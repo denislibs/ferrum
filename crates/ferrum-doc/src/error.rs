@@ -26,6 +26,11 @@ pub enum DocError {
     Loro(#[from] loro::LoroError),
     #[error("Ошибка экспорта Loro: {0}")]
     LoroEncode(#[from] loro::LoroEncodeError),
+    #[error("Не удалось откатить незавершённое изменение ({rollback}); исходная ошибка: {original}. Страница может быть в несогласованном состоянии — откройте файл заново")]
+    RollbackFailed {
+        original: Box<DocError>,
+        rollback: Box<DocError>,
+    },
 }
 
 pub type DocResult<T> = Result<T, DocError>;

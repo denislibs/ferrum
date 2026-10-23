@@ -8,7 +8,7 @@ use loro::{LoroDoc, LoroTree, LoroValue, TreeParentId, ValueOrContainer};
 use crate::error::{DocError, DocResult};
 use crate::history::{History, HistoryEntry};
 use crate::images::ImageStore;
-use crate::page::PageDoc;
+use crate::page::{Inverse, PageDoc};
 use crate::scene_cache::SceneRow;
 use crate::types::{NodeId, PageId};
 
@@ -218,9 +218,12 @@ impl Document {
 
     /// Загружает страницу при первом обращении.
     pub fn page(&mut self, id: PageId) -> DocResult<&PageDoc> {
-        if let Some(u) = self.unloaded.remove(&id) {
-            self.loaded
-                .insert(id, PageDoc::load(&u.snapshot, u.scene.as_deref())?);
+        if let Some(u) = self.unloaded.get(&id) {
+            // Сначала грузим по ссылке: при ошибке запись остаётся в unloaded,
+            // иначе страница пропала бы из документа и не попала бы в сохранение.
+            let page = PageDoc::load(&u.snapshot, u.scene.as_deref())?;
+            self.unloaded.remove(&id);
+            self.loaded.insert(id, page);
         }
         self.loaded
             .get(&id)
@@ -282,11 +285,8 @@ impl Document {
                 }
                 Ok(selection_after)
             }
-            Err(e) => {
-                // Откат: применяем обратные операции, в историю ничего не попадает.
-                p.apply_inverse(&ops)?;
-                Err(e)
-            }
+            // Откат: применяем обратные операции, в историю ничего не попадает.
+            Err(e) => Err(rollback(p, &ops, e)),
         }
     }
 
@@ -298,43 +298,179 @@ impl Document {
         self.history.can_redo()
     }
 
-    /// Применяет обратные операции шага и возвращает шаг для обратного направления.
-    fn replay(&mut self, mut entry: HistoryEntry) -> DocResult<HistoryEntry> {
+    /// Применяет операции шага и возвращает операции для обратного направления.
+    /// Шаг не изменяется: при ошибке вызывающий код вернёт его в стек целиком.
+    fn replay(&mut self, entry: &HistoryEntry) -> DocResult<Vec<Inverse>> {
         self.page(entry.page)?;
         let p = self.loaded.get(&entry.page).expect("загружена");
-        entry.ops = p.apply_inverse(&entry.ops)?;
-        Ok(entry)
+        // Сбой посреди apply_inverse может оставить страницу частично изменённой;
+        // это вне рамок этого исправления.
+        p.apply_inverse(&entry.ops)
     }
 
     pub fn undo(&mut self) -> DocResult<Option<Restore>> {
         let Some(entry) = self.history.pop_undo() else {
             return Ok(None);
         };
-        let entry = self.replay(entry)?;
-        let restore = Restore {
-            page: entry.page,
-            selection: entry.selection_before.clone(),
-        };
-        self.history.push_redo(entry);
-        Ok(Some(restore))
+        match self.replay(&entry) {
+            Ok(ops) => {
+                let restore = Restore {
+                    page: entry.page,
+                    selection: entry.selection_before.clone(),
+                };
+                self.history.push_redo(HistoryEntry { ops, ..entry });
+                Ok(Some(restore))
+            }
+            Err(e) => {
+                // Шаг не теряется: возвращаем исходную запись в стек undo.
+                self.history.push_undo_keep_redo(entry);
+                Err(e)
+            }
+        }
     }
 
     pub fn redo(&mut self) -> DocResult<Option<Restore>> {
         let Some(entry) = self.history.pop_redo() else {
             return Ok(None);
         };
-        let entry = self.replay(entry)?;
-        let restore = Restore {
-            page: entry.page,
-            selection: entry.selection_after.clone(),
-        };
-        self.history.push_undo_keep_redo(entry);
-        Ok(Some(restore))
+        match self.replay(&entry) {
+            Ok(ops) => {
+                let restore = Restore {
+                    page: entry.page,
+                    selection: entry.selection_after.clone(),
+                };
+                self.history.push_undo_keep_redo(HistoryEntry { ops, ..entry });
+                Ok(Some(restore))
+            }
+            Err(e) => {
+                // Шаг не теряется: возвращаем исходную запись в стек redo.
+                self.history.push_redo(entry);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Откат незавершённой транзакции. Если откат тоже сорвался, исходная ошибка
+/// не должна теряться: возвращаем обе.
+fn rollback(page: &PageDoc, ops: &[Inverse], original: DocError) -> DocError {
+    match page.apply_inverse(ops) {
+        Ok(_) => original,
+        Err(rollback) => DocError::RollbackFailed {
+            original: Box::new(original),
+            rollback: Box::new(rollback),
+        },
     }
 }
 
 impl Default for Document {
     fn default() -> Self {
         Document::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::HistoryEntry;
+    use crate::types::{NodeKind, PropsPatch};
+
+    /// Идентификатор узла, которого нет на свежей странице.
+    fn missing_node() -> NodeId {
+        let scratch = PageDoc::new();
+        scratch
+            .create_node(None, None, NodeKind::Rect)
+            .expect("создание узла")
+    }
+
+    fn missing_props_op() -> Inverse {
+        Inverse::Props(
+            missing_node(),
+            PropsPatch {
+                x: Some(1.0),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn failed_lazy_load_keeps_page() {
+        let mut doc = Document::new();
+        let p1 = doc.pages()[0].0;
+        let p2 = doc.add_page("Вторая").unwrap();
+        let root = doc.root_snapshot().unwrap();
+        let s1 = doc.page_payload(p1).unwrap();
+
+        let mut unloaded = HashMap::new();
+        unloaded.insert(
+            p1,
+            UnloadedPage {
+                snapshot: s1.snapshot,
+                image_refs: s1.image_refs,
+                scene: s1.scene,
+            },
+        );
+        unloaded.insert(
+            p2,
+            UnloadedPage {
+                snapshot: b"garbage".to_vec(),
+                image_refs: vec![],
+                scene: None,
+            },
+        );
+        let (mut d2, _) = Document::from_parts(&root, unloaded, ImageStore::default()).unwrap();
+
+        assert!(d2.page(p2).is_err());
+        let payload = d2.page_payload(p2).unwrap();
+        assert_eq!(payload.snapshot, b"garbage".to_vec());
+        assert!(d2.pages().iter().any(|(id, _)| *id == p2));
+        assert!(d2.page(p1).is_ok());
+    }
+
+    #[test]
+    fn failed_undo_keeps_history_entry() {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        doc.history.push(HistoryEntry {
+            page,
+            ops: vec![missing_props_op()],
+            selection_before: vec![],
+            selection_after: vec![],
+        });
+        assert!(doc.undo().is_err());
+        assert!(doc.can_undo());
+        assert!(!doc.can_redo());
+    }
+
+    #[test]
+    fn failed_redo_keeps_history_entry() {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        doc.history.push_redo(HistoryEntry {
+            page,
+            ops: vec![missing_props_op()],
+            selection_before: vec![],
+            selection_after: vec![],
+        });
+        assert!(doc.redo().is_err());
+        assert!(doc.can_redo());
+    }
+
+    #[test]
+    fn rollback_failure_keeps_original_error() {
+        let page = PageDoc::new();
+        let patch = PropsPatch {
+            x: Some(1.0),
+            ..Default::default()
+        };
+        let err = rollback(&page, &[Inverse::Props(missing_node(), patch)], DocError::CyclicMove);
+        match err {
+            DocError::RollbackFailed { original, .. } => {
+                assert!(matches!(*original, DocError::CyclicMove));
+            }
+            other => panic!("ожидалась RollbackFailed, получено {other:?}"),
+        }
+        let err = rollback(&page, &[], DocError::CyclicMove);
+        assert!(matches!(err, DocError::CyclicMove));
     }
 }
