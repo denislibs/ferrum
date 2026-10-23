@@ -71,7 +71,9 @@ impl CpuBackend {
         }
     }
 
-    /// Растеризует записанный кадр в прозрачный `Pixmap`.
+    /// Растеризует записанный кадр в прозрачный `Pixmap`. Память кадра — ширина ×
+    /// высота × 4 байта на каждый вызов: размер задаёт вызывающий (камера ограничивает
+    /// его через `MAX_DEVICE_SIDE` и `MAX_DEVICE_PIXELS`).
     pub fn render(&mut self) -> Pixmap {
         let (w, h) = self.size();
         let mut target = Pixmap::new(w, h);

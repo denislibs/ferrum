@@ -7,6 +7,6 @@ mod camera;
 mod image;
 
 pub use backend::{CpuBackend, ImagePaint, RenderBackend, Rgba};
-pub use camera::{Camera, MAX_ZOOM, MIN_ZOOM};
+pub use camera::{Camera, MAX_DEVICE_PIXELS, MAX_DEVICE_SIDE, MAX_ZOOM, MIN_ZOOM};
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use vello_cpu::Pixmap;
