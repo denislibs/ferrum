@@ -115,7 +115,12 @@ impl Document {
 
     pub fn schema_version(&self) -> u32 {
         match self.root.get_map(META).get(KEY_SCHEMA) {
-            Some(ValueOrContainer::Value(LoroValue::I64(v))) => v as u32,
+            // Значение вне u32 (отрицательное или слишком большое) нельзя усекать:
+            // 2^32 + 1 стало бы версией 1. Считаем его версией «из будущего» —
+            // документ откроется только для чтения.
+            Some(ValueOrContainer::Value(LoroValue::I64(v))) => {
+                u32::try_from(v).unwrap_or(u32::MAX)
+            }
             _ => SCHEMA_VERSION,
         }
     }
@@ -309,8 +314,7 @@ impl Document {
     fn replay(&mut self, entry: &HistoryEntry) -> DocResult<Vec<Inverse>> {
         self.page(entry.page)?;
         let p = self.loaded.get(&entry.page).expect("загружена");
-        // Сбой посреди apply_inverse может оставить страницу частично изменённой;
-        // это вне рамок этого исправления.
+        // При сбое apply_inverse сам откатывает уже применённую часть шага.
         p.apply_inverse(&entry.ops)
     }
 
@@ -432,6 +436,25 @@ mod tests {
             Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
         });
         assert!(matches!(err, Err(DocError::ReadOnly)));
+    }
+
+    #[test]
+    fn out_of_range_schema_version_opens_read_only() {
+        // 2^32 + 1 при усечении до u32 стало бы версией 1 — файл открылся бы на запись.
+        for raw in [(1i64 << 32) + 1, -1] {
+            let doc = Document::new();
+            doc.root.get_map(META).insert(KEY_SCHEMA, raw).unwrap();
+            doc.root.commit();
+            assert_eq!(doc.schema_version(), u32::MAX, "{raw}");
+            let root = doc.root_snapshot().unwrap();
+            let (opened, warnings) =
+                Document::from_parts(&root, HashMap::new(), ImageStore::default()).unwrap();
+            assert!(opened.is_read_only(), "{raw}");
+            assert!(
+                warnings.iter().any(|w| w.contains("только для чтения")),
+                "{raw}: {warnings:?}"
+            );
+        }
     }
 
     #[test]

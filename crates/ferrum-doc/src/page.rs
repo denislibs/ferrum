@@ -298,9 +298,31 @@ impl PageDoc {
 
     /// Применяет обратные операции в обратном порядке и возвращает операции,
     /// которые отменят это применение (для redo).
+    ///
+    /// При сбое посреди списка уже применённая часть откатывается по своему же
+    /// журналу: страница возвращается в состояние до вызова, и шаг истории, который
+    /// вызывающий код вернёт в стек, по-прежнему соответствует странице.
     pub(crate) fn apply_inverse(&self, ops: &[Inverse]) -> DocResult<Vec<Inverse>> {
         self.begin_journal();
-        let result = ops.iter().rev().try_for_each(|op| match op {
+        let result = self.replay(ops);
+        let redo = self.take_journal();
+        let result = match result {
+            Ok(()) => Ok(redo),
+            // Журнал уже выключен: откат не пишет новых обратных операций.
+            Err(original) => Err(match self.replay(&redo) {
+                Ok(()) => original,
+                Err(rollback) => DocError::RollbackFailed {
+                    original: Box::new(original),
+                    rollback: Box::new(rollback),
+                },
+            }),
+        };
+        self.commit();
+        result
+    }
+
+    fn replay(&self, ops: &[Inverse]) -> DocResult<()> {
+        ops.iter().rev().try_for_each(|op| match op {
             Inverse::Delete(id) => self.delete_nodes(&[*id]),
             Inverse::Restore(nodes) => nodes.iter().try_for_each(|n| {
                 self.create_with(n.id, n.parent, Some(n.index), n.props.clone())
@@ -308,10 +330,7 @@ impl PageDoc {
             }),
             Inverse::Props(id, patch) => self.set_props(*id, patch),
             Inverse::Move { id, parent, index } => self.move_node(*id, *parent, *index),
-        });
-        let redo = self.take_journal();
-        self.commit();
-        result.map(|_| redo)
+        })
     }
 
     fn tid(&self, id: NodeId) -> DocResult<TreeID> {
@@ -1050,6 +1069,45 @@ mod tests {
             PageDoc::from_snapshot(&page.export_snapshot().unwrap()),
             Err(DocError::Corrupted(_))
         ));
+    }
+
+    #[test]
+    fn failed_apply_inverse_returns_page_to_previous_state() {
+        let page = small_page();
+        let all = page.walk();
+        let before = props_of(&page, &all);
+        let missing = PageDoc::new()
+            .create_node(None, None, NodeKind::Rect)
+            .unwrap();
+        // Применяются с конца: перенос, правка свойств и удаление проходят, затем сбой.
+        let ops = vec![
+            Inverse::Props(
+                missing,
+                PropsPatch {
+                    x: Some(1.0),
+                    ..Default::default()
+                },
+            ),
+            Inverse::Delete(all[3]),
+            Inverse::Props(
+                all[1],
+                PropsPatch {
+                    x: Some(5.0),
+                    ..Default::default()
+                },
+            ),
+            Inverse::Move {
+                id: all[2],
+                parent: None,
+                index: 0,
+            },
+        ];
+        assert!(matches!(
+            page.apply_inverse(&ops),
+            Err(DocError::NodeNotFound(_))
+        ));
+        assert_eq!(page.walk(), all);
+        assert_eq!(props_of(&page, &all), before);
     }
 
     #[test]
