@@ -24,8 +24,82 @@ use crate::backend::{RenderBackend, Rgba};
 /// Onest (SIL Open Font License 1.1, лицензия — `assets/fonts/OFL.txt`).
 pub const ONEST: &[u8] = include_bytes!("../assets/fonts/Onest-wght.ttf");
 
-/// Сколько разных подписей держать в кэше раскладок; больше — кэш сбрасывается.
+/// Сколько записей держать в каждом кэше подписей; при переполнении вытесняется
+/// запись, которой не пользовались дольше всех.
 const LABEL_CACHE_LIMIT: usize = 512;
+
+/// Названия узлов приходят из документа (то есть извне): раскладываются не больше
+/// стольких символов, остальное отбрасывается до раскладки. Иначе название в
+/// несколько мегабайт раскладывалось бы целиком ради подписи в одну строку.
+pub const LABEL_MAX_CHARS: usize = 256;
+
+/// Кэш с вытеснением давно не использованных записей (LRU).
+struct Lru<K, V> {
+    map: HashMap<K, (V, u64)>,
+    tick: u64,
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
+    fn new() -> Self {
+        Lru {
+            map: HashMap::new(),
+            tick: 0,
+        }
+    }
+
+    fn get(&mut self, key: &K) -> Option<V> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.get_mut(key).map(|(v, used)| {
+            *used = tick;
+            v.clone()
+        })
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        self.tick += 1;
+        if self.map.len() >= LABEL_CACHE_LIMIT && !self.map.contains_key(&key) {
+            let oldest = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.map.remove(&k);
+            }
+        }
+        self.map.insert(key, (value, self.tick));
+    }
+}
+
+/// Приводит название к одной строке: управляющие символы и переводы строк (в том
+/// числе U+2028) становятся пробелами, серии пробелов схлопываются, край
+/// обрезается до `LABEL_MAX_CHARS` по границе символа с многоточием.
+fn sanitize(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = 0;
+    let mut pending_space = false;
+    for c in text.chars() {
+        if c.is_control() || c.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if chars >= LABEL_MAX_CHARS {
+            out.push('…');
+            return out;
+        }
+        if pending_space {
+            out.push(' ');
+            chars += 1;
+            pending_space = false;
+        }
+        out.push(c);
+        chars += 1;
+    }
+    out
+}
+
+type TextKey = (String, u32, u16);
 
 /// Разложенная подпись: глифы в координатах строки (ноль — левый край базовой линии).
 pub struct Label {
@@ -42,7 +116,11 @@ pub struct TextEngine {
     layouts: LayoutContext<()>,
     family: String,
     outlines: HashMap<(u32, Vec<i16>), Arc<BezPath>>,
-    labels: HashMap<(String, u32, u16, u32), Arc<Label>>,
+    /// Раскладка полного текста — не зависит от доступной ширины.
+    full: Lru<TextKey, Arc<Label>>,
+    /// Результат усечения до ширины (включая `None`: не поместилось и многоточие).
+    fitted: Lru<(TextKey, u32), Option<Arc<Label>>>,
+    layout_count: usize,
 }
 
 impl Default for TextEngine {
@@ -72,12 +150,15 @@ impl TextEngine {
             layouts: LayoutContext::new(),
             family,
             outlines: HashMap::new(),
-            labels: HashMap::new(),
+            full: Lru::new(),
+            fitted: Lru::new(),
+            layout_count: 0,
         }
     }
 
     /// Подпись, усечённая с многоточием до `max_width` (`None` — не помещается даже
-    /// многоточие). Размер — в пикселях, в которых подпись будет нарисована.
+    /// многоточие или нечего рисовать). Размер — в пикселях, в которых подпись будет
+    /// нарисована. Текст недоверенный: см. `sanitize`.
     pub fn label(
         &mut self,
         text: &str,
@@ -87,54 +168,83 @@ impl TextEngine {
     ) -> Option<Arc<Label>> {
         // Отрицательные, нулевые и NaN-размеры подписи не дают.
         let positive = |v: f64| v > 0.0;
-        if text.is_empty() || !positive(max_width) || !positive(size) {
+        if !positive(max_width) || !positive(size) {
             return None;
         }
-        let key = (
-            text.to_string(),
-            (size * 64.0) as u32,
-            weight,
-            max_width.clamp(0.0, 1e6) as u32,
-        );
-        if let Some(l) = self.labels.get(&key) {
-            return Some(l.clone());
+        // Ширина округляется вниз до измерения: ключ кэша — целое число пикселей, и
+        // результат, посчитанный для 40,9, не должен переиспользоваться для 40,1.
+        let max_width = max_width.floor();
+        if !positive(max_width) {
+            return None;
         }
-        let full = self.layout(text, size, weight);
-        let label = if full.width <= max_width {
-            full
-        } else {
-            // Самый длинный префикс, который вместе с «…» помещается в ширину.
-            let cuts: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-            let mut shortened = |keep: usize| {
-                let candidate = format!("{}…", text[..cuts[keep]].trim_end());
-                self.layout(&candidate, size, weight)
-            };
-            let mut best = shortened(0);
-            if best.width > max_width {
-                return None;
-            }
-            let (mut lo, mut hi) = (0, cuts.len() - 1);
-            while lo < hi {
-                let mid = (lo + hi).div_ceil(2);
-                let candidate = shortened(mid);
-                if candidate.width <= max_width {
-                    best = candidate;
-                    lo = mid;
-                } else {
-                    hi = mid - 1;
-                }
-            }
-            best
-        };
-        if self.labels.len() >= LABEL_CACHE_LIMIT {
-            self.labels.clear();
+        let clean = sanitize(text);
+        if clean.is_empty() {
+            return None;
         }
-        let label = Arc::new(label);
-        self.labels.insert(key, label.clone());
-        Some(label)
+        let base: TextKey = (clean, (size * 64.0) as u32, weight);
+        let key = (base.clone(), max_width.min(1e9) as u32);
+        if let Some(hit) = self.fitted.get(&key) {
+            return hit;
+        }
+        let result = self.fit(&base, size, max_width);
+        self.fitted.insert(key, result.clone());
+        result
+    }
+
+    /// Ширина многоточия: уже неё подпись не бывает.
+    pub fn ellipsis_width(&mut self, size: f64, weight: u16) -> f64 {
+        if size.is_nan() || size <= 0.0 {
+            return f64::INFINITY;
+        }
+        self.full_layout(&("…".to_string(), (size * 64.0) as u32, weight), size)
+            .width
+    }
+
+    fn full_layout(&mut self, key: &TextKey, size: f64) -> Arc<Label> {
+        if let Some(l) = self.full.get(key) {
+            return l;
+        }
+        let l = Arc::new(self.layout(&key.0, size, key.2));
+        self.full.insert(key.clone(), l.clone());
+        l
+    }
+
+    fn fit(&mut self, base: &TextKey, size: f64, max_width: f64) -> Option<Arc<Label>> {
+        let full = self.full_layout(base, size);
+        if full.width <= max_width {
+            return Some(full);
+        }
+        // Самый длинный префикс, который вместе с «…» помещается в ширину.
+        let weight = base.2;
+        let text = base.0.as_str();
+        let ellipsis = self.full_layout(&("…".to_string(), base.1, weight), size);
+        if ellipsis.width > max_width {
+            return None;
+        }
+        let cuts: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        let mut best = ellipsis;
+        let (mut lo, mut hi) = (0, cuts.len() - 1);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            let candidate = format!("{}…", text[..cuts[mid]].trim_end());
+            let laid = self.layout(&candidate, size, weight);
+            if laid.width <= max_width {
+                best = Arc::new(laid);
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Some(best)
+    }
+
+    /// Сколько раскладок выполнено (для проверки кэша).
+    pub fn layout_count(&self) -> usize {
+        self.layout_count
     }
 
     fn layout(&mut self, text: &str, size: f64, weight: u16) -> Label {
+        self.layout_count += 1;
         let mut builder = self
             .layouts
             .ranged_builder(&mut self.fonts, text, 1.0, false);

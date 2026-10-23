@@ -70,6 +70,7 @@ pub fn camera(w: f64, h: f64) -> Camera {
     c
 }
 
+pub const BLACK: Rgba = Rgba::new([0.0, 0.0, 0.0, 1.0]);
 pub const WHITE: Rgba = Rgba::new([1.0, 1.0, 1.0, 1.0]);
 
 /// Содержимое сцены на белом фоне, без оверлеев.

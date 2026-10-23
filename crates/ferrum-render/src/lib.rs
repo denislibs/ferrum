@@ -95,6 +95,11 @@ impl Renderer {
         stats
     }
 
+    /// Сколько раскладок подписей выполнено за всё время (для проверки кэша).
+    pub fn text_layouts(&self) -> usize {
+        self.text.layout_count()
+    }
+
     /// Только содержимое сцены, без фона и оверлеев.
     pub fn draw_scene(
         &mut self,

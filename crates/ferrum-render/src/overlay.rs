@@ -17,6 +17,8 @@ use crate::text::TextEngine;
 pub const HANDLE_SIZE: f64 = 8.0;
 /// Пиксельная сетка видна с зума 800%.
 pub const PIXEL_GRID_MIN_ZOOM: f64 = 8.0;
+/// Наибольшее число линий пиксельной сетки по одной оси.
+const MAX_GRID_LINES: usize = 4096;
 /// Кегль подписей фреймов и бейджа.
 pub const LABEL_SIZE: f64 = 11.0;
 
@@ -129,7 +131,7 @@ pub(crate) fn draw(
     camera: &Camera,
     overlay: &Overlay,
 ) {
-    let dpr = camera.dpr();
+    let dpr = camera.effective_dpr();
     // Мир → пиксели устройства.
     let view = camera.view_transform();
     let theme = &overlay.theme;
@@ -190,23 +192,29 @@ fn node_outline(scene: &Scene, id: NodeId, view: Affine) -> Option<BezPath> {
     Some(path)
 }
 
+/// Целые мировые координаты линий сетки на отрезке `lo..=hi`. Число линий задаётся
+/// счётчиком, а не накоплением `x += 1.0`: при |x| ≥ 2^53 прибавление единицы
+/// ничего не меняет, и такой цикл не заканчивался бы. Предел защищает и от
+/// чрезмерного числа заливок на огромных вьюпортах.
+fn grid_lines(lo: f64, hi: f64) -> impl Iterator<Item = f64> {
+    let base = lo.floor();
+    let count = ((hi - base).floor() + 1.0).clamp(0.0, MAX_GRID_LINES as f64) as usize;
+    (0..count).map(move |i| base + i as f64)
+}
+
 fn pixel_grid(backend: &mut impl RenderBackend, camera: &Camera, color: Rgba) {
     let visible = camera.visible_world_rect();
     let view = camera.view_transform();
     let (w, h) = backend.size();
     backend.set_transform(Affine::IDENTITY);
     backend.set_color(color);
-    let mut x = visible.x0.floor();
-    while x <= visible.x1 {
+    for x in grid_lines(visible.x0, visible.x1) {
         let dx = (view * Point::new(x, 0.0)).x.round();
         backend.fill_rect(&Rect::new(dx, 0.0, dx + 1.0, h as f64));
-        x += 1.0;
     }
-    let mut y = visible.y0.floor();
-    while y <= visible.y1 {
+    for y in grid_lines(visible.y0, visible.y1) {
         let dy = (view * Point::new(0.0, y)).y.round();
         backend.fill_rect(&Rect::new(0.0, dy, w as f64, dy + 1.0));
-        y += 1.0;
     }
 }
 
@@ -219,7 +227,7 @@ fn frame_labels(
     camera: &Camera,
     overlay: &Overlay,
 ) {
-    let dpr = camera.dpr();
+    let dpr = camera.effective_dpr();
     let view = camera.view_transform();
     let (w, h) = backend.size();
     let screen = Rect::new(0.0, 0.0, w as f64, h as f64);
@@ -237,6 +245,11 @@ fn frame_labels(
             || b.y0 < 0.0
             || b.y0 - gap - LABEL_SIZE * dpr * 1.5 > screen.y1
         {
+            continue;
+        }
+        // Фрейм уже многоточия: подписи не будет, раскладывать название незачем
+        // (на малом зуме так отсекаются почти все фреймы).
+        if b.width() < text.ellipsis_width(LABEL_SIZE * dpr, 400) {
             continue;
         }
         let Some(label) = text.label(&n.props.name, LABEL_SIZE * dpr, 400, b.width()) else {
@@ -258,7 +271,7 @@ fn selection(
     camera: &Camera,
     overlay: &Overlay,
 ) {
-    let dpr = camera.dpr();
+    let dpr = camera.effective_dpr();
     let view = camera.view_transform();
     let theme = &overlay.theme;
     let nodes: Vec<_> = overlay
@@ -386,4 +399,20 @@ fn selection(
         Point::new(pill.x0 + pad_x, pill.y0 + pad_y + label.ascent),
         theme.on_select,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_lines_are_bounded_and_exact() {
+        assert_eq!(
+            grid_lines(1.5, 4.2).collect::<Vec<_>>(),
+            [1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(grid_lines(1e16, 1e16 + 50.0).count(), 51);
+        assert_eq!(grid_lines(-1e300, 1e300).count(), MAX_GRID_LINES);
+        assert_eq!(grid_lines(5.0, 4.0).count(), 0);
+    }
 }
