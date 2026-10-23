@@ -113,7 +113,8 @@ impl PageDoc {
     }
 
     /// Загружает страницу. С кэшем сцены (уже сверенным со снапшотом по хэшу)
-    /// индекс и зеркало строятся без чтения свойств из Loro.
+    /// индекс и зеркало строятся без чтения свойств из Loro; кэш, который не
+    /// сходится с деревом Loro, отбрасывается.
     pub(crate) fn load(bytes: &[u8], cache: Option<&[SceneRow]>) -> DocResult<PageDoc> {
         let page = PageDoc::wrap(LoroDoc::from_snapshot(bytes)?);
         match cache {
@@ -123,10 +124,45 @@ impl PageDoc {
                     state.insert(row.id, row.tree_id, row.props.clone());
                 }
                 *page.state.borrow_mut() = state;
+                if !page.cache_matches_tree(rows) {
+                    page.rebuild_from_loro()?;
+                }
             }
             None => page.rebuild_from_loro()?,
         }
         Ok(page)
+    }
+
+    /// Совпадение хэша говорит лишь, что кэш записан рядом с этим снапшотом, но не
+    /// что он верен: таблица из чужой или ошибочной сборки рассинхронизирует индекс,
+    /// и страницу потом нельзя сохранить. Проверка за O(n) без чтения свойств:
+    /// ID и `TreeID` уникальны (индекс не схлопнул строки), родитель каждой строки
+    /// совпадает с родителем в Loro — значит, все строки живы (цепочка доходит до
+    /// корня), а сумма детей корня и всех строк равна числу строк — значит, ни один
+    /// живой узел не пропущен.
+    fn cache_matches_tree(&self, rows: &[SceneRow]) -> bool {
+        let state = self.state.borrow();
+        if state.by_id.len() != rows.len() || state.by_tree.len() != rows.len() {
+            return false;
+        }
+        let mut live = self.tree.children_num(TreeParentId::Root).unwrap_or(0);
+        for row in rows {
+            let expected = match row.parent {
+                None => TreeParentId::Root,
+                Some(p) => match rows.get(p as usize) {
+                    Some(parent) => TreeParentId::Node(parent.tree_id),
+                    None => return false,
+                },
+            };
+            if self.tree.parent(row.tree_id) != Some(expected) {
+                return false;
+            }
+            live += self
+                .tree
+                .children_num(TreeParentId::Node(row.tree_id))
+                .unwrap_or(0);
+        }
+        live == rows.len()
     }
 
     fn wrap(doc: LoroDoc) -> PageDoc {
@@ -879,6 +915,52 @@ mod tests {
             page.move_nodes(&[outer], Some(outer), 0),
             Err(DocError::CyclicMove)
         ));
+    }
+
+    /// Страница из фрейма с двумя детьми и прямоугольника в корне, зафиксированная.
+    fn small_page() -> PageDoc {
+        let page = PageDoc::new();
+        let f = page.create_node(None, None, NodeKind::Frame).unwrap();
+        page.create_node(Some(f), None, NodeKind::Rect).unwrap();
+        page.create_node(Some(f), None, NodeKind::Ellipse).unwrap();
+        page.create_node(None, None, NodeKind::Rect).unwrap();
+        page.commit();
+        page
+    }
+
+    #[test]
+    fn forged_scene_cache_falls_back_to_loro() {
+        let page = small_page();
+        let snapshot = page.export_snapshot().unwrap();
+        let rows = page.scene_rows().unwrap();
+        assert_eq!(rows.len(), 4);
+
+        let mut missing = rows.clone();
+        missing.pop();
+        let mut duplicate = rows.clone();
+        duplicate.push(rows[1].clone());
+        let mut same_id = rows.clone();
+        same_id[3].id = rows[0].id;
+        let mut wrong_parent = rows.clone();
+        wrong_parent[1].parent = None;
+        let mut dead_tree = rows.clone();
+        dead_tree[3].tree_id = small_page().scene_rows().unwrap()[3].tree_id;
+
+        for (name, forged) in [
+            ("строки не хватает", missing),
+            ("строка повторена", duplicate),
+            ("NodeId повторён", same_id),
+            ("чужой родитель", wrong_parent),
+            ("TreeID не из этой страницы", dead_tree),
+        ] {
+            let loaded = PageDoc::load(&snapshot, Some(&forged)).unwrap();
+            assert_eq!(loaded.walk(), page.walk(), "{name}");
+            assert_eq!(loaded.scene_rows().unwrap(), rows, "{name}");
+            assert!(loaded.export_snapshot().is_ok(), "{name}");
+        }
+        // Честный кэш принимается как есть.
+        let loaded = PageDoc::load(&snapshot, Some(&rows)).unwrap();
+        assert_eq!(loaded.scene_rows().unwrap(), rows);
     }
 
     #[test]
