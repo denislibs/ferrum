@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use loro::{LoroDoc, LoroTree, LoroValue, TreeParentId, ValueOrContainer};
 
+use crate::changes::Changes;
 use crate::error::{DocError, DocResult};
 use crate::history::{History, HistoryEntry};
 use crate::images::ImageStore;
@@ -49,6 +50,8 @@ pub struct Document {
     loaded: HashMap<PageId, PageDoc>,
     unloaded: HashMap<PageId, UnloadedPage>,
     history: History,
+    /// Изменённые узлы по страницам с последнего `take_changes`.
+    changes: HashMap<PageId, Changes>,
     pub images: ImageStore,
     read_only: bool,
 }
@@ -79,6 +82,7 @@ impl Document {
             loaded: HashMap::new(),
             unloaded,
             history: History::default(),
+            changes: HashMap::new(),
             images,
             read_only: false,
         }
@@ -206,6 +210,7 @@ impl Document {
         self.loaded.remove(&id);
         self.unloaded.remove(&id);
         self.history.forget_page(id);
+        self.changes.remove(&id);
         Ok(())
     }
 
@@ -284,6 +289,9 @@ impl Document {
         let result = f(&Tx::new(p));
         let ops = p.take_journal();
         p.commit();
+        // И при ошибке: откат вернул эти узлы в прежнее состояние, а если сорвался —
+        // сцене тем более нужно сверить их со страницей.
+        self.changes.entry(page).or_default().record(&ops);
         match result {
             Ok(selection_after) => {
                 if !ops.is_empty() {
@@ -301,6 +309,12 @@ impl Document {
         }
     }
 
+    /// Узлы страницы, изменённые правками, отменой и повтором с прошлого вызова.
+    /// Сцена вызывает это раз за кадр и пересчитывает только эти узлы.
+    pub fn take_changes(&mut self, page: PageId) -> Changes {
+        self.changes.remove(&page).unwrap_or_default()
+    }
+
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
@@ -315,7 +329,15 @@ impl Document {
         self.page(entry.page)?;
         let p = self.loaded.get(&entry.page).expect("загружена");
         // При сбое apply_inverse сам откатывает уже применённую часть шага.
-        p.apply_inverse(&entry.ops)
+        let result = p.apply_inverse(&entry.ops);
+        // Применённые операции записывают обратные к себе — это и есть изменения.
+        // При сбое сверяем все узлы шага: откат мог и не удаться.
+        let changes = self.changes.entry(entry.page).or_default();
+        match &result {
+            Ok(done) => changes.record(done),
+            Err(_) => changes.record(&entry.ops),
+        }
+        result
     }
 
     pub fn undo(&mut self) -> DocResult<Option<Restore>> {
@@ -436,6 +458,71 @@ mod tests {
             Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
         });
         assert!(matches!(err, Err(DocError::ReadOnly)));
+    }
+
+    /// Документ, где изображение используется только узлом внутри скрытого
+    /// поддерева (узел неизвестного типа), сохранённый в файл.
+    fn file_with_hidden_image() -> (Vec<u8>, String) {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let hash = doc.images.add(b"png bytes".to_vec());
+        let star = doc
+            .transact(page, vec![], |p| {
+                p.create_node(None, None, NodeKind::Rect)?;
+                let star = p.create_node(None, None, NodeKind::Group)?;
+                let pic = p.create_node(Some(star), None, NodeKind::Rect)?;
+                p.set_props(
+                    pic,
+                    &PropsPatch {
+                        fills: Some(vec![crate::Fill::image(hash.clone())]),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(vec![star])
+            })
+            .unwrap()[0];
+        doc.page(page)
+            .unwrap()
+            .force_raw_kind_for_tests(star, Some("star"));
+        let bytes = crate::container::encode(&doc).unwrap();
+        // Кэш сцены записан по зеркалу, где узел ещё известного типа; файл из новой
+        // версии Ferrum такого кэша не содержал бы. Убираем его (id не страницы —
+        // секция не сопоставится), чтобы страница загружалась из Loro.
+        let bytes = crate::container::testing::map_sections(&bytes, |kind, id, _| {
+            if kind == 5 {
+                *id = "не-страница".to_string();
+            }
+        });
+        (bytes, hash)
+    }
+
+    #[test]
+    fn hidden_node_images_survive_resave_after_page_load() {
+        let (bytes, hash) = file_with_hidden_image();
+        let mut doc = crate::container::decode(&bytes).unwrap().document;
+        let page = doc.pages()[0].0;
+        // Загрузка страницы: ссылки теперь берутся из зеркала, где скрытых узлов нет.
+        assert_eq!(doc.page(page).unwrap().walk().len(), 1);
+        let resaved = crate::container::encode(&doc).unwrap();
+        let reopened = crate::container::decode(&resaved).unwrap().document;
+        assert!(reopened.images.get(&hash).is_some());
+    }
+
+    #[test]
+    fn hidden_node_images_survive_lost_refs_section() {
+        let (bytes, hash) = file_with_hidden_image();
+        // Секция ссылок с чужим id: читатель её не сопоставит со страницей и
+        // пересчитает ссылки из снапшота.
+        let damaged = crate::container::testing::map_sections(&bytes, |kind, id, _| {
+            if kind == 3 {
+                *id = "не-страница".to_string();
+            }
+        });
+        let opened = crate::container::decode(&damaged).unwrap();
+        assert!(opened.warnings.iter().any(|w| w.contains("изображений")));
+        let resaved = crate::container::encode(&opened.document).unwrap();
+        let reopened = crate::container::decode(&resaved).unwrap().document;
+        assert!(reopened.images.get(&hash).is_some());
     }
 
     #[test]

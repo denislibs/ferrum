@@ -105,6 +105,18 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
     })
 }
 
+/// Хэши изображений в заливках узла — без разбора остальных свойств и типа узла:
+/// так читаются и узлы неизвестного типа, скрытые от модели.
+pub(crate) fn read_image_refs(map: &LoroMap) -> Vec<String> {
+    match value(map, key::FILLS) {
+        Some(v) => read_list(&v, read_fill)
+            .into_iter()
+            .filter_map(|f| f.image_hash)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Элементы, которые не удалось разобрать, пропускаются: лучше открыть файл
 /// без одной заливки, чем не открыть совсем.
 fn read_list<T>(v: &LoroValue, item: fn(&LoroValue) -> Option<T>) -> Vec<T> {

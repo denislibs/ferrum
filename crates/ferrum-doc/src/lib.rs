@@ -2,16 +2,19 @@
 //! и не видят Loro напрямую.
 
 mod binary;
+mod changes;
 mod codec;
 pub mod container;
 mod document;
 mod error;
 mod history;
 mod images;
+mod loro_ext;
 mod page;
 mod scene_cache;
 mod types;
 
+pub use changes::Changes;
 pub use document::{Document, Restore, SCHEMA_VERSION};
 pub use error::{DocError, DocResult};
 pub use images::ImageStore;

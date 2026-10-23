@@ -15,13 +15,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use loro::{
-    ContainerTrait, ExportMode, LoroDoc, LoroTree, LoroValue, TreeID, TreeParentId,
-    ValueOrContainer,
-};
+use loro::{ExportMode, LoroDoc, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer};
 
 use crate::codec;
 use crate::error::{DocError, DocResult};
+use crate::loro_ext;
 use crate::scene_cache::SceneRow;
 use crate::types::*;
 
@@ -102,6 +100,9 @@ pub struct PageDoc {
     journal: RefCell<Option<Vec<Inverse>>>,
     /// При загрузке встретились узлы неизвестного типа (см. `rebuild_from_loro`).
     unknown_nodes: Cell<bool>,
+    /// Изображения, на которые ссылаются скрытые узлы неизвестного типа и их
+    /// потомки. Зеркало их не видит, но при сохранении эти байты терять нельзя.
+    hidden_refs: RefCell<Vec<String>>,
     /// Индекс и зеркало взяты из кэша сцены, а не прочитаны из Loro.
     from_cache: Cell<bool>,
 }
@@ -180,6 +181,7 @@ impl PageDoc {
             state: RefCell::default(),
             journal: RefCell::default(),
             unknown_nodes: Cell::default(),
+            hidden_refs: RefCell::default(),
             from_cache: Cell::default(),
         }
     }
@@ -204,10 +206,12 @@ impl PageDoc {
     /// он и его поддерево не попадают в индекс и для модели не существуют — их не
     /// видно в `children`, `walk` и кэше сцены, но в снапшоте Loro они остаются.
     /// Чтобы правка не потеряла их (удаление предка, отмена), документ с такой
-    /// страницей открывается только для чтения (`has_unknown_nodes`).
+    /// страницей открывается только для чтения (`has_unknown_nodes`), а ссылки
+    /// скрытого поддерева на изображения запоминаются для сохранения.
     fn rebuild_from_loro(&self) -> DocResult<()> {
         let mut state = State::default();
         let mut unknown = false;
+        let mut hidden_refs = Vec::new();
         let mut stack = self.tree.children(TreeParentId::Root).unwrap_or_default();
         while let Some(tid) = stack.pop() {
             let id = self.stable_id(tid);
@@ -215,6 +219,7 @@ impl PageDoc {
                 Ok(props) => props,
                 Err(DocError::UnknownKind(..)) => {
                     unknown = true;
+                    self.collect_hidden_refs(tid, &mut hidden_refs)?;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -228,6 +233,24 @@ impl PageDoc {
         }
         *self.state.borrow_mut() = state;
         self.unknown_nodes.set(unknown);
+        hidden_refs.sort();
+        hidden_refs.dedup();
+        *self.hidden_refs.borrow_mut() = hidden_refs;
+        Ok(())
+    }
+
+    /// Хэши изображений в заливках скрытого поддерева (сам узел и все потомки,
+    /// какого бы типа они ни были).
+    fn collect_hidden_refs(&self, root: TreeID, out: &mut Vec<String>) -> DocResult<()> {
+        let mut stack = vec![root];
+        while let Some(tid) = stack.pop() {
+            out.extend(codec::read_image_refs(&self.tree.get_meta(tid)?));
+            stack.extend(
+                self.tree
+                    .children(TreeParentId::Node(tid))
+                    .unwrap_or_default(),
+            );
+        }
         Ok(())
     }
 
@@ -436,14 +459,29 @@ impl PageDoc {
         Ok(())
     }
 
-    /// Позиция узла среди детей его родителя. Публичный `LoroTree` её не отдаёт, а
-    /// список соседей на каждое перемещение стоил бы O(соседей); обработчик дерева из
-    /// `loro-internal` ищет позицию за O(log n).
+    /// Позицию узла среди детей его родителя за O(log n) (см. `loro_ext`).
     fn index_of(&self, tid: TreeID) -> usize {
-        self.tree
-            .to_handler()
-            .get_index_by_tree_id(&tid)
-            .unwrap_or(0)
+        loro_ext::index_of(&self.tree, tid).unwrap_or(0)
+    }
+
+    /// Где стоит узел: родитель и позиция среди его детей — та же, что в
+    /// `children(parent)`. Один поиск узла и O(log n) на позицию: сцене это нужно,
+    /// чтобы вставить созданный или перемещённый узел без перестроения списка
+    /// соседей. `None` — узла нет. Позиция `None` — на странице есть скрытые узлы
+    /// неизвестного типа: их позиции в Loro не совпадают с позициями в `children`,
+    /// и вызывающий код должен перечитать список целиком.
+    pub fn placement(&self, id: NodeId) -> Option<(Option<NodeId>, Option<usize>)> {
+        let tid = self.tid(id).ok()?;
+        let parent = match self.tree.parent(tid)? {
+            TreeParentId::Node(p) => Some(self.node_of(p)),
+            _ => None,
+        };
+        let position = if self.has_unknown_nodes() {
+            None
+        } else {
+            loro_ext::index_of(&self.tree, tid)
+        };
+        Some((parent, position))
     }
 
     /// Переносит узел к новому родителю на позицию `index` среди его детей
@@ -533,7 +571,7 @@ impl PageDoc {
                 break;
             }
         }
-        self.tree.to_handler().get_child_at(&target, at)
+        loro_ext::child_at(&self.tree, target, at)
     }
 
     fn record_move(&self, id: NodeId, tid: TreeID) {
@@ -718,13 +756,15 @@ impl PageDoc {
         Ok(rows)
     }
 
-    /// Хэши изображений, на которые ссылаются заливки живых узлов страницы.
+    /// Хэши изображений, на которые ссылаются заливки живых узлов страницы,
+    /// включая узлы неизвестного типа, скрытые от модели.
     pub fn image_refs(&self) -> DocResult<Vec<String>> {
         let state = self.state.borrow();
         let mut refs: Vec<String> = state
             .props
             .values()
             .flat_map(|p| p.fills.iter().filter_map(|f| f.image_hash.clone()))
+            .chain(self.hidden_refs.borrow().iter().cloned())
             .collect();
         refs.sort();
         refs.dedup();
