@@ -1,12 +1,12 @@
-//! Случайные транзакции, отмены и повторы: сцена, обновлённая по `Changes`,
-//! после каждого шага совпадает со сценой, построенной заново по странице.
+//! Случайные транзакции, отмены и повторы, превью жеста: сцена, обновлённая по
+//! `Changes`, после каждого шага совпадает со сценой, построенной заново по странице.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 
 use ferrum_doc::*;
 use ferrum_scene::{testing::snapshot, Scene};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
+use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
 #[derive(Debug, Clone)]
 enum Edit {
@@ -46,6 +46,8 @@ enum Step {
     Tx(Vec<Edit>),
     Undo,
     Redo,
+    Preview { nodes: Vec<usize>, x: i16 },
+    ClearPreview,
 }
 
 fn edit() -> impl Strategy<Value = Edit> {
@@ -69,6 +71,9 @@ fn step() -> impl Strategy<Value = Step> {
         4 => prop::collection::vec(edit(), 1..4).prop_map(Step::Tx),
         1 => Just(Step::Undo),
         1 => Just(Step::Redo),
+        1 => (prop::collection::vec(any::<usize>(), 1..4), any::<i16>())
+            .prop_map(|(nodes, x)| Step::Preview { nodes, x }),
+        1 => Just(Step::ClearPreview),
     ]
 }
 
@@ -86,7 +91,36 @@ fn pick(alive: &[NodeId], i: usize) -> Option<NodeId> {
         .then(|| alive[i % (alive.len() + 1)])
 }
 
-fn run(p: &Tx, e: &Edit) -> DocResult<()> {
+/// Что сделала транзакция сверх самих правок. Учитывается только при успехе:
+/// при откате все эти события отменяются вместе с правками.
+#[derive(Default, Clone, Copy)]
+struct TxHits {
+    /// Перенос узла к другому родителю.
+    reparent: usize,
+    /// Пакетный перенос, который прошёл и двигает два разных узла.
+    batch_pair: usize,
+    /// Удаление узла, у которого были дети.
+    delete_with_children: usize,
+}
+
+/// Счётчики трудных случаев за весь прогон: тест не должен проходить вхолостую.
+#[derive(Default, Debug)]
+struct Stats {
+    structural: usize,
+    props_only: usize,
+    moved_steps: usize,
+    reparent: usize,
+    batch_pair: usize,
+    delete_with_children: usize,
+    history: usize,
+    history_multi: usize,
+    rotated_clipped_steps: usize,
+    hidden_parent_steps: usize,
+    preview_steps: usize,
+    failed_tx: usize,
+}
+
+fn run(p: &Tx, e: &Edit, hits: &mut TxHits) -> DocResult<()> {
     let alive = p.walk();
     match *e {
         Edit::Create {
@@ -109,7 +143,15 @@ fn run(p: &Tx, e: &Edit) -> DocResult<()> {
             parent,
             index,
         } => match pick(&alive, node) {
-            Some(n) => p.move_node(n, pick(&alive, parent), index),
+            Some(n) => {
+                let target = pick(&alive, parent);
+                let old = p.parent(n);
+                p.move_node(n, target, index)?;
+                if old != target {
+                    hits.reparent += 1;
+                }
+                Ok(())
+            }
             None => Ok(()),
         },
         Edit::MoveMany {
@@ -122,12 +164,23 @@ fn run(p: &Tx, e: &Edit) -> DocResult<()> {
                     .into_iter()
                     .flatten()
                     .collect();
-                p.move_nodes(&ids, pick(&alive, parent), index)
+                p.move_nodes(&ids, pick(&alive, parent), index)?;
+                if ids.len() == 2 && ids[0] != ids[1] {
+                    hits.batch_pair += 1;
+                }
+                Ok(())
             }
             None => Ok(()),
         },
         Edit::Delete { node } => match pick(&alive, node) {
-            Some(n) => p.delete_nodes(&[n]),
+            Some(n) => {
+                let had_children = !p.children(Some(n)).is_empty();
+                p.delete_nodes(&[n])?;
+                if had_children {
+                    hits.delete_with_children += 1;
+                }
+                Ok(())
+            }
             None => Ok(()),
         },
         Edit::Geometry {
@@ -165,14 +218,34 @@ fn run(p: &Tx, e: &Edit) -> DocResult<()> {
     }
 }
 
+/// Есть ли на странице повёрнутый фрейм с обрезкой и детьми.
+fn has_rotated_clipped_frame(p: &PageDoc) -> bool {
+    p.walk().into_iter().any(|id| {
+        p.props(id).is_ok_and(|pr| {
+            pr.kind == NodeKind::Frame
+                && pr.rotation != 0.0
+                && pr.clip_content
+                && !p.children(Some(id)).is_empty()
+        })
+    })
+}
+
+/// Есть ли скрытый узел, у которого есть видимый ребёнок.
+fn has_hidden_parent_with_visible_child(p: &PageDoc) -> bool {
+    p.walk().into_iter().any(|id| {
+        p.props(id).is_ok_and(|pr| !pr.visible)
+            && p.children(Some(id))
+                .into_iter()
+                .any(|c| p.props(c).is_ok_and(|pc| pc.visible))
+    })
+}
+
 #[test]
 fn scene_after_changes_matches_rebuild() {
-    let structural = Cell::new(0usize);
-    let props_only = Cell::new(0usize);
-    let history = Cell::new(0usize);
-    let failed_tx = Cell::new(0usize);
+    let stats = RefCell::new(Stats::default());
     let mut runner = TestRunner::new(Config {
         cases: 96,
+        failure_persistence: None,
         ..Config::default()
     });
     runner
@@ -180,56 +253,170 @@ fn scene_after_changes_matches_rebuild() {
             let mut doc = Document::new();
             let page = doc.pages()[0].0;
             let mut scene = Scene::new();
+            // Превью жеста так, как его задал последний `set_preview` в тесте.
+            let mut preview: Vec<(NodeId, PropsPatch)> = Vec::new();
+            // Зеркало истории: число правок в каждой записи стеков undo и redo.
+            let mut undo_stack: Vec<usize> = Vec::new();
+            let mut redo_stack: Vec<usize> = Vec::new();
             for s in &steps {
+                // Число правок транзакции, если она записана в историю (проверим ниже).
+                let mut recorded: Option<usize> = None;
                 match s {
                     Step::Tx(edits) => {
+                        let mut hits = TxHits::default();
                         let r = doc.transact(page, vec![], |p| {
-                            edits.iter().try_for_each(|e| run(p, e)).map(|_| vec![])
+                            edits
+                                .iter()
+                                .try_for_each(|e| run(p, e, &mut hits))
+                                .map(|_| vec![])
                         });
-                        if r.is_err() {
-                            failed_tx.set(failed_tx.get() + 1);
+                        match r {
+                            Ok(_) => {
+                                recorded = Some(edits.len());
+                                let mut st = stats.borrow_mut();
+                                st.reparent += hits.reparent;
+                                st.batch_pair += hits.batch_pair;
+                                st.delete_with_children += hits.delete_with_children;
+                            }
+                            // Отказ по циклу — ожидаемый откат транзакции; любая другая
+                            // ошибка означает сбой в самом документе.
+                            Err(DocError::CyclicMove) => stats.borrow_mut().failed_tx += 1,
+                            Err(e) => {
+                                return Err(TestCaseError::fail(format!(
+                                    "неожиданная ошибка транзакции: {e}"
+                                )))
+                            }
                         }
                     }
                     Step::Undo => {
                         if doc.undo().unwrap().is_some() {
-                            history.set(history.get() + 1);
+                            let n = undo_stack.pop().expect("зеркало истории совпадает");
+                            redo_stack.push(n);
+                            let mut st = stats.borrow_mut();
+                            st.history += 1;
+                            if n >= 2 {
+                                st.history_multi += 1;
+                            }
                         }
                     }
                     Step::Redo => {
                         if doc.redo().unwrap().is_some() {
-                            history.set(history.get() + 1);
+                            let n = redo_stack.pop().expect("зеркало истории совпадает");
+                            undo_stack.push(n);
+                            let mut st = stats.borrow_mut();
+                            st.history += 1;
+                            if n >= 2 {
+                                st.history_multi += 1;
+                            }
                         }
+                    }
+                    Step::Preview { nodes, x } => {
+                        let alive = doc.page(page).unwrap().walk();
+                        preview.clear();
+                        for &i in nodes {
+                            if let Some(id) = pick(&alive, i) {
+                                if !preview.iter().any(|(q, _)| *q == id) {
+                                    let patch = PropsPatch {
+                                        x: Some(f64::from(*x)),
+                                        ..Default::default()
+                                    };
+                                    preview.push((id, patch));
+                                }
+                            }
+                        }
+                        scene.set_preview(&preview);
+                    }
+                    Step::ClearPreview => {
+                        preview.clear();
+                        scene.clear_preview();
                     }
                 }
                 let changes = doc.take_changes(page);
-                if changes.created.len() + changes.deleted.len() + changes.moved.len() > 0 {
-                    structural.set(structural.get() + 1);
-                } else if !changes.is_empty() {
-                    props_only.set(props_only.get() + 1);
+                if let Some(n) = recorded {
+                    // Пустая транзакция в историю не попадает; непустая очищает redo.
+                    if !changes.is_empty() {
+                        undo_stack.push(n);
+                        redo_stack.clear();
+                    }
                 }
+                {
+                    let mut st = stats.borrow_mut();
+                    if !changes.moved.is_empty() {
+                        st.moved_steps += 1;
+                    }
+                    if changes.created.len() + changes.deleted.len() + changes.moved.len() > 0 {
+                        st.structural += 1;
+                    } else if !changes.is_empty() {
+                        st.props_only += 1;
+                    }
+                }
+                // Сцена забывает превью удалённого поддерева, даже если отмена вернёт узел.
+                preview.retain(|(id, _)| !changes.deleted.contains(id));
                 let p = doc.page(page).unwrap();
                 scene.apply(&changes, p);
-                let fresh = Scene::from_page(p);
+                {
+                    let mut st = stats.borrow_mut();
+                    if scene.has_preview() {
+                        st.preview_steps += 1;
+                    }
+                    if has_rotated_clipped_frame(p) {
+                        st.rotated_clipped_steps += 1;
+                    }
+                    if has_hidden_parent_with_visible_child(p) {
+                        st.hidden_parent_steps += 1;
+                    }
+                }
+                let mut fresh = Scene::from_page(p);
+                fresh.set_preview(&preview);
                 prop_assert_eq!(snapshot(&scene), snapshot(&fresh), "после {:?}", s);
             }
             Ok(())
         })
         .unwrap();
+    let st = stats.into_inner();
     // Тест не должен проходить вхолостую: сцена обновлялась всеми путями.
+    assert!(st.structural > 300, "структурных шагов: {}", st.structural);
     assert!(
-        structural.get() > 300,
-        "структурных шагов: {}",
-        structural.get()
-    );
-    assert!(
-        props_only.get() > 100,
+        st.props_only > 100,
         "шагов только со свойствами: {}",
-        props_only.get()
+        st.props_only
     );
-    assert!(history.get() > 100, "отмен и повторов: {}", history.get());
+    assert!(st.history > 100, "отмен и повторов: {}", st.history);
+    assert!(st.failed_tx > 0, "откатов транзакций: {}", st.failed_tx);
+    assert!(st.moved_steps > 50, "шагов с переносом: {}", st.moved_steps);
     assert!(
-        failed_tx.get() > 0,
-        "откатов транзакций: {}",
-        failed_tx.get()
+        st.reparent > 15,
+        "переносов к другому родителю: {}",
+        st.reparent
+    );
+    assert!(
+        st.batch_pair > 5,
+        "пакетных переносов двух узлов: {}",
+        st.batch_pair
+    );
+    assert!(
+        st.delete_with_children > 8,
+        "удалений узла с детьми: {}",
+        st.delete_with_children
+    );
+    assert!(
+        st.history_multi > 50,
+        "отмен и повторов транзакций из двух и более правок: {}",
+        st.history_multi
+    );
+    assert!(
+        st.rotated_clipped_steps > 30,
+        "шагов с повёрнутым фреймом с обрезкой и детьми: {}",
+        st.rotated_clipped_steps
+    );
+    assert!(
+        st.hidden_parent_steps > 25,
+        "шагов со скрытым узлом и видимым ребёнком: {}",
+        st.hidden_parent_steps
+    );
+    assert!(
+        st.preview_steps > 150,
+        "шагов с активным превью: {}",
+        st.preview_steps
     );
 }
