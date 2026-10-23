@@ -60,12 +60,17 @@ pub enum Geometry {
 }
 
 pub fn geometry(p: &Props) -> Geometry {
-    let rect = Rect::new(0.0, 0.0, p.w, p.h);
+    // Отрицательные размеры и радиус здесь обнуляются, а не передаются дальше: иначе
+    // `RoundedRect` получит отрицательный радиус, а `hit` будет считать его нулевым,
+    // и рендер с попаданием разойдутся. Общая геометрия нужна, чтобы их не разводить.
+    let w = p.w.max(0.0);
+    let h = p.h.max(0.0);
+    let rect = Rect::new(0.0, 0.0, w, h);
     match p.kind {
         NodeKind::Group => Geometry::None,
         NodeKind::Frame | NodeKind::Rect | NodeKind::Image => Geometry::Rect {
             rect,
-            radius: p.corner_radius.min(p.w / 2.0).min(p.h / 2.0),
+            radius: p.corner_radius.max(0.0).min(w / 2.0).min(h / 2.0),
         },
         NodeKind::Ellipse => Geometry::Ellipse(rect),
         NodeKind::Line => Geometry::Line(p.w),
@@ -239,7 +244,11 @@ pub fn hit(p: &Props, local: Point, tolerance: f64) -> bool {
         let nearest = seg.nearest(local, 1e-9);
         return nearest.distance_sq.sqrt() <= half.max(tolerance);
     }
-    let filled = p.kind == NodeKind::Frame || p.fills.iter().any(|f| f.visible);
+    // Изображение рисуется на всём прямоугольнике, поэтому попадает в него, как фрейм,
+    // даже без заливок: у свежесозданного изображения заливок нет, и без этого клик
+    // по нему не попадал бы никуда.
+    let filled = matches!(p.kind, NodeKind::Frame | NodeKind::Image)
+        || p.fills.iter().any(|f| f.visible);
     if filled && geom.contains(local) {
         return true;
     }

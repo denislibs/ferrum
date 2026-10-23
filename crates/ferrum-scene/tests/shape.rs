@@ -165,3 +165,28 @@ fn stroke_ring_follows_alignment() {
         Geometry::None
     );
 }
+
+#[test]
+fn default_image_is_hit_over_its_whole_rect() {
+    // Изображение без заливок и обводок попадает внутрь прямоугольника, как фрейм.
+    let p = Props::defaults(NodeKind::Image);
+    assert!(p.fills.is_empty() && p.strokes.is_empty());
+    assert!(shape::hit(&p, Point::new(50.0, 50.0), 0.0));
+    assert!(shape::hit(&p, Point::new(1.0, 1.0), 0.0));
+    assert!(!shape::hit(&p, Point::new(150.0, 50.0), 0.0));
+    assert!(!shape::hit(&p, Point::new(50.0, -5.0), 0.0));
+}
+
+#[test]
+fn negative_corner_radius_is_clamped_to_plain_rect() {
+    // Отрицательный радиус не должен менять контур и расходиться с попаданием.
+    let mut p = props(NodeKind::Rect, 100.0, 100.0);
+    p.corner_radius = -30.0;
+    let g = shape::geometry(&p);
+    let fill = g.fill_path().unwrap();
+    let close = |a: Rect, b: Rect| (a.x0 - b.x0).abs() + (a.x1 - b.x1).abs() < 1e-6;
+    assert!(close(fill.bounding_box(), Rect::new(0.0, 0.0, 100.0, 100.0)));
+    // Угол прямоугольника без скругления попадает, как и любая внутренняя точка.
+    assert!(shape::hit(&p, Point::new(2.0, 2.0), 0.0));
+    assert!(g.contains(Point::new(2.0, 2.0)));
+}
