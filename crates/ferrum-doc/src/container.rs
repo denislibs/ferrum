@@ -72,10 +72,11 @@ pub fn encode(doc: &Document) -> DocResult<Vec<u8>> {
             payload.image_refs.join("\n").as_bytes(),
         );
         count += 2;
-        if let Some(rows) = &payload.scene {
+        // Страница, которая не помещается в таблицу кэша, сохраняется без него.
+        if let Some(table) = payload.scene.as_deref().and_then(scene_cache::encode) {
             let mut data = blake3::hash(&payload.snapshot).as_bytes().to_vec();
             data.push(SCENE_CACHE_VERSION);
-            data.extend_from_slice(&scene_cache::encode(rows));
+            data.extend_from_slice(&table);
             push_section(&mut sections, SCENE, &page, &data);
             count += 1;
         }

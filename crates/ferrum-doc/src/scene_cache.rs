@@ -59,13 +59,16 @@ fn read_color(r: &mut Reader) -> Option<Color> {
     Some(Color::rgba(b[0], b[1], b[2], b[3]))
 }
 
-pub(crate) fn encode(rows: &[SceneRow]) -> Vec<u8> {
+/// `None` — какая-то строка не помещается в формат таблицы (строка длиннее 65 535
+/// байт, больше 255 заливок или обводок). Усечённый кэш разошёлся бы с документом,
+/// поэтому для такой страницы кэш не пишется: она откроется из Loro.
+pub(crate) fn encode(rows: &[SceneRow]) -> Option<Vec<u8>> {
     let mut w = Writer::new();
-    w.u32(rows.len() as u32);
+    w.u32(u32::try_from(rows.len()).ok()?);
     for row in rows {
         let p = &row.props;
-        w.str16(&row.id.to_string());
-        w.str16(&row.tree_id.to_string());
+        w.str16(&row.id.to_string())?;
+        w.str16(&row.tree_id.to_string())?;
         w.u32(row.parent.unwrap_or(ROOT));
         w.u8(kind_code(p.kind));
         let mut flags = 0;
@@ -82,9 +85,9 @@ pub(crate) fn encode(rows: &[SceneRow]) -> Vec<u8> {
         for v in [p.x, p.y, p.w, p.h, p.rotation, p.opacity, p.corner_radius] {
             w.f64(v);
         }
-        w.str16(&p.name);
-        w.u8(p.fills.len().min(255) as u8);
-        for f in p.fills.iter().take(255) {
+        w.str16(&p.name)?;
+        w.u8(u8::try_from(p.fills.len()).ok()?);
+        for f in &p.fills {
             w.u8(match f.kind {
                 FillKind::Solid => 0,
                 FillKind::Image => 1,
@@ -97,10 +100,10 @@ pub(crate) fn encode(rows: &[SceneRow]) -> Vec<u8> {
             });
             w.f64(f.opacity);
             w.u8(f.visible as u8);
-            w.str16(f.image_hash.as_deref().unwrap_or(""));
+            w.str16(f.image_hash.as_deref().unwrap_or(""))?;
         }
-        w.u8(p.strokes.len().min(255) as u8);
-        for s in p.strokes.iter().take(255) {
+        w.u8(u8::try_from(p.strokes.len()).ok()?);
+        for s in &p.strokes {
             color(&mut w, s.color);
             w.f64(s.width);
             w.u8(match s.align {
@@ -110,7 +113,7 @@ pub(crate) fn encode(rows: &[SceneRow]) -> Vec<u8> {
             });
         }
     }
-    w.buf
+    Some(w.buf)
 }
 
 /// `None` — таблица повреждена; вызывающий код тогда просто не использует кэш.

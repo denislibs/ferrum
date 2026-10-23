@@ -353,3 +353,154 @@ fn unknown_section_kind_is_skipped_without_warnings() {
     assert_eq!(d.page(p1).unwrap().props(frame).unwrap().h, 852.0);
     assert!(d.images.get(&hash).is_some());
 }
+
+/// Документ с одним прямоугольником, к которому применена правка `patch`.
+fn single_node(patch: PropsPatch) -> (Document, PageId, NodeId) {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let id = doc
+        .transact(page, vec![], |p| {
+            let id = p.create_node(None, None, NodeKind::Rect)?;
+            p.set_props(id, &patch)?;
+            Ok(vec![id])
+        })
+        .unwrap()[0];
+    (doc, page, id)
+}
+
+#[test]
+fn row_that_does_not_fit_scene_cache_skips_cache() {
+    let stroke = Stroke {
+        color: Color::BLACK,
+        width: 1.0,
+        align: StrokeAlign::Center,
+    };
+    for (name, patch) in [
+        (
+            "длинное имя",
+            PropsPatch {
+                name: Some("я".repeat(40_000)),
+                ..Default::default()
+            },
+        ),
+        (
+            "256 заливок",
+            PropsPatch {
+                fills: Some(vec![Fill::solid(Color::WHITE); 256]),
+                ..Default::default()
+            },
+        ),
+        (
+            "256 обводок",
+            PropsPatch {
+                strokes: Some(vec![stroke; 256]),
+                ..Default::default()
+            },
+        ),
+        (
+            "длинный хэш картинки",
+            PropsPatch {
+                fills: Some(vec![Fill::image("f".repeat(70_000))]),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let (mut doc, page, id) = single_node(patch);
+        let expected = doc.page(page).unwrap().props(id).unwrap();
+        let mut opened = decode(&encode(&doc).unwrap()).unwrap();
+        assert!(opened.warnings.is_empty(), "{name}: {:?}", opened.warnings);
+        assert!(
+            opened.document.cached_scene(page).is_none(),
+            "{name}: усечённый кэш не пишется"
+        );
+        assert_eq!(
+            opened.document.page(page).unwrap().props(id).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn scene_cache_roundtrips_every_field() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let h1 = doc.images.add(vec![1; 10]);
+    let h2 = doc.images.add(vec![2; 10]);
+    let kinds = [
+        NodeKind::Frame,
+        NodeKind::Group,
+        NodeKind::Rect,
+        NodeKind::Ellipse,
+        NodeKind::Line,
+        NodeKind::Image,
+    ];
+    doc.transact(page, vec![], |p| {
+        let mut parent = None;
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let id = p.create_node(parent, None, kind)?;
+            let f = i as f64;
+            p.set_props(
+                id,
+                &PropsPatch {
+                    name: Some(format!("Слой «{i}» ✓")),
+                    x: Some(-10.5 + f),
+                    y: Some(3.25 * f),
+                    w: Some(100.0 + f),
+                    h: Some(0.125 + f),
+                    rotation: Some(f * 15.0),
+                    opacity: Some(0.1 * f),
+                    visible: Some(i % 2 == 0),
+                    locked: Some(i % 3 == 0),
+                    corner_radius: Some(f / 3.0),
+                    clip_content: Some(i % 2 == 1),
+                    fills: Some(vec![
+                        Fill::solid(Color::rgba(i as u8, 2, 3, 4)),
+                        Fill {
+                            scale_mode: ScaleMode::Fit,
+                            opacity: 0.5,
+                            visible: false,
+                            ..Fill::image(&h1)
+                        },
+                        Fill {
+                            scale_mode: ScaleMode::Tile,
+                            ..Fill::image(&h2)
+                        },
+                        Fill::image(&h1),
+                    ]),
+                    strokes: Some(vec![
+                        Stroke {
+                            color: Color::rgba(9, 8, 7, 6),
+                            width: 0.5,
+                            align: StrokeAlign::Inside,
+                        },
+                        Stroke {
+                            color: Color::BLACK,
+                            width: 2.0,
+                            align: StrokeAlign::Center,
+                        },
+                        Stroke {
+                            color: Color::WHITE,
+                            width: 12.75,
+                            align: StrokeAlign::Outside,
+                        },
+                    ]),
+                },
+            )?;
+            // Вложенность через раз: и корень, и дети.
+            if i % 2 == 0 {
+                parent = Some(id);
+            }
+        }
+        Ok(vec![])
+    })
+    .unwrap();
+    let expected = doc.page(page).unwrap().scene_rows().unwrap();
+    assert_eq!(expected.len(), kinds.len());
+    let opened = decode(&encode(&doc).unwrap()).unwrap();
+    assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+    assert_eq!(
+        opened.document.cached_scene(page),
+        Some(expected.as_slice())
+    );
+}

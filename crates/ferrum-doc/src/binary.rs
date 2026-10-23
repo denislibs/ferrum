@@ -29,14 +29,12 @@ impl Writer {
         self.buf.extend_from_slice(v);
     }
 
-    /// Строка с длиной u16. Длинные строки обрезаются по границе символа.
-    pub fn str16(&mut self, s: &str) {
-        let mut end = s.len().min(u16::MAX as usize);
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.u16(end as u16);
-        self.bytes(&s.as_bytes()[..end]);
+    /// Строка с длиной u16. `None` — строка длиннее 65 535 байт: обрезать её нельзя,
+    /// иначе кэш сцены молча разошёлся бы с документом.
+    pub fn str16(&mut self, s: &str) -> Option<()> {
+        self.u16(u16::try_from(s.len()).ok()?);
+        self.bytes(s.as_bytes());
+        Some(())
     }
 }
 
