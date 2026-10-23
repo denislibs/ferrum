@@ -7,7 +7,16 @@
 //! Типы секций: 1 — корневой документ, 2 — страница (id = PageId, shallow-снапшот Loro),
 //! 3 — ссылки страницы на изображения (id = PageId, хэши через `\n`),
 //! 4 — изображение (id = хэш blake3), 5 — кэш сцены страницы
-//! (id = PageId, данные — blake3 снапшота страницы 32 байта + таблица узлов).
+//! (id = PageId, данные — blake3 снапшота страницы 32 байта · версия кэша u8 · таблица узлов).
+//!
+//! Кэш сцены — производные данные со своей версией: кэш неизвестной версии молча
+//! игнорируется (страница строится из Loro), поэтому формат таблицы можно менять
+//! без повышения `FORMAT_VERSION`.
+//!
+//! Секции неизвестного типа при чтении пропускаются без предупреждений и при
+//! пересохранении теряются. Поэтому новый тип секции, который обязан пережить
+//! открытие и сохранение в старой сборке, требует повышения `FORMAT_VERSION`
+//! (старая сборка тогда откажется открывать файл, а не тихо потеряет данные).
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,6 +30,8 @@ use crate::types::PageId;
 
 pub const MAGIC: &[u8; 8] = b"FERRUM\0\0";
 pub const FORMAT_VERSION: u32 = 1;
+/// Версия таблицы в секции кэша сцены; растёт при любом изменении `scene_cache`.
+pub const SCENE_CACHE_VERSION: u8 = 1;
 
 const ROOT: u8 = 1;
 const PAGE: u8 = 2;
@@ -63,6 +74,7 @@ pub fn encode(doc: &Document) -> DocResult<Vec<u8>> {
         count += 2;
         if let Some(rows) = &payload.scene {
             let mut data = blake3::hash(&payload.snapshot).as_bytes().to_vec();
+            data.push(SCENE_CACHE_VERSION);
             data.extend_from_slice(&scene_cache::encode(rows));
             push_section(&mut sections, SCENE, &page, &data);
             count += 1;
@@ -165,11 +177,16 @@ pub fn decode(bytes: &[u8]) -> DocResult<Opened> {
     })?;
     let mut unloaded = HashMap::new();
     for (id, snapshot) in snapshots {
-        // Кэш годен, только если построен именно из этого снапшота.
+        // Кэш годен, только если построен именно из этого снапшота и в понятной
+        // этой сборке версии таблицы.
         let scene = scenes
             .get(&id)
-            .filter(|d| d.len() >= 32 && d[..32] == *blake3::hash(&snapshot).as_bytes())
-            .and_then(|d| scene_cache::decode(&d[32..]));
+            .filter(|d| {
+                d.len() > 32
+                    && d[..32] == *blake3::hash(&snapshot).as_bytes()
+                    && d[32] == SCENE_CACHE_VERSION
+            })
+            .and_then(|d| scene_cache::decode(&d[33..]));
         let image_refs = match refs.remove(&id) {
             Some(list) => list,
             None => {
@@ -226,6 +243,17 @@ pub mod testing {
             pos = data_at.checked_add(len)?;
         }
         None
+    }
+
+    /// Дописывает в конец файла секцию произвольного типа — как файл из будущей версии.
+    pub fn with_extra_section(bytes: &[u8], kind: u8, id: &str, data: &[u8]) -> Vec<u8> {
+        let count = crate::binary::Reader::at(bytes, 12)
+            .u32()
+            .expect("валидный файл");
+        let mut out = bytes.to_vec();
+        out[12..16].copy_from_slice(&(count + 1).to_le_bytes());
+        super::push_section(&mut out, kind, id, data);
+        out
     }
 
     /// Перестраивает файл: `f` меняет тип, id и данные каждой секции,

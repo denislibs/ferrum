@@ -297,3 +297,59 @@ fn opened_file_has_clean_undo_history() {
     assert!(opened.undo().unwrap().is_none());
     assert_eq!(opened.page(p1).unwrap().props(frame).unwrap().x, 0.0);
 }
+
+#[test]
+fn scene_cache_starts_with_its_own_version() {
+    let (doc, ..) = sample();
+    let mut seen = 0;
+    ferrum_doc::container::testing::map_sections(&encode(&doc).unwrap(), |kind, _, data| {
+        if kind == 5 {
+            // blake3 снапшота 32 байта, затем версия кэша.
+            assert_eq!(data[32], ferrum_doc::container::SCENE_CACHE_VERSION);
+            seen += 1;
+        }
+    });
+    assert_eq!(seen, 2, "обе страницы открыты — у обеих есть кэш");
+}
+
+#[test]
+fn unknown_scene_cache_version_is_ignored() {
+    let (doc, p1, _, frame, _) = sample();
+    let bytes =
+        ferrum_doc::container::testing::map_sections(&encode(&doc).unwrap(), |kind, _, data| {
+            if kind == 5 {
+                data[32] = ferrum_doc::container::SCENE_CACHE_VERSION + 1;
+            }
+        });
+    let mut opened = decode(&bytes).unwrap();
+    assert!(opened.document.cached_scene(p1).is_none());
+    assert!(
+        opened.warnings.is_empty(),
+        "кэш другой версии необязателен — без предупреждений"
+    );
+    assert_eq!(
+        opened.document.page(p1).unwrap().props(frame).unwrap().w,
+        393.0
+    );
+}
+
+#[test]
+fn unknown_section_kind_is_skipped_without_warnings() {
+    let (doc, p1, p2, frame, hash) = sample();
+    let bytes = ferrum_doc::container::testing::with_extra_section(
+        &encode(&doc).unwrap(),
+        200,
+        "из будущего",
+        b"payload",
+    );
+    let mut opened = decode(&bytes).unwrap();
+    assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+    let d = &mut opened.document;
+    assert_eq!(
+        d.pages().iter().map(|p| p.0).collect::<Vec<_>>(),
+        vec![p1, p2]
+    );
+    assert!(d.cached_scene(p1).is_some());
+    assert_eq!(d.page(p1).unwrap().props(frame).unwrap().h, 852.0);
+    assert!(d.images.get(&hash).is_some());
+}

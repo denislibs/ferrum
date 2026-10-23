@@ -69,7 +69,7 @@ pub(crate) fn read_kind(map: &LoroMap, id: &NodeId) -> DocResult<NodeKind> {
     let raw = value(map, key::TYPE)
         .as_ref()
         .and_then(as_str)
-        .ok_or_else(|| DocError::NodeNotFound(id.to_string()))?;
+        .ok_or_else(|| DocError::Corrupted(format!("у узла {id} не записан тип")))?;
     NodeKind::parse(&raw).ok_or_else(|| DocError::UnknownKind(id.to_string(), raw))
 }
 

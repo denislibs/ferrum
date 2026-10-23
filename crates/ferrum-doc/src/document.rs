@@ -222,6 +222,10 @@ impl Document {
             // Сначала грузим по ссылке: при ошибке запись остаётся в unloaded,
             // иначе страница пропала бы из документа и не попала бы в сохранение.
             let page = PageDoc::load(&u.snapshot, u.scene.as_deref())?;
+            // Узлы неизвестного типа скрыты от модели; правка могла бы их потерять.
+            if page.has_unknown_nodes() {
+                self.read_only = true;
+            }
             self.unloaded.remove(&id);
             self.loaded.insert(id, page);
         }
@@ -266,8 +270,10 @@ impl Document {
     where
         F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
     {
-        self.writable()?;
+        // Сначала загрузка: страница с неизвестными узлами делает документ
+        // доступным только для чтения.
         self.page(page)?;
+        self.writable()?;
         let p = self.loaded.get(&page).expect("страница загружена выше");
         p.begin_journal();
         let result = f(&Tx::new(p));
@@ -392,6 +398,40 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    #[test]
+    fn page_with_unknown_kind_makes_document_read_only() {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let star = doc
+            .transact(page, vec![], |p| {
+                p.create_node(None, None, NodeKind::Rect)?;
+                Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+            })
+            .unwrap()[0];
+        doc.page(page)
+            .unwrap()
+            .force_raw_kind_for_tests(star, Some("star"));
+        let root = doc.root_snapshot().unwrap();
+        let payload = doc.page_payload(page).unwrap();
+        let mut unloaded = HashMap::new();
+        unloaded.insert(
+            page,
+            UnloadedPage {
+                snapshot: payload.snapshot,
+                image_refs: payload.image_refs,
+                scene: None,
+            },
+        );
+        let (mut d2, _) = Document::from_parts(&root, unloaded, ImageStore::default()).unwrap();
+        assert!(!d2.is_read_only());
+        assert_eq!(d2.page(page).unwrap().walk().len(), 1);
+        assert!(d2.is_read_only(), "скрытые узлы нельзя потерять правкой");
+        let err = d2.transact(page, vec![], |p| {
+            Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+        });
+        assert!(matches!(err, Err(DocError::ReadOnly)));
     }
 
     #[test]

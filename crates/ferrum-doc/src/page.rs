@@ -12,7 +12,7 @@
 //!   операцию в журнал транзакции, и память растёт с числом правок, а не с размером
 //!   документа.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use loro::{
@@ -100,6 +100,8 @@ pub struct PageDoc {
     state: RefCell<State>,
     /// Журнал обратных операций текущей транзакции; `None` — запись выключена.
     journal: RefCell<Option<Vec<Inverse>>>,
+    /// При загрузке встретились узлы неизвестного типа (см. `rebuild_from_loro`).
+    unknown_nodes: Cell<bool>,
 }
 
 impl PageDoc {
@@ -173,6 +175,7 @@ impl PageDoc {
             tree,
             state: RefCell::default(),
             journal: RefCell::default(),
+            unknown_nodes: Cell::default(),
         }
     }
 
@@ -191,12 +194,26 @@ impl PageDoc {
     }
 
     /// Полное построение индекса и зеркала из Loro — при загрузке без кэша.
+    ///
+    /// Узел неизвестного типа (из более новой версии Ferrum) не роняет загрузку:
+    /// он и его поддерево не попадают в индекс и для модели не существуют — их не
+    /// видно в `children`, `walk` и кэше сцены, но в снапшоте Loro они остаются.
+    /// Чтобы правка не потеряла их (удаление предка, отмена), документ с такой
+    /// страницей открывается только для чтения (`has_unknown_nodes`).
     fn rebuild_from_loro(&self) -> DocResult<()> {
         let mut state = State::default();
+        let mut unknown = false;
         let mut stack = self.tree.children(TreeParentId::Root).unwrap_or_default();
         while let Some(tid) = stack.pop() {
             let id = self.stable_id(tid);
-            let props = codec::read_props(&self.tree.get_meta(tid)?, &id)?;
+            let props = match codec::read_props(&self.tree.get_meta(tid)?, &id) {
+                Ok(props) => props,
+                Err(DocError::UnknownKind(..)) => {
+                    unknown = true;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             state.insert(id, tid, props);
             stack.extend(
                 self.tree
@@ -205,7 +222,13 @@ impl PageDoc {
             );
         }
         *self.state.borrow_mut() = state;
+        self.unknown_nodes.set(unknown);
         Ok(())
+    }
+
+    /// Есть ли на странице узлы неизвестного типа, скрытые от модели.
+    pub fn has_unknown_nodes(&self) -> bool {
+        self.unknown_nodes.get()
     }
 
     /// Shallow-снапшот: текущее состояние без истории правок. Меньше полного,
@@ -227,6 +250,18 @@ impl PageDoc {
     #[doc(hidden)]
     pub fn commit_for_tests(&self) {
         self.doc.commit();
+    }
+
+    /// Переписывает тип узла прямо в Loro — как сделала бы более новая версия Ferrum.
+    /// `None` — ключ типа удаляется.
+    #[cfg(test)]
+    pub(crate) fn force_raw_kind_for_tests(&self, id: NodeId, raw: Option<&str>) {
+        let meta = self.tree.get_meta(self.tid(id).unwrap()).unwrap();
+        match raw {
+            Some(raw) => meta.insert(codec::key::TYPE, raw).unwrap(),
+            None => meta.delete(codec::key::TYPE).unwrap(),
+        }
+        self.commit();
     }
 
     /// Правка отдельной страницы без документа — для тестов и бенчмарков:
@@ -587,11 +622,12 @@ impl PageDoc {
             return Vec::new();
         };
         let state = self.state.borrow();
+        // Узлы вне индекса (неизвестного типа) для модели не существуют.
         self.tree
             .children(parent)
             .unwrap_or_default()
             .into_iter()
-            .map(|t| state.by_tree.get(&t).copied().unwrap_or(NodeId(t)))
+            .filter_map(|t| state.by_tree.get(&t).copied())
             .collect()
     }
 
@@ -961,6 +997,46 @@ mod tests {
         // Честный кэш принимается как есть.
         let loaded = PageDoc::load(&snapshot, Some(&rows)).unwrap();
         assert_eq!(loaded.scene_rows().unwrap(), rows);
+    }
+
+    #[test]
+    fn unknown_kind_hides_subtree_and_keeps_other_nodes() {
+        let page = PageDoc::new();
+        let f = page.create_node(None, None, NodeKind::Frame).unwrap();
+        let a = page.create_node(Some(f), None, NodeKind::Rect).unwrap();
+        let star = page.create_node(Some(f), None, NodeKind::Group).unwrap();
+        page.create_node(Some(star), None, NodeKind::Rect).unwrap();
+        let r = page.create_node(None, None, NodeKind::Ellipse).unwrap();
+        page.set_props(
+            a,
+            &PropsPatch {
+                x: Some(7.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let before = props_of(&page, &[f, a, r]);
+        assert!(!page.has_unknown_nodes());
+        page.force_raw_kind_for_tests(star, Some("star"));
+
+        let loaded = PageDoc::from_snapshot(&page.export_snapshot().unwrap()).unwrap();
+        assert!(loaded.has_unknown_nodes());
+        assert_eq!(loaded.walk(), vec![f, a, r]);
+        assert_eq!(loaded.children(Some(f)), vec![a]);
+        assert!(!loaded.contains(star));
+        assert_eq!(props_of(&loaded, &[f, a, r]), before);
+        assert_eq!(loaded.scene_rows().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn missing_kind_is_corruption() {
+        let page = PageDoc::new();
+        let a = page.create_node(None, None, NodeKind::Rect).unwrap();
+        page.force_raw_kind_for_tests(a, None);
+        assert!(matches!(
+            PageDoc::from_snapshot(&page.export_snapshot().unwrap()),
+            Err(DocError::Corrupted(_))
+        ));
     }
 
     #[test]
