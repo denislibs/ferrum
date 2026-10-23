@@ -3,12 +3,17 @@
 
 mod binary;
 mod codec;
+mod document;
 mod error;
+mod history;
+mod images;
 mod page;
 mod scene_cache;
 mod types;
 
+pub use document::{Document, Restore, SCHEMA_VERSION};
 pub use error::{DocError, DocResult};
+pub use images::ImageStore;
 pub use page::PageDoc;
 pub use scene_cache::SceneRow;
 pub use types::*;
