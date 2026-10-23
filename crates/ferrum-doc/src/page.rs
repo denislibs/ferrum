@@ -292,11 +292,15 @@ impl PageDoc {
         Ok(())
     }
 
-    /// Позиция узла среди детей его родителя.
-    fn index_of(&self, id: NodeId, parent: Option<NodeId>) -> usize {
-        self.children(parent)
+    /// Позиция узла среди детей родителя по сырому `TreeID`, без сопоставления с `NodeId`.
+    /// Вызывается на каждую правку: на широком родителе (десятки тысяч детей) лишние
+    /// аллокации и поиски в хэш-таблице на каждого соседа съедали бы время правки.
+    fn index_of(&self, tid: TreeID, parent: TreeParentId) -> usize {
+        self.tree
+            .children(parent)
+            .unwrap_or_default()
             .iter()
-            .position(|c| *c == id)
+            .position(|t| *t == tid)
             .unwrap_or(0)
     }
 
@@ -309,7 +313,8 @@ impl PageDoc {
             }
         }
         let old_parent = self.parent(id);
-        let old_index = self.index_of(id, old_parent);
+        let old_parent_tid = self.tree.parent(tid).unwrap_or(TreeParentId::Root);
+        let old_index = self.index_of(tid, old_parent_tid);
         self.tree.mov_to(tid, self.parent_tid(parent)?, index)?;
         self.record(Inverse::Move {
             id,
@@ -330,26 +335,44 @@ impl PageDoc {
     }
 
     /// Удаляет узлы вместе с потомками. Уже удалённые пропускаются.
+    ///
+    /// Стоимость одного вызова — O(соседи + размер поддеревьев), а не O(k · соседи).
+    /// Списки детей берутся из Loro один раз на родителя и дальше поддерживаются
+    /// локально: иначе удаление 1000 узлов среди 100 000 соседей пересчитывало бы
+    /// весь список для каждого удаляемого узла и поддерева.
     pub fn delete_nodes(&self, ids: &[NodeId]) -> DocResult<()> {
+        let mut siblings: HashMap<TreeParentId, Vec<TreeID>> = HashMap::new();
         for id in ids {
             let Ok(tid) = self.tid(*id) else { continue };
-            let parent = self.parent(*id);
+            let tree_parent = self.tree.parent(tid).unwrap_or(TreeParentId::Root);
+            let list = siblings
+                .entry(tree_parent)
+                .or_insert_with(|| self.tree.children(tree_parent).unwrap_or_default());
+            let pos = list.iter().position(|t| *t == tid).unwrap_or(0);
             let mut saved = vec![SavedNode {
                 id: *id,
-                parent,
-                index: self.index_of(*id, parent),
+                parent: self.parent(*id),
+                index: pos,
                 props: self.props(*id)?,
             }];
-            for node in self.walk_from(Some(*id)) {
-                let parent = self.parent(node);
+            // Поддерево обходим один раз в глубину: родитель раньше детей, дети
+            // в порядке соседей. Индекс ребёнка берётся из его текущего списка Loro.
+            let mut stack = Vec::new();
+            self.push_children(tid, *id, &mut stack);
+            while let Some((child, index, parent)) = stack.pop() {
+                let node = self.node_of(child);
                 saved.push(SavedNode {
                     id: node,
-                    parent,
-                    index: self.index_of(node, parent),
+                    parent: Some(parent),
+                    index,
                     props: self.props(node)?,
                 });
+                self.push_children(child, node, &mut stack);
             }
             self.tree.delete(tid)?;
+            // Удалённый узел выбывает из кэша соседей, чтобы индексы следующих
+            // удалений в этом же вызове оставались верными.
+            list.remove(pos);
             let mut state = self.state.borrow_mut();
             for node in &saved {
                 state.remove(node.id);
@@ -358,6 +381,29 @@ impl PageDoc {
             self.record(Inverse::Restore(saved));
         }
         Ok(())
+    }
+
+    /// Кладёт детей узла в стек с их индексами и `NodeId` родителя.
+    fn push_children(
+        &self,
+        tid: TreeID,
+        parent: NodeId,
+        stack: &mut Vec<(TreeID, usize, NodeId)>,
+    ) {
+        let kids = self.tree.children(TreeParentId::Node(tid)).unwrap_or_default();
+        for (i, child) in kids.into_iter().enumerate().rev() {
+            stack.push((child, i, parent));
+        }
+    }
+
+    /// `NodeId` по сырому `TreeID`; без записи в индексе — стабильный ID по `TreeID`.
+    fn node_of(&self, tid: TreeID) -> NodeId {
+        self.state
+            .borrow()
+            .by_tree
+            .get(&tid)
+            .copied()
+            .unwrap_or(NodeId(tid))
     }
 
     /// Дети снизу вверх (последний рисуется поверх). `None` — корень страницы.
@@ -448,5 +494,85 @@ impl PageDoc {
 impl Default for PageDoc {
     fn default() -> Self {
         PageDoc::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn props_of(page: &PageDoc, ids: &[NodeId]) -> Vec<Props> {
+        ids.iter().map(|id| page.props(*id).unwrap()).collect()
+    }
+
+    #[test]
+    fn delete_siblings_then_inverse_restores_order_and_ids() {
+        let page = PageDoc::new();
+        let a = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let b = page.create_node(None, None, NodeKind::Frame).unwrap();
+        let c = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let d = page.create_node(None, None, NodeKind::Ellipse).unwrap();
+        let b1 = page.create_node(Some(b), None, NodeKind::Rect).unwrap();
+        let b2 = page.create_node(Some(b), None, NodeKind::Line).unwrap();
+        let all = [a, b, b1, b2, c, d];
+        let before = props_of(&page, &all);
+
+        page.begin_journal();
+        page.delete_nodes(&[a, c, b]).unwrap();
+        let ops = page.take_journal();
+        page.apply_inverse(&ops).unwrap();
+
+        assert_eq!(page.children(None), vec![a, b, c, d]);
+        assert_eq!(page.children(Some(b)), vec![b1, b2]);
+        for id in all {
+            assert!(page.contains(id));
+        }
+        assert_eq!(props_of(&page, &all), before);
+    }
+
+    #[test]
+    fn move_then_inverse_restores_order() {
+        let page = PageDoc::new();
+        let a = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let b = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let c = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let d = page.create_node(None, None, NodeKind::Rect).unwrap();
+
+        page.begin_journal();
+        page.move_node(d, None, 0).unwrap();
+        let ops = page.take_journal();
+        page.apply_inverse(&ops).unwrap();
+        assert_eq!(page.children(None), vec![a, b, c, d]);
+
+        page.begin_journal();
+        page.move_node(a, None, 3).unwrap();
+        let ops = page.take_journal();
+        page.apply_inverse(&ops).unwrap();
+        assert_eq!(page.children(None), vec![a, b, c, d]);
+    }
+
+    #[test]
+    fn deleting_many_flat_siblings() {
+        let page = PageDoc::new();
+        let all: Vec<NodeId> = (0..20_000)
+            .map(|_| page.create_node(None, None, NodeKind::Rect).unwrap())
+            .collect();
+        let doomed: Vec<NodeId> = all.iter().copied().step_by(20).collect();
+        let kept: Vec<NodeId> = all
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(i, _)| i % 20 != 0)
+            .map(|(_, id)| id)
+            .collect();
+
+        page.begin_journal();
+        page.delete_nodes(&doomed).unwrap();
+        let ops = page.take_journal();
+        assert_eq!(page.children(None), kept);
+        assert_eq!(page.children(None).len(), 19_000);
+
+        page.apply_inverse(&ops).unwrap();
+        assert_eq!(page.children(None), all);
     }
 }
