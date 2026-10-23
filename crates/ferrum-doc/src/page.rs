@@ -250,12 +250,27 @@ impl PageDoc {
         Ok(id)
     }
 
+    /// Создаёт узел у родителя. `index` ограничивается числом детей: позиция за концом
+    /// списка означает «в конец», а не ошибку.
     fn create_tree_node(&self, parent: Option<NodeId>, index: Option<usize>) -> DocResult<TreeID> {
         let parent = self.parent_tid(parent)?;
         Ok(match index {
-            Some(i) => self.tree.create_at(parent, i)?,
+            Some(i) => {
+                let max = self.child_count(parent, None);
+                self.tree.create_at(parent, i.min(max))?
+            }
             None => self.tree.create(parent)?,
         })
+    }
+
+    /// Число детей родителя, не считая узла `excluding` (если он уже среди них).
+    fn child_count(&self, parent: TreeParentId, excluding: Option<TreeID>) -> usize {
+        self.tree
+            .children(parent)
+            .unwrap_or_default()
+            .iter()
+            .filter(|t| Some(**t) != excluding)
+            .count()
     }
 
     fn finish_create(&self, id: NodeId, tid: TreeID, props: Props) -> DocResult<()> {
@@ -304,7 +319,10 @@ impl PageDoc {
             .unwrap_or(0)
     }
 
-    /// Переносит узел к новому родителю на позицию `index` среди его детей.
+    /// Переносит узел к новому родителю на позицию `index` среди его детей
+    /// (позиция после операции). Значение за пределами допустимого диапазона
+    /// означает «в конец списка», а не ошибку. Узел, уже бывший ребёнком этого
+    /// родителя, при подсчёте позиций не учитывается.
     pub fn move_node(&self, id: NodeId, parent: Option<NodeId>, index: usize) -> DocResult<()> {
         let tid = self.tid(id)?;
         if let Some(p) = parent {
@@ -315,7 +333,9 @@ impl PageDoc {
         let old_parent = self.parent(id);
         let old_parent_tid = self.tree.parent(tid).unwrap_or(TreeParentId::Root);
         let old_index = self.index_of(tid, old_parent_tid);
-        self.tree.mov_to(tid, self.parent_tid(parent)?, index)?;
+        let target = self.parent_tid(parent)?;
+        let max = self.child_count(target, Some(tid));
+        self.tree.mov_to(tid, target, index.min(max))?;
         self.record(Inverse::Move {
             id,
             parent: old_parent,
@@ -574,5 +594,38 @@ mod tests {
 
         page.apply_inverse(&ops).unwrap();
         assert_eq!(page.children(None), all);
+    }
+
+    #[test]
+    fn move_index_past_end_goes_last() {
+        let page = PageDoc::new();
+        let a = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let b = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let c = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let other = page.create_node(None, None, NodeKind::Frame).unwrap();
+        let before = props_of(&page, &[a, b, c, other]);
+
+        // Тот же родитель: позиция 10 среди [a, b, c] — в конец, без ошибки.
+        page.begin_journal();
+        page.move_node(a, None, 10).unwrap();
+        let ops = page.take_journal();
+        assert_eq!(page.children(None), vec![b, c, other, a]);
+        page.apply_inverse(&ops).unwrap();
+        assert_eq!(page.children(None), vec![a, b, c, other]);
+        assert_eq!(props_of(&page, &[a, b, c, other]), before);
+
+        // Родитель без детей: позиция 5 — единственный ребёнок.
+        let frame = page.create_node(None, None, NodeKind::Frame).unwrap();
+        page.move_node(b, Some(frame), 5).unwrap();
+        assert_eq!(page.children(Some(frame)), vec![b]);
+    }
+
+    #[test]
+    fn create_index_past_end_goes_last() {
+        let page = PageDoc::new();
+        let a = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let b = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let c = page.create_node(None, Some(99), NodeKind::Rect).unwrap();
+        assert_eq!(page.children(None), vec![a, b, c]);
     }
 }
