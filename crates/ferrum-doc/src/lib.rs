@@ -18,3 +18,6 @@ pub use images::ImageStore;
 pub use page::PageDoc;
 pub use scene_cache::SceneRow;
 pub use types::*;
+
+#[doc(hidden)]
+pub mod fixture;

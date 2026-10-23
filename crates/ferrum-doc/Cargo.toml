@@ -14,3 +14,7 @@ blake3.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "doc_bench"
+harness = false
