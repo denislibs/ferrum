@@ -185,7 +185,10 @@ fn negative_corner_radius_is_clamped_to_plain_rect() {
     let g = shape::geometry(&p);
     let fill = g.fill_path().unwrap();
     let close = |a: Rect, b: Rect| (a.x0 - b.x0).abs() + (a.x1 - b.x1).abs() < 1e-6;
-    assert!(close(fill.bounding_box(), Rect::new(0.0, 0.0, 100.0, 100.0)));
+    assert!(close(
+        fill.bounding_box(),
+        Rect::new(0.0, 0.0, 100.0, 100.0)
+    ));
     // Угол прямоугольника без скругления попадает, как и любая внутренняя точка.
     assert!(shape::hit(&p, Point::new(2.0, 2.0), 0.0));
     assert!(g.contains(Point::new(2.0, 2.0)));

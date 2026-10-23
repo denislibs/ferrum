@@ -2,7 +2,7 @@ use ferrum_doc::container::{decode, encode};
 use ferrum_doc::{
     Color, Document, Fill, NodeId, NodeKind, PageId, PropsPatch, SceneRow, Stroke, StrokeAlign,
 };
-use ferrum_scene::{testing::snapshot, Scene};
+use ferrum_scene::{testing, testing::snapshot, Scene};
 use kurbo::{Point, Rect};
 
 fn patch(x: f64, y: f64, w: f64, h: f64) -> PropsPatch {
@@ -269,7 +269,7 @@ fn hit_test_finds_topmost_visible_unclipped_node() {
 
 #[test]
 fn hit_test_on_rotated_node() {
-    let (mut doc, page, [_, _, _, _, _, l]) = sample();
+    let (mut doc, page, _) = sample();
     let id = doc
         .transact(page, vec![], |p| {
             let id = p.create_node(None, None, NodeKind::Rect)?;
@@ -291,7 +291,6 @@ fn hit_test_on_rotated_node() {
     // Повёрнут вокруг (1000, 1000): теперь тянется вверх.
     assert_eq!(scene.hit_test(Point::new(1005.0, 950.0), 0.0), Some(id));
     assert_eq!(scene.hit_test(Point::new(1050.0, 1005.0), 0.0), None);
-    let _ = l;
 }
 
 #[test]
@@ -460,4 +459,143 @@ fn large_batches_match_rebuild() {
     doc.undo().unwrap();
     apply(&mut scene, &mut doc, page);
     assert_matches_rebuild(&scene, &mut doc, page);
+}
+
+/// Номера версий всех узлов сцены и их поддеревьев.
+fn versions(scene: &Scene) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut stack = scene.roots().to_vec();
+    while let Some(s) = stack.pop() {
+        let n = scene.at(s);
+        out.push(n.version);
+        out.push(n.subtree_version);
+        stack.extend(n.children.iter().copied());
+    }
+    out
+}
+
+#[test]
+fn rebuilt_scene_versions_are_fresh() {
+    let (mut doc, page, _) = sample();
+    let rows = doc.page(page).unwrap().scene_rows().unwrap();
+    let a = Scene::from_rows(&rows);
+    let max_a = versions(&a).into_iter().max().unwrap();
+    // Вторая сцена из тех же строк не должна выдать номер, который выдала первая.
+    let b = Scene::from_rows(&rows);
+    let min_b = versions(&b).into_iter().min().unwrap();
+    assert!(
+        min_b > max_a,
+        "версии сцены B ({min_b}) не новее сцены A ({max_a})"
+    );
+}
+
+#[test]
+fn fallback_rebuild_keeps_preview_and_fresh_versions() {
+    let (mut doc, page, [_, r, g, _, _, l]) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    scene.set_preview(&[(
+        r,
+        PropsPatch {
+            x: Some(300.0),
+            ..Default::default()
+        },
+    )]);
+    let max_before = versions(&scene).into_iter().max().unwrap();
+    // Группа пропала из таблицы идентификаторов: перенос в неё не сходится со сценой,
+    // и `apply` перестраивает сцену целиком.
+    testing::forget(&mut scene, g);
+    doc.transact(page, vec![], |p| p.move_node(l, Some(g), 0).map(|_| vec![]))
+        .unwrap();
+    apply(&mut scene, &mut doc, page);
+    assert!(scene.has_preview(), "превью пережило перестройку");
+    assert_eq!(scene.node(r).unwrap().props.x, 300.0);
+    let mut fresh = Scene::from_page(doc.page(page).unwrap());
+    fresh.set_preview(&[(
+        r,
+        PropsPatch {
+            x: Some(300.0),
+            ..Default::default()
+        },
+    )]);
+    assert_eq!(snapshot(&scene), snapshot(&fresh));
+    assert!(
+        versions(&scene).iter().all(|&v| v > max_before),
+        "после перестройки есть повторный номер версии"
+    );
+}
+
+#[test]
+fn hit_test_inside_rotated_nested_frames() {
+    let (mut doc, page, [f, ..]) = sample();
+    doc.transact(page, vec![], |p| {
+        p.set_props(
+            f,
+            &PropsPatch {
+                rotation: Some(30.0),
+                ..Default::default()
+            },
+        )
+        .map(|_| vec![])
+    })
+    .unwrap();
+    let ids = doc
+        .transact(page, vec![], |p| {
+            let inner = p.create_node(Some(f), None, NodeKind::Frame)?;
+            p.set_props(
+                inner,
+                &PropsPatch {
+                    x: Some(10.0),
+                    y: Some(10.0),
+                    w: Some(100.0),
+                    h: Some(100.0),
+                    rotation: Some(45.0),
+                    ..Default::default()
+                },
+            )?;
+            let child = p.create_node(Some(inner), None, NodeKind::Rect)?;
+            p.set_props(child, &patch(10.0, 10.0, 20.0, 20.0))?;
+            Ok(vec![inner, child])
+        })
+        .unwrap();
+    let (inner, child) = (ids[0], ids[1]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    // Центр ребёнка (его геометрия (0, 0, 20, 20) в собственных координатах), переведённый
+    // в мир через оба поворота.
+    let center = scene.node(child).unwrap().world * Point::new(10.0, 10.0);
+    assert_eq!(scene.hit_test(center, 0.0), Some(child));
+    // Точка слева от ребёнка в его собственных координатах: мимо него, но в повёрнутом фрейме.
+    let outside_child = scene.node(child).unwrap().world * Point::new(-1.0, 10.0);
+    assert_ne!(scene.hit_test(outside_child, 0.0), Some(child));
+    // Внутренний фрейм ловится в собственной точке, а не в точке внешнего.
+    let inner_point = scene.node(inner).unwrap().world * Point::new(50.0, 50.0);
+    assert_eq!(scene.hit_test(inner_point, 0.0), Some(inner));
+}
+
+#[test]
+fn hit_tolerance_on_rotated_thin_line() {
+    let (mut doc, page, _) = sample();
+    let line = doc
+        .transact(page, vec![], |p| {
+            let id = p.create_node(None, None, NodeKind::Line)?;
+            p.set_props(
+                id,
+                &PropsPatch {
+                    x: Some(1000.0),
+                    y: Some(1000.0),
+                    w: Some(100.0),
+                    h: Some(0.0),
+                    rotation: Some(90.0),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![id])
+        })
+        .unwrap()[0];
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    // Повёрнута на 90° против часовой: от (1000, 1000) вверх до (1000, 900).
+    assert_eq!(scene.hit_test(Point::new(1003.0, 950.0), 4.0), Some(line));
+    assert_eq!(scene.hit_test(Point::new(1006.0, 950.0), 4.0), None);
+    // Конец отрезка: допуск считается до отрезка, а не до бесконечной прямой.
+    assert_eq!(scene.hit_test(Point::new(1000.0, 897.0), 4.0), Some(line));
+    assert_eq!(scene.hit_test(Point::new(1000.0, 895.0), 4.0), None);
 }

@@ -5,6 +5,7 @@
 //! только затронутые узлы, их потомки (мировая трансформация) и предки (границы).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferrum_doc::{Changes, NodeId, NodeKind, PageDoc, Props, PropsPatch, SceneRow};
 use kurbo::{Affine, Point, Rect};
@@ -21,6 +22,17 @@ type Entry = GeomWithData<Rectangle<[f64; 2]>, Slot>;
 
 /// С какого числа удалений из R-tree выгоднее один проход по всему дереву.
 const TREE_DRAIN_THRESHOLD: usize = 200;
+
+/// Номера версий общие для всего процесса. Если бы каждая сцена считала их сама,
+/// сцена, построенная заново (после перестройки или подмены сцены из кэша загруженной
+/// сценой), выдала бы номера, которые уже видел рендер, и его кэш принял бы старое
+/// за новое. Атомарный счётчик выдаёт каждый номер один раз.
+static NEXT_VERSION: AtomicU64 = AtomicU64::new(1);
+
+fn fresh_version() -> u64 {
+    // Порядок не нужен: уникальность номеров даёт сама атомарная операция.
+    NEXT_VERSION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Выборка записей R-tree по пометкам их слотов — для удаления пачкой.
 struct Marked<'a> {
@@ -129,7 +141,6 @@ pub struct Scene {
     by_id: HashMap<NodeId, Slot>,
     roots: Vec<Slot>,
     rtree: RTree<Entry, Params>,
-    next_version: u64,
     /// Узлы под превью жеста: свойства из документа и временная правка поверх них.
     preview: HashMap<Slot, (Props, PropsPatch)>,
     /// Изменения R-tree, накопленные за один пересчёт (см. `flush_tree`).
@@ -247,7 +258,7 @@ impl Scene {
 
     fn alloc(&mut self, id: NodeId, mut props: Props) -> Slot {
         shape::sanitize(&mut props);
-        self.next_version += 1;
+        let version = fresh_version();
         let node = SceneNode {
             id,
             local: shape::local_transform(&props),
@@ -259,8 +270,8 @@ impl Scene {
             local_bounds: None,
             world_bounds: None,
             subtree_bounds: None,
-            version: self.next_version,
-            subtree_version: self.next_version,
+            version,
+            subtree_version: version,
         };
         let slot = match self.free.pop() {
             Some(s) => {
@@ -457,8 +468,7 @@ impl Scene {
         for &s in &subtree {
             self.update_world(s);
         }
-        self.next_version += 1;
-        let version = self.next_version;
+        let version = fresh_version();
         for &s in subtree.iter().rev() {
             self.update_bounds(s, true);
             self.at_mut(s).subtree_version = version;
@@ -628,8 +638,7 @@ impl Scene {
             patch.apply_to(&mut props);
         }
         shape::sanitize(&mut props);
-        self.next_version += 1;
-        let version = self.next_version;
+        let version = fresh_version();
         let n = self.at_mut(slot);
         if looks_different(&n.props, &props) {
             n.version = version;
@@ -653,10 +662,11 @@ impl Scene {
             let at = touched.entry(parent).or_insert(first);
             *at = (*at).min(first);
             if let [one] = gone[..] {
+                // Позиция уже известна из `index`: искать её в списке линейно незачем.
+                let i = self.index[one as usize] as usize;
                 let list = self.list_mut(parent);
-                if let Some(i) = list.iter().position(|&s| s == one) {
-                    list.remove(i);
-                }
+                debug_assert_eq!(list.get(i), Some(&one), "индекс расходится со списком");
+                list.remove(i);
             } else {
                 let mark = self.next_mark();
                 for &s in &gone {
@@ -731,6 +741,9 @@ impl Scene {
 
     /// Узлы, чьи собственные границы пересекают прямоугольник (в мире), — запрос по
     /// R-tree без точной проверки формы. Для рамки выделения и отладки отсечения.
+    /// Возвращает кандидатов по одним границам: скрытые узлы и части, обрезанные
+    /// фреймом, в ответ тоже попадают, поэтому вызывающий должен отфильтровать их
+    /// через `is_visible`.
     pub fn query_rect(&self, rect: Rect) -> Vec<NodeId> {
         self.rtree
             .locate_in_envelope_intersecting(&aabb(rect))
@@ -857,6 +870,12 @@ pub mod testing {
         pub local_bounds: Option<Rect>,
         pub world_bounds: Option<Rect>,
         pub subtree_bounds: Option<Rect>,
+    }
+
+    /// Удаляет узел из таблицы идентификаторов, оставляя его в списках. Такое
+    /// расхождение сцены с документом заставляет `apply` перестроить сцену целиком.
+    pub fn forget(scene: &mut Scene, id: NodeId) {
+        scene.by_id.remove(&id);
     }
 
     pub fn snapshot(scene: &Scene) -> (Vec<NodeState>, Vec<(String, [f64; 4])>) {

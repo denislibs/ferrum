@@ -247,8 +247,8 @@ pub fn hit(p: &Props, local: Point, tolerance: f64) -> bool {
     // Изображение рисуется на всём прямоугольнике, поэтому попадает в него, как фрейм,
     // даже без заливок: у свежесозданного изображения заливок нет, и без этого клик
     // по нему не попадал бы никуда.
-    let filled = matches!(p.kind, NodeKind::Frame | NodeKind::Image)
-        || p.fills.iter().any(|f| f.visible);
+    let filled =
+        matches!(p.kind, NodeKind::Frame | NodeKind::Image) || p.fills.iter().any(|f| f.visible);
     if filled && geom.contains(local) {
         return true;
     }
