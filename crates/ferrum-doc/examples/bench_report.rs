@@ -207,6 +207,40 @@ fn main() {
                 "≤ 50 мс",
                 delete <= Duration::from_millis(50),
             );
+
+            // Отмена удаления восстанавливает узлы по одному: каждая вставка не должна
+            // перебирать соседей.
+            let (_, undo_delete) = time(|| flat.undo().unwrap());
+            add(
+                "Undo удаления 1000 узлов",
+                ms(undo_delete),
+                "≤ 50 мс",
+                undo_delete <= Duration::from_millis(50),
+            );
+
+            // Группировка (Ctrl+G) разбросанных по плоской странице узлов в новый фрейм.
+            let (_, group) = time(|| {
+                flat.transact(flat_page, vec![], |p| {
+                    let frame = p.create_node(None, None, NodeKind::Frame)?;
+                    p.move_nodes(&to_delete, Some(frame), 0)?;
+                    Ok(vec![frame])
+                })
+                .unwrap()
+            });
+            add(
+                "Перемещение 1000 узлов во фрейм",
+                ms(group),
+                "≤ 50 мс",
+                group <= Duration::from_millis(50),
+            );
+
+            let (_, undo_group) = time(|| flat.undo().unwrap());
+            add(
+                "Undo перемещения 1000 узлов",
+                ms(undo_group),
+                "≤ 50 мс",
+                undo_group <= Duration::from_millis(50),
+            );
         }
     }
 

@@ -19,6 +19,11 @@ enum Op {
         parent: usize,
         index: usize,
     },
+    MoveMany {
+        nodes: (usize, usize, usize),
+        parent: usize,
+        index: usize,
+    },
     Delete {
         node: usize,
     },
@@ -42,6 +47,13 @@ fn edit_op() -> impl Strategy<Value = Op> {
             parent,
             index
         }),
+        (any::<(usize, usize, usize)>(), any::<usize>(), 0usize..5).prop_map(
+            |(nodes, parent, index)| Op::MoveMany {
+                nodes,
+                parent,
+                index
+            }
+        ),
         any::<usize>().prop_map(|node| Op::Delete { node }),
         (any::<usize>(), -1000i32..1000).prop_map(|(node, x)| Op::SetX { node, x }),
         (any::<usize>(), any::<u8>()).prop_map(|(node, rgb)| Op::Fill { node, rgb }),
@@ -79,6 +91,10 @@ fn attempted(op: &Op, alive: &[NodeId]) -> bool {
     match *op {
         Op::Create { .. } => true,
         Op::Move { node, .. }
+        | Op::MoveMany {
+            nodes: (node, _, _),
+            ..
+        }
         | Op::Delete { node }
         | Op::SetX { node, .. }
         | Op::Fill { node, .. } => pick(alive, node).is_some(),
@@ -98,6 +114,20 @@ fn apply_edit(p: &PageDoc, op: &Op, alive: &[NodeId]) -> DocResult<()> {
         } => {
             if let Some(n) = pick(alive, node) {
                 p.move_node(n, pick(alive, parent), index)?;
+            }
+        }
+        Op::MoveMany {
+            nodes: (a, b, c),
+            parent,
+            index,
+        } => {
+            // Первый узел задаёт, будет ли правка; остальные — живые узлы или пропуск.
+            if let Some(first) = pick(alive, a) {
+                let ids: Vec<NodeId> = [Some(first), pick(alive, b), pick(alive, c)]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                p.move_nodes(&ids, pick(alive, parent), index)?;
             }
         }
         Op::Delete { node } => {
@@ -250,7 +280,7 @@ proptest! {
                             }
                         }
                         // Перемещение в собственное поддерево — ожидаемый отказ; откат не оставляет следов.
-                        Err(DocError::CyclicMove) if matches!(edit, Op::Move { .. }) => {}
+                        Err(DocError::CyclicMove) if matches!(edit, Op::Move { .. } | Op::MoveMany { .. }) => {}
                         Err(e) => panic!("неожиданная ошибка операции {edit:?}: {e}"),
                     }
                 }

@@ -13,9 +13,12 @@
 //!   документа.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use loro::{ExportMode, LoroDoc, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer};
+use loro::{
+    ContainerTrait, ExportMode, LoroDoc, LoroTree, LoroValue, TreeID, TreeParentId,
+    ValueOrContainer,
+};
 
 use crate::codec;
 use crate::error::{DocError, DocResult};
@@ -264,13 +267,14 @@ impl PageDoc {
     }
 
     /// Число детей родителя, не считая узла `excluding` (если он уже среди них).
+    /// Берётся из `children_num` Loro без построения списка: отмена удаления вызывает
+    /// это на каждый восстановленный узел, и список соседей стоил бы O(k · соседи).
     fn child_count(&self, parent: TreeParentId, excluding: Option<TreeID>) -> usize {
-        self.tree
-            .children(parent)
-            .unwrap_or_default()
-            .iter()
-            .filter(|t| Some(**t) != excluding)
-            .count()
+        let n = self.tree.children_num(parent).unwrap_or(0);
+        match excluding {
+            Some(t) if self.tree.parent(t) == Some(parent) => n.saturating_sub(1),
+            _ => n,
+        }
     }
 
     fn finish_create(&self, id: NodeId, tid: TreeID, props: Props) -> DocResult<()> {
@@ -307,15 +311,13 @@ impl PageDoc {
         Ok(())
     }
 
-    /// Позиция узла среди детей родителя по сырому `TreeID`, без сопоставления с `NodeId`.
-    /// Вызывается на каждую правку: на широком родителе (десятки тысяч детей) лишние
-    /// аллокации и поиски в хэш-таблице на каждого соседа съедали бы время правки.
-    fn index_of(&self, tid: TreeID, parent: TreeParentId) -> usize {
+    /// Позиция узла среди детей его родителя. Публичный `LoroTree` её не отдаёт, а
+    /// список соседей на каждое перемещение стоил бы O(соседей); обработчик дерева из
+    /// `loro-internal` ищет позицию за O(log n).
+    fn index_of(&self, tid: TreeID) -> usize {
         self.tree
-            .children(parent)
-            .unwrap_or_default()
-            .iter()
-            .position(|t| *t == tid)
+            .to_handler()
+            .get_index_by_tree_id(&tid)
             .unwrap_or(0)
     }
 
@@ -324,34 +326,92 @@ impl PageDoc {
     /// означает «в конец списка», а не ошибку. Узел, уже бывший ребёнком этого
     /// родителя, при подсчёте позиций не учитывается.
     pub fn move_node(&self, id: NodeId, parent: Option<NodeId>, index: usize) -> DocResult<()> {
-        let tid = self.tid(id)?;
+        self.move_nodes(&[id], parent, index)
+    }
+
+    /// Переносит узлы к родителю одним блоком: после операции они стоят подряд
+    /// в порядке `ids`, первый — на позиции `index` среди детей родителя, не
+    /// считая самих перемещаемых (за концом — в конец). Повторы в `ids` игнорируются.
+    ///
+    /// Стоимость — O(k · log n), без построения списков соседей: группировка тысячи
+    /// узлов плоской страницы не должна перебирать сто тысяч соседей на каждый узел.
+    /// Каждый узел записывает своё `Inverse::Move` с позицией прямо перед своим
+    /// переносом, поэтому обратный проход восстанавливает порядок точно.
+    pub fn move_nodes(
+        &self,
+        ids: &[NodeId],
+        parent: Option<NodeId>,
+        index: usize,
+    ) -> DocResult<()> {
+        let target = self.parent_tid(parent)?;
+        let mut seen = HashSet::new();
+        let mut moving: Vec<(NodeId, TreeID)> = Vec::with_capacity(ids.len());
+        for id in ids {
+            if seen.insert(*id) {
+                moving.push((*id, self.tid(*id)?));
+            }
+        }
+        // Проверка до первого переноса: отказ не должен оставлять полусделанную операцию.
         if let Some(p) = parent {
-            if p == id || self.is_ancestor(id, p) {
+            let ancestors: HashSet<NodeId> =
+                std::iter::successors(Some(p), |n| self.parent(*n)).collect();
+            if moving.iter().any(|(id, _)| ancestors.contains(id)) {
                 return Err(DocError::CyclicMove);
             }
         }
-        let old_parent = self.parent(id);
-        let old_parent_tid = self.tree.parent(tid).unwrap_or(TreeParentId::Root);
-        let old_index = self.index_of(tid, old_parent_tid);
-        let target = self.parent_tid(parent)?;
-        let max = self.child_count(target, Some(tid));
-        self.tree.mov_to(tid, target, index.min(max))?;
-        self.record(Inverse::Move {
-            id,
-            parent: old_parent,
-            index: old_index,
-        });
+        match self.anchor(target, &moving, index) {
+            // Каждый узел встаёт прямо перед якорем — блок складывается в порядке `ids`.
+            Some(anchor) => {
+                for &(id, tid) in &moving {
+                    self.record_move(id, tid);
+                    self.tree.mov_before(tid, anchor)?;
+                }
+            }
+            None => {
+                for &(id, tid) in &moving {
+                    self.record_move(id, tid);
+                    let end = self.child_count(target, Some(tid));
+                    self.tree.mov_to(tid, target, end)?;
+                }
+            }
+        }
         Ok(())
     }
 
-    fn is_ancestor(&self, ancestor: NodeId, mut node: NodeId) -> bool {
-        while let Some(p) = self.parent(node) {
-            if p == ancestor {
-                return true;
+    /// Ребёнок `target`, перед которым встанет блок: `index`-й среди детей, которые
+    /// не перемещаются. `None` — блок встаёт в конец. Позиции перемещаемых детей
+    /// `target` берутся по одной за O(log n), а не списком всех соседей.
+    fn anchor(
+        &self,
+        target: TreeParentId,
+        moving: &[(NodeId, TreeID)],
+        index: usize,
+    ) -> Option<TreeID> {
+        let mut inside: Vec<usize> = moving
+            .iter()
+            .filter(|(_, tid)| self.tree.parent(*tid) == Some(target))
+            .map(|(_, tid)| self.index_of(*tid))
+            .collect();
+        inside.sort_unstable();
+        // `index`-й неперемещаемый ребёнок стоит на позиции `index` плюс число
+        // перемещаемых детей, которые стоят не правее него.
+        let mut at = index;
+        for q in inside {
+            if q <= at {
+                at += 1;
+            } else {
+                break;
             }
-            node = p;
         }
-        false
+        self.tree.to_handler().get_child_at(&target, at)
+    }
+
+    fn record_move(&self, id: NodeId, tid: TreeID) {
+        self.record(Inverse::Move {
+            id,
+            parent: self.parent(id),
+            index: self.index_of(tid),
+        });
     }
 
     /// Удаляет узлы вместе с потомками. Уже удалённые пропускаются.
@@ -688,6 +748,59 @@ mod tests {
         let frame = page.create_node(None, None, NodeKind::Frame).unwrap();
         page.move_node(b, Some(frame), 5).unwrap();
         assert_eq!(page.children(Some(frame)), vec![b]);
+    }
+
+    #[test]
+    fn move_nodes_places_block_in_given_order_and_inverse_restores() {
+        let page = PageDoc::new();
+        let ids: Vec<NodeId> = (0..5)
+            .map(|_| page.create_node(None, None, NodeKind::Rect).unwrap())
+            .collect();
+        let [a, b, c, d, e] = ids[..] else {
+            unreachable!()
+        };
+
+        // Тот же родитель: блок [d, a] встаёт на позицию 1 среди оставшихся [b, c, e].
+        page.begin_journal();
+        page.move_nodes(&[d, a, d], None, 1).unwrap();
+        let ops = page.take_journal();
+        assert_eq!(page.children(None), vec![b, d, a, c, e]);
+        page.apply_inverse(&ops).unwrap();
+        assert_eq!(page.children(None), ids);
+
+        // В новый фрейм (Ctrl+G): порядок блока — порядок аргумента.
+        let frame = page.create_node(None, None, NodeKind::Frame).unwrap();
+        page.begin_journal();
+        page.move_nodes(&[e, b, d], Some(frame), 0).unwrap();
+        let ops = page.take_journal();
+        assert_eq!(page.children(None), vec![a, c, frame]);
+        assert_eq!(page.children(Some(frame)), vec![e, b, d]);
+        page.apply_inverse(&ops).unwrap();
+        assert_eq!(page.children(None), vec![a, b, c, d, e, frame]);
+        assert!(page.children(Some(frame)).is_empty());
+
+        // Позиция за концом — в конец.
+        page.move_nodes(&[a, b], None, 99).unwrap();
+        assert_eq!(page.children(None), vec![c, d, e, frame, a, b]);
+    }
+
+    #[test]
+    fn move_nodes_rejects_cycle_before_moving_anything() {
+        let page = PageDoc::new();
+        let outer = page.create_node(None, None, NodeKind::Frame).unwrap();
+        let inner = page
+            .create_node(Some(outer), None, NodeKind::Frame)
+            .unwrap();
+        let other = page.create_node(None, None, NodeKind::Rect).unwrap();
+        assert!(matches!(
+            page.move_nodes(&[other, outer], Some(inner), 0),
+            Err(DocError::CyclicMove)
+        ));
+        assert_eq!(page.children(None), vec![outer, other]);
+        assert!(matches!(
+            page.move_nodes(&[outer], Some(outer), 0),
+            Err(DocError::CyclicMove)
+        ));
     }
 
     #[test]
