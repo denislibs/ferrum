@@ -102,6 +102,8 @@ pub struct PageDoc {
     journal: RefCell<Option<Vec<Inverse>>>,
     /// При загрузке встретились узлы неизвестного типа (см. `rebuild_from_loro`).
     unknown_nodes: Cell<bool>,
+    /// Индекс и зеркало взяты из кэша сцены, а не прочитаны из Loro.
+    from_cache: Cell<bool>,
 }
 
 impl PageDoc {
@@ -126,7 +128,9 @@ impl PageDoc {
                     state.insert(row.id, row.tree_id, row.props.clone());
                 }
                 *page.state.borrow_mut() = state;
-                if !page.cache_matches_tree(rows) {
+                if page.cache_matches_tree(rows) {
+                    page.from_cache.set(true);
+                } else {
                     page.rebuild_from_loro()?;
                 }
             }
@@ -176,6 +180,7 @@ impl PageDoc {
             state: RefCell::default(),
             journal: RefCell::default(),
             unknown_nodes: Cell::default(),
+            from_cache: Cell::default(),
         }
     }
 
@@ -224,6 +229,12 @@ impl PageDoc {
         *self.state.borrow_mut() = state;
         self.unknown_nodes.set(unknown);
         Ok(())
+    }
+
+    /// Загружена ли страница по кэшу сцены — чтобы тесты проверяли именно быстрый путь.
+    #[doc(hidden)]
+    pub fn loaded_from_cache(&self) -> bool {
+        self.from_cache.get()
     }
 
     /// Есть ли на странице узлы неизвестного типа, скрытые от модели.
@@ -990,12 +1001,14 @@ mod tests {
             ("TreeID не из этой страницы", dead_tree),
         ] {
             let loaded = PageDoc::load(&snapshot, Some(&forged)).unwrap();
+            assert!(!loaded.loaded_from_cache(), "{name}");
             assert_eq!(loaded.walk(), page.walk(), "{name}");
             assert_eq!(loaded.scene_rows().unwrap(), rows, "{name}");
             assert!(loaded.export_snapshot().is_ok(), "{name}");
         }
         // Честный кэш принимается как есть.
         let loaded = PageDoc::load(&snapshot, Some(&rows)).unwrap();
+        assert!(loaded.loaded_from_cache());
         assert_eq!(loaded.scene_rows().unwrap(), rows);
     }
 

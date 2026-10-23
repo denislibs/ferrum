@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::mem::replace;
 
+use ferrum_doc::container;
 use ferrum_doc::*;
 use proptest::prelude::*;
 
@@ -203,6 +204,59 @@ fn check_tree(p: &PageDoc) {
     }
 }
 
+/// Сохранение и открытие по кэшу сцены — быстрый путь продакшена — дают ту же
+/// страницу: тот же порядок, стабильные ID и свойства, в том числе у узлов,
+/// заново созданных отменой удаления под новыми `TreeID`. Возвращает открытый документ.
+fn check_reopen(doc: &mut Document, page: PageId) -> Document {
+    let live = doc.page(page).unwrap();
+    let expected = snapshot(live);
+    let rows = live.scene_rows().unwrap();
+    let opened = container::decode(&container::encode(doc).unwrap()).unwrap();
+    assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+    let mut reopened = opened.document;
+    assert_eq!(
+        reopened.cached_scene(page),
+        Some(rows.as_slice()),
+        "кэш сцены расходится с живой страницей"
+    );
+    let p = reopened.page(page).unwrap();
+    assert!(p.loaded_from_cache(), "страница открылась не по кэшу сцены");
+    assert_eq!(snapshot(p), expected, "страница после открытия по кэшу");
+    check_tree(p);
+    reopened
+}
+
+/// На открытом по кэшу документе правка и её отмена держат дерево согласованным.
+fn edit_and_undo_reopened(doc: &mut Document, page: PageId) {
+    let mut reopened = check_reopen(doc, page);
+    let before = snapshot(reopened.page(page).unwrap());
+    let alive = reopened.page(page).unwrap().walk();
+    reopened
+        .transact(page, vec![], |p| {
+            let new = p.create_node(alive.first().copied(), None, NodeKind::Rect)?;
+            p.set_props(
+                new,
+                &PropsPatch {
+                    x: Some(42.0),
+                    ..Default::default()
+                },
+            )?;
+            if let Some(last) = alive.last() {
+                p.move_nodes(&[new, *last], None, 0)?;
+            }
+            if let Some(first) = alive.first() {
+                p.delete_nodes(&[*first])?;
+            }
+            Ok(vec![new])
+        })
+        .unwrap();
+    check_tree(reopened.page(page).unwrap());
+    assert!(reopened.undo().unwrap().is_some());
+    assert_eq!(snapshot(reopened.page(page).unwrap()), before);
+    // Отмена удаления создала узлы заново — повторное открытие по кэшу их сохраняет.
+    check_reopen(&mut reopened, page);
+}
+
 /// Дерево валидно, состояние совпадает с моделью, доступность undo/redo — тоже.
 fn check_model(doc: &mut Document, page: PageId, m: &Model) {
     let p = doc.page(page).unwrap();
@@ -293,6 +347,7 @@ proptest! {
                 assert!(!p.contains(*id), "удалённый узел всё ещё на странице");
             }
             check_model(&mut doc, page, &m);
+            check_reopen(&mut doc, page);
             max_size = max_size.max(m.cur.len());
         }
 
@@ -322,5 +377,6 @@ proptest! {
             check_model(&mut doc, page, &m);
         }
         prop_assert_eq!(snapshot(doc.page(page).unwrap()), target);
+        edit_and_undo_reopened(&mut doc, page);
     }
 }
