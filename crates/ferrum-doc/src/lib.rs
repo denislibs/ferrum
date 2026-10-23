@@ -3,6 +3,7 @@
 
 mod binary;
 mod codec;
+pub mod container;
 mod document;
 mod error;
 mod history;
