@@ -78,9 +78,10 @@ fn pick(alive: &[NodeId], i: usize) -> Option<NodeId> {
 fn attempted(op: &Op, alive: &[NodeId]) -> bool {
     match *op {
         Op::Create { .. } => true,
-        Op::Move { node, .. } | Op::Delete { node } | Op::SetX { node, .. } | Op::Fill { node, .. } => {
-            pick(alive, node).is_some()
-        }
+        Op::Move { node, .. }
+        | Op::Delete { node }
+        | Op::SetX { node, .. }
+        | Op::Fill { node, .. } => pick(alive, node).is_some(),
         Op::Undo | Op::Redo => false,
     }
 }
@@ -90,7 +91,11 @@ fn apply_edit(p: &PageDoc, op: &Op, alive: &[NodeId]) -> DocResult<()> {
         Op::Create { parent, kind } => {
             p.create_node(pick(alive, parent), None, KINDS[kind as usize])?;
         }
-        Op::Move { node, parent, index } => {
+        Op::Move {
+            node,
+            parent,
+            index,
+        } => {
             if let Some(n) = pick(alive, node) {
                 p.move_node(n, pick(alive, parent), index)?;
             }
@@ -102,13 +107,25 @@ fn apply_edit(p: &PageDoc, op: &Op, alive: &[NodeId]) -> DocResult<()> {
         }
         Op::SetX { node, x } => {
             if let Some(n) = pick(alive, node) {
-                p.set_props(n, &PropsPatch { x: Some(x as f64), ..Default::default() })?;
+                p.set_props(
+                    n,
+                    &PropsPatch {
+                        x: Some(x as f64),
+                        ..Default::default()
+                    },
+                )?;
             }
         }
         Op::Fill { node, rgb } => {
             if let Some(n) = pick(alive, node) {
                 let fills = vec![Fill::solid(Color::rgba(rgb, rgb, 0, 255))];
-                p.set_props(n, &PropsPatch { fills: Some(fills), ..Default::default() })?;
+                p.set_props(
+                    n,
+                    &PropsPatch {
+                        fills: Some(fills),
+                        ..Default::default()
+                    },
+                )?;
             }
         }
         Op::Undo | Op::Redo => unreachable!("undo и redo не проходят через transact"),
@@ -160,9 +177,21 @@ fn check_tree(p: &PageDoc) {
 fn check_model(doc: &mut Document, page: PageId, m: &Model) {
     let p = doc.page(page).unwrap();
     check_tree(p);
-    assert_eq!(snapshot(p), m.cur, "состояние страницы расходится с моделью истории");
-    assert_eq!(doc.can_undo(), !m.past.is_empty(), "can_undo расходится с моделью");
-    assert_eq!(doc.can_redo(), !m.future.is_empty(), "can_redo расходится с моделью");
+    assert_eq!(
+        snapshot(p),
+        m.cur,
+        "состояние страницы расходится с моделью истории"
+    );
+    assert_eq!(
+        doc.can_undo(),
+        !m.past.is_empty(),
+        "can_undo расходится с моделью"
+    );
+    assert_eq!(
+        doc.can_redo(),
+        !m.future.is_empty(),
+        "can_redo расходится с моделью"
+    );
 }
 
 proptest! {

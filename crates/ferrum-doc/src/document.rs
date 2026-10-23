@@ -339,7 +339,8 @@ impl Document {
                     page: entry.page,
                     selection: entry.selection_after.clone(),
                 };
-                self.history.push_undo_keep_redo(HistoryEntry { ops, ..entry });
+                self.history
+                    .push_undo_keep_redo(HistoryEntry { ops, ..entry });
                 Ok(Some(restore))
             }
             Err(e) => {
@@ -463,7 +464,11 @@ mod tests {
             x: Some(1.0),
             ..Default::default()
         };
-        let err = rollback(&page, &[Inverse::Props(missing_node(), patch)], DocError::CyclicMove);
+        let err = rollback(
+            &page,
+            &[Inverse::Props(missing_node(), patch)],
+            DocError::CyclicMove,
+        );
         match err {
             DocError::RollbackFailed { original, .. } => {
                 assert!(matches!(*original, DocError::CyclicMove));
