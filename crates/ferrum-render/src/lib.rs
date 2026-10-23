@@ -16,7 +16,7 @@ pub use backend::{CpuBackend, ImagePaint, RenderBackend, Rgba};
 pub use camera::{Camera, MAX_DEVICE_PIXELS, MAX_DEVICE_SIDE, MAX_ZOOM, MIN_ZOOM};
 pub use draw::{
     FrameStats, EVICT_AFTER_FRAMES, LOD_RECT_PX, LOD_SKIP_PX, RASTER_BUILDS_PER_FRAME,
-    RASTER_MAX_PX, RASTER_MAX_SCALE,
+    RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use vello_cpu::Pixmap;
@@ -35,7 +35,7 @@ pub enum ExportError {
     #[error("Нечего экспортировать: у узла нулевой размер или он скрыт")]
     Empty,
     #[error(
-        "Картинка {0}×{1} слишком большая: сторона не больше 16384 пикселей. Уменьшите масштаб"
+        "Картинка {0}×{1} слишком большая: сторона не больше 16384 пикселей, площадь не больше 64 мегапикселей. Уменьшите масштаб"
     )]
     TooLarge(u32, u32),
     #[error("Не удалось закодировать PNG: {0}")]
@@ -51,6 +51,19 @@ pub struct Renderer {
 impl Renderer {
     pub fn new() -> Renderer {
         Renderer::default()
+    }
+
+    /// Рендерер с другим пределом памяти растрового кэша (по умолчанию
+    /// `RASTER_CACHE_BYTES`).
+    pub fn with_raster_cache_bytes(bytes: usize) -> Renderer {
+        Renderer {
+            painter: Painter::with_raster_limit(bytes),
+        }
+    }
+
+    /// Сколько байт сейчас занимает растровый кэш фреймов.
+    pub fn raster_cache_bytes(&self) -> usize {
+        self.painter.raster_bytes()
     }
 
     /// Только содержимое сцены, без фона и оверлеев.
@@ -105,6 +118,10 @@ impl Renderer {
         }
         let slot = scene.slot(id).ok_or(ExportError::NotFound)?;
         let n = scene.at(slot);
+        // Скрытый узел (и узел без видимого содержимого) картинки не даёт.
+        if n.subtree_bounds.is_none() {
+            return Err(ExportError::Empty);
+        }
         let area = match (n.props.kind, n.local_bounds) {
             (NodeKind::Frame, Some(b)) => Some(n.world.transform_rect_bbox(b)),
             _ => match (n.world_bounds, n.subtree_bounds) {
@@ -119,6 +136,11 @@ impl Renderer {
             return Err(ExportError::Empty);
         }
         if w > MAX_EXPORT_SIDE as f64 || h > MAX_EXPORT_SIDE as f64 {
+            return Err(ExportError::TooLarge(w as u32, h as u32));
+        }
+        // Сторона в пределах, но площадь может быть огромной: столько памяти не даём,
+        // сколько и холсту на экране.
+        if w as u64 * h as u64 > MAX_DEVICE_PIXELS {
             return Err(ExportError::TooLarge(w as u32, h as u32));
         }
         let mut backend = CpuBackend::new(w as u16, h as u16);

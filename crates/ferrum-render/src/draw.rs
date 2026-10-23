@@ -30,6 +30,11 @@ pub const RASTER_MAX_SCALE: f64 = 0.25;
 /// Сколько растровых кэшей строить за кадр; остальные фреймы этого кадра рисуются
 /// узлами, а кэш догоняет в следующих кадрах.
 pub const RASTER_BUILDS_PER_FRAME: usize = 32;
+/// Сколько байт занимают растры фреймов всего: сверх этого вытесняются давно не
+/// рисовавшиеся. Возраст (`EVICT_AFTER_FRAMES`) сам память не ограничивает: при
+/// быстром панорамировании по огромной странице за 300 кадров растров накопится
+/// на гигабайты.
+pub const RASTER_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Через сколько кадров без отрисовки выбрасываются контуры узла и растр фрейма.
 pub const EVICT_AFTER_FRAMES: u64 = 300;
 
@@ -76,7 +81,24 @@ pub struct DrawContext<'a> {
 
 enum Visit {
     Enter(Slot),
-    Exit { clip: bool, layer: bool },
+    /// Конец поддерева. У фрейма с детьми обводка рисуется после детей (в Figma
+    /// обводка фрейма лежит поверх содержимого); `stroke` хранит его слот и, если
+    /// списки не кэшируются, уже построенный список, чтобы не строить его заново.
+    Exit {
+        clip: bool,
+        layer: bool,
+        stroke: Option<(Slot, Option<DisplayList>)>,
+    },
+}
+
+/// Какие элементы списка воспроизводить.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    All,
+    /// Заливки фрейма — под детьми.
+    Fills,
+    /// Обводки фрейма — над детьми.
+    Strokes,
 }
 
 /// Растр поддерева контейнера в мировых координатах.
@@ -88,11 +110,20 @@ struct Raster {
     origin: Point,
     pixmap: Arc<Pixmap>,
     last_used: u64,
+    /// В растр попала заглушка вместо ещё не загруженной картинки. Такой растр не
+    /// переиспользуется: картинка появится без изменения сцены, и устаревший
+    /// растр показывал бы заглушку вечно.
+    placeholder: bool,
+}
+
+impl Raster {
+    fn bytes(&self) -> usize {
+        self.pixmap.width() as usize * self.pixmap.height() as usize * 4
+    }
 }
 
 /// Кэши между кадрами: списки отрисовки по слотам сцены, растры фреймов, общий
 /// буфер для контуров обрезки.
-#[derive(Default)]
 pub struct Painter {
     lists: Vec<Option<DisplayList>>,
     rasters: HashMap<Slot, Raster>,
@@ -102,10 +133,41 @@ pub struct Painter {
     /// Один бэкенд на все построения растров: создание `RenderContext` дороже
     /// самой отрисовки мелкого фрейма.
     raster_backend: Option<CpuBackend>,
+    /// Занято растрами и предел.
+    raster_bytes: usize,
+    raster_limit: usize,
+    /// В текущем рисовании встретилась заглушка вместо картинки.
+    missing_image: bool,
     pub stats: FrameStats,
 }
 
+impl Default for Painter {
+    fn default() -> Painter {
+        Painter::with_raster_limit(RASTER_CACHE_BYTES)
+    }
+}
+
 impl Painter {
+    pub fn with_raster_limit(bytes: usize) -> Painter {
+        Painter {
+            lists: Vec::new(),
+            rasters: HashMap::new(),
+            path: BezPath::new(),
+            frame: 0,
+            raster_budget: 0,
+            raster_backend: None,
+            raster_bytes: 0,
+            raster_limit: bytes,
+            missing_image: false,
+            stats: FrameStats::default(),
+        }
+    }
+
+    /// Сколько байт занимают растры в кэше.
+    pub fn raster_bytes(&self) -> usize {
+        self.raster_bytes
+    }
+
     /// Начало кадра: сброс статистики, бюджет кэша, вытеснение старого.
     pub fn begin_frame(&mut self) {
         self.stats = FrameStats::default();
@@ -126,6 +188,24 @@ impl Painter {
         }
         self.rasters
             .retain(|_, r| r.last_used + EVICT_AFTER_FRAMES >= frame);
+        self.raster_bytes = self.rasters.values().map(Raster::bytes).sum();
+    }
+
+    /// Вытесняет давно не рисовавшиеся растры, пока кэш не уложится в предел.
+    /// `keep` — только что построенный растр: он нужен прямо сейчас.
+    fn enforce_raster_limit(&mut self, keep: Slot) {
+        while self.raster_bytes > self.raster_limit {
+            let oldest = self
+                .rasters
+                .iter()
+                .filter(|(&s, _)| s != keep)
+                .min_by_key(|(_, r)| r.last_used)
+                .map(|(&s, _)| s);
+            let Some(slot) = oldest else { break };
+            if let Some(r) = self.rasters.remove(&slot) {
+                self.raster_bytes -= r.bytes();
+            }
+        }
     }
 
     /// Рисует поддеревья `roots` снизу вверх. Обход без рекурсии: глубина дерева из
@@ -136,9 +216,17 @@ impl Painter {
         while let Some(visit) = stack.pop() {
             let slot = match visit {
                 Visit::Enter(slot) => slot,
-                Visit::Exit { clip, layer } => {
+                Visit::Exit {
+                    clip,
+                    layer,
+                    stroke,
+                } => {
                     if clip {
                         backend.pop_clip();
+                    }
+                    if let Some((slot, held)) = stroke {
+                        let n = scene.at(slot);
+                        self.draw_own(backend, ctx, slot, n, 1.0, Part::Strokes, held);
                     }
                     if layer {
                         backend.pop_layer();
@@ -182,7 +270,17 @@ impl Painter {
                 backend.push_opacity_layer(opacity);
                 self.stats.layers += 1;
             }
-            self.draw_own(backend, ctx, slot, n, if layer { 1.0 } else { opacity });
+            // Обводка фрейма с детьми — над детьми, заливка — под ними.
+            let split = has_children && n.props.kind == NodeKind::Frame;
+            let held = self.draw_own(
+                backend,
+                ctx,
+                slot,
+                n,
+                if layer { 1.0 } else { opacity },
+                if split { Part::Fills } else { Part::All },
+                None,
+            );
             if has_children {
                 let clip =
                     n.props.kind == NodeKind::Frame && n.props.clip_content && needs_clip(scene, n);
@@ -193,12 +291,21 @@ impl Painter {
                     backend.push_clip(&self.path);
                     self.stats.clips += 1;
                 }
-                stack.push(Visit::Exit { clip, layer });
+                let stroke = (split && !n.props.strokes.is_empty()).then_some((slot, held));
+                stack.push(Visit::Exit {
+                    clip,
+                    layer,
+                    stroke,
+                });
                 stack.extend(n.children.iter().rev().map(|&c| Visit::Enter(c)));
             }
         }
     }
 
+    /// Рисует собственное содержимое узла (без детей). Возвращает построенный
+    /// список, если он нужен для `Part::Strokes` этого же узла, а кэшировать его
+    /// нельзя.
+    #[allow(clippy::too_many_arguments)]
     fn draw_own(
         &mut self,
         backend: &mut impl RenderBackend,
@@ -206,54 +313,83 @@ impl Painter {
         slot: Slot,
         n: &SceneNode,
         alpha: f32,
-    ) {
+        part: Part,
+        held: Option<DisplayList>,
+    ) -> Option<DisplayList> {
         if n.props.kind == NodeKind::Group {
-            return;
+            return None;
         }
-        let Some(bounds) = n.world_bounds else { return };
+        let bounds = n.world_bounds?;
         if ctx.cull.is_some_and(|c| !overlaps(bounds, c)) {
-            return;
+            return None;
         }
         let px = max_side(bounds) * ctx.scale;
         if ctx.lod && px < LOD_SKIP_PX {
-            return;
+            return None;
         }
         if ctx.lod && px < LOD_RECT_PX {
-            // Мелкому узлу список отрисовки не нужен — только цвет.
-            if let Some(c) = display::lod_color(&n.props) {
-                backend.set_transform(ctx.transform);
-                backend.set_color(c.multiply_alpha(alpha));
-                backend.fill_rect(&bounds);
-                self.stats.lod_rects += 1;
+            // Мелкому узлу список отрисовки не нужен — только цвет. Прямоугольник
+            // рисуется одним разом вместе с заливкой, обводка поверх не нужна.
+            if part != Part::Strokes {
+                if let Some(c) = display::lod_color(&n.props) {
+                    backend.set_transform(ctx.transform);
+                    backend.set_color(c.multiply_alpha(alpha));
+                    backend.fill_rect(&bounds);
+                    self.stats.lod_rects += 1;
+                }
             }
-            return;
+            return None;
         }
         let i = slot as usize;
-        let cached = self
-            .lists
-            .get(i)
-            .and_then(Option::as_ref)
-            .is_some_and(|l| l.version == n.version && (ctx.retain || l.paths.is_some()));
+        let split = part != Part::All;
         backend.set_transform(ctx.transform * n.world);
-        self.stats.drawn += 1;
-        if !cached {
-            self.stats.lists_built += 1;
-            let mut list = DisplayList::build(n);
+        if part != Part::Strokes {
+            self.stats.drawn += 1;
+        }
+        if let Some(mut list) = held {
             list.paths();
-            replay(backend, &list, alpha, ctx.images);
+            self.play(backend, &list, alpha, ctx, part);
+            return None;
+        }
+        let cached = self.lists.get(i).and_then(Option::as_ref).is_some_and(|l| {
+            l.version == n.version && l.split == split && (ctx.retain || l.paths.is_some())
+        });
+        if !cached {
+            if part != Part::Strokes {
+                self.stats.lists_built += 1;
+            }
+            let mut list = DisplayList::build(n, split);
+            list.paths();
+            self.play(backend, &list, alpha, ctx, part);
             if ctx.retain {
                 list.last_used = self.frame;
                 if self.lists.len() <= i {
                     self.lists.resize(i + 1, None);
                 }
                 self.lists[i] = Some(list);
+                return None;
             }
-            return;
+            return (part == Part::Fills).then_some(list);
         }
-        let list = self.lists[i].as_mut().expect("проверено выше");
+        let mut list = self.lists[i].take().expect("проверено выше");
         list.last_used = self.frame;
         list.paths();
-        replay(backend, list, alpha, ctx.images);
+        self.play(backend, &list, alpha, ctx, part);
+        self.lists[i] = Some(list);
+        None
+    }
+
+    fn play(
+        &mut self,
+        backend: &mut impl RenderBackend,
+        list: &DisplayList,
+        alpha: f32,
+        ctx: &DrawContext,
+        part: Part,
+    ) {
+        let info = replay(backend, list, alpha, ctx.images, part);
+        self.missing_image |= info.missing_image;
+        self.stats.layers += info.layered as usize;
     }
 
     /// Рисует контейнер из растрового кэша, при необходимости строя кэш. `false` —
@@ -274,6 +410,7 @@ impl Painter {
     ) -> bool {
         let fresh = self.rasters.get(&slot).is_some_and(|r| {
             r.id == n.id
+                && !r.placeholder
                 && r.subtree_version == n.subtree_version
                 && r.scale >= ctx.scale
                 && r.scale < 2.0 * ctx.scale
@@ -310,23 +447,29 @@ impl Painter {
                 retain: false,
             };
             let outer = self.stats;
+            let outer_missing = std::mem::take(&mut self.missing_image);
             self.draw(&mut cpu, &inner, &[slot]);
+            let placeholder = std::mem::replace(&mut self.missing_image, outer_missing);
             self.stats = FrameStats {
                 raster_builds: outer.raster_builds + 1,
                 lists_built: self.stats.lists_built,
                 ..outer
             };
-            self.rasters.insert(
-                slot,
-                Raster {
-                    id: n.id,
-                    subtree_version: n.subtree_version,
-                    scale,
-                    origin: area.origin(),
-                    pixmap: Arc::new(cpu.render()),
-                    last_used: 0,
-                },
-            );
+            if let Some(old) = self.rasters.remove(&slot) {
+                self.raster_bytes -= old.bytes();
+            }
+            let raster = Raster {
+                id: n.id,
+                subtree_version: n.subtree_version,
+                scale,
+                origin: area.origin(),
+                pixmap: Arc::new(cpu.render()),
+                last_used: self.frame,
+                placeholder,
+            };
+            self.raster_bytes += raster.bytes();
+            self.rasters.insert(slot, raster);
+            self.enforce_raster_limit(slot);
             self.raster_backend = Some(cpu);
         }
         let r = self.rasters.get_mut(&slot).expect("есть или построен выше");
@@ -350,13 +493,52 @@ impl Painter {
     }
 }
 
+/// Что случилось при воспроизведении списка.
+struct ReplayInfo {
+    /// Вместо картинки нарисована заглушка: картинки ещё нет.
+    missing_image: bool,
+    /// Узел нарисован слоем прозрачности.
+    layered: bool,
+}
+
 /// Воспроизводит список отрисовки в локальных координатах узла.
 /// Контуры списка уже построены (`DisplayList::paths`).
+///
+/// Прозрачность листа (`alpha < 1`) умножается в краску, только когда краска одна:
+/// иначе перекрывающиеся краски (заливка и обводка, несколько заливок) просвечивали
+/// бы друг через друга, и результат отличался бы от прозрачности всего узла. Тогда
+/// узел рисуется слоем.
 fn replay(
     backend: &mut impl RenderBackend,
     list: &DisplayList,
     alpha: f32,
     images: &dyn ImageProvider,
+    part: Part,
+) -> ReplayInfo {
+    let mut info = ReplayInfo {
+        missing_image: false,
+        layered: false,
+    };
+    let single_paint =
+        list.items.len() == 1 && !matches!(list.items[0], Item::FilledInsideStroke { .. });
+    if alpha < 1.0 && !single_paint && !list.items.is_empty() {
+        backend.push_opacity_layer(alpha);
+        info.layered = true;
+        replay_items(backend, list, 1.0, images, part, &mut info);
+        backend.pop_layer();
+    } else {
+        replay_items(backend, list, alpha, images, part, &mut info);
+    }
+    info
+}
+
+fn replay_items(
+    backend: &mut impl RenderBackend,
+    list: &DisplayList,
+    alpha: f32,
+    images: &dyn ImageProvider,
+    part: Part,
+    info: &mut ReplayInfo,
 ) {
     let geom = list.geometry;
     let paths = list
@@ -364,6 +546,12 @@ fn replay(
         .as_ref()
         .expect("контуры построены до воспроизведения");
     for (item, item_path) in list.items.iter().zip(&paths.items) {
+        let is_fill = matches!(item, Item::Fill(_));
+        match part {
+            Part::Fills if !is_fill => continue,
+            Part::Strokes if is_fill => continue,
+            _ => {}
+        }
         match item {
             Item::Fill(Paint::Solid(c)) => {
                 backend.set_color(c.multiply_alpha(alpha));
@@ -375,7 +563,12 @@ fn replay(
                 alpha: a,
             }) => {
                 let Some(area) = geom.bounds() else { continue };
+                // Вырожденная область: матрица размещения необратима.
+                if !(area.width() > 0.0 && area.height() > 0.0) {
+                    continue;
+                }
                 let Some(pixmap) = images.image(hash) else {
+                    info.missing_image = true;
                     backend.set_color(IMAGE_PLACEHOLDER.multiply_alpha(a * alpha));
                     fill_shape(backend, geom, &paths.shape);
                     continue;

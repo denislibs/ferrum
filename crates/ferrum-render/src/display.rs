@@ -60,6 +60,11 @@ pub struct DisplayList {
     /// Цвет, которым мелкий узел рисуется одним прямоугольником.
     pub lod_color: Option<Rgba>,
     pub paths: Option<Paths>,
+    /// Список построен для фрейма с детьми: заливка и обводка воспроизводятся
+    /// порознь (первая под детьми, вторая над), поэтому они не сливаются в
+    /// `FilledInsideStroke`. Наличие детей версию узла не меняет, так что список
+    /// помнит, для какого случая он строился.
+    pub split: bool,
     /// Номер кадра, в котором узел последний раз рисовался полностью.
     pub last_used: u64,
 }
@@ -89,7 +94,7 @@ pub fn lod_color(p: &Props) -> Option<Rgba> {
 }
 
 impl DisplayList {
-    pub fn build(node: &SceneNode) -> DisplayList {
+    pub fn build(node: &SceneNode, split: bool) -> DisplayList {
         let p: &Props = &node.props;
         let geometry = shape::geometry(p);
         let mut items = Vec::new();
@@ -116,7 +121,8 @@ impl DisplayList {
                 items.push(Item::Stroke(s.clone(), color(s.color)));
             }
         }
-        if let [Item::Fill(Paint::Solid(fill)), Item::Stroke(s, stroke)] = &items[..] {
+        let pair = if split { &[][..] } else { &items[..] };
+        if let [Item::Fill(Paint::Solid(fill)), Item::Stroke(s, stroke)] = pair {
             if s.align == StrokeAlign::Inside && fill.components[3] >= 1.0 && s.color.a == 255 {
                 items = vec![Item::FilledInsideStroke {
                     fill: *fill,
@@ -131,6 +137,7 @@ impl DisplayList {
             items,
             lod_color: lod_color(p),
             paths: None,
+            split,
             last_used: 0,
         }
     }

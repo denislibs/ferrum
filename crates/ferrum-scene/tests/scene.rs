@@ -599,3 +599,53 @@ fn hit_tolerance_on_rotated_thin_line() {
     assert_eq!(scene.hit_test(Point::new(1000.0, 897.0), 4.0), Some(line));
     assert_eq!(scene.hit_test(Point::new(1000.0, 895.0), 4.0), None);
 }
+
+/// Прозрачность и обрезка не меняют вид узла в его координатах (версия узла и
+/// его список отрисовки остаются), но меняют картинку поддерева: растровый кэш
+/// рендера следит за `subtree_version` узла и всех его предков.
+#[test]
+fn opacity_and_clip_bump_subtree_version_of_node_and_ancestors_only() {
+    let (mut doc, page, [f, r, ..]) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let edits = [
+        PropsPatch {
+            opacity: Some(0.5),
+            ..Default::default()
+        },
+        PropsPatch {
+            clip_content: Some(false),
+            ..Default::default()
+        },
+    ];
+    for edit in edits {
+        let (fv, fs) = (
+            scene.node(f).unwrap().version,
+            scene.node(f).unwrap().subtree_version,
+        );
+        let (rv, rs) = (
+            scene.node(r).unwrap().version,
+            scene.node(r).unwrap().subtree_version,
+        );
+        doc.transact(page, vec![], |p| p.set_props(r, &edit).map(|_| vec![]))
+            .unwrap();
+        apply(&mut scene, &mut doc, page);
+        assert_eq!(
+            scene.node(r).unwrap().version,
+            rv,
+            "версия узла не меняется"
+        );
+        assert_ne!(scene.node(r).unwrap().subtree_version, rs);
+        assert_eq!(scene.node(f).unwrap().version, fv);
+        assert_ne!(scene.node(f).unwrap().subtree_version, fs, "предок тоже");
+    }
+    // То же для превью жеста.
+    let fs = scene.node(f).unwrap().subtree_version;
+    scene.set_preview(&[(
+        r,
+        PropsPatch {
+            opacity: Some(0.1),
+            ..Default::default()
+        },
+    )]);
+    assert_ne!(scene.node(f).unwrap().subtree_version, fs);
+}

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common::*;
-use ferrum_doc::{Color, Fill, NodeKind, PropsPatch};
+use ferrum_doc::{Color, Fill, NodeKind, PropsPatch, ScaleMode, Stroke as DocStroke, StrokeAlign};
 use ferrum_render::{
     decode_png, Camera, CpuBackend, ExportError, ImagePaint, NoImages, Pixmap, RenderBackend,
     Renderer, Rgba, LOD_RECT_PX, RASTER_BUILDS_PER_FRAME,
@@ -361,4 +361,261 @@ fn decode_png_rejects_garbage_and_huge_headers() {
         decode_png(&huge).is_none(),
         "размер из заголовка проверяется до декодирования"
     );
+}
+
+fn stroke(r: u8, g: u8, b: u8, width: f64, align: StrokeAlign) -> DocStroke {
+    DocStroke {
+        color: Color::rgba(r, g, b, 255),
+        width,
+        align,
+    }
+}
+
+/// Одна красная картинка 1×1 для заливок.
+fn red_image() -> Arc<Pixmap> {
+    let mut red = Pixmap::new(1, 1);
+    red.set_pixel(
+        0,
+        0,
+        vello_cpu::color::PremulRgba8 {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        },
+    );
+    Arc::new(red)
+}
+
+#[test]
+fn child_opacity_change_reaches_raster_cache() {
+    // Прозрачность не входит в версию узла, но растр фрейма должен о ней узнать.
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            fills: solid(255, 255, 255),
+            ..rect(0.0, 0.0, 200.0, 200.0)
+        },
+    );
+    let kid = p.add(
+        Some(f),
+        NodeKind::Rect,
+        PropsPatch {
+            fills: solid(0, 0, 0),
+            ..rect(50.0, 50.0, 100.0, 100.0)
+        },
+    );
+    let mut scene = p.scene();
+    let mut cam = Camera::new(Size::new(40.0, 40.0), 1.0);
+    cam.set_center(Point::new(100.0, 100.0));
+    cam.set_zoom(0.2);
+    let mut r = Renderer::new();
+    let before = render_with(&mut r, &scene, &cam, &NoImages);
+    assert_px(&before, 20, 20, [0, 0, 0], 2);
+    p.edit(
+        kid,
+        PropsPatch {
+            opacity: Some(0.5),
+            ..Default::default()
+        },
+    );
+    p.update(&mut scene);
+    let after = render_with(&mut r, &scene, &cam, &NoImages);
+    assert_px(&after, 20, 20, [128, 128, 128], 4);
+    // И собственная прозрачность контейнера верхнего уровня.
+    p.edit(
+        f,
+        PropsPatch {
+            opacity: Some(0.5),
+            ..Default::default()
+        },
+    );
+    p.update(&mut scene);
+    let faded = render_with(&mut r, &scene, &cam, &NoImages);
+    assert_px(&faded, 20, 20, [191, 191, 191], 4);
+}
+
+#[test]
+fn image_arriving_after_raster_is_shown() {
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            fills: solid(255, 255, 255),
+            ..rect(0.0, 0.0, 200.0, 200.0)
+        },
+    );
+    p.add(
+        Some(f),
+        NodeKind::Image,
+        PropsPatch {
+            fills: Some(vec![Fill::image("позже")]),
+            ..rect(50.0, 50.0, 100.0, 100.0)
+        },
+    );
+    let scene = p.scene();
+    let mut cam = Camera::new(Size::new(40.0, 40.0), 1.0);
+    cam.set_center(Point::new(100.0, 100.0));
+    cam.set_zoom(0.2);
+    let mut r = Renderer::new();
+    let first = render_with(&mut r, &scene, &cam, &NoImages);
+    assert_px(&first, 20, 20, [217, 217, 217], 2);
+    let images: HashMap<String, Arc<Pixmap>> = [("позже".to_string(), red_image())].into();
+    let second = render_with(&mut r, &scene, &cam, &images);
+    assert_px(&second, 20, 20, [255, 0, 0], 2);
+}
+
+#[test]
+fn leaf_opacity_applies_to_the_whole_leaf_not_each_paint() {
+    // Заливка и внутренняя обводка при прозрачности 0.5: внутри только синяя
+    // заливка на белом, обводка не просвечивает сквозь неё.
+    let mut p = Page::new();
+    p.add(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            fills: solid(0, 0, 255),
+            strokes: Some(vec![stroke(255, 0, 0, 4.0, StrokeAlign::Inside)]),
+            opacity: Some(0.5),
+            ..rect(0.0, 0.0, 40.0, 40.0)
+        },
+    );
+    let img = render(&p.scene(), &camera(40.0, 40.0));
+    assert_px(&img, 20, 20, [128, 128, 255], 2);
+    assert_px(&img, 1, 20, [255, 128, 128], 2);
+    // Несколько заливок: нижняя не просвечивает через верхнюю.
+    let mut q = Page::new();
+    q.add(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            fills: Some(vec![
+                Fill::solid(Color::rgba(255, 0, 0, 255)),
+                Fill::solid(Color::rgba(0, 0, 255, 255)),
+            ]),
+            opacity: Some(0.5),
+            ..rect(0.0, 0.0, 40.0, 40.0)
+        },
+    );
+    let img = render(&q.scene(), &camera(40.0, 40.0));
+    assert_px(&img, 20, 20, [128, 128, 255], 2);
+}
+
+#[test]
+fn hidden_node_export_is_empty() {
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            visible: Some(false),
+            ..rect(0.0, 0.0, 50.0, 50.0)
+        },
+    );
+    assert_eq!(
+        Renderer::new().export_png(&p.scene(), f, 1.0, &NoImages),
+        Err(ExportError::Empty)
+    );
+}
+
+#[test]
+fn export_rejects_too_many_pixels() {
+    // Каждая сторона в пределах, но площадь больше MAX_DEVICE_PIXELS (64 Mpx).
+    let mut p = Page::new();
+    let f = p.add(None, NodeKind::Frame, rect(0.0, 0.0, 9000.0, 9000.0));
+    assert_eq!(
+        Renderer::new().export_png(&p.scene(), f, 1.0, &NoImages),
+        Err(ExportError::TooLarge(9000, 9000))
+    );
+}
+
+#[test]
+fn image_in_zero_sized_node_is_skipped() {
+    for mode in [ScaleMode::Fit, ScaleMode::Fill, ScaleMode::Tile] {
+        for (w, h) in [(0.0, 20.0), (20.0, 0.0), (0.0, 0.0)] {
+            let mut p = Page::new();
+            p.add(
+                None,
+                NodeKind::Rect,
+                PropsPatch {
+                    fills: solid(0, 255, 0),
+                    ..rect(0.0, 0.0, 20.0, 20.0)
+                },
+            );
+            let mut fill = Fill::image("к");
+            fill.scale_mode = mode;
+            p.add(
+                None,
+                NodeKind::Image,
+                PropsPatch {
+                    fills: Some(vec![fill]),
+                    ..rect(0.0, 0.0, w, h)
+                },
+            );
+            let images: HashMap<String, Arc<Pixmap>> = [("к".to_string(), red_image())].into();
+            let img = render_with(
+                &mut Renderer::new(),
+                &p.scene(),
+                &camera(20.0, 20.0),
+                &images,
+            );
+            // Ничего красного: вырожденный узел картинку не рисует.
+            assert_px(&img, 10, 10, [0, 255, 0], 1);
+        }
+    }
+}
+
+#[test]
+fn frame_stroke_is_drawn_above_children() {
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            fills: solid(255, 255, 255),
+            strokes: Some(vec![stroke(0, 0, 0, 10.0, StrokeAlign::Inside)]),
+            ..rect(0.0, 0.0, 100.0, 100.0)
+        },
+    );
+    p.add(
+        Some(f),
+        NodeKind::Rect,
+        PropsPatch {
+            fills: solid(255, 0, 0),
+            ..rect(0.0, 40.0, 60.0, 20.0)
+        },
+    );
+    let img = render(&p.scene(), &camera(100.0, 100.0));
+    // Ребёнок перекрывает край фрейма: обводка поверх него, внутри — ребёнок.
+    assert_px(&img, 5, 50, [0, 0, 0], 1);
+    assert_px(&img, 30, 50, [255, 0, 0], 1);
+    assert_px(&img, 30, 20, [255, 255, 255], 1);
+}
+
+#[test]
+fn raster_cache_respects_byte_budget() {
+    let (mut p, _) = grid(8, 8, 10);
+    let scene = p.scene();
+    let mut cam = Camera::new(Size::new(400.0, 400.0), 1.0);
+    cam.fit(scene.bounds().unwrap(), 10.0);
+    let warm = |r: &mut Renderer| {
+        for _ in 0..4 {
+            draw(r, &scene, &cam);
+        }
+    };
+    let mut free = Renderer::new();
+    warm(&mut free);
+    let all = free.raster_cache_bytes();
+    assert!(all > 0);
+    assert_eq!(draw(&mut free, &scene, &cam).raster_builds, 0);
+    // Бюджет на четверть: кэш не растёт выше, фреймы перестраиваются.
+    let limit = all / 4;
+    let mut small = Renderer::with_raster_cache_bytes(limit);
+    warm(&mut small);
+    assert!(small.raster_cache_bytes() <= limit);
+    assert!(draw(&mut small, &scene, &cam).raster_builds > 0);
+    assert!(small.raster_cache_bytes() <= limit);
 }
