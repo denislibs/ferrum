@@ -156,10 +156,10 @@ fn scene_cache_is_available_before_page_loads() {
 }
 
 #[test]
-fn stale_or_broken_scene_cache_is_ignored() {
+fn broken_scene_cache_checksum_is_ignored() {
     let (doc, p1, ..) = sample();
     let mut bytes = encode(&doc).unwrap();
-    // Портим первый байт таблицы кэша: ищем секцию типа 5 и меняем данные после хэша.
+    // Портим первый байт данных кэша: контрольная сумма секции не сходится, секция пропускается.
     let pos = ferrum_doc::container::testing::section_data_offset(&bytes, 5).unwrap();
     bytes[pos] ^= 0xff;
     let mut opened = decode(&bytes).unwrap();
@@ -169,6 +169,111 @@ fn stale_or_broken_scene_cache_is_ignored() {
         "кэш необязателен — без предупреждений"
     );
     assert_eq!(opened.document.page(p1).unwrap().children(None).len(), 1);
+}
+
+#[test]
+fn stale_scene_cache_is_ignored() {
+    let (doc, p1, ..) = sample();
+    // Контрольная сумма секции верна, но префикс-хэш снапшота не совпадает со страницей.
+    let bytes =
+        ferrum_doc::container::testing::map_sections(&encode(&doc).unwrap(), |kind, _, data| {
+            if kind == 5 {
+                for b in &mut data[..32] {
+                    *b ^= 0xff;
+                }
+            }
+        });
+    let mut opened = decode(&bytes).unwrap();
+    assert!(opened.document.cached_scene(p1).is_none());
+    assert!(
+        opened.warnings.is_empty(),
+        "устаревший кэш необязателен — без предупреждений"
+    );
+    assert_eq!(opened.document.page(p1).unwrap().children(None).len(), 1);
+}
+
+#[test]
+fn image_with_mismatched_id_is_skipped_with_warning() {
+    let (doc, ..) = sample();
+    // Секция картинки с верной контрольной суммой, но id, который не равен хэшу содержимого.
+    let bytes =
+        ferrum_doc::container::testing::map_sections(&encode(&doc).unwrap(), |kind, id, _| {
+            if kind == 4 {
+                *id = "0".repeat(64);
+            }
+        });
+    let opened = decode(&bytes).unwrap();
+    assert_eq!(opened.document.images.len(), 0);
+    assert!(
+        opened
+            .warnings
+            .iter()
+            .any(|w| w.contains("изображений — 1")),
+        "{:?}",
+        opened.warnings
+    );
+}
+
+#[test]
+fn corrupted_page_refs_are_rebuilt_from_snapshot() {
+    let (doc, _p1, _p2, _frame, hash) = sample();
+    let mut bytes = encode(&doc).unwrap();
+    // Портим данные первой секции списка ссылок (страница 1).
+    let pos = ferrum_doc::container::testing::section_data_offset(&bytes, 3).unwrap();
+    bytes[pos] ^= 0xff;
+    let opened = decode(&bytes).unwrap();
+    assert!(
+        opened
+            .warnings
+            .iter()
+            .any(|w| w.contains("восстановлен из её содержимого")),
+        "{:?}",
+        opened.warnings
+    );
+    // Пересохранение не теряет картинку страницы.
+    let again = decode(&encode(&opened.document).unwrap()).unwrap();
+    assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    assert!(again.document.images.get(&hash).is_some());
+}
+
+#[test]
+fn corrupted_root_is_an_error() {
+    let (doc, ..) = sample();
+    let mut bytes = encode(&doc).unwrap();
+    // Первая секция файла — корневой документ.
+    let pos = ferrum_doc::container::testing::section_data_offset(&bytes, 1).unwrap();
+    bytes[pos] ^= 0xff;
+    assert!(matches!(decode(&bytes), Err(DocError::Corrupted(_))));
+}
+
+#[test]
+fn corrupted_page_opens_empty_while_others_survive() {
+    let mut doc = Document::new();
+    let p1 = doc.pages()[0].0;
+    let p2 = doc.add_page("Вторая").unwrap();
+    doc.transact(p2, vec![], |p| {
+        Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+    })
+    .unwrap();
+    doc.transact(p1, vec![], |p| {
+        Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+    })
+    .unwrap();
+    let mut bytes = encode(&doc).unwrap();
+    // Первая секция страницы (тип 2) — страница 1.
+    let pos = ferrum_doc::container::testing::section_data_offset(&bytes, 2).unwrap();
+    bytes[pos] ^= 0xff;
+    let mut opened = decode(&bytes).unwrap();
+    assert!(
+        opened
+            .warnings
+            .iter()
+            .any(|w| w.contains("повреждена и открыта пустой")),
+        "{:?}",
+        opened.warnings
+    );
+    assert_eq!(opened.document.page(p1).unwrap().children(None).len(), 0);
+    assert_eq!(opened.document.page(p2).unwrap().children(None).len(), 1);
 }
 
 #[test]

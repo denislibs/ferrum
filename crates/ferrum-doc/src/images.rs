@@ -27,6 +27,8 @@ impl ImageStore {
         self.by_hash.is_empty()
     }
 
+    /// Вставляет байты без пересчёта хэша. Вызывающий обязан до вызова проверить,
+    /// что `hash` — это blake3 от `bytes` (в контейнере это делает `container::decode`).
     pub(crate) fn insert_verified(&mut self, hash: String, bytes: Vec<u8>) {
         self.by_hash.insert(hash, bytes);
     }

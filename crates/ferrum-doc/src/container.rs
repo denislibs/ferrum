@@ -15,6 +15,7 @@ use crate::binary::Reader;
 use crate::document::{Document, UnloadedPage};
 use crate::error::{DocError, DocResult};
 use crate::images::ImageStore;
+use crate::page::PageDoc;
 use crate::scene_cache;
 use crate::types::PageId;
 
@@ -146,7 +147,10 @@ pub fn decode(bytes: &[u8]) -> DocResult<Opened> {
                     }
                 }
             }
-            IMAGE if intact => images.insert_verified(id, data.to_vec()),
+            // Контрольная сумма секции ловит порчу; хэш содержимого — подмену id.
+            IMAGE if intact && blake3::hash(data).to_hex().as_str() == id => {
+                images.insert_verified(id, data.to_vec())
+            }
             IMAGE => bad_images += 1,
             _ => {} // секции из будущих версий формата пропускаем
         }
@@ -159,25 +163,34 @@ pub fn decode(bytes: &[u8]) -> DocResult<Opened> {
     let root = root.ok_or_else(|| {
         DocError::Corrupted("не удалось прочитать структуру документа".to_string())
     })?;
-    let unloaded = snapshots
-        .into_iter()
-        .map(|(id, snapshot)| {
-            // Кэш годен, только если построен именно из этого снапшота.
-            let scene = scenes
-                .get(&id)
-                .filter(|d| d.len() >= 32 && d[..32] == *blake3::hash(&snapshot).as_bytes())
-                .and_then(|d| scene_cache::decode(&d[32..]));
-            let image_refs = refs.remove(&id).unwrap_or_default();
-            (
-                id,
-                UnloadedPage {
-                    snapshot,
-                    image_refs,
-                    scene,
-                },
-            )
-        })
-        .collect();
+    let mut unloaded = HashMap::new();
+    for (id, snapshot) in snapshots {
+        // Кэш годен, только если построен именно из этого снапшота.
+        let scene = scenes
+            .get(&id)
+            .filter(|d| d.len() >= 32 && d[..32] == *blake3::hash(&snapshot).as_bytes())
+            .and_then(|d| scene_cache::decode(&d[32..]));
+        let image_refs = match refs.remove(&id) {
+            Some(list) => list,
+            None => {
+                // Без списка при сохранении пропали бы картинки страницы — пересчитываем из снапшота.
+                warnings.push(format!(
+                    "Список изображений страницы {id} повреждён и восстановлен из её содержимого"
+                ));
+                PageDoc::from_snapshot(&snapshot)
+                    .and_then(|p| p.image_refs())
+                    .unwrap_or_default()
+            }
+        };
+        unloaded.insert(
+            id,
+            UnloadedPage {
+                snapshot,
+                image_refs,
+                scene,
+            },
+        );
+    }
     let (document, mut doc_warnings) = Document::from_parts(&root, unloaded, images)?;
     warnings.append(&mut doc_warnings);
     Ok(Opened { document, warnings })
@@ -197,20 +210,42 @@ pub mod testing {
     pub fn section_data_offset(bytes: &[u8], kind: u8) -> Option<usize> {
         let mut r = crate::binary::Reader::at(bytes, 12);
         let count = r.u32()?;
-        let mut pos = 16;
+        let mut pos = 16usize;
         for _ in 0..count {
             let mut r = crate::binary::Reader::at(bytes, pos);
             let k = r.u8()?;
-            let id_len = r.u32()? as usize;
+            let id_len = usize::try_from(r.u32()?).ok()?;
             r.take(id_len)?;
-            let len = r.u64()? as usize;
+            let len = usize::try_from(r.u64()?).ok()?;
             r.take(32)?;
-            let data_at = pos + 1 + 4 + id_len + 8 + 32;
+            // тип 1 + длина id 4 + id + длина данных 8 + checksum 32
+            let data_at = pos.checked_add(45)?.checked_add(id_len)?;
             if k == kind {
                 return Some(data_at);
             }
-            pos = data_at + len;
+            pos = data_at.checked_add(len)?;
         }
         None
+    }
+
+    /// Перестраивает файл: `f` меняет тип, id и данные каждой секции,
+    /// контрольные суммы пересчитываются — так портятся данные «тихо» для проверки.
+    pub fn map_sections(bytes: &[u8], mut f: impl FnMut(u8, &mut String, &mut Vec<u8>)) -> Vec<u8> {
+        let mut r = crate::binary::Reader::at(bytes, 12);
+        let count = r.u32().expect("валидный файл");
+        let mut r = crate::binary::Reader::at(bytes, 16);
+        let mut out = bytes[..16].to_vec();
+        for _ in 0..count {
+            let kind = r.u8().expect("валидный файл");
+            let id_len = usize::try_from(r.u32().expect("валидный файл")).expect("длина");
+            let mut id =
+                String::from_utf8(r.take(id_len).expect("валидный файл").to_vec()).expect("UTF-8");
+            let len = usize::try_from(r.u64().expect("валидный файл")).expect("длина");
+            r.take(32).expect("валидный файл");
+            let mut data = r.take(len).expect("валидный файл").to_vec();
+            f(kind, &mut id, &mut data);
+            super::push_section(&mut out, kind, &id, &data);
+        }
+        out
     }
 }
