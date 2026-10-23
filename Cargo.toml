@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/ferrum-doc"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.96"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+loro = "=1.16.2"
+# loro 1.16.2 не собирается с loro-internal 1.17.x — фиксируем совместимую версию
+loro-internal = "=1.16.2"
+thiserror = "2.0.20"
+blake3 = "1.8"
+criterion = "0.8"
+proptest = "1.12"
