@@ -15,7 +15,7 @@ mod types;
 pub use document::{Document, Restore, SCHEMA_VERSION};
 pub use error::{DocError, DocResult};
 pub use images::ImageStore;
-pub use page::PageDoc;
+pub use page::{PageDoc, Tx};
 pub use scene_cache::SceneRow;
 pub use types::*;
 

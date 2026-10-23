@@ -102,7 +102,7 @@ fn attempted(op: &Op, alive: &[NodeId]) -> bool {
     }
 }
 
-fn apply_edit(p: &PageDoc, op: &Op, alive: &[NodeId]) -> DocResult<()> {
+fn apply_edit(p: &Tx, op: &Op, alive: &[NodeId]) -> DocResult<()> {
     match *op {
         Op::Create { parent, kind } => {
             p.create_node(pick(alive, parent), None, KINDS[kind as usize])?;

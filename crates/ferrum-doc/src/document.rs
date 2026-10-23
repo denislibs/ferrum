@@ -8,7 +8,7 @@ use loro::{LoroDoc, LoroTree, LoroValue, TreeParentId, ValueOrContainer};
 use crate::error::{DocError, DocResult};
 use crate::history::{History, HistoryEntry};
 use crate::images::ImageStore;
-use crate::page::{Inverse, PageDoc};
+use crate::page::{Inverse, PageDoc, Tx};
 use crate::scene_cache::SceneRow;
 use crate::types::{NodeId, PageId};
 
@@ -264,13 +264,13 @@ impl Document {
         f: F,
     ) -> DocResult<Vec<NodeId>>
     where
-        F: FnOnce(&PageDoc) -> DocResult<Vec<NodeId>>,
+        F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
     {
         self.writable()?;
         self.page(page)?;
         let p = self.loaded.get(&page).expect("страница загружена выше");
         p.begin_journal();
-        let result = f(p);
+        let result = f(&Tx::new(p));
         let ops = p.take_journal();
         p.commit();
         match result {

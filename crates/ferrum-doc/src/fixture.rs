@@ -1,11 +1,13 @@
 //! Генератор тестовых страниц для бенчмарков. Не для продакшен-кода.
 
-use crate::{Color, DocResult, Fill, NodeId, NodeKind, PageDoc, PropsPatch, Stroke, StrokeAlign};
+use crate::{
+    Color, DocResult, Fill, NodeId, NodeKind, PageDoc, PropsPatch, Stroke, StrokeAlign, Tx,
+};
 
 /// Отдельная страница из `nodes` узлов.
 pub fn page_with_nodes(nodes: usize) -> DocResult<(PageDoc, Vec<NodeId>)> {
     let page = PageDoc::new();
-    let ids = fill(&page, nodes)?;
+    let ids = fill(&page.tx_for_tests(), nodes)?;
     page.commit_for_tests();
     Ok((page, ids))
 }
@@ -13,7 +15,7 @@ pub fn page_with_nodes(nodes: usize) -> DocResult<(PageDoc, Vec<NodeId>)> {
 /// Наполняет страницу `nodes` узлами: фреймы по 100 узлов (фрейм + 99 фигур),
 /// у каждой фигуры заданы координаты, имя, заливка и обводка — как в реальном макете.
 /// Подходит и для вызова внутри `Document::transact`.
-pub fn fill(page: &PageDoc, nodes: usize) -> DocResult<Vec<NodeId>> {
+pub fn fill(page: &Tx, nodes: usize) -> DocResult<Vec<NodeId>> {
     let mut ids = Vec::with_capacity(nodes);
     let frames = nodes.div_ceil(100);
     for f in 0..frames {

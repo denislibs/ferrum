@@ -28,14 +28,15 @@ fn bench(c: &mut Criterion) {
         let mut x = 0.0;
         b.iter(|| {
             x += 1.0;
-            page.set_props(
-                ids[N / 2],
-                &PropsPatch {
-                    x: Some(x),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+            page.tx_for_tests()
+                .set_props(
+                    ids[N / 2],
+                    &PropsPatch {
+                        x: Some(x),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
             page.commit_for_tests();
         })
     });
@@ -45,15 +46,16 @@ fn bench(c: &mut Criterion) {
             || PageDoc::from_snapshot(&snapshot).unwrap(),
             |p| {
                 for (i, id) in ids.iter().take(1000).enumerate() {
-                    p.set_props(
-                        *id,
-                        &PropsPatch {
-                            x: Some(i as f64),
-                            y: Some(5.0),
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap();
+                    p.tx_for_tests()
+                        .set_props(
+                            *id,
+                            &PropsPatch {
+                                x: Some(i as f64),
+                                y: Some(5.0),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
                 }
                 p.commit_for_tests();
             },

@@ -77,6 +77,23 @@ impl State {
     }
 }
 
+/// Правка страницы. Выдаётся только замыканию `Document::transact`: так каждая
+/// правка проходит проверку «только для чтения», попадает в историю отмены и
+/// фиксируется в Loro. Чтение — через `Deref` на `PageDoc`.
+///
+/// Мимо транзакции страницу изменить нельзя:
+/// ```compile_fail
+/// let mut doc = ferrum_doc::Document::new();
+/// let page = doc.pages()[0].0;
+/// doc.page(page)
+///     .unwrap()
+///     .create_node(None, None, ferrum_doc::NodeKind::Rect)
+///     .unwrap();
+/// ```
+pub struct Tx<'a> {
+    page: &'a PageDoc,
+}
+
 pub struct PageDoc {
     doc: LoroDoc,
     tree: LoroTree,
@@ -176,6 +193,13 @@ impl PageDoc {
         self.doc.commit();
     }
 
+    /// Правка отдельной страницы без документа — для тестов и бенчмарков:
+    /// без истории отмены и без фиксации (её делает `commit_for_tests`).
+    #[doc(hidden)]
+    pub fn tx_for_tests(&self) -> Tx<'_> {
+        Tx::new(self)
+    }
+
     pub(crate) fn begin_journal(&self) {
         *self.journal.borrow_mut() = Some(Vec::new());
     }
@@ -228,7 +252,7 @@ impl PageDoc {
     }
 
     /// Создаёт узел со свойствами по умолчанию. `index = None` — поверх всех детей.
-    pub fn create_node(
+    pub(crate) fn create_node(
         &self,
         parent: Option<NodeId>,
         index: Option<usize>,
@@ -300,7 +324,7 @@ impl PageDoc {
         Ok(self.props(id)?.kind)
     }
 
-    pub fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
+    pub(crate) fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
         let tid = self.tid(id)?;
         let before = self.props(id)?;
         codec::write_patch(&self.tree.get_meta(tid)?, patch)?;
@@ -325,7 +349,12 @@ impl PageDoc {
     /// (позиция после операции). Значение за пределами допустимого диапазона
     /// означает «в конец списка», а не ошибку. Узел, уже бывший ребёнком этого
     /// родителя, при подсчёте позиций не учитывается.
-    pub fn move_node(&self, id: NodeId, parent: Option<NodeId>, index: usize) -> DocResult<()> {
+    pub(crate) fn move_node(
+        &self,
+        id: NodeId,
+        parent: Option<NodeId>,
+        index: usize,
+    ) -> DocResult<()> {
         self.move_nodes(&[id], parent, index)
     }
 
@@ -337,7 +366,7 @@ impl PageDoc {
     /// узлов плоской страницы не должна перебирать сто тысяч соседей на каждый узел.
     /// Каждый узел записывает своё `Inverse::Move` с позицией прямо перед своим
     /// переносом, поэтому обратный проход восстанавливает порядок точно.
-    pub fn move_nodes(
+    pub(crate) fn move_nodes(
         &self,
         ids: &[NodeId],
         parent: Option<NodeId>,
@@ -427,7 +456,7 @@ impl PageDoc {
     /// Предок и потомок в одном вызове допустимы в любом порядке: потомок предка,
     /// удалённого раньше, пропускается (`tid` не найдёт его); потомок, удалённый
     /// раньше предка, уже не попадёт в обход поддерева предка.
-    pub fn delete_nodes(&self, ids: &[NodeId]) -> DocResult<()> {
+    pub(crate) fn delete_nodes(&self, ids: &[NodeId]) -> DocResult<()> {
         let mut order: Vec<TreeParentId> = Vec::new();
         let mut groups: HashMap<TreeParentId, Vec<NodeId>> = HashMap::new();
         for id in ids {
@@ -598,6 +627,55 @@ impl PageDoc {
         refs.sort();
         refs.dedup();
         Ok(refs)
+    }
+}
+
+impl<'a> Tx<'a> {
+    pub(crate) fn new(page: &'a PageDoc) -> Tx<'a> {
+        Tx { page }
+    }
+
+    /// Создаёт узел со свойствами по умолчанию. `index = None` — поверх всех детей.
+    pub fn create_node(
+        &self,
+        parent: Option<NodeId>,
+        index: Option<usize>,
+        kind: NodeKind,
+    ) -> DocResult<NodeId> {
+        self.page.create_node(parent, index, kind)
+    }
+
+    pub fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
+        self.page.set_props(id, patch)
+    }
+
+    /// См. [`Tx::move_nodes`]: перенос одного узла.
+    pub fn move_node(&self, id: NodeId, parent: Option<NodeId>, index: usize) -> DocResult<()> {
+        self.page.move_node(id, parent, index)
+    }
+
+    /// Переносит узлы одним блоком: после операции они стоят подряд в порядке `ids`,
+    /// первый — на позиции `index` среди остальных детей родителя (за концом — в конец).
+    pub fn move_nodes(
+        &self,
+        ids: &[NodeId],
+        parent: Option<NodeId>,
+        index: usize,
+    ) -> DocResult<()> {
+        self.page.move_nodes(ids, parent, index)
+    }
+
+    /// Удаляет узлы вместе с потомками. Уже удалённые пропускаются.
+    pub fn delete_nodes(&self, ids: &[NodeId]) -> DocResult<()> {
+        self.page.delete_nodes(ids)
+    }
+}
+
+impl std::ops::Deref for Tx<'_> {
+    type Target = PageDoc;
+
+    fn deref(&self) -> &PageDoc {
+        self.page
     }
 }
 

@@ -3,6 +3,7 @@ use ferrum_doc::*;
 #[test]
 fn create_and_read_node_with_defaults() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let id = page.create_node(None, None, NodeKind::Rect).unwrap();
     let p = page.props(id).unwrap();
     assert_eq!(p, Props::defaults(NodeKind::Rect));
@@ -12,6 +13,7 @@ fn create_and_read_node_with_defaults() {
 #[test]
 fn set_props_changes_only_given_fields() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let id = page.create_node(None, None, NodeKind::Rect).unwrap();
     page.set_props(
         id,
@@ -32,6 +34,7 @@ fn set_props_changes_only_given_fields() {
 #[test]
 fn fills_and_strokes_roundtrip() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let id = page.create_node(None, None, NodeKind::Rect).unwrap();
     let fills = vec![
         Fill::solid(Color::parse("#ff000080").unwrap()),
@@ -64,6 +67,7 @@ fn fills_and_strokes_roundtrip() {
 #[test]
 fn children_keep_order_and_index_insert() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let frame = page.create_node(None, None, NodeKind::Frame).unwrap();
     let a = page.create_node(Some(frame), None, NodeKind::Rect).unwrap();
     let b = page
@@ -80,6 +84,7 @@ fn children_keep_order_and_index_insert() {
 #[test]
 fn move_node_reorders_and_reparents() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let f1 = page.create_node(None, None, NodeKind::Frame).unwrap();
     let f2 = page.create_node(None, None, NodeKind::Frame).unwrap();
     let a = page.create_node(Some(f1), None, NodeKind::Rect).unwrap();
@@ -94,6 +99,7 @@ fn move_node_reorders_and_reparents() {
 #[test]
 fn move_into_own_descendant_is_rejected() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let outer = page.create_node(None, None, NodeKind::Frame).unwrap();
     let inner = page
         .create_node(Some(outer), None, NodeKind::Frame)
@@ -111,6 +117,7 @@ fn move_into_own_descendant_is_rejected() {
 #[test]
 fn delete_removes_subtree() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let frame = page.create_node(None, None, NodeKind::Frame).unwrap();
     let child = page.create_node(Some(frame), None, NodeKind::Rect).unwrap();
     page.delete_nodes(&[frame, frame]).unwrap();
@@ -123,6 +130,7 @@ fn delete_removes_subtree() {
 #[test]
 fn walk_is_depth_first_bottom_to_top() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let f = page.create_node(None, None, NodeKind::Frame).unwrap();
     let a = page.create_node(Some(f), None, NodeKind::Rect).unwrap();
     let b = page.create_node(None, None, NodeKind::Rect).unwrap();
@@ -132,6 +140,7 @@ fn walk_is_depth_first_bottom_to_top() {
 #[test]
 fn snapshot_roundtrip() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let f = page.create_node(None, None, NodeKind::Frame).unwrap();
     page.set_props(
         f,
@@ -149,6 +158,7 @@ fn snapshot_roundtrip() {
 #[test]
 fn node_id_string_roundtrip() {
     let page = PageDoc::new();
+    let page = page.tx_for_tests();
     let id = page.create_node(None, None, NodeKind::Rect).unwrap();
     let parsed: NodeId = id.to_string().parse().unwrap();
     assert_eq!(parsed, id);
