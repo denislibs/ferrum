@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use ferrum_doc::{Document, NodeId, NodeKind, PageId, PropsPatch};
 use ferrum_render::{
-    Camera, CpuBackend, ImageProvider, NoImages, Pixmap, RenderBackend, Renderer, Rgba,
+    Camera, CpuBackend, ImageProvider, NoImages, Overlay, Pixmap, RenderBackend, Renderer, Rgba,
 };
 use ferrum_scene::Scene;
 use kurbo::{Affine, Point, Rect, Size};
@@ -89,6 +89,26 @@ pub fn render_with(
     backend.set_color(WHITE);
     backend.fill_rect(&Rect::new(0.0, 0.0, w as f64, h as f64));
     renderer.draw_scene(&mut backend, scene, camera, images);
+    backend.render()
+}
+
+/// Кадр целиком: фон, содержимое, оверлеи.
+pub fn render_overlay(
+    scene: &Scene,
+    camera: &Camera,
+    overlay: &Overlay,
+    background: Rgba,
+) -> Pixmap {
+    let (w, h) = camera.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    Renderer::new().render(
+        &mut backend,
+        scene,
+        camera,
+        overlay,
+        &NoImages,
+        Some(background),
+    );
     backend.render()
 }
 

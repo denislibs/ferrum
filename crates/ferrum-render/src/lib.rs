@@ -7,10 +7,12 @@ mod camera;
 mod display;
 mod draw;
 mod image;
+mod overlay;
+mod text;
 
 use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::Scene;
-use kurbo::Affine;
+use kurbo::{Affine, Rect};
 
 pub use backend::{CpuBackend, ImagePaint, RenderBackend, Rgba};
 pub use camera::{Camera, MAX_DEVICE_PIXELS, MAX_DEVICE_SIDE, MAX_ZOOM, MIN_ZOOM};
@@ -19,6 +21,10 @@ pub use draw::{
     RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
+pub use overlay::{
+    format_size, Overlay, OverlayTheme, HANDLE_SIZE, LABEL_SIZE, PIXEL_GRID_MIN_ZOOM,
+};
+pub use text::{Label, TextEngine, ONEST};
 pub use vello_cpu::Pixmap;
 
 use draw::{DrawContext, Painter};
@@ -42,10 +48,11 @@ pub enum ExportError {
     Encode(String),
 }
 
-/// Рендерер одного холста: кэши списков отрисовки и растров живут между кадрами.
+/// Рендерер одного холста: кэши списков отрисовки, растров и шрифтов живут между кадрами.
 #[derive(Default)]
 pub struct Renderer {
     painter: Painter,
+    text: TextEngine,
 }
 
 impl Renderer {
@@ -58,12 +65,34 @@ impl Renderer {
     pub fn with_raster_cache_bytes(bytes: usize) -> Renderer {
         Renderer {
             painter: Painter::with_raster_limit(bytes),
+            text: TextEngine::new(),
         }
     }
 
     /// Сколько байт сейчас занимает растровый кэш фреймов.
     pub fn raster_cache_bytes(&self) -> usize {
         self.painter.raster_bytes()
+    }
+
+    /// Рисует кадр: фон, содержимое, оверлеи.
+    pub fn render(
+        &mut self,
+        backend: &mut impl RenderBackend,
+        scene: &Scene,
+        camera: &Camera,
+        overlay: &Overlay,
+        images: &dyn ImageProvider,
+        background: Option<Rgba>,
+    ) -> FrameStats {
+        if let Some(bg) = background {
+            let (w, h) = backend.size();
+            backend.set_transform(Affine::IDENTITY);
+            backend.set_color(bg);
+            backend.fill_rect(&Rect::new(0.0, 0.0, w as f64, h as f64));
+        }
+        let stats = self.draw_scene(backend, scene, camera, images);
+        overlay::draw(backend, &mut self.text, scene, camera, overlay);
+        stats
     }
 
     /// Только содержимое сцены, без фона и оверлеев.
