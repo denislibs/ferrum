@@ -9,13 +9,13 @@ use std::collections::HashSet;
 
 use ferrum_doc::{NodeId, NodeKind, PropsPatch};
 use ferrum_render::HANDLE_SIZE;
-use ferrum_scene::{Draft, Slot};
+use ferrum_scene::{shape, Draft, Slot};
 use kurbo::{Affine, Line, Point, Rect, Vec2};
 
 use super::{Ctx, Cursor, Flow, Tool, ToolKind, ToolOverlay, DRAG_THRESHOLD_PX};
 use crate::geometry::{
     bases, normalize_deg, rect_map, resize_rect, rigid_patches, scale_patches_in, snap_angle,
-    top_level, world_box, Base, Handle, SelectionBox,
+    top_level, world_box, Base, Handle, SelectionBox, MIN_SIDE,
 };
 use crate::input::{Modifiers, PointerEvent};
 use crate::ops::{duplicate, local_delta, reposition};
@@ -399,10 +399,12 @@ impl SelectTool {
                     self.state = State::Idle;
                     return;
                 };
+                let mut bases = bases(cx.scene, &ids, true);
+                let sbox = widen_zero_sides(&mut bases, sbox);
                 State::Resizing(Resize {
                     handle,
                     sbox,
-                    bases: bases(cx.scene, &ids, true),
+                    bases,
                     snapper: Snapper::new(cx.scene, &ids),
                     transform: Affine::IDENTITY,
                 })
@@ -657,6 +659,54 @@ fn editable(cx: &Ctx, ids: &[NodeId]) -> Vec<NodeId> {
                 .is_some_and(|s| !cx.scene.is_draft(*id) && !locked(cx.scene, s))
         })
         .collect()
+}
+
+/// Ресайз масштабирует размер базы, и нулевая сторона (узел из старого документа,
+/// из вставки или из `transact`) так и осталась бы нулевой: первый жест записал
+/// бы лишь `MIN_SIDE` лишним шагом отмены. Поэтому у фигур (не линий и не групп)
+/// нулевая сторона базы становится `MIN_SIDE`, локальная матрица пересчитывается
+/// (отражение зависит от размера), а нулевая ось рамки жеста расширяется до
+/// `MIN_SIDE` — масштаб идёт от неё сразу к цели. У линий нулевая высота рамки
+/// остаётся: масштаб по ней — 1, линию нельзя растянуть вширь.
+fn widen_zero_sides(bases: &mut [Base], sbox: SelectionBox) -> SelectionBox {
+    let (mut wide_x, mut wide_y) = (false, false);
+    for b in bases.iter_mut() {
+        if matches!(b.props.kind, NodeKind::Line | NodeKind::Group) {
+            continue;
+        }
+        let (zw, zh) = (b.props.w <= 0.0, b.props.h <= 0.0);
+        if !zw && !zh {
+            continue;
+        }
+        if zw {
+            b.props.w = MIN_SIDE;
+        }
+        if zh {
+            b.props.h = MIN_SIDE;
+        }
+        b.local = shape::local_transform(&b.props);
+        wide_x |= zw;
+        wide_y |= zh;
+    }
+    if !wide_x && !wide_y {
+        return sbox;
+    }
+    let mut sbox = sbox;
+    if let [b] = bases {
+        // Один узел: рамка — его собственная, в его осях.
+        sbox.rect = Rect::new(0.0, 0.0, b.props.w, b.props.h);
+        sbox.to_world = b.parent_world * b.local;
+        return sbox;
+    }
+    // Общая рамка в мире: расширяется только ось, где она действительно нулевая.
+    let r = sbox.rect;
+    if wide_x && r.width() <= 0.0 {
+        sbox.rect.x1 = r.x0 + MIN_SIDE;
+    }
+    if wide_y && r.height() <= 0.0 {
+        sbox.rect.y1 = r.y0 + MIN_SIDE;
+    }
+    sbox
 }
 
 fn union_box(cx: &Ctx, ids: &[NodeId]) -> Option<Rect> {

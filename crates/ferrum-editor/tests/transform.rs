@@ -456,3 +456,65 @@ fn escape_cancels_gesture_even_when_rebound() {
     assert_eq!(h.ed.step_count(), steps);
     h.assert_scene_clean();
 }
+
+/// Узел с уже нулевой стороной (из `transact` или из вставки: буфер обмена
+/// приводит отрицательную ширину к нулю) растягивается первым же жестом: база
+/// ресайза получает сторону `MIN_SIDE`, и масштаб идёт от неё сразу к цели.
+/// Раньше первый жест записывал w = 0.01 лишним шагом, и тянул только второй.
+#[test]
+fn zero_side_node_widens_in_one_drag() {
+    let mut h = H::new();
+    let a = h.rect(None, 100.0, 100.0, 0.0, 100.0);
+    assert_eq!(h.props(a).w, 0.0);
+    // Вторая — из вставки: копия, удаление оригинала, вставка на то же место.
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    h.ed.execute(CommandId::Copy);
+    let bytes =
+        h.ed.take_events()
+            .into_iter()
+            .find_map(|e| match e {
+                EditorEvent::Clipboard(b) => Some(b),
+                _ => None,
+            })
+            .expect("байты буфера");
+    let b = h.rect(None, 600.0, 100.0, 0.0, 100.0);
+    h.ed.select(&[a]);
+    h.ed.execute(CommandId::Delete);
+    h.ed.paste(&bytes).unwrap();
+    let pasted = h.sel()[0];
+    assert_eq!((h.props(pasted).x, h.props(pasted).w), (100.0, 0.0));
+    for (id, x0) in [(pasted, 100.0), (b, 600.0)] {
+        h.ed.select(&[id]);
+        let before = h.state();
+        let steps = h.ed.step_count();
+        h.drag((x0, 150.0), (x0 + 250.0, 150.0), none());
+        let p = h.props(id);
+        assert_eq!((p.x, p.y, p.w, p.h), (x0, 100.0, 250.0, 100.0), "{p:?}");
+        assert!(!p.flip_x && !p.flip_y);
+        h.assert_one_step(steps, &before);
+    }
+    // По высоте: верхняя ручка нулевой высоты вверх — одним жестом.
+    let c = h.rect(None, 100.0, 400.0, 200.0, 0.0);
+    h.ed.select(&[c]);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.drag((200.0, 400.0), (200.0, 320.0), none());
+    let p = h.props(c);
+    assert_eq!((p.x, p.y, p.w, p.h), (100.0, 320.0, 200.0, 80.0), "{p:?}");
+    assert!(!p.flip_x && !p.flip_y);
+    h.assert_one_step(steps, &before);
+    // Линия в выделении остаётся линией: её высота не становится `MIN_SIDE`.
+    let d = h.rect(None, 100.0, 600.0, 0.0, 100.0);
+    let line = h.add(
+        None,
+        ferrum_doc::NodeKind::Line,
+        patch(300.0, 650.0, 100.0, 0.0),
+    );
+    h.ed.select(&[d, line]);
+    // Общая рамка (100, 600)–(400, 700): правая ручка на 100 px вправо.
+    h.drag((400.0, 650.0), (500.0, 650.0), none());
+    assert_eq!(h.props(line).h, 0.0);
+    assert!(h.props(d).w > 0.0, "{:?}", h.props(d));
+    h.assert_scene_clean();
+}
