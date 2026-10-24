@@ -51,7 +51,35 @@ fn missing_and_broken_images_get_a_permanent_placeholder() {
     assert_eq!((a.width(), a.height(), b.width()), (1, 1, 1));
     images.begin_frame();
     assert!(images.provider(&store).image(&broken).is_some());
+    // Не PNG вообще: заголовок не читается, декодировать нечего.
+    assert_eq!(images.stats().2, 0);
+    // Заголовок верный, данные обрезаны: декодируется один раз, потом заглушка.
+    let mut cut = png(8, 8, [9, 9, 9, 255]);
+    cut.truncate(40);
+    let cut = store.add(cut);
+    for _ in 0..3 {
+        images.begin_frame();
+        assert_eq!(images.provider(&store).image(&cut).unwrap().width(), 1);
+    }
     assert_eq!(images.stats().2, 1, "неразборчивая декодировалась снова");
+}
+
+#[test]
+fn frame_byte_budget_spreads_big_images_over_frames() {
+    let mut store = ImageStore::default();
+    let hashes: Vec<String> = (0..3)
+        .map(|i| store.add(png(16, 16, [i * 40, 0, 0, 255])))
+        .collect();
+    // На кадр — полторы картинки: первая проходит всегда, вторая ждёт следующего.
+    let images = DocImages::with_limits(usize::MAX, 16 * 16 * 4 * 3 / 2);
+    images.begin_frame();
+    let p = images.provider(&store);
+    let got: Vec<bool> = hashes.iter().map(|h| p.image(h).is_some()).collect();
+    assert_eq!(got, [true, false, false]);
+    images.begin_frame();
+    let p = images.provider(&store);
+    let got: Vec<bool> = hashes.iter().map(|h| p.image(h).is_some()).collect();
+    assert_eq!(got, [true, true, false]);
 }
 
 #[test]
@@ -62,22 +90,46 @@ fn memory_limit_evicts_images_not_used_this_frame() {
     // Предел — одна картинка 16×16.
     let images = DocImages::with_limit(16 * 16 * 4);
     images.begin_frame();
-    let p = images.provider(&store);
-    p.image(&a).unwrap();
-    // В этом же кадре `a` нужна: обе остаются, предел временно превышен.
-    p.image(&b).unwrap();
-    assert_eq!(images.stats().0, 2);
+    images.provider(&store).image(&a).unwrap();
+    // В этом же кадре `a` нужна и вытеснить её нельзя: предел памяти важнее,
+    // `b` получает заглушку и в кэш не попадает.
+    assert_eq!(images.provider(&store).image(&b).unwrap().width(), 1);
+    assert_eq!(images.stats().0, 1);
+    // Следующий кадр: `a` не рисовалась — вытесняется ради `b`.
     images.begin_frame();
-    let p = images.provider(&store);
-    p.image(&b).unwrap();
-    // `a` в этом кадре не рисовалась — вытесняется, когда понадобится место.
-    images.insert("c", Pixmap::new(16, 16));
-    assert_eq!(images.stats().0, 2);
-    assert!(p.image(&b).is_some());
+    assert_eq!(images.provider(&store).image(&b).unwrap().width(), 16);
     let (n, bytes, decoded) = images.stats();
-    assert_eq!((n, bytes, decoded), (2, 2 * 16 * 16 * 4, 2));
+    assert_eq!((n, bytes, decoded), (1, 16 * 16 * 4, 2));
     // Вытеснена именно `a`: её снова приходится декодировать.
     images.begin_frame();
     images.provider(&store).image(&a).unwrap();
     assert_eq!(images.stats().2, 3);
+}
+
+#[test]
+fn visible_images_never_exceed_the_memory_limit() {
+    let mut store = ImageStore::default();
+    // Пять одноцветных картинок 32×32 (по 4 КБ), предел — две.
+    let hashes: Vec<String> = (0..5)
+        .map(|i| store.add(png(32, 32, [i * 40, 0, 0, 255])))
+        .collect();
+    let limit = 2 * 32 * 32 * 4;
+    let images = DocImages::with_limit(limit);
+    let mut settled = false;
+    for _ in 0..10 {
+        images.begin_frame();
+        let p = images.provider(&store);
+        // Все пять «видимы» в каждом кадре; None — кадр нужен ещё раз.
+        let all = hashes.iter().all(|h| p.image(h).is_some());
+        assert!(images.stats().1 <= limit, "память {}", images.stats().1);
+        if all {
+            settled = true;
+            break;
+        }
+    }
+    assert!(
+        settled,
+        "кадры не кончаются: заглушка должна заканчивать ожидание"
+    );
+    assert!(images.stats().1 <= limit);
 }

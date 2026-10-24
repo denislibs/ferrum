@@ -102,6 +102,26 @@ fn cursor(c: Cursor) -> (CursorKind, f64) {
     }
 }
 
+/// Событие выделения: точное число и не больше `SELECTION_IDS_MAX` идентификаторов
+/// (лишние отбрасывает и сама функция, чтобы предел не зависел от вызывающего).
+fn selection_event(count: usize, ids: impl Iterator<Item = String>) -> CoreEvent {
+    CoreEvent::Selection {
+        count: count as u32,
+        ids: ids.take(SELECTION_IDS_MAX).collect(),
+    }
+}
+
+/// Команда в тексте ошибки: чужая строка может быть любой длины.
+fn clip(text: &str) -> String {
+    let mut it = text.chars();
+    let head: String = it.by_ref().take(64).collect();
+    if it.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 fn overlay_theme(t: Theme) -> OverlayTheme {
     match t {
         Theme::Dark => OverlayTheme::dark(),
@@ -280,7 +300,7 @@ impl Core {
             Command::Demo { nodes } => self.demo(nodes),
             Command::Execute { command } => match CommandId::from_key(&command) {
                 Some(id) => self.editor.execute(id),
-                None => self.error(format!("Неизвестная команда «{command}»")),
+                None => self.error(format!("Неизвестная команда «{}»", clip(&command))),
             },
             Command::SetTool { tool } => self.editor.set_tool(tool_kind(tool)),
             Command::SetTheme { theme } => {
@@ -329,14 +349,10 @@ impl Core {
             match e {
                 EditorEvent::NeedsRedraw => self.dirty = true,
                 EditorEvent::DocumentChanged => document = true,
-                EditorEvent::SelectionChanged(ids) => self.events.push(CoreEvent::Selection {
-                    count: ids.len() as u32,
-                    ids: ids
-                        .iter()
-                        .take(SELECTION_IDS_MAX)
-                        .map(NodeId::to_string)
-                        .collect(),
-                }),
+                EditorEvent::SelectionChanged(ids) => self.events.push(selection_event(
+                    ids.len(),
+                    ids.iter().take(SELECTION_IDS_MAX).map(NodeId::to_string),
+                )),
                 EditorEvent::ToolChanged(k) => self.events.push(CoreEvent::Tool { tool: tool(k) }),
                 EditorEvent::CursorChanged(c) => {
                     // Наведение меняет курсор часто: в пачке важен только последний.
@@ -366,10 +382,19 @@ impl Core {
     }
 
     fn copy_png(&mut self, ids: &[NodeId]) {
-        let provider = self.images.provider(&self.editor.document().images);
+        let before = self.images.placeholders_served();
+        // Экспорт декодирует всё нужное сразу, без бюджета кадра.
+        let provider = self.images.export_provider(&self.editor.document().images);
         let result =
             self.renderer
                 .export_png_nodes(self.editor.scene(), ids, COPY_PNG_SCALE, &provider);
+        // Заглушка в экспорте — это неверная картинка: лучше ошибка, чем серый квадрат.
+        if self.images.placeholders_served() != before {
+            self.error(
+                "Не удалось скопировать: часть изображений не читается или не помещается в память",
+            );
+            return;
+        }
         match result {
             Ok(png) => self.events.push(CoreEvent::ClipboardPng {
                 bytes: ByteBuf::from(png),
@@ -526,5 +551,27 @@ impl Core {
             atlas_images: self.atlas.0 as f64,
             atlas_misses: self.atlas.1 as f64,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_event_caps_ids_but_keeps_count() {
+        let ids = (0..1001).map(|i| i.to_string());
+        let CoreEvent::Selection { count, ids } = selection_event(1001, ids) else {
+            panic!()
+        };
+        assert_eq!((count, ids.len()), (1001, SELECTION_IDS_MAX));
+    }
+
+    #[test]
+    fn clip_shortens_long_commands() {
+        assert_eq!(clip("edit.undo"), "edit.undo");
+        let c = clip(&"я".repeat(100));
+        assert_eq!(c.chars().count(), 65);
+        assert!(c.ends_with('…'));
     }
 }
