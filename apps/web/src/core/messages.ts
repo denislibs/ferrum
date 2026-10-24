@@ -32,19 +32,37 @@ export const MAX_COMMAND_BYTES = {
   placeImage: 64 * 1024 * 1024,
 } as const;
 
-/** Текст ошибки, если команда не годится к отправке (байты больше предела или не
- * `Uint8Array`); `null` — можно слать. Команды из основного потока не доверенные,
- * проверка формы остаётся и в worker'е. */
+/** Размер в мегабайтах с округлением вверх: «предел 64 МБ, получено 64 МБ» сбивало бы с толку. */
+const mb = (n: number) => Math.ceil(n / (1024 * 1024));
+
+/** Текст ошибки, если команда не годится к отправке (байты больше предела, не
+ * `Uint8Array` или лежат в общей памяти); `null` — можно слать. Проверку делают
+ * обе стороны: команды из основного потока не доверенные. */
 export function commandSizeError(cmd: Command): string | null {
   if (cmd.type !== 'open' && cmd.type !== 'paste' && cmd.type !== 'placeImage') return null;
   const bytes = (cmd as { bytes: unknown }).bytes;
   if (!(bytes instanceof Uint8Array)) return 'Неверная команда: байты должны быть Uint8Array.';
+  if (typeof SharedArrayBuffer === 'function' && bytes.buffer instanceof SharedArrayBuffer) {
+    return 'Неверная команда: байты не могут лежать в общей памяти.';
+  }
   const max = MAX_COMMAND_BYTES[cmd.type];
   if (bytes.byteLength > max) {
-    const mb = (n: number) => Math.round(n / (1024 * 1024));
     return `Слишком большой объём данных: ${mb(bytes.byteLength)} МБ, предел для этой команды — ${mb(max)} МБ.`;
   }
   return null;
+}
+
+/** Команда к отправке: байты, занимающие часть буфера, копируются (передача
+ * буфера целиком утащила бы чужие данные и сделала бы недействительными другие
+ * представления на нём). Возвращает команду и список передаваемых буферов либо
+ * текст ошибки. */
+export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transferable[] } | { error: string } {
+  const error = commandSizeError(cmd);
+  if (error) return { error };
+  if (!('bytes' in cmd)) return { cmd, transfer: [] };
+  let bytes = cmd.bytes as unknown as Uint8Array;
+  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) bytes = bytes.slice();
+  return { cmd: { ...cmd, bytes } as Command, transfer: [bytes.buffer as ArrayBuffer] };
 }
 
 export type FromWorker =

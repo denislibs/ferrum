@@ -2,13 +2,46 @@
 // состояния. Вынесено из worker'а и транспорта, чтобы проверять без браузера
 // (e2e/shared.spec.ts). Всё, что читается из общей памяти, не доверенное.
 
-import { Ctrl, RECORD_SIZE, RING_CAPACITY } from './layout.gen';
+import { Ctrl, Field, Kind, RECORD_SIZE, RING_CAPACITY } from './layout.gen';
 
 export interface Drained {
   /** Сколько записей положено в `out`. */
   count: number;
   /** Сколько записей пропало: счётчик записи ушёл вперёд больше чем на ёмкость кольца. */
   excess: number;
+}
+
+const INT32_MAX = 2 ** 31 - 1;
+
+/** Прибавляет к счётчику в общей памяти, не переходя через границу int32: при
+ * переполнении счётчик остаётся на максимуме, а не уходит в минус. Счётчик могут
+ * менять оба потока, поэтому — цикл на `compareExchange`. */
+export function addSaturating(ctrl: Int32Array, index: number, n: number): void {
+  const add = Math.min(Math.max(0, n), INT32_MAX);
+  for (;;) {
+    const old = Atomics.load(ctrl, index);
+    const next = Math.min(INT32_MAX, old + add);
+    if (Atomics.compareExchange(ctrl, index, old, next) === old) return;
+  }
+}
+
+/** Запись можно потерять при переполнении очереди: движение указателя и колесо.
+ * Нажатия, отпускания, клавиши, blur и размер теряться не должны — иначе редактор
+ * застрянет в перетаскивании или с «залипшей» клавишей. */
+export function isDroppableKind(kind: number): boolean {
+  return kind === Kind.POINTER_MOVE || kind === Kind.WHEEL;
+}
+
+/** Убирает самую старую теряемую запись из `count` подряд лежащих; `false`, если
+ * таких нет. Ограничено размером очереди и срабатывает только при переполнении. */
+export function evictOldestDroppable(bytes: Uint8Array, count: number): boolean {
+  for (let i = 0; i < count; i++) {
+    if (isDroppableKind(bytes[i * RECORD_SIZE + Field.KIND])) {
+      bytes.copyWithin(i * RECORD_SIZE, (i + 1) * RECORD_SIZE, count * RECORD_SIZE);
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -32,7 +65,7 @@ export function drainRing(ctrl: Int32Array, ring: Uint8Array, out: Uint8Array): 
     at += RECORD_SIZE;
     if (at === RING_CAPACITY * RECORD_SIZE) at = 0;
   }
-  if (excess > 0) Atomics.add(ctrl, Ctrl.INPUT_DROPPED, excess);
+  if (excess > 0) addSaturating(ctrl, Ctrl.INPUT_DROPPED, excess);
   Atomics.store(ctrl, Ctrl.INPUT_READ, w);
   return { count, excess };
 }
@@ -70,7 +103,11 @@ export class LiveReader {
       if (before === this.lastSeq && this.last) return this.last;
       const copy = this.slots.slice();
       // Другая версия после чтения — запись прошла посередине, копия порвана.
-      if (Atomics.load(this.ctrl, Ctrl.LIVE_SEQ) === before) {
+      // Повторная проверка — `compareExchange`, а не `load`: это чтение-изменение-
+      // запись с порядком seq-cst, и обычные чтения слотов выше не могут уйти
+      // за неё (простой `load` такой защиты от переупорядочивания не даёт). Меняет
+      // значение на то же самое, писателю это не мешает.
+      if (Atomics.compareExchange(this.ctrl, Ctrl.LIVE_SEQ, before, before) === before) {
         this.lastSeq = before;
         this.last = copy;
         return copy;

@@ -174,3 +174,38 @@ test('неверная команда не роняет worker', async ({ page }
   const l = await liveWhen(page, 'l.zoom > 0.5');
   expect(l.nodes).toBe(1000);
 });
+
+// Сбои worker'а не должны вешать запуск и не должны быть тихими.
+test.describe('сбои worker\'а', () => {
+  test('ядро не загрузилось: плашка показывает причину, start не висит', async ({ page }) => {
+    await page.route('**/*.wasm', (route) => route.fulfill({ status: 200, contentType: 'application/wasm', body: 'не wasm' }));
+    await page.goto('/?nodes=10');
+    await expect(page.locator('#hud')).toContainText('Ядро не запустилось', { timeout: 20_000 });
+    expect(await page.evaluate(() => window.__ferrum === undefined)).toBe(true);
+  });
+
+  test('скрипт worker\'а не загрузился: onerror отклоняет start', async ({ page }) => {
+    await page.route('**/assets/core.worker-*.js', (route) =>
+      route.fulfill({ status: 200, contentType: 'text/javascript', body: 'это не javascript (' }),
+    );
+    await page.goto('/?nodes=10');
+    await expect(page.locator('#hud')).toContainText('Ядро не запустилось', { timeout: 20_000 });
+  });
+
+  test('сбой после запуска приходит событием error и попадает на плашку', async ({ page }) => {
+    await open(page);
+    await page.evaluate(() => {
+      const worker = (window.__ferrum!.core as unknown as { worker: Worker }).worker;
+      worker.dispatchEvent(new ErrorEvent('error', { message: 'проверочный сбой' }));
+    });
+    await page.waitForFunction(() =>
+      window.__ferrum!.events.some((e) => e.type === 'error' && e.message === 'Ядро остановлено: проверочный сбой'),
+    );
+    await expect(page.locator('#hud')).toContainText('проверочный сбой');
+  });
+
+  test('неверные параметры адреса игнорируются', async ({ page }) => {
+    await open(page, '&backend=вулкан&transport=пигеон&atlas=abc');
+    expect(await page.evaluate(() => window.__ferrum!.core.mode)).toBe('sab');
+  });
+});

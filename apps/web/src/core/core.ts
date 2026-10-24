@@ -6,7 +6,7 @@
 import type { Backend, Command, CoreEvent, CursorKind } from '../wasm/ferrum_wasm';
 import * as enc from './input';
 import { BACKENDS, Kind, LIVE_NAMES } from './layout.gen';
-import type { FromWorker } from './messages';
+import { prepareCommand, type FromWorker } from './messages';
 import { createTransport, type Transport, type TransportMode } from './transport';
 
 export type LiveState = Record<(typeof LIVE_NAMES)[number], number>;
@@ -108,6 +108,12 @@ export class Core {
       });
     });
     transport.onMessage((m) => core.onWorker(m));
+    // Сбои самого worker'а (не загрузился скрипт, исключение вне наших обработчиков).
+    worker.onerror = (e) => {
+      e.preventDefault?.();
+      core.fail(e.message || 'сбой worker\'а');
+    };
+    worker.onmessageerror = () => core.fail('сообщение worker\'а не удалось разобрать');
     const r = canvas.getBoundingClientRect();
     core.rect = { left: r.left, top: r.top, width: r.width, height: r.height };
     const offscreen = canvas.transferControlToOffscreen();
@@ -125,7 +131,13 @@ export class Core {
       },
       [offscreen],
     );
-    await ready;
+    try {
+      await ready;
+    } catch (e) {
+      worker.terminate();
+      throw e;
+    }
+    core.failed = null;
     core.listen();
     core.loop();
     return core;
@@ -138,9 +150,7 @@ export class Core {
         for (const l of this.listeners) l(e);
       }
     } else if (m.t === 'fatal') {
-      const err = new Error(m.message);
-      this.failed?.(err);
-      for (const l of this.listeners) l({ type: 'error', message: `Ядро остановлено: ${m.message}` });
+      this.fail(m.message);
     }
   }
 
@@ -152,10 +162,23 @@ export class Core {
 
   /** Команда ядру. Байты (`Uint8Array`) передаются без копии. */
   send(cmd: Command): void {
-    const transfer: Transferable[] = [];
-    if ('bytes' in cmd) transfer.push(cmd.bytes.buffer as ArrayBuffer);
-    const error = this.transport.post({ t: 'cmd', cmd }, transfer);
-    if (error) for (const l of this.listeners) l({ type: 'error', message: error });
+    const prepared = prepareCommand(cmd);
+    if ('error' in prepared) {
+      this.emit({ type: 'error', message: prepared.error });
+      return;
+    }
+    const error = this.transport.post({ t: 'cmd', cmd: prepared.cmd }, prepared.transfer);
+    if (error) this.emit({ type: 'error', message: error });
+  }
+
+  private emit(e: CoreEvent): void {
+    for (const l of this.listeners) l(e);
+  }
+
+  /** Отказ worker'а: до `ready` — `start` отклоняется, после — событие `error`. */
+  private fail(message: string): void {
+    if (this.failed) this.failed(new Error(message));
+    else this.emit({ type: 'error', message: `Ядро остановлено: ${message}` });
   }
 
   /** Бюджет основного потока: время обработчиков ввода и кадра. */

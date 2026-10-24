@@ -16,11 +16,23 @@ const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const hud = document.getElementById('hud') as HTMLElement;
 
+/** Параметр адреса из списка допустимых значений; иное — как будто не задан. */
+function choice<T extends string>(name: string, allowed: readonly T[]): T | undefined {
+  const v = params.get(name);
+  return allowed.find((a) => a === v);
+}
+
+/** Сторона атласа — целое от 1 до 65535 (u16 в ядре); иное игнорируется. */
+function atlasSide(): number | undefined {
+  const n = Number(params.get('atlas'));
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : undefined;
+}
+
 async function main(): Promise<void> {
   const core = await Core.start(canvas, {
-    backend: (params.get('backend') as Backend | null) ?? undefined,
-    transport: (params.get('transport') as TransportMode | null) ?? undefined,
-    atlasSide: params.has('atlas') ? Number(params.get('atlas')) : undefined,
+    backend: choice<Backend>('backend', ['webgpu', 'webgl', 'cpu']),
+    transport: choice<TransportMode>('transport', ['sab', 'message']),
+    atlasSide: atlasSide(),
   });
   // Журнал событий для тестов (после `ready` — его забирает `Core.start`).
   const events: CoreEvent[] = [];

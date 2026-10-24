@@ -5,7 +5,7 @@
 import init, { WasmCore } from '../wasm/ferrum_wasm.js';
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import { Ctrl, CTRL_BYTES, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET } from '../core/layout.gen';
-import type { FromWorker, ToWorker } from '../core/messages';
+import { commandSizeError, type FromWorker, type ToWorker } from '../core/messages';
 import { drainRing, writeLive as writeLiveSlots } from '../core/shared';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -15,12 +15,17 @@ let sab: { ctrl: Int32Array; live: Float64Array; ring: Uint8Array } | null = nul
 /** Записи, вычитанные из кольца за кадр (не больше ёмкости кольца). */
 const drained = new Uint8Array(RING_CAPACITY * RECORD_SIZE);
 const early: ToWorker[] = [];
+/** После фатальной ошибки worker молчит: входящее не копим и не разбираем. */
+let dead = false;
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
   scope.postMessage(msg, transfer);
 }
 
 function fatal(e: unknown): void {
+  if (dead) return;
+  dead = true;
+  early.length = 0;
   post({ t: 'fatal', message: e instanceof Error ? e.message : String(e) });
   core = null;
 }
@@ -92,14 +97,21 @@ function handle(msg: ToWorker): void {
   if (!core) return;
   switch (msg.t) {
     case 'cmd':
+      {
+        // Предел размера проверяем и здесь: основной поток не доверенный.
+        const error = commandSizeError(msg.cmd);
+        if (error) {
+          post({ t: 'events', events: [{ type: 'error', message: error }] });
+          return;
+        }
+      }
       try {
         core.command(msg.cmd);
+        // Ответы на команды (сохранение, ошибки) — сразу, кадр нарисуется по тику.
+        sendEvents();
       } catch (e) {
         fatal(e);
-        return;
       }
-      // Ответы на команды (сохранение, ошибки) — сразу, кадр нарисуется по тику.
-      sendEvents();
       break;
     case 'tick':
       try {
@@ -113,7 +125,13 @@ function handle(msg: ToWorker): void {
   }
 }
 
+// Сбои вне наших try/catch (отклонённые обещания, ошибки в обработчиках) тоже
+// доходят до основного потока, а не остаются в консоли worker'а.
+scope.addEventListener('unhandledrejection', (e) => fatal((e as PromiseRejectionEvent).reason));
+scope.addEventListener('error', (e) => fatal((e as ErrorEvent).error ?? (e as ErrorEvent).message));
+
 scope.onmessage = async (e: MessageEvent<ToWorker>) => {
+  if (dead) return;
   const msg = e.data;
   if (msg.t !== 'init') {
     if (core) handle(msg);
@@ -135,9 +153,14 @@ scope.onmessage = async (e: MessageEvent<ToWorker>) => {
       ring: new Uint8Array(msg.sab, RING_OFFSET, RING_CAPACITY * RECORD_SIZE),
     };
   }
-  post({ t: 'started', waitAsync });
-  writeLive();
-  sendEvents();
+  try {
+    post({ t: 'started', waitAsync });
+    writeLive();
+    sendEvents();
+  } catch (err) {
+    fatal(err);
+    return;
+  }
   for (const m of early.splice(0)) handle(m);
   if (sab && waitAsync) void sabLoop();
 };

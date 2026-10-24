@@ -5,9 +5,9 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import * as enc from '../src/core/input';
-import { Ctrl, Kind, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET, SAB_BYTES } from '../src/core/layout.gen';
-import { commandSizeError, MAX_COMMAND_BYTES, type FromWorker, type ToWorker } from '../src/core/messages';
-import { drainRing, LIVE_READ_RETRIES, LiveReader, writeLive } from '../src/core/shared';
+import { Ctrl, CTRL_BYTES, Kind, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET, SAB_BYTES } from '../src/core/layout.gen';
+import { commandSizeError, MAX_COMMAND_BYTES, prepareCommand, type FromWorker, type ToWorker } from '../src/core/messages';
+import { addSaturating, drainRing, LIVE_READ_RETRIES, LiveReader, writeLive } from '../src/core/shared';
 import { MessageTransport, SabTransport } from '../src/core/transport';
 
 const MiB = 1024 * 1024;
@@ -16,7 +16,7 @@ function sharedParts() {
   const sab = new SharedArrayBuffer(SAB_BYTES);
   return {
     sab,
-    ctrl: new Int32Array(sab, 0, 16),
+    ctrl: new Int32Array(sab, 0, CTRL_BYTES / 4),
     live: new Float64Array(sab, LIVE_OFFSET, LIVE_SLOTS),
     ring: new Uint8Array(sab, RING_OFFSET, RING_CAPACITY * RECORD_SIZE),
   };
@@ -93,7 +93,7 @@ test.describe('кольцо ввода', () => {
   test('основной поток: полное кольцо — запись в очередь, порядок сохраняется', () => {
     const posted: ToWorker[] = [];
     const t = new SabTransport({ postMessage: (m: ToWorker) => posted.push(m) } as unknown as Worker);
-    const parts = { ctrl: new Int32Array(t.sab, 0, 16), ring: new Uint8Array(t.sab, RING_OFFSET, RING_CAPACITY * RECORD_SIZE) };
+    const parts = { ctrl: new Int32Array(t.sab, 0, CTRL_BYTES / 4), ring: new Uint8Array(t.sab, RING_OFFSET, RING_CAPACITY * RECORD_SIZE) };
     const total = RING_CAPACITY + 10;
     for (let i = 0; i < total; i++) enc.resize(t.sink, 100 + i, 50, 1);
     expect(Atomics.load(parts.ctrl, Ctrl.INPUT_WRITE)).toBe(RING_CAPACITY);
@@ -106,6 +106,27 @@ test.describe('кольцо ввода', () => {
     const widths = Array.from({ length: 10 }, (_, i) => new DataView(out.buffer).getFloat64(i * RECORD_SIZE + 8, true));
     expect(widths).toEqual(Array.from({ length: 10 }, (_, i) => 100 + RING_CAPACITY + i));
     expect(t.dropped()).toBe(0);
+  });
+});
+
+test.describe('счётчик потерь INPUT_DROPPED', () => {
+  test('насыщается на максимуме int32, а не уходит в минус', () => {
+    const { ctrl } = sharedParts();
+    Atomics.store(ctrl, Ctrl.INPUT_DROPPED, 2 ** 31 - 5);
+    addSaturating(ctrl, Ctrl.INPUT_DROPPED, 3);
+    expect(Atomics.load(ctrl, Ctrl.INPUT_DROPPED)).toBe(2 ** 31 - 2);
+    addSaturating(ctrl, Ctrl.INPUT_DROPPED, 2 ** 31 + 1000);
+    expect(Atomics.load(ctrl, Ctrl.INPUT_DROPPED)).toBe(2 ** 31 - 1);
+  });
+
+  test('чтение кольца с огромным отрывом не переполняет счётчик', () => {
+    const { ctrl, ring } = sharedParts();
+    const out = new Uint8Array(RING_CAPACITY * RECORD_SIZE);
+    Atomics.store(ctrl, Ctrl.INPUT_DROPPED, 2 ** 31 - 10);
+    Atomics.store(ctrl, Ctrl.INPUT_READ, 0);
+    Atomics.store(ctrl, Ctrl.INPUT_WRITE, (2 ** 31) | 0);
+    drainRing(ctrl, ring, out);
+    expect(Atomics.load(ctrl, Ctrl.INPUT_DROPPED)).toBe(2 ** 31 - 1);
   });
 });
 
@@ -199,6 +220,29 @@ test.describe('предел размера команд', () => {
     }
     expect(commandSizeError({ type: 'save' })).toBeNull();
     expect(commandSizeError(JSON.parse('{"type":"open","bytes":"текст"}'))).toMatch(/^Неверная команда/);
+  });
+
+  test('размер в сообщении округляется вверх, а не вниз', () => {
+    const err = commandSizeError({ type: 'paste', bytes: big(MAX_COMMAND_BYTES.paste + 1) })!;
+    expect(err).toContain('65 МБ, предел для этой команды — 64 МБ');
+  });
+
+  test('байты в общей памяти отклоняются, часть буфера копируется перед передачей', () => {
+    const shared = new Uint8Array(new SharedArrayBuffer(8));
+    expect(commandSizeError({ type: 'open', bytes: shared })).toMatch(/общей памяти/);
+    const whole = new Uint8Array([1, 2, 3, 4]);
+    const a = prepareCommand({ type: 'paste', bytes: whole });
+    if ('error' in a) throw new Error(a.error);
+    expect((a.cmd as { bytes: Uint8Array }).bytes).toBe(whole);
+    expect(a.transfer).toEqual([whole.buffer]);
+    // Подмассив: уходит копия, исходный буфер остаётся у владельца.
+    const sub = whole.subarray(1, 3);
+    const b = prepareCommand({ type: 'paste', bytes: sub });
+    if ('error' in b) throw new Error(b.error);
+    const sent = (b.cmd as { bytes: Uint8Array }).bytes;
+    expect([Array.from(sent), sent.buffer.byteLength, sent.buffer === whole.buffer]).toEqual([[2, 3], 2, false]);
+    expect(whole.buffer.byteLength).toBe(4);
+    expect('error' in prepareCommand({ type: 'open', bytes: shared })).toBe(true);
   });
 
   test('транспорт не отправляет такую команду и возвращает текст ошибки', () => {
@@ -318,5 +362,92 @@ test.describe('записи ввода совпадают с Rust', () => {
       const hex = Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
       expect(hex, name).toBe(golden[i]);
     });
+  });
+});
+
+test.describe('переполнение очереди ввода', () => {
+  const ev = { button: -1, timeStamp: 1, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false } as PointerEvent;
+
+  test('SAB: после потока движений отпускание не теряется, порядок сохраняется', () => {
+    const t = new SabTransport({ postMessage: () => undefined } as unknown as Worker);
+    const ctrl = new Int32Array(t.sab, 0, CTRL_BYTES / 4);
+    const ring = new Uint8Array(t.sab, RING_OFFSET, RING_CAPACITY * RECORD_SIZE);
+    const total = RING_CAPACITY + 4 * RING_CAPACITY + 500; // кольцо, очередь и ещё сверху
+    for (let i = 0; i < total; i++) enc.pointer(t.sink, Kind.POINTER_MOVE, ev, i, 0);
+    expect(t.dropped()).toBe(500);
+    enc.pointer(t.sink, Kind.POINTER_UP, { ...ev, button: 0 } as PointerEvent, 7, 7);
+    enc.key(t.sink, Kind.KEY_UP, { code: 'KeyA', key: 'a', repeat: false, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, getModifierState: () => false, timeStamp: 0 } as unknown as KeyboardEvent);
+    expect(t.dropped()).toBe(502); // каждое вытеснило одно движение
+    const kinds: number[] = [];
+    const out = new Uint8Array(RING_CAPACITY * RECORD_SIZE);
+    for (let round = 0; round < 10; round++) {
+      const { count } = drainRing(ctrl, ring, out);
+      for (let i = 0; i < count; i++) kinds.push(out[i * RECORD_SIZE]);
+      t.tick();
+    }
+    expect(kinds.slice(-2)).toEqual([Kind.POINTER_UP, Kind.KEY_UP]);
+    expect(kinds.filter((k) => k === Kind.POINTER_UP)).toHaveLength(1);
+    expect(kinds).toHaveLength(RING_CAPACITY + 4 * RING_CAPACITY);
+  });
+
+  test('postMessage: то же правило', () => {
+    const posted: ToWorker[] = [];
+    const t = new MessageTransport({ postMessage: (m: ToWorker) => posted.push(m) } as unknown as Worker);
+    for (let i = 0; i < 4 * RING_CAPACITY + 100; i++) enc.pointer(t.sink, Kind.POINTER_MOVE, ev, i, 0);
+    expect(t.dropped()).toBe(100);
+    enc.pointer(t.sink, Kind.POINTER_UP, { ...ev, button: 0 } as PointerEvent, 7, 7);
+    enc.simple(t.sink, Kind.BLUR);
+    t.tick();
+    const m = posted[0];
+    if (m.t !== 'tick' || !m.input) throw new Error('нет кадра');
+    const bytes = new Uint8Array(m.input);
+    expect(bytes.byteLength).toBe(4 * RING_CAPACITY * RECORD_SIZE);
+    const n = bytes.byteLength / RECORD_SIZE;
+    expect([bytes[(n - 2) * RECORD_SIZE], bytes[(n - 1) * RECORD_SIZE]]).toEqual([Kind.POINTER_UP, Kind.BLUR]);
+  });
+});
+
+test.describe('сообщения worker\'а', () => {
+  function fake() {
+    const worker = { onmessage: null as ((e: MessageEvent<unknown>) => void) | null, postMessage: () => undefined };
+    return worker;
+  }
+  const send = (w: ReturnType<typeof fake>, data: unknown) => w.onmessage!({ data } as MessageEvent<unknown>);
+
+  test('живое состояние неверной формы и неизвестные виды игнорируются и считаются', () => {
+    const w = fake();
+    const t = new MessageTransport(w as unknown as Worker);
+    const got: FromWorker[] = [];
+    t.onMessage((m) => got.push(m));
+    send(w, { t: 'live', live: new Float64Array(3) });
+    send(w, { t: 'live', live: [1, 2] });
+    send(w, { t: 'неизвестное' });
+    send(w, null);
+    expect(t.malformed()).toBe(4);
+    expect(t.live()).toBeNull();
+    send(w, { t: 'events', events: [] });
+    expect(got).toHaveLength(1);
+    const good = new Float64Array(LIVE_SLOTS);
+    good[0] = 9;
+    send(w, { t: 'live', live: good });
+    expect(t.live()?.[0]).toBe(9);
+    expect(t.malformed()).toBe(4);
+  });
+
+  test('неверный ответ не останавливает кадры', () => {
+    const posted: unknown[] = [];
+    const w = { onmessage: null as ((e: MessageEvent<unknown>) => void) | null, postMessage: (m: unknown) => posted.push(m) };
+    const t = new MessageTransport(w as unknown as Worker);
+    t.tick();
+    w.onmessage!({ data: { t: 'live', live: new Float64Array(1) } } as MessageEvent<unknown>);
+    t.tick();
+    expect(posted).toHaveLength(2);
+  });
+
+  test('в режиме SAB сообщение live лишнее', () => {
+    const w = fake();
+    const t = new SabTransport(w as unknown as Worker);
+    send(w, { t: 'live', live: new Float64Array(LIVE_SLOTS) });
+    expect(t.malformed()).toBe(1);
   });
 });
