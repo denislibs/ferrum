@@ -162,7 +162,21 @@ impl Renderer {
         scale: f64,
         images: &dyn ImageProvider,
     ) -> Result<Vec<u8>, ExportError> {
-        let pixmap = self.export_pixmap(scene, id, scale, images)?;
+        self.export_png_nodes(scene, &[id], scale, images)
+    }
+
+    /// Экспорт нескольких узлов одной картинкой («Скопировать как PNG» для
+    /// выделения): область — объединение областей узлов (как у `export_png`), узлы
+    /// рисуются в порядке отрисовки сцены, а не выделения. Неизвестные и скрытые
+    /// узлы пропускаются; если не осталось ни одного — ошибка.
+    pub fn export_png_nodes(
+        &mut self,
+        scene: &Scene,
+        ids: &[NodeId],
+        scale: f64,
+        images: &dyn ImageProvider,
+    ) -> Result<Vec<u8>, ExportError> {
+        let pixmap = self.export_pixmap_nodes(scene, ids, scale, images)?;
         pixmap
             .into_png()
             .map_err(|e| ExportError::Encode(e.to_string()))
@@ -175,23 +189,64 @@ impl Renderer {
         scale: f64,
         images: &dyn ImageProvider,
     ) -> Result<Pixmap, ExportError> {
+        self.export_pixmap_nodes(scene, &[id], scale, images)
+    }
+
+    pub fn export_pixmap_nodes(
+        &mut self,
+        scene: &Scene,
+        ids: &[NodeId],
+        scale: f64,
+        images: &dyn ImageProvider,
+    ) -> Result<Pixmap, ExportError> {
         if !(scale.is_finite() && scale > 0.0) {
             return Err(ExportError::BadScale);
         }
-        let slot = scene.slot(id).ok_or(ExportError::NotFound)?;
-        let n = scene.at(slot);
-        // Скрытый узел (и узел без видимого содержимого) картинки не даёт.
-        if n.subtree_bounds.is_none() {
-            return Err(ExportError::Empty);
+        let mut slots = Vec::with_capacity(ids.len());
+        let mut area: Option<Rect> = None;
+        let mut known = false;
+        for id in ids {
+            let Some(slot) = scene.slot(*id) else {
+                continue;
+            };
+            known = true;
+            let n = scene.at(slot);
+            // Скрытый узел (и узел без видимого содержимого) картинки не даёт.
+            if n.subtree_bounds.is_none() {
+                continue;
+            }
+            let own = match (n.props.kind, n.local_bounds) {
+                (NodeKind::Frame, Some(b)) => Some(n.world.transform_rect_bbox(b)),
+                _ => match (n.world_bounds, n.subtree_bounds) {
+                    (Some(a), Some(b)) => Some(a.union(b)),
+                    (a, b) => a.or(b),
+                },
+            };
+            if let Some(own) = own {
+                area = Some(area.map_or(own, |a| a.union(own)));
+                slots.push(slot);
+            }
         }
-        let area = match (n.props.kind, n.local_bounds) {
-            (NodeKind::Frame, Some(b)) => Some(n.world.transform_rect_bbox(b)),
-            _ => match (n.world_bounds, n.subtree_bounds) {
-                (Some(a), Some(b)) => Some(a.union(b)),
-                (a, b) => a.or(b),
-            },
+        if !known {
+            return Err(ExportError::NotFound);
         }
-        .ok_or(ExportError::Empty)?;
+        let area = area.ok_or(ExportError::Empty)?;
+        // Узел, чей предок тоже экспортируется, уже нарисован вместе с предком:
+        // второй раз он лёг бы поверх (полупрозрачный — темнее).
+        let chosen: std::collections::HashSet<_> = slots.iter().copied().collect();
+        slots.retain(|&s| {
+            let mut cur = scene.at(s).parent;
+            while let Some(p) = cur {
+                if chosen.contains(&p) {
+                    return false;
+                }
+                cur = scene.at(p).parent;
+            }
+            true
+        });
+        // Порядок отрисовки: ключ — позиции от корня, без повторов.
+        slots.sort_by_cached_key(|s| scene.order_key(*s));
+        slots.dedup();
         let w = (area.width() * scale).round();
         let h = (area.height() * scale).round();
         if w < 1.0 || h < 1.0 {
@@ -223,7 +278,7 @@ impl Renderer {
         // не использует (`raster`, `retain` выключены), так что терять нечего.
         let mut painter = Painter::with_raster_limit(0);
         painter.begin_frame();
-        painter.draw(&mut backend, &ctx, &[slot]);
+        painter.draw(&mut backend, &ctx, &slots);
         Ok(backend.render())
     }
 }
