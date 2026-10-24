@@ -36,6 +36,26 @@ fn shift_rotation_snaps_absolute_angle_not_delta() {
 }
 
 #[test]
+fn non_finite_pointer_up_cancels_gesture() {
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 100.0, 50.0);
+    h.click(150.0, 125.0, none());
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.down(150.0, 125.0, none());
+    h.mv(190.0, 160.0, none());
+    assert!(h.ed.scene().has_preview());
+    // Отпускание без координат отбрасывается, но жест не должен зависнуть.
+    h.up(f64::NAN, 160.0, none());
+    assert!(!h.ed.is_busy());
+    assert!(!h.ed.scene().has_preview());
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(h.state(), before);
+    assert_eq!(h.props(r).x, 100.0);
+    h.assert_scene_clean();
+}
+
+#[test]
 fn non_finite_input_never_reaches_nodes() {
     let mut h = H::new();
     let r = h.rect(None, 100.0, 100.0, 100.0, 50.0);
