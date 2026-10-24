@@ -641,10 +641,30 @@ pub fn scale_patches(bases: &[Base], t: Affine, pixel_snap: bool) -> Vec<(NodeId
 }
 
 /// Как `scale_patches`, но округление — по осям (см. `PixelSnap`). Ширина
-/// округляется вместе с осью x, высота — с осью y. Нечисловой `t` заменяется тождественным.
+/// округляется вместе с осью x, высота — с осью y. Нечисловой `t` заменяется
+/// тождественным. Отражение жеста считается по осям мира (см. `scale_patches_in`).
 pub fn scale_patches_snapped(
     bases: &[Base],
     t: Affine,
+    pixel: PixelSnap,
+) -> Vec<(NodeId, PropsPatch)> {
+    scale_patches_in(bases, t, Affine::IDENTITY, pixel)
+}
+
+/// Как `scale_patches_snapped`, но жест задан в рамке `frame` (её матрица в мир):
+/// у ресайза одного узла это сам узел, у группы — группа, у нескольких узлов и у
+/// команд отражения — мир.
+///
+/// Отражение — одно правило для любого поворота, как в Figma: если `t` в осях
+/// рамки отрицателен по оси x, у каждого узла переключается `flip_x`, по оси y —
+/// `flip_y` (по обеим — оба). Поворот получается из разложения: при отражении по
+/// оси рамки узел с поворотом θ относительно неё получает −θ. Так у одного узла
+/// ручка за противоположной стороной отражает именно эту ось, угол за обеими
+/// сторонами — обе без поворота на 180°, а Shift+H дважды возвращает узел как был.
+pub fn scale_patches_in(
+    bases: &[Base],
+    t: Affine,
+    frame: Affine,
     pixel: PixelSnap,
 ) -> Vec<(NodeId, PropsPatch)> {
     let t = if finite_affine(t) {
@@ -652,6 +672,7 @@ pub fn scale_patches_snapped(
     } else {
         Affine::IDENTITY
     };
+    let axes = mirror_axes(t, frame);
     // Масштаб в координатах родителя каждого узла; для детей группы — в
     // координатах группы, посчитанный при обработке самой группы.
     let mut in_parent: Vec<Affine> = Vec::with_capacity(bases.len());
@@ -669,7 +690,10 @@ pub fn scale_patches_snapped(
             continue;
         }
         let m = tp * b.local;
-        let hint = mirror_hint(&b.props, b.local, m);
+        let hint = match axes {
+            Some((ax, ay)) => (b.props.flip_x ^ ax, b.props.flip_y ^ ay),
+            None => mirror_hint(&b.props, b.local, m),
+        };
         // Линии: у них точен сдвиг по u, а центр лежит на линии и уехать не может.
         let pose = if b.props.kind == NodeKind::Line {
             decompose_hinted(m, b.props.w, b.props.h, b.props.rotation, hint)
@@ -681,13 +705,28 @@ pub fn scale_patches_snapped(
     out
 }
 
-/// Какие отражения ждать от масштаба: жест в осях узла — `local⁻¹ · m`. Если он
-/// диагональный (ресайз одного узла в его осях, отражение мира у неповёрнутого или
-/// повёрнутого на четверть узла), ось с отрицательным масштабом переключает своё
-/// отражение — так ручка за противоположной стороной отражает именно эту ось, а
-/// угол за обеими сторонами отражает обе, не поворачивая узел на 180°. Иначе
-/// (повёрнутый узел в общей рамке) подсказка — прежние отражения, а ось выбирает
-/// `decompose_hinted` по ближайшему повороту.
+/// Оси рамки, по которым `t` отражает: `frame⁻¹ · t · frame` — масштаб по осям
+/// рамки (так устроены ресайз и команды отражения). `None` — жест не диагонален в
+/// рамке (не из ресайза), отражение тогда ищет `mirror_hint`.
+fn mirror_axes(t: Affine, frame: Affine) -> Option<(bool, bool)> {
+    if !finite_affine(frame) || frame.determinant().abs() < 1e-24 {
+        return None;
+    }
+    let g = (frame.inverse() * t * frame).as_coeffs();
+    if !g.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let scale = g[0].abs().max(g[3].abs());
+    if g[1].abs() > 1e-9 * scale || g[2].abs() > 1e-9 * scale {
+        return None;
+    }
+    Some((g[0] < 0.0, g[3] < 0.0))
+}
+
+/// Запасная подсказка для жеста, не диагонального в своей рамке: жест в осях узла
+/// — `local⁻¹ · m`. Если он диагональный, ось с отрицательным масштабом
+/// переключает своё отражение; иначе подсказка — прежние отражения, а ось при
+/// несовпадении чётности выбирает `decompose_hinted` по ближайшему повороту.
 fn mirror_hint(props: &Props, local: Affine, m: Affine) -> (bool, bool) {
     let base = (props.flip_x, props.flip_y);
     let g = (local.inverse() * m).as_coeffs();

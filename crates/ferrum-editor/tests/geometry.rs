@@ -831,7 +831,8 @@ fn world_mirror_of_rotated_node_negates_rotation() {
     assert!(close(p.rotation.unwrap(), 330.0), "{p:?}");
     let base = &b[0].props;
     assert!(same_affine(local_with(base, p), mx * w0));
-    // Ось мира на четверти поворота — это ось y узла: поворот не меняется.
+    // Узел на четверти поворота — то же правило: flip_x и −θ (90° → 270°), а не
+    // отражение по y узла с прежним поворотом.
     let (mut doc, pg, ids) = page(&[(
         None,
         NodeKind::Rect,
@@ -844,7 +845,9 @@ fn world_mirror_of_rotated_node_negates_rotation() {
     let w0 = scene.node(ids[0]).unwrap().world;
     let b = bases(&scene, &ids, true);
     let (_, p) = &scale_patches(&b, mx, false)[0];
-    assert_eq!((p.flip_x, p.flip_y, p.rotation), (None, Some(true), None));
+    assert_eq!(p.flip_x, Some(true));
+    assert_eq!(p.flip_y, None);
+    assert!(close(p.rotation.unwrap(), 270.0), "{p:?}");
     assert!(same_affine(local_with(&b[0].props, p), mx * w0));
 }
 

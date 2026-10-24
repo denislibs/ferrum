@@ -231,7 +231,8 @@ fn multi_selection_resized_past_side_mirrors_each_node() {
     let mut h = H::new();
     let a = h.rect(None, 100.0, 100.0, 50.0, 50.0);
     let b = h.rect(None, 200.0, 100.0, 50.0, 30.0);
-    // Повёрнутый на четверть: зеркальный по x мира — это его отражение по y.
+    // Повёрнутый на четверть: правило то же, что для любого угла — отражение по x
+    // мира переключает flip_x, а поворот θ становится −θ (90° → 270°).
     let c = h.rect(None, 300.0, 200.0, 60.0, 20.0);
     h.set(
         c,
@@ -255,8 +256,8 @@ fn multi_selection_resized_past_side_mirrors_each_node() {
     }
     assert_eq!(flips(&mut h, a), (true, false));
     assert_eq!(flips(&mut h, b), (true, false));
-    assert_eq!(flips(&mut h, c), (false, true));
-    assert_eq!(h.props(c).rotation, 90.0);
+    assert_eq!(flips(&mut h, c), (true, false));
+    assert_eq!(h.props(c).rotation, 270.0);
     h.assert_one_step(steps, &before);
 }
 
@@ -500,4 +501,131 @@ fn drawing_inside_mirrored_frame_appears_unmirrored() {
     );
     assert!(world(&h, r).determinant() > 0.0);
     assert_eq!(flips(&mut h, r), (true, false));
+}
+
+/// Прямоугольник 100×50 в (300, 300) с поворотом `deg`, выделенный.
+fn rotated(deg: f64) -> (H, NodeId) {
+    let mut h = H::new();
+    let r = h.rect(None, 300.0, 300.0, 100.0, 50.0);
+    h.set(
+        r,
+        PropsPatch {
+            rotation: Some(deg),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[r]);
+    (h, r)
+}
+
+fn mirror_about(c: Point, sx: f64, sy: f64) -> Affine {
+    Affine::translate(c.to_vec2())
+        * Affine::scale_non_uniform(sx, sy)
+        * Affine::translate(-c.to_vec2())
+}
+
+/// Одно правило при любом угле, как в Figma: отражение по x мира переключает
+/// flip_x, по y — flip_y, поворот θ становится −θ; повтор возвращает узел.
+#[test]
+fn flip_commands_follow_one_rule_at_any_angle() {
+    for deg in [60.0, 90.0, 135.0] {
+        for (cmd, sx, sy, want) in [
+            (CommandId::FlipHorizontal, -1.0, 1.0, (true, false)),
+            (CommandId::FlipVertical, 1.0, -1.0, (false, true)),
+        ] {
+            let (mut h, r) = rotated(deg);
+            let before = h.props(r);
+            let w0 = world(&h, r);
+            let c = SelectionBox::of(h.ed.scene(), &[r]).unwrap().center_world();
+            h.ed.execute(cmd);
+            let p = h.props(r);
+            assert_eq!((p.flip_x, p.flip_y), want, "{deg} {cmd:?}");
+            let neg = (360.0 - deg) % 360.0;
+            assert!(close(p.rotation, neg), "{deg} {cmd:?}: {p:?}");
+            assert_affine(world(&h, r), mirror_about(c, sx, sy) * w0);
+            // Повтор возвращает прежнюю позу.
+            h.ed.execute(cmd);
+            let p = h.props(r);
+            assert_eq!((p.flip_x, p.flip_y), (false, false), "{deg} {cmd:?}");
+            assert_eq!(p.rotation, before.rotation, "{deg} {cmd:?}");
+            assert!(
+                (p.x - before.x).abs() < 1e-9 && (p.y - before.y).abs() < 1e-9,
+                "{deg} {cmd:?}: {p:?}"
+            );
+            assert_eq!((p.w, p.h), (before.w, before.h));
+            assert_affine(world(&h, r), w0);
+        }
+    }
+}
+
+/// Ресайз нескольких узлов за сторону — то же правило, что у команд.
+#[test]
+fn multi_selection_resize_past_side_follows_one_rule_at_any_angle() {
+    for deg in [60.0, 90.0, 135.0] {
+        for vertical in [false, true] {
+            let mut h = H::new();
+            let a = h.rect(None, 100.0, 100.0, 50.0, 50.0);
+            let r = h.rect(None, 300.0, 300.0, 100.0, 50.0);
+            h.set(
+                r,
+                PropsPatch {
+                    rotation: Some(deg),
+                    ..Default::default()
+                },
+            );
+            h.ed.select(&[a, r]);
+            let sbox = SelectionBox::of(h.ed.scene(), &[a, r]).unwrap();
+            let w0 = world(&h, r);
+            let (from, to, t) = if vertical {
+                let rr = sbox.rect;
+                (
+                    sbox.point(0.5, 1.0),
+                    sbox.point(0.5, -1.0),
+                    rect_map(rr, Rect::new(rr.x0, rr.y0, rr.x1, rr.y0 - rr.height())),
+                )
+            } else {
+                let rr = sbox.rect;
+                (
+                    sbox.point(1.0, 0.5),
+                    sbox.point(-1.0, 0.5),
+                    rect_map(rr, Rect::new(rr.x0, rr.y0, rr.x0 - rr.width(), rr.y1)),
+                )
+            };
+            let steps = h.ed.step_count();
+            h.drag((from.x, from.y), (to.x, to.y), none());
+            assert_eq!(h.ed.step_count(), steps + 1);
+            let p = h.props(r);
+            let want = if vertical {
+                (false, true)
+            } else {
+                (true, false)
+            };
+            assert_eq!((p.flip_x, p.flip_y), want, "{deg} {vertical}");
+            assert!(close(p.rotation, (360.0 - deg) % 360.0), "{deg}: {p:?}");
+            assert_affine(world(&h, r), t * w0);
+        }
+    }
+}
+
+#[test]
+fn node_rotated_180_snaps_on_resize() {
+    // Под 180° — та же матрица, что у отражения по обеим осям: рамка выровнена по
+    // осям мира, и ручка ресайза привязывается к соседям.
+    let (mut h, r) = rotated(180.0);
+    // Рамка узла видимо 200..300 × 250..300; сосед левее, его правый край — 150.
+    h.rect(None, 100.0, 250.0, 50.0, 50.0);
+    h.ed.select(&[r]);
+    // Ручка Right (локально x = 100) — видимый левый край x = 200.
+    assert_eq!(handle(&h, 1.0, 0.5), Point::new(200.0, 275.0));
+    h.drag_hold((200.0, 275.0), (153.0, 275.0), none());
+    assert!(
+        !h.ed.overlay().snap_lines.is_empty(),
+        "линия привязки к соседу"
+    );
+    h.up(153.0, 275.0, none());
+    let p = h.props(r);
+    // Без привязки ширина была бы 147.
+    assert_eq!(p.w, 150.0);
+    assert_eq!(p.rotation, 180.0);
+    assert_eq!((p.flip_x, p.flip_y), (false, false));
 }

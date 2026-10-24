@@ -14,7 +14,7 @@ use kurbo::{Affine, Line, Point, Rect, Vec2};
 
 use super::{Ctx, Cursor, Flow, Tool, ToolKind, ToolOverlay, DRAG_THRESHOLD_PX};
 use crate::geometry::{
-    bases, normalize_deg, rect_map, resize_rect, rigid_patches, scale_patches, snap_angle,
+    bases, normalize_deg, rect_map, resize_rect, rigid_patches, scale_patches_in, snap_angle,
     top_level, world_box, Base, Handle, SelectionBox,
 };
 use crate::input::{Modifiers, PointerEvent};
@@ -489,7 +489,12 @@ impl SelectTool {
                 let new = resize_rect(r.sbox.rect, r.handle, local, mods.shift, mods.alt);
                 r.transform =
                     r.sbox.to_world * rect_map(r.sbox.rect, new) * r.sbox.to_world.inverse();
-                let patches = scale_patches(&r.bases, r.transform, cx.settings.pixel_snap);
+                let patches = scale_patches_in(
+                    &r.bases,
+                    r.transform,
+                    r.sbox.to_world,
+                    cx.settings.pixel_snap.into(),
+                );
                 cx.scene.set_preview(&patches);
             }
             State::Rotating(r) => {
@@ -569,7 +574,12 @@ impl SelectTool {
             State::Dragging(d) => commit_drag(cx, d, cx.to_world(e.point)),
             State::Marquee(_) => {}
             State::Resizing(r) => {
-                let patches = scale_patches(&r.bases, r.transform, cx.settings.pixel_snap);
+                let patches = scale_patches_in(
+                    &r.bases,
+                    r.transform,
+                    r.sbox.to_world,
+                    cx.settings.pixel_snap.into(),
+                );
                 commit_patches(cx, patches);
             }
             State::Rotating(r) => {
