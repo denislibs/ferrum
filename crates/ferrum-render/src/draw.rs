@@ -431,7 +431,7 @@ impl Painter {
             let (w, h) = (w.max(1.0) as u16, h.max(1.0) as u16);
             let mut cpu = match self.raster_backend.take() {
                 Some(mut b) => {
-                    b.reset(w, h);
+                    b.begin_frame(w, h);
                     b
                 }
                 None => CpuBackend::new(w, h),

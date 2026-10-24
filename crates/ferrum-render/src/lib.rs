@@ -78,7 +78,9 @@ impl Renderer {
         self.painter.raster_bytes()
     }
 
-    /// Рисует кадр: фон, содержимое, оверлеи.
+    /// Рисует кадр: фон, содержимое, оверлеи. Сначала бэкенд начинает новый кадр
+    /// размера `camera.device_size()` (`RenderBackend::begin_frame`): прошлый кадр
+    /// стирается, поэтому один бэкенд можно переиспользовать.
     pub fn render(
         &mut self,
         backend: &mut impl RenderBackend,
@@ -88,6 +90,8 @@ impl Renderer {
         images: &dyn ImageProvider,
         background: Option<Rgba>,
     ) -> FrameStats {
+        let (w, h) = camera.device_size();
+        backend.begin_frame(w, h);
         if let Some(bg) = background {
             let (w, h) = backend.size();
             backend.set_transform(Affine::IDENTITY);
@@ -182,6 +186,7 @@ impl Renderer {
             return Err(ExportError::TooLarge(w as u32, h as u32));
         }
         let mut backend = CpuBackend::new(w as u16, h as u16);
+        backend.begin_frame(w as u16, h as u16);
         let ctx = DrawContext {
             scene,
             images,

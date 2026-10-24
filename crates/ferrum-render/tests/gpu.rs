@@ -41,6 +41,10 @@ impl<B: RenderBackend> Recording<B> {
 }
 
 impl<B: RenderBackend> RenderBackend for Recording<B> {
+    fn begin_frame(&mut self, w: u16, h: u16) {
+        self.log.push("begin_frame");
+        self.inner.begin_frame(w, h);
+    }
     fn size(&self) -> (u16, u16) {
         self.inner.size()
     }
@@ -134,6 +138,9 @@ fn gpu_encodes_same_calls_as_cpu() {
     // CPU без растрового кэша, чтобы кадры были сравнимы.
     struct NoRaster(Recording<CpuBackend>);
     impl RenderBackend for NoRaster {
+        fn begin_frame(&mut self, w: u16, h: u16) {
+            self.0.begin_frame(w, h)
+        }
         fn size(&self) -> (u16, u16) {
             self.0.size()
         }

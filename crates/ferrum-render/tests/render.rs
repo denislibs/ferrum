@@ -126,6 +126,9 @@ fn tiny_nodes_become_rects_and_specks_disappear() {
 struct NoRaster<'a>(&'a mut CpuBackend);
 
 impl RenderBackend for NoRaster<'_> {
+    fn begin_frame(&mut self, w: u16, h: u16) {
+        self.0.begin_frame(w, h)
+    }
     fn size(&self) -> (u16, u16) {
         self.0.size()
     }
@@ -618,4 +621,51 @@ fn raster_cache_respects_byte_budget() {
     assert!(small.raster_cache_bytes() <= limit);
     assert!(draw(&mut small, &scene, &cam).raster_builds > 0);
     assert!(small.raster_cache_bytes() <= limit);
+}
+
+/// Медиана длительностей (для замеров времени кадра в тестах).
+fn median_of(mut d: Vec<std::time::Duration>) -> std::time::Duration {
+    d.sort();
+    d[d.len() / 2]
+}
+
+#[test]
+fn reused_backend_starts_each_frame_clean() {
+    // Один бэкенд на 300 кадров, как в приложении: прошлые кадры не должны
+    // оставаться под новым (иначе время кадра растёт, а vello_cpu через сотню-другую
+    // кадров падает на переполнении индекса альфы).
+    let (mut p, _) = grid(3, 3, 10);
+    let scene = p.scene();
+    let mut cam = Camera::new(Size::new(160.0, 160.0), 1.0);
+    cam.fit(scene.bounds().unwrap(), 0.0);
+    cam.set_zoom(cam.zoom() * 1.5);
+    let (w, h) = cam.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    let mut r = Renderer::new();
+    let overlay = ferrum_render::Overlay::default();
+    let mut first: Option<Pixmap> = None;
+    let mut last = None;
+    let mut times = Vec::new();
+    for _ in 0..300 {
+        let t = std::time::Instant::now();
+        r.render(&mut backend, &scene, &cam, &overlay, &NoImages, Some(WHITE));
+        let img = backend.render();
+        times.push(t.elapsed());
+        if first.is_none() {
+            first = Some(img);
+        } else {
+            last = Some(img);
+        }
+    }
+    let (first, last) = (first.unwrap(), last.unwrap());
+    assert!(
+        first.data() == last.data(),
+        "последний кадр отличается от первого"
+    );
+    let head = median_of(times[..20].to_vec());
+    let tail = median_of(times[times.len() - 20..].to_vec());
+    assert!(
+        tail <= head * 2,
+        "время кадра растёт: первые {head:?}, последние {tail:?}"
+    );
 }

@@ -29,6 +29,10 @@ impl GpuBackend {
 }
 
 impl RenderBackend for GpuBackend {
+    fn begin_frame(&mut self, width: u16, height: u16) {
+        self.reset(width, height);
+    }
+
     fn size(&self) -> (u16, u16) {
         (self.scene.width(), self.scene.height())
     }
