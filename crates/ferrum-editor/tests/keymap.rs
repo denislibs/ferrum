@@ -144,6 +144,12 @@ fn lookup_by_physical_code_with_exact_modifiers() {
         win.lookup(&key("KeyV", true, false, false, false)),
         Some(CommandId::Paste)
     );
+    // Shift без своей команды не падает на команду без Shift: Shift+R — не «Прямоугольник».
+    assert_eq!(win.lookup(&key("KeyR", false, false, true, false)), None);
+    assert_eq!(
+        Keymap::new(Platform::Mac).lookup(&key("KeyR", false, false, true, false)),
+        None
+    );
 }
 
 #[test]

@@ -472,8 +472,13 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
     };
     // Нечисловые и огромные значения — к допустимым, как у строк кэша сцены.
     shape::sanitize(&mut props);
-    if kind == NodeKind::Line {
-        props.h = 0.0;
+    // Размер, которого у узла этого типа не бывает, не принимается из чужих данных:
+    // у линии нет высоты, у группы — своей рамки (границы считаются по детям), а
+    // отражение группы идёт относительно начала её координат (`w = h = 0`).
+    match kind {
+        NodeKind::Line => props.h = 0.0,
+        NodeKind::Group => (props.w, props.h) = (0.0, 0.0),
+        _ => {}
     }
     Ok(props)
 }

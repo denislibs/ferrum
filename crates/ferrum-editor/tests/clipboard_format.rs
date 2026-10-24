@@ -454,3 +454,23 @@ fn flips_travel_in_props_and_old_payloads_decode_unmirrored() {
         Err(ClipboardError::Corrupted(_))
     ));
 }
+
+#[test]
+fn hostile_group_size_is_dropped() {
+    // Группа своей рамки не имеет: размер из чужих данных обнуляется, иначе её
+    // отражение шло бы не относительно начала координат, а относительно выдуманного
+    // центра.
+    let group = node_json(None, "group")
+        .replace("\"w\":10.0", "\"w\":5000.0")
+        .replace("\"h\":10.0", "\"h\":-3.0")
+        .replace("\"clipContent\"", "\"flipX\":true,\"clipContent\"");
+    let child = node_json(Some(0), "rect");
+    let json =
+        format!("{{\"nodes\":[{group},{child}],\"images\":[],\"bounds\":[0.0,0.0,10.0,10.0]}}");
+    let p = ClipPayload::decode(&with_json(&json)).unwrap();
+    let g = &p.nodes[0].props;
+    assert_eq!(g.kind, NodeKind::Group);
+    assert_eq!((g.w, g.h), (0.0, 0.0));
+    assert!(g.flip_x);
+    assert_eq!((p.nodes[1].props.w, p.nodes[1].props.h), (10.0, 10.0));
+}
