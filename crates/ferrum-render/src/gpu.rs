@@ -2,6 +2,7 @@
 //! для CPU. Поверхность, устройство wgpu/WebGL и растеризация — этап 4.
 
 use kurbo::{Affine, BezPath, Rect, Stroke};
+// vello_cpu и vello_gpu используют один и тот же `peniko` (проверено `cargo tree -d`).
 use vello_cpu::peniko::Fill;
 
 use crate::backend::{ImagePaint, RenderBackend, Rgba};
