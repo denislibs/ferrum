@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use ferrum_doc::{NodeId, NodeKind, PropsPatch};
 use ferrum_render::HANDLE_SIZE;
-use ferrum_scene::Draft;
+use ferrum_scene::{Draft, Slot};
 use kurbo::{Affine, Line, Point, Rect, Vec2};
 
 use super::{Ctx, Cursor, Flow, Tool, ToolKind, ToolOverlay, DRAG_THRESHOLD_PX};
@@ -20,7 +20,8 @@ use crate::geometry::{
 use crate::input::{Modifiers, PointerEvent};
 use crate::ops::{duplicate, local_delta, reposition};
 use crate::selection::{
-    deeper, drop_frame_at, frame_label_at, locked, resolve, root_frame_at, top_hit, Pick,
+    deeper, drop_frame_at, frame_label_at, locked, resolve_with, root_frame_at, selection_parents,
+    top_hit, Pick,
 };
 use crate::snap::{Snapper, SNAP_THRESHOLD_PX};
 
@@ -150,6 +151,22 @@ pub struct SelectTool {
     last: Option<PointerEvent>,
     /// Время и точка последнего клика — для двойного клика.
     last_click: Option<(f64, Point)>,
+    /// То, что наведение и нажатие берут из выделения (см. `SelCache`).
+    cache: Option<SelCache>,
+}
+
+/// Что наведение берёт из выделения: рамку редактируемых выделенных и родителей
+/// выделенных. Посчитать их — O(размера выделения); наведение без кнопки
+/// случается на каждое движение, поэтому они кэшируются по номеру сцены, её
+/// счётчику изменений и версии выделения: на движение остаётся работа,
+/// не зависящая от размера выделения (при 20 000 выделенных было 2.5 мс).
+#[derive(Debug, Clone)]
+struct SelCache {
+    key: (u64, u64, u64),
+    /// Рамка выделения без черновиков и заблокированных (как у жестов); `None` —
+    /// таких нет.
+    sbox: Option<SelectionBox>,
+    parents: HashSet<Option<Slot>>,
 }
 
 impl Default for SelectTool {
@@ -185,7 +202,32 @@ impl SelectTool {
             lines: Vec::new(),
             last: None,
             last_click: None,
+            cache: None,
         }
+    }
+
+    /// Кэш выделения для текущего состояния: пересчитывается, только если
+    /// сменились сцена, её содержимое или выделение.
+    fn sel_cache(&mut self, cx: &Ctx) -> &SelCache {
+        let key = (
+            cx.scene_epoch,
+            cx.scene.change_counter(),
+            cx.selection.version(),
+        );
+        if self.cache.as_ref().is_none_or(|c| c.key != key) {
+            let sel = editable(cx, cx.selection);
+            let sbox = if sel.is_empty() {
+                None
+            } else {
+                SelectionBox::of(cx.scene, &sel)
+            };
+            self.cache = Some(SelCache {
+                key,
+                sbox,
+                parents: selection_parents(cx.scene, cx.selection),
+            });
+        }
+        self.cache.as_ref().expect("кэш только что заполнен")
     }
 
     /// Единственная выделенная линия.
@@ -200,13 +242,10 @@ impl SelectTool {
         }
     }
 
-    /// Ручка или зона поворота под экранной точкой.
-    fn box_hit(cx: &Ctx, screen: Point) -> Option<(BoxHit, f64)> {
-        let sel = editable(cx, cx.selection);
-        if sel.is_empty() {
-            return None;
-        }
-        let sbox = SelectionBox::of(cx.scene, &sel)?;
+    /// Ручка или зона поворота под экранной точкой; `sbox` — рамка редактируемых
+    /// выделенных из `SelCache`.
+    fn box_hit(cx: &Ctx, sbox: Option<SelectionBox>, screen: Point) -> Option<(BoxHit, f64)> {
+        let sbox = sbox?;
         let to_screen = |p: Point| cx.camera.world_to_screen(p);
         if Self::single_line(cx).is_some() {
             for h in [Handle::LineStart, Handle::LineEnd] {
@@ -257,8 +296,15 @@ impl SelectTool {
         None
     }
 
-    /// Узел, который выберет клик в точке, с учётом модификаторов.
-    fn pick_at(cx: &Ctx, screen: Point, mods: Modifiers, double: bool) -> Option<NodeId> {
+    /// Узел, который выберет клик в точке, с учётом модификаторов; `parents` —
+    /// родители выделенных из `SelCache`.
+    fn pick_at(
+        cx: &Ctx,
+        parents: &HashSet<Option<Slot>>,
+        screen: Point,
+        mods: Modifiers,
+        double: bool,
+    ) -> Option<NodeId> {
         if let Some(frame) = frame_label_at(cx.scene, cx.camera, screen) {
             return Some(frame);
         }
@@ -274,11 +320,13 @@ impl SelectTool {
         } else {
             Pick::Normal
         };
-        resolve(cx.scene, hit, cx.selection, pick)
+        resolve_with(cx.scene, hit, parents, pick)
     }
 
     fn update_hover(&mut self, cx: &mut Ctx, e: &PointerEvent) {
-        if let Some((hit, angle)) = Self::box_hit(cx, e.point) {
+        let cache = self.sel_cache(cx);
+        let sbox = cache.sbox;
+        if let Some((hit, angle)) = Self::box_hit(cx, sbox, e.point) {
             *cx.hover = None;
             self.cursor = match hit {
                 BoxHit::Handle(_) => Cursor::Resize { angle },
@@ -286,8 +334,9 @@ impl SelectTool {
             };
             return;
         }
+        let hover = Self::pick_at(cx, &self.sel_cache(cx).parents, e.point, e.modifiers, false);
         self.cursor = Cursor::Default;
-        *cx.hover = Self::pick_at(cx, e.point, e.modifiers, false);
+        *cx.hover = hover;
     }
 
     fn begin(&mut self, cx: &mut Ctx, press: Press, e: &PointerEvent) {
@@ -317,7 +366,7 @@ impl SelectTool {
             }
             Target::Empty { context } => {
                 let base = if e.modifiers.shift {
-                    cx.selection.clone()
+                    cx.selection.to_vec()
                 } else {
                     Vec::new()
                 };
@@ -465,7 +514,7 @@ impl SelectTool {
                 let mut sel = m.base.clone();
                 let have: HashSet<NodeId> = sel.iter().copied().collect();
                 sel.extend(found.into_iter().filter(|id| !have.contains(id)));
-                *cx.selection = sel;
+                cx.selection.set(sel);
             }
             State::Resizing(r) => {
                 let mut p = p;
@@ -566,7 +615,7 @@ impl SelectTool {
                     match on_click {
                         OnClick::Nothing => {}
                         OnClick::Remove(id) => cx.selection.retain(|s| s != id),
-                        OnClick::SelectOnly(id) => *cx.selection = vec![*id],
+                        OnClick::SelectOnly(id) => cx.selection.set(vec![*id]),
                     }
                 }
                 self.last_click = Some((e.time_ms, e.point));
@@ -683,7 +732,7 @@ fn line_patch(parent_world: Affine, a: Point, b: Point) -> PropsPatch {
 }
 
 fn commit_patches(cx: &mut Ctx, patches: Vec<(NodeId, PropsPatch)>) {
-    let sel = cx.selection.clone();
+    let sel = cx.selection.to_vec();
     cx.commit(|tx, _| {
         for (id, patch) in &patches {
             tx.set_props(*id, patch)?;
@@ -709,7 +758,7 @@ fn commit_drag(cx: &mut Ctx, d: Drag, pointer: Point) {
     let ids: HashSet<NodeId> = d.originals.iter().map(|m| m.id).collect();
     let target = drop_frame_at(cx.scene, pointer, cx.tolerance(), &ids);
     let reparent = target != d.grab_parent;
-    let sel = cx.selection.clone();
+    let sel = cx.selection.to_vec();
     cx.commit(|tx, scene| {
         let shift = Affine::translate(delta);
         // Переносятся узлы, чей родитель — фрейм или корень: из группы при
@@ -771,18 +820,20 @@ impl Tool for SelectTool {
         }
         let world = cx.to_world(e.point);
         let shift = e.modifiers.shift;
-        let target = if let Some((hit, _)) = Self::box_hit(cx, e.point) {
+        let cache = self.sel_cache(cx);
+        let sbox = cache.sbox;
+        let target = if let Some((hit, _)) = Self::box_hit(cx, sbox, e.point) {
             match hit {
                 BoxHit::Handle(h) => Target::Handle(h),
                 BoxHit::Rotate => Target::Rotate,
             }
-        } else if let Some(id) = Self::pick_at(cx, e.point, e.modifiers, double) {
+        } else if let Some(id) = Self::pick_at(cx, &cache.parents, e.point, e.modifiers, double) {
             let selected = cx.selection.contains(&id);
             let on_click = if !selected {
                 if shift {
                     cx.selection.push(id);
                 } else {
-                    *cx.selection = vec![id];
+                    cx.selection.set(vec![id]);
                 }
                 OnClick::Nothing
             } else if shift {
@@ -852,7 +903,7 @@ impl Tool for SelectTool {
 
     fn cancel(&mut self, cx: &mut Ctx) {
         if let State::Marquee(m) = &self.state {
-            *cx.selection = m.base.clone();
+            cx.selection.set(m.base.clone());
         }
         self.state = State::Idle;
         self.lines.clear();

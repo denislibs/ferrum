@@ -220,3 +220,53 @@ fn deepest_click_uses_cmd_on_mac() {
     h.click(130.0, 130.0, ctrl());
     assert_eq!(h.sel(), vec![p.g], "без контекста — группа целиком");
 }
+
+/// Наведение берёт рамку и родителей выделения из кэша по версии выделения и
+/// счётчику сцены: ручки следуют за выделением из панели, за правкой документа,
+/// за отменой и за сменой страницы; повторный выбор того же списка не шлёт
+/// «выделение изменилось», а повторы в списке убираются.
+#[test]
+fn hover_follows_selection_and_document_changes() {
+    let mut h = H::new();
+    let a = h.rect(None, 100.0, 100.0, 100.0, 100.0);
+    let b = h.rect(None, 400.0, 100.0, 100.0, 100.0);
+    let resize = |h: &mut H, x: f64, y: f64| {
+        h.hover(x, y);
+        matches!(h.ed.cursor(), Cursor::Resize { .. })
+    };
+    h.ed.select(&[a, a, b, a]);
+    assert_eq!(h.sel(), vec![a, b], "повторы убраны, порядок входа");
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    assert!(resize(&mut h, 200.0, 200.0), "угол a");
+    h.ed.select(&[a]);
+    assert!(
+        !h.ed
+            .take_events()
+            .iter()
+            .any(|e| matches!(e, EditorEvent::SelectionChanged(_))),
+        "тот же список — не изменение"
+    );
+    // Выделение из панели: ручки у b, у a — нет.
+    h.ed.select(&[b]);
+    assert!(h
+        .ed
+        .take_events()
+        .contains(&EditorEvent::SelectionChanged(vec![b])));
+    assert!(!resize(&mut h, 200.0, 200.0));
+    assert!(resize(&mut h, 500.0, 200.0), "угол b");
+    // Правка документа двигает b — ручки за ним.
+    h.set(b, patch(600.0, 100.0, 100.0, 100.0));
+    assert!(!resize(&mut h, 500.0, 200.0));
+    assert!(resize(&mut h, 700.0, 200.0));
+    // Отмена правки возвращает b и ручки.
+    h.ed.execute(CommandId::Undo);
+    assert!(resize(&mut h, 500.0, 200.0));
+    // Другая страница: выделение снято, ручек нет, наведение не берёт старую рамку.
+    let p2 = h.ed.add_page("Вторая").unwrap();
+    h.ed.set_page(p2).unwrap();
+    assert!(!resize(&mut h, 500.0, 200.0));
+    let c = h.rect(None, 400.0, 100.0, 100.0, 100.0);
+    h.ed.select(&[c]);
+    assert!(resize(&mut h, 500.0, 200.0), "угол c на второй странице");
+}

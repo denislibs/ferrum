@@ -70,6 +70,31 @@ pub fn resolve(scene: &Scene, hit: Slot, selection: &[NodeId], pick: Pick) -> Op
     if pick == Pick::Deepest {
         return Some(scene.at(hit).id);
     }
+    resolve_with(scene, hit, &selection_parents(scene, selection), pick)
+}
+
+/// Родители выделенных узлов (`None` — корень страницы): по ним `resolve`
+/// решает, на каком уровне выбирать соседей. Наведение считает их один раз на
+/// версию выделения, а не на каждое движение.
+pub fn selection_parents(scene: &Scene, selection: &[NodeId]) -> HashSet<Option<Slot>> {
+    selection
+        .iter()
+        .filter_map(|id| scene.slot(*id))
+        .map(|s| scene.at(s).parent)
+        .collect()
+}
+
+/// `resolve` с заранее посчитанными `selection_parents`: работа зависит от
+/// глубины узла под курсором, а не от размера выделения.
+pub fn resolve_with(
+    scene: &Scene,
+    hit: Slot,
+    parents: &HashSet<Option<Slot>>,
+    pick: Pick,
+) -> Option<NodeId> {
+    if pick == Pick::Deepest {
+        return Some(scene.at(hit).id);
+    }
     let chain = chain(scene, hit);
     let root = scene.at(chain[0]);
     // Уровень по умолчанию: ребёнок фрейма верхнего уровня или сам объект верхнего уровня.
@@ -79,11 +104,6 @@ pub fn resolve(scene: &Scene, hit: Slot, selection: &[NodeId], pick: Pick) -> Op
         0
     };
     // Выделение внутри контейнера делает соседей выделенных выбираемыми на их уровне.
-    let parents: HashSet<Option<Slot>> = selection
-        .iter()
-        .filter_map(|id| scene.slot(*id))
-        .map(|s| scene.at(s).parent)
-        .collect();
     for (i, &s) in chain.iter().enumerate().skip(level + 1) {
         if parents.contains(&scene.at(s).parent) {
             level = i;

@@ -6,7 +6,8 @@
 use std::time::{Duration, Instant};
 
 use ferrum_doc::fixture::fill;
-use ferrum_doc::{Document, NodeId};
+use ferrum_doc::{Document, NodeId, PropsPatch};
+use ferrum_editor::snap::SNAP_THRESHOLD_PX as SNAP_PX;
 use ferrum_editor::{CommandId, Editor, Input, Modifiers, Platform, PointerEvent};
 use ferrum_render::Camera;
 use kurbo::{Point, Size};
@@ -17,12 +18,24 @@ const VIEWPORT: Size = Size::new(1920.0, 1080.0);
 const MOVES: usize = 60;
 /// Повторов записи и отмены перетаскивания (медиана).
 const COMMIT_RUNS: usize = 5;
-/// Порог привязки редактора в экранных пикселях (`snap::SNAP_THRESHOLD_PX`).
-const SNAP_PX: f64 = 4.0;
+/// Размер большого выделения: стоимость выбора, наведения и отмены не должна
+/// расти с ним квадратично.
+const BIG_SELECTION: usize = 10_000;
 
 fn median(mut runs: Vec<Duration>) -> Duration {
     runs.sort();
     runs[runs.len() / 2]
+}
+
+/// 95-й процентиль (ближайший ранг) — справочно рядом с медианой.
+fn p95(runs: &[Duration]) -> Duration {
+    let mut v = runs.to_vec();
+    v.sort();
+    if v.is_empty() {
+        return Duration::ZERO;
+    }
+    let rank = (v.len() * 95).div_ceil(100).max(1);
+    v[rank - 1]
 }
 
 fn worst(runs: &[Duration]) -> Duration {
@@ -55,6 +68,19 @@ impl Report {
             limit: limit_label(limit_ms),
             pass: Some(d.as_secs_f64() * 1000.0 <= limit_ms),
         });
+    }
+
+    /// Цель по медиане выборки и справочная строка с p95 рядом.
+    fn gate_median(&mut self, metric: &str, runs: &[Duration], limit_ms: f64) {
+        self.gate(
+            &format!("{metric} (медиана)"),
+            median(runs.to_vec()),
+            limit_ms,
+        );
+        self.info(
+            &format!("То же, p95 ({} замеров)", runs.len()),
+            ms(p95(runs)),
+        );
     }
 
     /// Проверка без времени: замер не считается, если сценарий ничего не сделал.
@@ -118,6 +144,8 @@ struct Drag {
     moved: usize,
     /// Экранная точка последнего движения (для отпускания).
     end: Point,
+    /// Первое движение за порогом: начало жеста (базы, `Snapper`) — не в выборке.
+    first: Duration,
 }
 
 /// Перетаскивание выделенных `sel` от экранной точки `from`; кнопка остаётся
@@ -134,8 +162,7 @@ fn drag_moves(ed: &mut Editor, clock: &mut Clock, sel: &[NodeId], from: Point, s
     };
     let before: Vec<Point> = sel.iter().map(|id| origin(ed, *id)).collect();
     let kick = Point::new(from.x + 4.0, from.y);
-    ed.handle(Input::PointerMove(clock.at(kick)));
-    ed.take_events();
+    let first = timed(ed, Input::PointerMove(clock.at(kick)));
     let mut times = Vec::new();
     let mut max_lines = 0;
     let mut end = kick;
@@ -155,6 +182,7 @@ fn drag_moves(ed: &mut Editor, clock: &mut Clock, sel: &[NodeId], from: Point, s
         max_lines,
         moved,
         end,
+        first,
     }
 }
 
@@ -227,12 +255,16 @@ fn main() {
         ed.is_busy() && ed.scene().has_preview(),
         "перетаскивание идёт"
     );
-    report.gate(
-        "Движение при перетаскивании 1000 выделенных: превью и привязки (медиана)",
-        median(drag.times.clone()),
+    report.gate_median(
+        "Движение при перетаскивании 1000 выделенных: превью и привязки",
+        &drag.times,
         4.0,
     );
     report.info("То же, худшее движение", ms(worst(&drag.times)));
+    report.info(
+        "То же, первое движение (начало жеста: базы и Snapper; не в выборке)",
+        ms(drag.first),
+    );
     check_drag(
         &mut report,
         "Перетаскивание 1000 выделенных",
@@ -276,14 +308,14 @@ fn main() {
         steps0 + COMMIT_RUNS as u64,
         "каждый жест — один шаг"
     );
-    report.gate(
+    report.gate_median(
         "Запись перетаскивания 1000 узлов (отпускание: транзакция и сцена)",
-        median(commits),
+        &commits,
         20.0,
     );
-    report.gate(
+    report.gate_median(
         "Отмена перетаскивания 1000 узлов (документ и сцена)",
-        median(undos),
+        &undos,
         20.0,
     );
     report.check(
@@ -326,14 +358,14 @@ fn main() {
         steps0 + COMMIT_RUNS as u64,
         "каждое отражение — один шаг"
     );
-    report.gate(
+    report.gate_median(
         "Отражение 1000 выделенных (Shift+H: транзакция и сцена)",
-        median(flips),
+        &flips,
         20.0,
     );
-    report.gate(
+    report.gate_median(
         "Отмена отражения 1000 узлов (документ и сцена)",
-        median(unflips),
+        &unflips,
         20.0,
     );
     report.check(
@@ -355,12 +387,16 @@ fn main() {
     let c = ed.scene().node(one).unwrap().world_bounds.unwrap().center();
     let from = screen(&ed, c.x, c.y);
     let drag = drag_moves(&mut ed, &mut clock, &[one], from, 2.3);
-    report.gate(
-        "Движение одного узла с привязками к 100 соседям (медиана)",
-        median(drag.times.clone()),
+    report.gate_median(
+        "Движение одного узла с привязками к 100 соседям",
+        &drag.times,
         1.0,
     );
     report.info("То же, худшее движение", ms(worst(&drag.times)));
+    report.info(
+        "То же, первое движение (начало жеста; не в выборке)",
+        ms(drag.first),
+    );
     check_drag(&mut report, "Один узел", &drag, 1);
     ed.execute(CommandId::Escape);
     ed.handle(Input::PointerUp(clock.at(from)));
@@ -369,11 +405,7 @@ fn main() {
     // 4. Наведение: hit-test и правила выделения на каждое движение без кнопки.
     ed.select(&[]);
     let (hovers, hits) = hover_moves(&mut ed, &mut clock, 400, 37, 53);
-    report.gate(
-        "Наведение: hit-test и выбор объекта (медиана)",
-        median(hovers.clone()),
-        0.2,
-    );
+    report.gate_median("Наведение: hit-test и выбор объекта", &hovers, 0.2);
     report.info("То же, худшее движение", ms(worst(&hovers)));
     report.check(
         "Наведение: движений, после которых объект под курсором найден",
@@ -386,11 +418,7 @@ fn main() {
     ed.select(&children);
     ed.take_events();
     let (hovers_sel, hits_sel) = hover_moves(&mut ed, &mut clock, 400, 41, 59);
-    report.gate(
-        "Наведение при 1000 выделенных (медиана)",
-        median(hovers_sel.clone()),
-        0.2,
-    );
+    report.gate_median("Наведение при 1000 выделенных", &hovers_sel, 0.2);
     report.info("То же, худшее движение", ms(worst(&hovers_sel)));
     report.check(
         "Наведение при 1000 выделенных: движений с найденным объектом",
@@ -399,6 +427,91 @@ fn main() {
         "> 0",
     );
     ed.select(&[]);
+
+    // 4в'. Выделение 10 000 узлов (дети ~100 фреймов): выбор из панели слоёв,
+    // наведение и отмена, восстанавливающая такое выделение. Раньше `select`
+    // убирал повторы перебором (квадратично), наведение пересобирало рамку и
+    // родителей выделения на каждое движение, а события сравнивали списки целиком.
+    let many: Vec<NodeId> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 100 != 0)
+        .map(|(_, id)| *id)
+        .take(BIG_SELECTION)
+        .collect();
+    let mut selects = Vec::new();
+    let mut select_ok = true;
+    for _ in 0..COMMIT_RUNS {
+        ed.select(&[]);
+        ed.take_events();
+        let t = Instant::now();
+        ed.select(&many);
+        selects.push(t.elapsed());
+        select_ok &= ed.selection() == many.as_slice();
+        select_ok &= ed
+            .take_events()
+            .iter()
+            .any(|e| matches!(e, ferrum_editor::EditorEvent::SelectionChanged(s) if s.len() == BIG_SELECTION));
+    }
+    report.gate_median(
+        "Выделение 10 000 узлов из панели слоёв (select)",
+        &selects,
+        20.0,
+    );
+    report.check(
+        "Выделение 10 000: выделено столько же, событие для интерфейса отправлено",
+        select_ok,
+        format!("{}", ed.selection().len()),
+        "10000",
+    );
+    let (hovers_big, hits_big) = hover_moves(&mut ed, &mut clock, 400, 43, 61);
+    report.gate_median("Наведение при 10 000 выделенных", &hovers_big, 0.2);
+    report.info("То же, худшее движение", ms(worst(&hovers_big)));
+    report.check(
+        "Наведение при 10 000 выделенных: движений с найденным объектом",
+        hits_big > 0,
+        format!("{hits_big} из 400"),
+        "> 0",
+    );
+    let mut restores = Vec::new();
+    let mut restore_ok = true;
+    let x0 = ed.page_doc().props(sample).unwrap().x;
+    for _ in 0..COMMIT_RUNS {
+        ed.select(&many);
+        // Шаг, после которого выделен один узел; его отмена возвращает 10 000.
+        ed.transact(|tx| {
+            tx.set_props(
+                sample,
+                &PropsPatch {
+                    x: Some(x0 + 7.0),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![sample])
+        })
+        .unwrap();
+        restore_ok &= ed.selection() == [sample];
+        ed.take_events();
+        let t = Instant::now();
+        ed.execute(CommandId::Undo);
+        restores.push(t.elapsed());
+        ed.take_events();
+        restore_ok &= ed.selection() == many.as_slice();
+        restore_ok &= ed.page_doc().props(sample).unwrap().x == x0;
+    }
+    report.gate_median(
+        "Отмена, восстанавливающая выделение 10 000 узлов",
+        &restores,
+        20.0,
+    );
+    report.check(
+        "Отмена: выделение 10 000 восстановлено, узел вернулся",
+        restore_ok,
+        format!("{}", ed.selection().len()),
+        "10000",
+    );
+    ed.select(&[]);
+    ed.take_events();
 
     // 4б. Перетаскивание фрейма верхнего уровня с привязками при отдалении на плотной
     // странице: соседи — тысяча фреймов, полоса привязки в мире шире в 1/зум раз, и
@@ -426,9 +539,9 @@ fn main() {
         let from = screen(&ed, target.1.x, target.1.y);
         let drag = drag_moves(&mut ed, &mut clock, &[], from, 0.8);
         let name = format!("Фрейм при отдалении (зум {zoom})");
-        report.gate(
-            &format!("Движение фрейма с привязками к соседям-фреймам при отдалении (зум {zoom}; медиана)"),
-            median(drag.times.clone()),
+        report.gate_median(
+            &format!("Движение фрейма с привязками к соседям-фреймам при отдалении (зум {zoom})"),
+            &drag.times,
             4.0,
         );
         report.info(&format!("{name}: худшее движение"), ms(worst(&drag.times)));
@@ -478,9 +591,9 @@ fn main() {
         format!("{}", spread.len()),
         "1000",
     );
-    report.gate(
-        "Движение при перетаскивании 1000 узлов из ~100 фреймов при зуме 0.1 (медиана)",
-        median(drag.times.clone()),
+    report.gate_median(
+        "Движение при перетаскивании 1000 узлов из ~100 фреймов при зуме 0.1",
+        &drag.times,
         4.0,
     );
     report.info("То же, худшее движение", ms(worst(&drag.times)));
@@ -510,9 +623,9 @@ fn main() {
         })
         .collect();
     let selected = ed.selection().len();
-    report.gate(
-        "Обновление рамки выделения на странице 100 000 (медиана, ~100 фреймов в рамке)",
-        median(marquee.clone()),
+    report.gate_median(
+        "Обновление рамки выделения на странице 100 000 (~100 фреймов в рамке)",
+        &marquee,
         4.0,
     );
     report.info(

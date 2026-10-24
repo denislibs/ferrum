@@ -9,6 +9,8 @@
 //! единственный владелец всего состояния ядра, рендер получает `scene()`,
 //! `camera()` и `overlay()` по ссылке.
 
+use std::collections::HashSet;
+
 use ferrum_doc::{DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
 use ferrum_render::{Camera, Overlay, OverlayTheme};
 use ferrum_scene::Scene;
@@ -18,8 +20,8 @@ use crate::commands::CommandId;
 use crate::input::{Input, KeyEvent, Platform, PointerButton, PointerEvent, WheelEvent};
 use crate::keymap::Keymap;
 use crate::tools::{
-    sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Shape, Tool, ToolKind,
-    ToolOverlay,
+    sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, Tool,
+    ToolKind, ToolOverlay,
 };
 
 /// Множитель зума колесом с Ctrl/Cmd и щипком: `exp(-deltaY · k)`.
@@ -90,9 +92,11 @@ fn input_is_finite(input: &Input) -> bool {
 }
 
 /// Что видел интерфейс в прошлый раз — события шлются только при изменении.
+/// Выделение — номером версии: сравнение списков в 10 000 узлов на каждое
+/// событие стоило бы больше самого события.
 #[derive(Debug, Clone, PartialEq)]
 struct Seen {
-    selection: Vec<NodeId>,
+    selection: u64,
     tool: ToolKind,
     cursor: Cursor,
     frame: FrameKey,
@@ -101,8 +105,10 @@ struct Seen {
 #[derive(Debug, Clone, PartialEq)]
 struct FrameKey {
     scene: u64,
+    scene_epoch: u64,
     camera: Camera,
-    selection: Vec<NodeId>,
+    /// Версия выделения; выделение инструмента на время жеста — в `tool`.
+    selection: u64,
     hover: Option<NodeId>,
     tool: ToolOverlay,
     theme: OverlayTheme,
@@ -114,7 +120,9 @@ pub struct Editor {
     pub(crate) page: PageId,
     pub(crate) scene: Scene,
     pub(crate) camera: Camera,
-    pub(crate) selection: Vec<NodeId>,
+    pub(crate) selection: Selection,
+    /// Растёт при каждой замене сцены целиком (переключение страницы).
+    scene_epoch: u64,
     pub(crate) hover: Option<NodeId>,
     pub(crate) tool: Box<dyn Tool>,
     /// Инструмент, который рука временно заменила на время удержания клавиши,
@@ -152,13 +160,14 @@ impl Editor {
         let theme = OverlayTheme::dark();
         let tool: Box<dyn Tool> = Box::new(SelectTool::new());
         let seen = Seen {
-            selection: Vec::new(),
+            selection: 0,
             tool: ToolKind::Move,
             cursor: Cursor::Default,
             frame: FrameKey {
                 scene: scene.change_counter(),
+                scene_epoch: 0,
                 camera: camera.clone(),
-                selection: Vec::new(),
+                selection: 0,
                 hover: None,
                 tool: ToolOverlay::default(),
                 theme: theme.clone(),
@@ -170,7 +179,8 @@ impl Editor {
             page,
             scene,
             camera,
-            selection: Vec::new(),
+            selection: Selection::default(),
+            scene_epoch: 0,
             hover: None,
             tool,
             held: None,
@@ -284,7 +294,7 @@ impl Editor {
         let t = self.tool.overlay();
         Overlay {
             theme: self.theme.clone(),
-            selection: t.selection.unwrap_or_else(|| self.selection.clone()),
+            selection: t.selection.unwrap_or_else(|| self.selection.to_vec()),
             hover: if self.is_busy() { None } else { self.hover },
             marquee: t.marquee,
             snap_lines: t.snap_lines,
@@ -301,6 +311,7 @@ impl Editor {
             scene,
             camera,
             selection,
+            scene_epoch,
             hover,
             settings,
             out,
@@ -315,6 +326,7 @@ impl Editor {
                 scene,
                 camera,
                 selection,
+                scene_epoch: *scene_epoch,
                 hover,
                 settings,
                 out,
@@ -555,14 +567,15 @@ impl Editor {
         F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
     {
         self.cancel_gesture();
-        let before = self.selection.clone();
+        let before = self.selection.to_vec();
         let result = self.doc.transact(self.page, before, f);
         let changed = sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
         if let Ok(sel) = &result {
             if changed {
                 self.out.steps += 1;
             }
-            self.selection = self.alive(sel);
+            let sel = self.alive(sel);
+            self.selection.set(sel);
         }
         self.emit();
         result
@@ -571,7 +584,8 @@ impl Editor {
     /// Выделение из панели слоёв. Неизвестные узлы пропускаются.
     pub fn select(&mut self, ids: &[NodeId]) {
         self.cancel_gesture();
-        self.selection = self.alive(ids);
+        let sel = self.alive(ids);
+        self.selection.set(sel);
         self.emit();
     }
 
@@ -583,10 +597,14 @@ impl Editor {
         }
     }
 
+    /// Узлы из `ids`, которые есть в сцене и не черновики, без повторов, в порядке
+    /// входа. Повторы — множеством: перебор списка был квадратичным (выделение
+    /// 20 000 узлов — 94 мс).
     pub(crate) fn alive(&self, ids: &[NodeId]) -> Vec<NodeId> {
         let mut out = Vec::with_capacity(ids.len());
+        let mut seen = HashSet::with_capacity(ids.len());
         for id in ids {
-            if self.scene.slot(*id).is_some() && !self.scene.is_draft(*id) && !out.contains(id) {
+            if self.scene.slot(*id).is_some() && !self.scene.is_draft(*id) && seen.insert(*id) {
                 out.push(*id);
             }
         }
@@ -615,6 +633,7 @@ impl Editor {
         }
         let pd = self.doc.page(page)?;
         self.scene = Scene::from_page(pd);
+        self.scene_epoch += 1;
         self.page = page;
         self.selection.clear();
         self.hover = None;
@@ -637,11 +656,13 @@ impl Editor {
                 if restore.page != self.page {
                     if let Ok(pd) = self.doc.page(restore.page) {
                         self.scene = Scene::from_page(pd);
+                        self.scene_epoch += 1;
                         self.page = restore.page;
                         self.out.events.push(EditorEvent::PageChanged(restore.page));
                     }
                 }
-                self.selection = self.alive(&restore.selection);
+                let sel = self.alive(&restore.selection);
+                self.selection.set(sel);
             }
             Ok(None) => {}
             Err(e) => self.out.events.push(EditorEvent::Error(e.to_string())),
@@ -654,15 +675,15 @@ impl Editor {
         if self.hover.is_some_and(|h| self.scene.slot(h).is_none()) {
             self.hover = None;
         }
-        let overlay_selection = self.overlay().selection;
         let now = Seen {
-            selection: self.selection.clone(),
+            selection: self.selection.version(),
             tool: self.tool.kind(),
             cursor: self.cursor(),
             frame: FrameKey {
                 scene: self.scene.change_counter(),
+                scene_epoch: self.scene_epoch,
                 camera: self.camera.clone(),
-                selection: overlay_selection,
+                selection: self.selection.version(),
                 hover: if self.is_busy() { None } else { self.hover },
                 tool: self.tool.overlay(),
                 theme: self.theme.clone(),
@@ -672,7 +693,7 @@ impl Editor {
         if now.selection != self.seen.selection {
             self.out
                 .events
-                .push(EditorEvent::SelectionChanged(now.selection.clone()));
+                .push(EditorEvent::SelectionChanged(self.selection.to_vec()));
         }
         if now.tool != self.seen.tool {
             self.out.events.push(EditorEvent::ToolChanged(now.tool));

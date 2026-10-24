@@ -72,13 +72,70 @@ pub enum Flow {
     Finished,
 }
 
+/// Выделение с номером версии. Номер растёт при каждом изменении состава, и всё,
+/// что зависит от выделения, — события интерфейсу, кэш рамки и родителей у
+/// инструмента — сравнивает номер за O(1), а не списки за O(n) на каждое событие.
+/// Менять список можно только методами ниже: они и двигают номер.
+#[derive(Debug, Default)]
+pub(crate) struct Selection {
+    ids: Vec<NodeId>,
+    version: u64,
+}
+
+impl Selection {
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Заменяет выделение. Тот же список номер не двигает: интерфейс не должен
+    /// получать «выделение изменилось», когда оно не менялось.
+    pub fn set(&mut self, ids: Vec<NodeId>) {
+        if self.ids != ids {
+            self.ids = ids;
+            self.version += 1;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        if !self.ids.is_empty() {
+            self.ids.clear();
+            self.version += 1;
+        }
+    }
+
+    pub fn push(&mut self, id: NodeId) {
+        self.ids.push(id);
+        self.version += 1;
+    }
+
+    pub fn retain(&mut self, f: impl FnMut(&NodeId) -> bool) {
+        let n = self.ids.len();
+        self.ids.retain(f);
+        if self.ids.len() != n {
+            self.version += 1;
+        }
+    }
+}
+
+impl std::ops::Deref for Selection {
+    type Target = [NodeId];
+
+    fn deref(&self) -> &[NodeId] {
+        &self.ids
+    }
+}
+
 /// Всё, с чем работает инструмент. Создаётся редактором на одно событие.
 pub struct Ctx<'a> {
     pub(crate) doc: &'a mut Document,
     pub(crate) page: PageId,
     pub(crate) scene: &'a mut Scene,
     pub(crate) camera: &'a mut Camera,
-    pub(crate) selection: &'a mut Vec<NodeId>,
+    pub(crate) selection: &'a mut Selection,
+    /// Номер сцены: растёт, когда редактор заменяет сцену целиком (другая
+    /// страница), — у новой сцены свой счётчик изменений, и кэш по нему одному
+    /// принял бы её за прежнюю.
+    pub(crate) scene_epoch: u64,
     pub(crate) hover: &'a mut Option<NodeId>,
     pub(crate) settings: &'a Settings,
     pub(crate) out: &'a mut Outbox,
@@ -142,14 +199,14 @@ impl Ctx<'_> {
         let scene: &Scene = self.scene;
         let result = self
             .doc
-            .transact(self.page, self.selection.clone(), |tx| f(tx, scene));
+            .transact(self.page, self.selection.to_vec(), |tx| f(tx, scene));
         let changed = sync(self.doc, self.page, self.scene, self.out);
         match result {
             Ok(sel) => {
                 if changed {
                     self.out.steps += 1;
                 }
-                *self.selection = sel;
+                self.selection.set(sel);
                 true
             }
             Err(e) => {

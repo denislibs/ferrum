@@ -176,12 +176,13 @@ impl Editor {
             Some(p) => self.scene.at(p).children.clone(),
             None => self.scene.roots().to_vec(),
         };
-        self.selection = list
+        let all = list
             .into_iter()
             .filter(|s| self.scene.is_visible(*s) && !locked(&self.scene, *s))
             .map(|s| self.scene.at(s).id)
             .filter(|id| !self.scene.is_draft(*id))
             .collect();
+        self.selection.set(all);
     }
 
     /// Ctrl+G и Ctrl+Alt+G: оборачивает выделение в группу или фрейм. Контейнер
@@ -303,7 +304,7 @@ impl Editor {
                 None => groups.push((parent, len, vec![item])),
             }
         }
-        let selection = self.selection.clone();
+        let selection = self.selection.to_vec();
         self.ctx().commit(|tx, _| {
             for (parent, len, mut items) in groups {
                 items.sort_by_key(|(i, _)| *i);
@@ -352,7 +353,7 @@ impl Editor {
         if ids.is_empty() {
             return;
         }
-        let selection = self.selection.clone();
+        let selection = self.selection.to_vec();
         self.ctx().commit(|tx, scene| {
             for id in &ids {
                 let slot = scene.slot(*id).expect("в сцене");
@@ -398,7 +399,7 @@ impl Editor {
             t,
             PixelSnap { x: false, y: false },
         );
-        let selection = self.selection.clone();
+        let selection = self.selection.to_vec();
         self.ctx().commit(|tx, _| {
             for (id, patch) in &patches {
                 tx.set_props(*id, patch)?;
@@ -419,7 +420,7 @@ impl Editor {
             .filter_map(|id| self.scene.node(*id))
             .any(|n| get(&n.props));
         let patch = set(!any);
-        let selection = self.selection.clone();
+        let selection = self.selection.to_vec();
         self.ctx().commit(|tx, _| {
             for id in &ids {
                 tx.set_props(*id, &patch)?;
