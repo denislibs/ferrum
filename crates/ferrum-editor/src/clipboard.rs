@@ -451,6 +451,8 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
         locked: n.locked,
         corner_radius: n.corner_radius,
         clip_content: n.clip_content,
+        flip_x: false,
+        flip_y: false,
         fills,
         strokes,
     };
@@ -499,6 +501,10 @@ pub fn full_patch(p: &Props) -> PropsPatch {
         locked: Some(p.locked),
         corner_radius: Some(p.corner_radius),
         clip_content: Some(p.clip_content),
+        // Патч ложится на только что созданный узел, у которого отражения нет:
+        // нейтральное `false` не записывается, как и в `write_props` документа.
+        flip_x: p.flip_x.then_some(true),
+        flip_y: p.flip_y.then_some(true),
         fills: Some(p.fills.clone()),
         strokes: Some(p.strokes.clone()),
     }

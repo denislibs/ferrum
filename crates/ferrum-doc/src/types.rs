@@ -208,6 +208,12 @@ pub struct Props {
     pub locked: bool,
     pub corner_radius: f64,
     pub clip_content: bool,
+    /// Отражение по оси x узла (слева направо) относительно центра его рамки, как
+    /// в Figma: рамка остаётся на месте, зеркально рисуется содержимое — заливка
+    /// изображением и дети. Нейтральное значение — `false`.
+    pub flip_x: bool,
+    /// Отражение по оси y узла (сверху вниз) относительно центра его рамки.
+    pub flip_y: bool,
     pub fills: Vec<Fill>,
     pub strokes: Vec<Stroke>,
 }
@@ -246,6 +252,8 @@ impl Props {
             locked: false,
             corner_radius: 0.0,
             clip_content: kind == NodeKind::Frame,
+            flip_x: false,
+            flip_y: false,
             fills,
             strokes,
         }
@@ -266,6 +274,8 @@ pub struct PropsPatch {
     pub locked: Option<bool>,
     pub corner_radius: Option<f64>,
     pub clip_content: Option<bool>,
+    pub flip_x: Option<bool>,
+    pub flip_y: Option<bool>,
     pub fills: Option<Vec<Fill>>,
     pub strokes: Option<Vec<Stroke>>,
 }
@@ -285,6 +295,8 @@ impl PropsPatch {
             locked: self.locked.map(|_| before.locked),
             corner_radius: self.corner_radius.map(|_| before.corner_radius),
             clip_content: self.clip_content.map(|_| before.clip_content),
+            flip_x: self.flip_x.map(|_| before.flip_x),
+            flip_y: self.flip_y.map(|_| before.flip_y),
             fills: self.fills.as_ref().map(|_| before.fills.clone()),
             strokes: self.strokes.as_ref().map(|_| before.strokes.clone()),
         }
@@ -312,6 +324,8 @@ impl PropsPatch {
             (&mut p.visible, self.visible),
             (&mut p.locked, self.locked),
             (&mut p.clip_content, self.clip_content),
+            (&mut p.flip_x, self.flip_x),
+            (&mut p.flip_y, self.flip_y),
         ] {
             if let Some(v) = src {
                 *dst = v;

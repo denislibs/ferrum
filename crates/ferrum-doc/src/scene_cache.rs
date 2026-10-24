@@ -25,6 +25,9 @@ const ROOT: u32 = u32::MAX;
 const FLAG_VISIBLE: u8 = 1;
 const FLAG_LOCKED: u8 = 2;
 const FLAG_CLIP: u8 = 4;
+/// Флаги отражения появились во второй версии таблицы (`SCENE_CACHE_VERSION = 2`).
+const FLAG_FLIP_X: u8 = 8;
+const FLAG_FLIP_Y: u8 = 16;
 
 fn kind_code(k: NodeKind) -> u8 {
     match k {
@@ -80,6 +83,12 @@ pub(crate) fn encode(rows: &[SceneRow]) -> Option<Vec<u8>> {
         }
         if p.clip_content {
             flags |= FLAG_CLIP;
+        }
+        if p.flip_x {
+            flags |= FLAG_FLIP_X;
+        }
+        if p.flip_y {
+            flags |= FLAG_FLIP_Y;
         }
         w.u8(flags);
         for v in [p.x, p.y, p.w, p.h, p.rotation, p.opacity, p.corner_radius] {
@@ -194,6 +203,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
                 locked: flags & FLAG_LOCKED != 0,
                 corner_radius,
                 clip_content: flags & FLAG_CLIP != 0,
+                flip_x: flags & FLAG_FLIP_X != 0,
+                flip_y: flags & FLAG_FLIP_Y != 0,
                 fills,
                 strokes,
             },
