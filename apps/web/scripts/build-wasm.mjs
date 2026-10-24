@@ -18,17 +18,15 @@ if (version !== `wasm-bindgen ${WASM_BINDGEN}`) {
   process.exit(1);
 }
 // SIMD128 включает `.cargo/config.toml` (`target.wasm32-unknown-unknown.rustflags`),
-// но заданный RUSTFLAGS (или CARGO_ENCODED_RUSTFLAGS) cargo берёт вместо него, и
-// ядро молча собралось бы без SIMD. Флаг дописывается к заданным.
+// но заданный RUSTFLAGS (или CARGO_ENCODED_RUSTFLAGS) cargo берёт вместо него — даже
+// пустой, — и ядро молча собралось бы без SIMD. Флаг дописывается к заданным.
 const SIMD = ['-C', 'target-feature=+simd128'];
 const env = { ...process.env };
 for (const [name, sep] of [['CARGO_ENCODED_RUSTFLAGS', '\x1f'], ['RUSTFLAGS', ' ']]) {
   const value = env[name];
-  if (value === undefined || value.trim() === '') continue;
-  if (!value.includes('+simd128')) {
-    console.warn(`${name} задан («${value}»): cargo не возьмёт флаги из .cargo/config.toml, SIMD128 дописан.`);
-    env[name] = [value, ...SIMD].join(sep);
-  }
+  if (value === undefined || value.includes('+simd128')) continue;
+  console.warn(`${name} задан («${value}»): cargo не возьмёт флаги из .cargo/config.toml, SIMD128 дописан.`);
+  env[name] = value.trim() === '' ? SIMD.join(sep) : [value, ...SIMD].join(sep);
 }
 execFileSync(
   'cargo',

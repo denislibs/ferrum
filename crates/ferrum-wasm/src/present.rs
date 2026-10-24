@@ -69,6 +69,8 @@ impl PresentWatch {
                 Action::Pause(self.fresh(format!("Кадр не показан несколько раз подряд: {m}")))
             }
             PresentError::TooLarge(m) => {
+                // Пропуски до выхода за предел к этой паузе не относятся.
+                self.skips = 0;
                 let first = !std::mem::replace(&mut self.too_large, true);
                 Action::Pause(first.then(|| format!("Кадр не показан: {m}; уменьшите окно")))
             }

@@ -340,32 +340,50 @@ fn click_records(at: Point, t: f64) -> Vec<Record> {
     ]
 }
 
+/// Идентификаторы единственного события выделения после пачки `recs`.
+fn selection_after(core: &mut Core, recs: &[Record]) -> Vec<CoreEvent> {
+    let bytes: Vec<u8> = recs.iter().flat_map(encode).collect();
+    core.apply_input(&bytes);
+    core.take_events()
+        .into_iter()
+        .filter(|e| matches!(e, CoreEvent::Selection { .. }))
+        .collect()
+}
+
+fn selected_ids(ev: &[CoreEvent]) -> Vec<String> {
+    match ev {
+        [CoreEvent::Selection { ids, .. }] => ids.clone(),
+        _ => panic!("ожидалось одно событие выделения: {ev:?}"),
+    }
+}
+
 #[test]
 fn selection_changes_in_one_batch_give_one_selection_event() {
     let mut core = demo(1000);
     frame(&mut core);
     core.take_events();
-    // Выделить узел, снять выделение, выделить снова — в одной пачке ввода.
-    let mut recs = click_records(screen(200.0, 40.0), 1000.0);
-    recs.extend(click_records(Point::new(5.0, 5.0), 1100.0));
-    recs.extend(click_records(screen(200.0, 40.0), 1200.0));
-    recs.extend(click_records(Point::new(5.0, 5.0), 1300.0));
-    recs.extend(click_records(screen(200.0, 40.0), 1400.0));
-    let bytes: Vec<u8> = recs.iter().flat_map(encode).collect();
-    core.apply_input(&bytes);
-    let sel: Vec<_> = core
-        .take_events()
-        .into_iter()
-        .filter(|e| matches!(e, CoreEvent::Selection { .. }))
-        .collect();
+    // «Слой 1» — (140, 0)–(260, 80), «Слой 2» — (280, 0)–(400, 80).
+    let (one, two) = (screen(200.0, 40.0), screen(340.0, 40.0));
+    let id_two = selected_ids(&selection_after(&mut core, &click_records(two, 100.0)));
+    let id_one = selected_ids(&selection_after(&mut core, &click_records(one, 200.0)));
+    assert_ne!(id_one, id_two);
+    // Одной пачкой: снять выделение, «Слой 1», снять, «Слой 1», «Слой 2». Первое
+    // изменение — пустое выделение, последнее — «Слой 2».
+    let mut recs = click_records(Point::new(5.0, 5.0), 1000.0);
+    recs.extend(click_records(one, 1100.0));
+    recs.extend(click_records(Point::new(5.0, 5.0), 1200.0));
+    recs.extend(click_records(one, 1300.0));
+    recs.extend(click_records(two, 1400.0));
+    let sel = selection_after(&mut core, &recs);
     assert_eq!(
         sel.len(),
         1,
         "в пачке важно только последнее выделение: {sel:?}"
     );
-    assert!(
-        matches!(sel[0], CoreEvent::Selection { count: 1, .. }),
-        "{sel:?}"
+    assert_eq!(
+        selected_ids(&sel),
+        id_two,
+        "осталось последнее выделение, а не первое"
     );
 }
 
