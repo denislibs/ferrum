@@ -11,7 +11,7 @@ use ferrum_doc::fixture::fill;
 use ferrum_doc::{Document, NodeId, NodeKind, PageId, PropsPatch};
 use ferrum_render::{Camera, CpuBackend, NoImages, Renderer};
 use ferrum_scene::Scene;
-use kurbo::{Point, Rect, Size};
+use kurbo::{Point, Size};
 
 /// Считает живые байты в куче — для памяти кэша отрисовки.
 struct Counting;
@@ -36,6 +36,10 @@ fn heap_mb() -> f64 {
 }
 
 const NODES: usize = 100_000;
+/// Прогонов в медиане для строк `Scene::apply`.
+const APPLY_RUNS: usize = 5;
+/// Предел кадров прогрева: больше — кэш не сходится, это провал.
+const WARMUP_CAP: usize = 2000;
 const VIEWPORT: Size = Size::new(1920.0, 1080.0);
 
 /// Медиана нескольких замеров: один прогон на ноутбуке шумит на десятки процентов.
@@ -67,6 +71,15 @@ impl Report {
         });
     }
 
+    fn fail(&mut self, metric: &str, value: &str) {
+        self.0.push(Row {
+            metric: metric.to_string(),
+            value: value.to_string(),
+            limit: "прогрев ≤ 2000 кадров",
+            pass: Some(false),
+        });
+    }
+
     fn info(&mut self, metric: &str, value: String) {
         self.0.push(Row {
             metric: metric.to_string(),
@@ -78,23 +91,52 @@ impl Report {
 }
 
 /// Применяет транзакцию и замеряет `Scene::apply` её изменений, затем отмены.
+/// Медиана `APPLY_RUNS` прогонов: подготовка (транзакция) каждый раз вне замера,
+/// отмена возвращает документ и сцену в исходное состояние.
 fn apply_and_undo(
     doc: &mut Document,
     page: PageId,
     scene: &mut Scene,
     edit: impl Fn(&ferrum_doc::Tx) -> ferrum_doc::DocResult<()>,
 ) -> (Duration, Duration) {
-    doc.transact(page, vec![], |p| edit(p).map(|_| vec![]))
-        .unwrap();
-    let changes = doc.take_changes(page);
-    let t = Instant::now();
-    scene.apply(&changes, doc.page(page).unwrap());
-    let forward = t.elapsed();
-    doc.undo().unwrap();
-    let changes = doc.take_changes(page);
-    let t = Instant::now();
-    scene.apply(&changes, doc.page(page).unwrap());
-    (forward, t.elapsed())
+    let mut forward = Vec::new();
+    let mut back = Vec::new();
+    for _ in 0..APPLY_RUNS {
+        doc.transact(page, vec![], |p| edit(p).map(|_| vec![]))
+            .unwrap();
+        let changes = doc.take_changes(page);
+        let t = Instant::now();
+        scene.apply(&changes, doc.page(page).unwrap());
+        forward.push(t.elapsed());
+        doc.undo().unwrap();
+        let changes = doc.take_changes(page);
+        let t = Instant::now();
+        scene.apply(&changes, doc.page(page).unwrap());
+        back.push(t.elapsed());
+    }
+    (median(forward), median(back))
+}
+
+/// Кадры, пока растровый кэш не прогреется (`raster_builds == 0`). `None` — предел
+/// кадров исчерпан, кэш не прогрелся (провал).
+fn warm_up(
+    renderer: &mut Renderer,
+    backend: &mut CpuBackend,
+    scene: &Scene,
+    camera: &Camera,
+) -> Option<Vec<Duration>> {
+    let (w, h) = camera.device_size();
+    let mut times = Vec::new();
+    for _ in 0..WARMUP_CAP {
+        backend.reset(w, h);
+        let t = Instant::now();
+        let s = renderer.draw_scene(backend, scene, camera, &NoImages);
+        times.push(t.elapsed());
+        if s.raster_builds == 0 {
+            return Some(times);
+        }
+    }
+    None
 }
 
 /// Кадр после прогрева кэша: медиана нескольких сборок в бэкенд без растеризации.
@@ -393,6 +435,7 @@ fn main() {
     let (w, h) = camera.device_size();
     let mut backend = CpuBackend::new(w, h);
     let before = heap_mb();
+    let raster_before = renderer.raster_cache_bytes();
     let t = Instant::now();
     renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
     let cold = t.elapsed();
@@ -426,43 +469,21 @@ fn main() {
     camera.fit(scene.bounds().unwrap(), 0.0);
     {
         let mut cold_renderer = Renderer::new();
-        let mut cold_warmup = Vec::new();
-        loop {
-            backend.reset(w, h);
-            let t = Instant::now();
-            let s = cold_renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
-            cold_warmup.push(t.elapsed());
-            if s.raster_builds == 0 {
-                break;
-            }
-        }
-        report.info(
-            "Худший кадр прогрева растрового кэша (холодный рендерер: кадров до прогрева / максимум)",
-            format!(
-                "{} / {}",
-                cold_warmup.len() - 1,
-                ms(*cold_warmup.iter().max().unwrap())
+        match warm_up(&mut cold_renderer, &mut backend, &scene, &camera) {
+            Some(t) => report.info(
+                "Худший кадр прогрева растрового кэша (холодный рендерер: кадров до прогрева / максимум)",
+                format!("{} / {}", t.len() - 1, ms(*t.iter().max().unwrap())),
             ),
-        );
-    }
-    let mut warmup = Vec::new();
-    loop {
-        backend.reset(w, h);
-        let t = Instant::now();
-        let s = renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
-        warmup.push(t.elapsed());
-        if s.raster_builds == 0 {
-            break;
+            None => report.fail("Прогрев растрового кэша (холодный рендерер)", "не прогрелся"),
         }
     }
-    report.info(
-        "Вся страница: прогрев кэша (кадров / самый долгий кадр)",
-        format!(
-            "{} / {}",
-            warmup.len() - 1,
-            ms(*warmup.iter().max().unwrap())
+    match warm_up(&mut renderer, &mut backend, &scene, &camera) {
+        Some(t) => report.info(
+            "Вся страница: прогрев кэша (рендерер с прогретыми списками: кадров / самый долгий кадр)",
+            format!("{} / {}", t.len() - 1, ms(*t.iter().max().unwrap())),
         ),
-    );
+        None => report.fail("Вся страница: прогрев кэша", "не прогрелся"),
+    }
     let (whole, stats) = frame(&mut renderer, &mut backend, &scene, &camera);
     report.info(
         "Вся страница: зум / из растрового кэша / узлами / LOD-прямоугольников",
@@ -475,32 +496,81 @@ fn main() {
         ),
     );
     report.gate("Вся страница с LOD: сборка кадра", whole, 8.0, "≤ 8 мс");
-    // Кадр сразу после зума через степень двойки (прогретый кэш).
+    let t = Instant::now();
+    std::hint::black_box(backend.render());
+    report.info("Вся страница: растеризация CPU 1920×1080", ms(t.elapsed()));
+    // Память: прирост всей кучи (включая кадр бэкенда и векторы) и учёт самого
+    // рендерера. Растровый кэш ограничен `RASTER_CACHE_BYTES` (64 МБ).
+    report.info(
+        "Прирост кучи после отрисовки (всё)",
+        format!("{:.1} МБ", heap_mb() - before),
+    );
+    report.info(
+        "Растровый кэш фреймов по учёту рендерера (бюджет 64 МБ)",
+        format!(
+            "{:.1} МБ",
+            (renderer.raster_cache_bytes() - raster_before.min(renderer.raster_cache_bytes()))
+                as f64
+                / 1_048_576.0
+        ),
+    );
+
+    // Кадр сразу после зума через степень двойки: сколько уходит на построение
+    // растров, а сколько на рисование узлов. Построение = первый кадр минус
+    // установившийся кадр того же зума (после прогрева).
     {
         let z = camera.zoom();
         let target = 2f64.powf(z.log2().floor() + 1.0) * 1.01;
         camera.set_zoom(target);
         backend.reset(w, h);
         let t = Instant::now();
-        let s = renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+        let first = renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+        let first_time = t.elapsed();
         report.info(
-            "Кадр сразу после зума через степень двойки (зум / построено растров / время)",
+            "Кадр после зума через степень двойки: зум / построено растров / из кэша / узлами / LOD",
             format!(
-                "{:.3} / {} / {}",
+                "{:.3} / {} / {} / {} / {}",
                 camera.zoom(),
-                s.raster_builds,
-                ms(t.elapsed())
+                first.raster_builds,
+                first.rasters,
+                first.drawn,
+                first.lod_rects
             ),
         );
+        // Следующие кадры: время падает вместе с числом узлов, рисуемых поштучно, —
+        // по ним видно, что дороже: растры или поштучная отрисовка.
+        let mut series = Vec::new();
+        for _ in 0..3 {
+            backend.reset(w, h);
+            let t = Instant::now();
+            let s = renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+            series.push(format!(
+                "{} ({} растров, {} узлов)",
+                ms(t.elapsed()),
+                s.raster_builds,
+                s.drawn
+            ));
+        }
+        report.info(
+            "Кадры 2–4 после зума: время (построено растров, нарисовано узлов поштучно)",
+            series.join("; "),
+        );
+        match warm_up(&mut renderer, &mut backend, &scene, &camera) {
+            Some(t) => {
+                let (steady, _) = frame(&mut renderer, &mut backend, &scene, &camera);
+                report.info(
+                    "Кадр после зума: первый кадр / установившийся кадр / кадров до прогрева",
+                    format!("{} / {} / {}", ms(first_time), ms(steady), t.len()),
+                );
+                report.info(
+                    "Кадр после зума: лишнее время первого кадра (растры + поштучная отрисовка узлов без растров)",
+                    ms(first_time.saturating_sub(steady)),
+                );
+            }
+            None => report.fail("Прогрев после зума через степень двойки", "не прогрелся"),
+        }
         camera.set_zoom(z);
     }
-    let t = Instant::now();
-    std::hint::black_box(backend.render());
-    report.info("Вся страница: растеризация CPU 1920×1080", ms(t.elapsed()));
-    report.info(
-        "Память кэшей рендера (списки и контуры видимых узлов, растры фреймов)",
-        format!("{:.1} МБ", heap_mb() - before),
-    );
 
     // Экспорт фрейма @3x — справочно.
     let first_frame = scene.at(scene.roots()[0]).id;
@@ -512,7 +582,6 @@ fn main() {
         "Экспорт фрейма 1440×1024 @3x в PNG",
         format!("{} ({} КБ)", ms(t.elapsed()), png.len() / 1024),
     );
-    let _ = Rect::ZERO;
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
