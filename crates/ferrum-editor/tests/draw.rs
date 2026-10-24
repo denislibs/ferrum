@@ -264,3 +264,50 @@ fn russian_layout_uses_physical_keys() {
     h.ev(Input::KeyDown(e));
     assert_eq!(h.ed.tool_kind(), ToolKind::Ellipse);
 }
+
+/// Фигура, которую дотянули обратно к точке начала (меньше 1 px по любой оси),
+/// раньше становилась узлом 0 × 0. Как в Figma, она получает размер клика:
+/// 100 × 100 (линия — длину 100), одним шагом отмены.
+#[test]
+fn drawing_back_to_start_falls_back_to_click_size() {
+    let mut h = H::new();
+    for (key, kind) in [
+        ("KeyR", NodeKind::Rect),
+        ("KeyO", NodeKind::Ellipse),
+        ("KeyF", NodeKind::Frame),
+        ("KeyL", NodeKind::Line),
+    ] {
+        h.ed.execute(CommandId::SelectAll);
+        h.ed.execute(CommandId::Delete);
+        let before = h.state();
+        let steps = h.ed.step_count();
+        h.key(key, none());
+        h.down(100.0, 100.0, none());
+        h.mv(160.0, 140.0, none());
+        assert!(h.ed.scene().has_preview(), "{kind:?}: рисование началось");
+        h.mv(100.0, 100.0, none());
+        h.up(100.0, 100.0, none());
+        let id = only_child(&mut h);
+        let p = h.props(id);
+        assert_eq!(p.kind, kind);
+        assert_eq!((p.x, p.y), (100.0, 100.0), "{kind:?}");
+        if kind == NodeKind::Line {
+            assert_eq!((p.w, p.rotation), (100.0, 0.0), "{p:?}");
+        } else {
+            assert_eq!((p.w, p.h), (100.0, 100.0), "{p:?}");
+        }
+        assert_eq!(h.sel(), vec![id]);
+        h.assert_one_step(steps, &before);
+    }
+    // Тонкая полоса (полпикселя по высоте) — тоже размер клика, а не 60 × 0.
+    h.ed.execute(CommandId::SelectAll);
+    h.ed.execute(CommandId::Delete);
+    let mut s = h.ed.settings().clone();
+    s.pixel_snap = false;
+    h.ed.set_settings(s);
+    h.key("KeyR", none());
+    h.drag((100.0, 100.0), (160.0, 100.5), none());
+    let id = only_child(&mut h);
+    let p = h.props(id);
+    assert_eq!((p.w, p.h), (100.0, 100.0), "{p:?}");
+}

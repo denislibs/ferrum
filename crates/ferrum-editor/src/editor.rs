@@ -437,10 +437,11 @@ impl Editor {
     }
 
     fn key_down(&mut self, e: KeyEvent) {
-        let cmd = self.keymap.lookup(&e);
         if self.is_busy() {
             // Во время жеста клавиши только меняют модификаторы; Esc отменяет жест.
-            if cmd == Some(CommandId::Escape) {
+            // Esc здесь — физическая клавиша (раздел 7.1), а не команда раскладки:
+            // переназначение команды «Отмена» не должно лишать жест выхода.
+            if e.code == "Escape" {
                 self.cancel_gesture();
             } else {
                 let (tool, mut cx) = self.split();
@@ -448,7 +449,7 @@ impl Editor {
             }
             return;
         }
-        let Some(cmd) = cmd else {
+        let Some(cmd) = self.keymap.lookup(&e) else {
             return;
         };
         if cmd == CommandId::HandHold {

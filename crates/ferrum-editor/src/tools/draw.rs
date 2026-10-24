@@ -20,6 +20,10 @@ use crate::snap::{Snapper, SNAP_THRESHOLD_PX};
 
 /// Размер фигуры, созданной кликом без перетаскивания.
 pub const CLICK_SIZE: f64 = 100.0;
+/// Фигура меньше пикселя по любой оси (линия — короче пикселя) считается кликом:
+/// дотянутая обратно к точке начала, она получает размер клика, как в Figma, а не
+/// становится невидимым узлом 0 × 0.
+const MIN_DRAWN_PX: f64 = 1.0;
 
 /// Что рисуем.
 #[derive(Debug, Clone, PartialEq)]
@@ -278,6 +282,16 @@ impl Tool for DrawTool {
                 Flow::Finished
             }
             State::Drawing { start, props, .. } => {
+                let tiny = if props.kind == NodeKind::Line {
+                    props.w < MIN_DRAWN_PX
+                } else {
+                    props.w < MIN_DRAWN_PX || props.h < MIN_DRAWN_PX
+                };
+                let props = if tiny {
+                    self.click_props(&start)
+                } else {
+                    props
+                };
                 self.create(cx, start.parent, props);
                 Flow::Finished
             }

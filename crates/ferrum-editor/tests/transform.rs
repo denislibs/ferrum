@@ -391,3 +391,68 @@ fn locked_nodes_do_not_move() {
     assert_eq!(h.props(r).x, 100.0);
     assert_eq!(h.ed.step_count(), steps);
 }
+
+/// Ручка, доведённая ровно до противоположной стороны, раньше давала `w = 0`, и
+/// узел больше не растягивался: масштаб нулевой стороны — всегда ноль. Сторона не
+/// схлопывается до нуля (минимум `MIN_SIDE`, как 0.01 в Figma), и её можно
+/// растянуть обратно — и по ширине, и по высоте.
+#[test]
+fn collapsed_side_can_be_widened_again() {
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    h.click(200.0, 150.0, none());
+    assert_eq!(h.sel(), vec![r]);
+    // Правая ручка — ровно на левую сторону.
+    h.drag((300.0, 150.0), (100.0, 150.0), none());
+    let p = h.props(r);
+    assert!(p.w > 0.0 && p.w <= 0.01 + 1e-12, "{p:?}");
+    assert_eq!((p.x, p.h), (100.0, 100.0));
+    h.assert_scene_clean();
+    // И обратно: правая ручка (она у левой стороны) — на 250 px вправо.
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.drag((100.0 + p.w, 150.0), (350.0, 150.0), none());
+    let p = h.props(r);
+    assert_eq!((p.x, p.y, p.w, p.h), (100.0, 100.0, 250.0, 100.0));
+    assert!(!p.flip_x);
+    h.assert_one_step(steps, &before);
+    // То же по высоте: верхняя ручка на нижнюю сторону и обратно вверх.
+    h.drag((225.0, 100.0), (225.0, 200.0), none());
+    let p = h.props(r);
+    assert!(p.h > 0.0 && p.h <= 0.01 + 1e-12, "{p:?}");
+    assert_eq!(p.y, 200.0);
+    h.drag((225.0, 200.0), (225.0, 120.0), none());
+    let p = h.props(r);
+    assert_eq!((p.x, p.y, p.w, p.h), (100.0, 120.0, 250.0, 80.0));
+    assert!(!p.flip_y);
+    h.assert_scene_clean();
+}
+
+/// Esc отменяет жест по физической клавише (раздел 7.1), даже если команду
+/// «Отмена» переназначили, а клавишу Escape отдали другой команде.
+#[test]
+fn escape_cancels_gesture_even_when_rebound() {
+    let mut h = H::new();
+    h.rect(None, 100.0, 100.0, 50.0, 50.0);
+    h.ed.keymap_mut()
+        .set_bindings(CommandId::Escape, vec![Shortcut::parse("KeyQ").unwrap()]);
+    h.ed.keymap_mut().set_bindings(
+        CommandId::ToolRect,
+        vec![Shortcut::parse("Escape").unwrap()],
+    );
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.drag_hold((120.0, 120.0), (300.0, 300.0), none());
+    assert!(h.ed.is_busy() && h.ed.scene().has_preview());
+    h.ev(Input::KeyDown(KeyEvent::new("Escape", none())));
+    assert!(!h.ed.is_busy(), "Esc отменил жест");
+    assert_eq!(
+        h.ed.tool_kind(),
+        ToolKind::Move,
+        "команда клавиши не выполнена"
+    );
+    h.up(300.0, 300.0, none());
+    assert_eq!(h.state(), before);
+    assert_eq!(h.ed.step_count(), steps);
+    h.assert_scene_clean();
+}

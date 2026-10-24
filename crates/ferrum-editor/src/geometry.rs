@@ -431,6 +431,8 @@ pub fn resize_rect(
 
 /// Матрица, переводящая прямоугольник `from` в `to` (сдвиг и масштаб по осям).
 /// Нулевая сторона не масштабируется: вертикальную линию нельзя растянуть вширь.
+/// Ресайз фигуры до нулевой стороны не доводит (`MIN_SIDE`), поэтому нулевая
+/// сторона рамки — только у линий.
 pub fn rect_map(from: Rect, to: Rect) -> Affine {
     if !rect_finite(from) || !rect_finite(to) {
         return Affine::IDENTITY;
@@ -553,6 +555,12 @@ fn quarter_turn(rotation: f64) -> bool {
     right_angle(rotation) && !multiple_of(rotation, 180.0)
 }
 
+/// Наименьшая сторона узла после ресайза, как 0.01 в Figma. Ручку можно довести
+/// ровно до противоположной стороны, но сторона не схлопывается в ноль: размер
+/// после жеста — исходный, умноженный на масштаб, и у нулевой стороны любой
+/// следующий масштаб снова дал бы ноль — узел уже нельзя было бы растянуть.
+pub const MIN_SIDE: f64 = 0.01;
+
 fn pose_patch(base: &Props, pose: Pose, size: bool, pixel: PixelSnap) -> PropsPatch {
     let mut pose = pose;
     if size {
@@ -570,6 +578,10 @@ fn pose_patch(base: &Props, pose: Pose, size: bool, pixel: PixelSnap) -> PropsPa
         if h_axis {
             pose.h = pose.h.round();
         }
+        // После округления: иначе сторона в доли пикселя округлилась бы в ноль.
+        // `max` заодно заменяет NaN минимумом.
+        pose.w = pose.w.max(MIN_SIDE);
+        pose.h = pose.h.max(MIN_SIDE);
     }
     if right_angle(pose.rotation) {
         if pixel.x {
