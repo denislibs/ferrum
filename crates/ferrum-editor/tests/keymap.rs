@@ -397,12 +397,16 @@ fn alt_graph_never_matches_mod_alt_bindings() {
         !KeyEvent::new("KeyG", Modifiers::NONE).alt_graph,
         "по умолчанию false"
     );
-    // На маке Mod — Cmd: ⌥⌘] с флагом AltGr тоже не срабатывает.
+    // На маке AltGr нет: Option некоторые браузеры отдают как AltGraph, и правило
+    // убило бы ⌥⌘] / ⌥⌘[. Там флаг сочетаниям не мешает.
     let mac = Keymap::new(Platform::Mac);
     let mut f = key("BracketRight", false, true, false, true);
     assert_eq!(mac.lookup(&f), Some(CommandId::BringToFront));
     f.alt_graph = true;
-    assert_eq!(mac.lookup(&f), None);
+    assert_eq!(mac.lookup(&f), Some(CommandId::BringToFront));
+    let mut b = key("BracketLeft", false, true, false, true);
+    b.alt_graph = true;
+    assert_eq!(mac.lookup(&b), Some(CommandId::SendToBack));
 }
 
 /// На Windows и Linux Ctrl+Alt совпадает с AltGr, поэтому «На передний/задний

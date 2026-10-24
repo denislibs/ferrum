@@ -114,9 +114,12 @@ pub struct KeyEvent {
     pub modifiers: Modifiers,
     /// Автоповтор удерживаемой клавиши.
     pub repeat: bool,
-    /// Нажат AltGr (`getModifierState("AltGraph")`). На Windows он приходит как
-    /// Ctrl+Alt, поэтому с ним сочетания с Mod+Alt не срабатывают: пользователь
-    /// набирает символ, а не вызывает команду.
+    /// Нажат AltGr. На Windows он приходит как Ctrl+Alt, поэтому с ним на Windows
+    /// и Linux сочетания с Mod+Alt не срабатывают: пользователь набирает символ, а
+    /// не вызывает команду. Договор с основным потоком: ставить флаг только по
+    /// настоящему состоянию AltGraph (`KeyboardEvent.getModifierState("AltGraph")`),
+    /// не выводить его из Ctrl+Alt. На macOS флаг не учитывается (там AltGr нет,
+    /// а Option иногда приходит как AltGraph).
     pub alt_graph: bool,
 }
 

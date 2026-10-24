@@ -365,19 +365,17 @@ impl Keymap {
 
     /// Команда для нажатой клавиши. При конфликте — первая по таблице команд.
     ///
-    /// С AltGr (`KeyEvent::alt_graph`) сочетания с Mod+Alt не срабатывают: на
-    /// Windows AltGr приходит как Ctrl+Alt, и набор символа (например, «@» на
-    /// немецкой раскладке) иначе вызывал бы команду.
+    /// С AltGr (`KeyEvent::alt_graph`) на Windows и Linux сочетания с Mod+Alt не
+    /// срабатывают: там AltGr приходит как Ctrl+Alt, и набор символа (например,
+    /// «@» на немецкой раскладке) иначе вызывал бы команду. На macOS AltGr нет, а
+    /// Option некоторые браузеры отдают как AltGraph — правило убило бы ⌥⌘] и ⌥⌘[,
+    /// поэтому там флаг не учитывается.
     pub fn lookup(&self, e: &KeyEvent) -> Option<CommandId> {
         let s = Shortcut {
             code: e.code.clone(),
             mods: e.modifiers.into(),
         };
-        let primary = match self.platform {
-            Platform::Mac => s.mods.meta,
-            _ => s.mods.ctrl,
-        };
-        if e.alt_graph && s.mods.alt && (s.mods.ctrl || primary) {
+        if e.alt_graph && self.platform != Platform::Mac && s.mods.alt && s.mods.ctrl {
             return None;
         }
         self.index.get(&s).and_then(|ids| ids.first().copied())
