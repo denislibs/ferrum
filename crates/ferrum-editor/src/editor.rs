@@ -221,6 +221,12 @@ impl Editor {
         &self.selection
     }
 
+    /// Версия выделения: растёт при каждом изменении. По ней worker не пересчитывает
+    /// рамку выделения в живом состоянии, пока выделение и сцена те же.
+    pub fn selection_version(&self) -> u64 {
+        self.selection.version()
+    }
+
     pub fn tool_kind(&self) -> ToolKind {
         self.tool.kind()
     }

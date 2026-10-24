@@ -788,6 +788,8 @@ version = "0.1.0"
 dependencies = [
  "ferrum-doc",
  "ferrum-editor",
+ "ferrum-render",
+ "ferrum-scene",
  "kurbo",
  "proptest",
  "serde",

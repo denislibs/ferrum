@@ -315,6 +315,12 @@ impl Document {
         self.changes.remove(&page).unwrap_or_default()
     }
 
+    /// Забывает историю отмены и повтора: документ, собранный программно (пример,
+    /// шаблон), открывается как только что прочитанный файл — без шага «создать всё».
+    pub fn clear_history(&mut self) {
+        self.history = History::default();
+    }
+
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
