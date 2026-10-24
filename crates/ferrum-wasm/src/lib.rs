@@ -6,6 +6,10 @@
 //! (`core`). Основной поток пишет ввод в кольцевой буфер SharedArrayBuffer (или
 //! в буфер сообщения, если страница не изолирована), worker разбирает его в начале
 //! кадра и отдаёт редактору по порядку.
+//!
+//! Браузерная часть (`web`, только wasm32): `WasmCore` для worker'а —
+//! поверхность WebGPU, WebGL2 или CPU на OffscreenCanvas, часы `performance.now()`
+//! и привязки wasm-bindgen.
 
 pub mod core;
 pub mod images;
@@ -13,3 +17,5 @@ pub mod input;
 pub mod layout;
 pub mod live;
 pub mod protocol;
+#[cfg(target_arch = "wasm32")]
+pub mod web;

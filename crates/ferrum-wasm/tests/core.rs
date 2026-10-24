@@ -452,3 +452,40 @@ fn failed_open_keeps_undo_and_redo_of_the_old_document() {
     assert_eq!(core.live().can_undo, 1.0);
     assert_eq!(core.live().nodes, 1000.0);
 }
+
+#[test]
+fn reference_frame_matches_screen_frame_and_leaves_state_alone() {
+    let mut core = demo(300);
+    let screen_px = frame(&mut core);
+    let frames_before = core.live().frames;
+    let reference = core.draw_reference();
+    assert_eq!(
+        (reference.width(), reference.height()),
+        (screen_px.width(), screen_px.height())
+    );
+    assert_eq!(
+        reference.data_as_u8_slice(),
+        screen_px.data_as_u8_slice(),
+        "эталон — тот же кадр vello_cpu"
+    );
+    assert_eq!(core.live().frames, frames_before, "эталон кадры не считает");
+}
+
+#[test]
+fn request_frame_and_push_event_reach_the_loop() {
+    let mut core = demo(10);
+    frame(&mut core);
+    // Кадр дорисован: до запроса новый не нужен.
+    while core.wants_frame() {
+        frame(&mut core);
+    }
+    core.request_frame();
+    assert!(core.wants_frame());
+    core.push_event(CoreEvent::Error {
+        message: "x".into(),
+    });
+    assert!(core
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Error { message } if message == "x")));
+}

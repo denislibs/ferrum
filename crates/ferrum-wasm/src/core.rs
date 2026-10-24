@@ -403,6 +403,17 @@ impl Core {
         }
     }
 
+    /// Кадр не дошёл до экрана (поверхность пропустила его): нарисовать снова.
+    pub fn request_frame(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Событие от вызывающего (готовность, пиксели, ошибки поверхности) — в общую
+    /// очередь с событиями редактора.
+    pub fn push_event(&mut self, e: CoreEvent) {
+        self.events.push(e);
+    }
+
     /// Нужен ли кадр.
     pub fn wants_frame(&self) -> bool {
         self.dirty
@@ -432,6 +443,29 @@ impl Core {
         self.dirty = stats.needs_another_frame;
         self.frames += 1;
         stats
+    }
+
+    /// Тот же кадр, нарисованный `vello_cpu` отдельным рендерером, — эталон для
+    /// сравнения с GPU в тестах (`ReadPixels { reference: true }`). Свой рендерер:
+    /// кэши и счётчики кадров экрана не трогаются. Без растрового кэша и без
+    /// предела времени: эталон не зависит от истории кадров. Картинки — как при
+    /// экспорте (без бюджета кадра): иначе эталон с заглушкой вместо картинки
+    /// расходился бы с GPU, у которого картинка уже в атласе.
+    pub fn draw_reference(&self) -> ferrum_render::Pixmap {
+        let (w, h) = self.device_size();
+        let mut backend = ferrum_render::CpuBackend::new(w, h);
+        let mut renderer = Renderer::with_raster_cache_bytes(0);
+        renderer.set_raster_build_time(None);
+        let provider = self.images.export_provider(&self.editor.document().images);
+        renderer.render(
+            &mut backend,
+            self.editor.scene(),
+            self.editor.camera(),
+            &self.editor.overlay(),
+            &provider,
+            Some(self.background()),
+        );
+        backend.render()
     }
 
     /// Рамка выделения для живого состояния. Пересчитывается только при смене

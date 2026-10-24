@@ -13,14 +13,35 @@ crate-type = ["cdylib", "rlib"]
 ferrum-doc = { path = "../ferrum-doc" }
 ferrum-editor = { path = "../ferrum-editor" }
 ferrum-render = { path = "../ferrum-render" }
-ferrum-scene = { path = "../ferrum-scene" }
 kurbo.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 tsify.workspace = true
 wasm-bindgen.workspace = true
 
+# Браузерная часть (модуль `web`): только для wasm32, нативные тесты её не собирают.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ferrum-render = { path = "../ferrum-render", features = ["gpu"] }
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = [
+    "OffscreenCanvas",
+    "OffscreenCanvasRenderingContext2d",
+    "ImageData",
+    "HtmlCanvasElement",
+    "WebGl2RenderingContext",
+    "Performance",
+] }
+wgpu.workspace = true
+vello_gpu = { workspace = true, features = ["webgl"] }
+vello_common.workspace = true
+serde-wasm-bindgen.workspace = true
+console_error_panic_hook.workspace = true
+
 # proptest под wasm32 не собирается (getrandom без бэкенда): нативные тесты.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
