@@ -20,7 +20,7 @@ pub use backend::{CpuBackend, ImagePaint, RenderBackend, Rgba};
 pub use camera::{Camera, MAX_DEVICE_PIXELS, MAX_DEVICE_SIDE, MAX_ZOOM, MIN_ZOOM};
 pub use draw::{
     FrameStats, EVICT_AFTER_FRAMES, LOD_RECT_PX, LOD_SKIP_PX, RASTER_BUILDS_PER_FRAME,
-    RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
+    RASTER_BUILD_TIME_PER_FRAME, RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
 #[cfg(feature = "gpu")]
 pub use gpu::GpuBackend;
@@ -71,6 +71,13 @@ impl Renderer {
             painter: Painter::with_raster_limit(bytes),
             text: TextEngine::new(),
         }
+    }
+
+    /// Предел времени на построение растров фреймов за кадр (по умолчанию
+    /// `RASTER_BUILD_TIME_PER_FRAME`). `None` — только счётный предел
+    /// `RASTER_BUILDS_PER_FRAME`: число кадров прогрева не зависит от скорости машины.
+    pub fn set_raster_build_time(&mut self, budget: Option<std::time::Duration>) {
+        self.painter.set_raster_time(budget);
     }
 
     /// Сколько байт сейчас занимает растровый кэш фреймов.
@@ -128,7 +135,7 @@ impl Renderer {
             retain: true,
         };
         self.painter.draw(backend, &ctx, scene.roots());
-        self.painter.stats
+        self.painter.finish_frame()
     }
 
     /// Экспорт узла в PNG в масштабе `scale` (1, 2, 3…). Область — форма фрейма

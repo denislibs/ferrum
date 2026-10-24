@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ferrum_doc::{NodeId, NodeKind, ScaleMode};
 use ferrum_scene::shape::Geometry;
@@ -27,9 +28,16 @@ pub const RASTER_MAX_PX: f64 = 256.0;
 /// Растровый кэш — только при сильном отдалении (пикселей устройства на единицу
 /// мира): вблизи узлы рисуются дёшево, а любая правка перестраивала бы растр.
 pub const RASTER_MAX_SCALE: f64 = 0.25;
-/// Сколько растровых кэшей строить за кадр; остальные фреймы этого кадра рисуются
-/// узлами, а кэш догоняет в следующих кадрах.
+/// Сколько растровых кэшей строить за кадр — страховка поверх предела по времени
+/// (`RASTER_BUILD_TIME_PER_FRAME`). Фреймы без готового растра этого кадра рисуются
+/// прежним растром в новом масштабе (если он есть) или узлами, а кэш догоняет в
+/// следующих кадрах.
 pub const RASTER_BUILDS_PER_FRAME: usize = 32;
+/// Сколько времени за кадр тратить на построение растров. Один растр фрейма из сотни
+/// узлов строится около 0,5 мс, поэтому счётный предел в 32 растра сам по себе
+/// давал кадры по 16+ мс; 4 мс оставляют в кадре 60 Гц место остальной работе.
+/// Хотя бы один растр за кадр строится всегда — иначе кэш не догнал бы никогда.
+pub const RASTER_BUILD_TIME_PER_FRAME: Duration = Duration::from_millis(4);
 /// Сколько байт занимают растры фреймов всего: сверх этого вытесняются давно не
 /// рисовавшиеся. Возраст (`EVICT_AFTER_FRAMES`) сам память не ограничивает: при
 /// быстром панорамировании по огромной странице за 300 кадров растров накопится
@@ -58,6 +66,11 @@ pub struct FrameStats {
     pub raster_builds: usize,
     pub clips: usize,
     pub layers: usize,
+    /// Кадр неполный: часть растров не построена (бюджет кадра исчерпан, показаны
+    /// прежние растры или узлы) или вместо картинки нарисована заглушка. Холст без
+    /// правок и движения камеры должен запросить ещё кадр, иначе так и останется
+    /// размытым или с заглушками.
+    pub needs_another_frame: bool,
 }
 
 /// Параметры обхода.
@@ -130,6 +143,10 @@ pub struct Painter {
     path: BezPath,
     frame: u64,
     raster_budget: usize,
+    /// Предел времени на растры за кадр и сколько уже потрачено (`None` — только
+    /// счётный предел).
+    raster_time: Option<Duration>,
+    raster_time_spent: Duration,
     /// Один бэкенд на все построения растров: создание `RenderContext` дороже
     /// самой отрисовки мелкого фрейма.
     raster_backend: Option<CpuBackend>,
@@ -155,12 +172,20 @@ impl Painter {
             path: BezPath::new(),
             frame: 0,
             raster_budget: 0,
+            raster_time: Some(RASTER_BUILD_TIME_PER_FRAME),
+            raster_time_spent: Duration::ZERO,
             raster_backend: None,
             raster_bytes: 0,
             raster_limit: bytes,
             missing_image: false,
             stats: FrameStats::default(),
         }
+    }
+
+    /// Предел времени на построение растров за кадр; `None` — только счётный предел
+    /// `RASTER_BUILDS_PER_FRAME` (детерминированно: тесты и платформы без часов).
+    pub fn set_raster_time(&mut self, budget: Option<Duration>) {
+        self.raster_time = budget;
     }
 
     /// Сколько байт занимают растры в кэше.
@@ -173,9 +198,18 @@ impl Painter {
         self.stats = FrameStats::default();
         self.frame += 1;
         self.raster_budget = RASTER_BUILDS_PER_FRAME;
+        self.raster_time_spent = Duration::ZERO;
+        self.missing_image = false;
         if self.frame.is_multiple_of(64) {
             self.evict();
         }
+    }
+
+    /// Конец кадра на экране: статистика с признаком неполного кадра (заглушки
+    /// картинок, встреченные при рисовании, тоже его делают неполным).
+    pub fn finish_frame(&mut self) -> FrameStats {
+        self.stats.needs_another_frame |= self.missing_image;
+        self.stats
     }
 
     /// Выбрасывает контуры узлов и растры, не рисовавшиеся `EVICT_AFTER_FRAMES` кадров.
@@ -408,17 +442,16 @@ impl Painter {
         n: &SceneNode,
         area: Rect,
     ) -> bool {
-        let fresh = self.rasters.get(&slot).is_some_and(|r| {
-            r.id == n.id
-                && !r.placeholder
-                && r.subtree_version == n.subtree_version
-                && r.scale >= ctx.scale
-                && r.scale < 2.0 * ctx.scale
-        });
+        // Растр того же содержимого, возможно, другой плотности.
+        let same = self
+            .rasters
+            .get(&slot)
+            .is_some_and(|r| r.id == n.id && r.subtree_version == n.subtree_version);
+        let fresh = same
+            && self.rasters.get(&slot).is_some_and(|r| {
+                !r.placeholder && r.scale >= ctx.scale && r.scale < 2.0 * ctx.scale
+            });
         if !fresh {
-            if self.raster_budget == 0 {
-                return false;
-            }
             let scale = 2f64.powf(ctx.scale.log2().ceil());
             let (w, h) = (
                 (area.width() * scale).ceil(),
@@ -427,7 +460,34 @@ impl Painter {
             if w > 2.0 * RASTER_MAX_PX || h > 2.0 * RASTER_MAX_PX {
                 return false;
             }
+            if !self.can_build_raster() {
+                // Бюджет кадра исчерпан: кадр неполный, растр догонит в следующих.
+                self.stats.needs_another_frame = true;
+                // После зума через степень двойки у фрейма есть растр прежней
+                // плотности с тем же содержимым — он и рисуется, растянутый в новый
+                // масштаб (матрица в `blit_raster` учитывает его плотность): чуть
+                // размыто несколько кадров, зато без поштучной отрисовки десятков
+                // тысяч узлов.
+                if same {
+                    return self.blit_raster(backend, ctx, slot);
+                }
+                // Растра этого узла ещё не было (первый показ страницы издалека):
+                // пока — только собственная заливка фрейма, без детей. Поштучная
+                // отрисовка сотни тысяч LOD-прямоугольников стоила бы ~10 мс на
+                // каждом кадре прогрева.
+                let cold = self.rasters.get(&slot).is_none_or(|r| r.id != n.id);
+                if cold {
+                    let opacity = n.props.opacity as f32;
+                    if opacity > 0.0 {
+                        self.draw_own(backend, ctx, slot, n, opacity, Part::Fills, None);
+                    }
+                    return true;
+                }
+                // Содержимое изменилось (правка): точный вид важнее — узлами.
+                return false;
+            }
             self.raster_budget -= 1;
+            let started = now();
             let (w, h) = (w.max(1.0) as u16, h.max(1.0) as u16);
             let mut cpu = match self.raster_backend.take() {
                 Some(mut b) => {
@@ -450,6 +510,8 @@ impl Painter {
             let outer_missing = std::mem::take(&mut self.missing_image);
             self.draw(&mut cpu, &inner, &[slot]);
             let placeholder = std::mem::replace(&mut self.missing_image, outer_missing);
+            // Растр с заглушкой на экране — та же заглушка: кадр неполный.
+            self.missing_image |= placeholder;
             self.stats = FrameStats {
                 raster_builds: outer.raster_builds + 1,
                 lists_built: self.stats.lists_built,
@@ -471,8 +533,32 @@ impl Painter {
             self.rasters.insert(slot, raster);
             self.enforce_raster_limit(slot);
             self.raster_backend = Some(cpu);
+            if let Some(t) = started {
+                self.raster_time_spent += t.elapsed();
+            }
         }
-        let r = self.rasters.get_mut(&slot).expect("есть или построен выше");
+        self.blit_raster(backend, ctx, slot)
+    }
+
+    /// Можно ли в этом кадре построить ещё один растр: счётный предел и предел по
+    /// времени. Первый растр кадра строится всегда — так кэш догоняет при любом
+    /// пределе времени.
+    fn can_build_raster(&self) -> bool {
+        if self.raster_budget == 0 {
+            return false;
+        }
+        let first = self.stats.raster_builds == 0;
+        first || self.raster_time.is_none_or(|t| self.raster_time_spent < t)
+    }
+
+    /// Рисует растр фрейма из кэша (он там есть) в текущий кадр.
+    fn blit_raster(
+        &mut self,
+        backend: &mut impl RenderBackend,
+        ctx: &DrawContext,
+        slot: Slot,
+    ) -> bool {
+        let r = self.rasters.get_mut(&slot).expect("растр есть в кэше");
         r.last_used = self.frame;
         backend.set_transform(ctx.transform);
         backend.set_image(&ImagePaint {
@@ -491,6 +577,13 @@ impl Painter {
         self.stats.rasters += 1;
         true
     }
+}
+
+/// Текущее время, если платформа его даёт. В `wasm32-unknown-unknown`
+/// `Instant::now` паникует; там предел по времени не работает, остаётся счётный,
+/// пока часы (`performance.now`) не придут из `ferrum-wasm`.
+fn now() -> Option<Instant> {
+    (!cfg!(target_arch = "wasm32")).then(Instant::now)
 }
 
 /// Что случилось при воспроизведении списка.

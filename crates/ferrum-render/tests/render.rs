@@ -175,6 +175,9 @@ fn raster_cache_matches_live_drawing_and_follows_changes() {
     cam.fit(scene.bounds().unwrap(), 10.0);
     let (w, h) = cam.device_size();
     let mut r = Renderer::new();
+    // Проверяется счётный предел построений за кадр: предел по времени выключен,
+    // иначе число кадров прогрева зависело бы от скорости машины.
+    r.set_raster_build_time(None);
 
     let mut live = CpuBackend::new(w, h);
     r.draw_scene(&mut NoRaster(&mut live), &scene, &cam, &NoImages);
@@ -609,7 +612,9 @@ fn raster_cache_respects_byte_budget() {
             draw(r, &scene, &cam);
         }
     };
+    // Прогрев за фиксированное число кадров — только со счётным пределом.
     let mut free = Renderer::new();
+    free.set_raster_build_time(None);
     warm(&mut free);
     let all = free.raster_cache_bytes();
     assert!(all > 0);
@@ -617,6 +622,7 @@ fn raster_cache_respects_byte_budget() {
     // Бюджет на четверть: кэш не растёт выше, фреймы перестраиваются.
     let limit = all / 4;
     let mut small = Renderer::with_raster_cache_bytes(limit);
+    small.set_raster_build_time(None);
     warm(&mut small);
     assert!(small.raster_cache_bytes() <= limit);
     assert!(draw(&mut small, &scene, &cam).raster_builds > 0);
@@ -668,4 +674,170 @@ fn reused_backend_starts_each_frame_clean() {
         tail <= head * 2,
         "время кадра растёт: первые {head:?}, последние {tail:?}"
     );
+}
+
+/// Мера отличия двух картинок: среднее по пикселям наибольшее отличие канала.
+fn mean_diff(a: &Pixmap, b: &Pixmap) -> f64 {
+    let sum: u64 = a
+        .data()
+        .iter()
+        .zip(b.data())
+        .map(|(a, b)| {
+            a.r.abs_diff(b.r)
+                .max(a.g.abs_diff(b.g))
+                .max(a.b.abs_diff(b.b)) as u64
+        })
+        .sum();
+    sum as f64 / (a.width() as f64 * a.height() as f64)
+}
+
+/// Кадр в новый бэкенд: статистика и картинка.
+fn frame_image(
+    r: &mut Renderer,
+    scene: &Scene,
+    cam: &Camera,
+) -> (ferrum_render::FrameStats, Pixmap) {
+    let (w, h) = cam.device_size();
+    let mut b = CpuBackend::new(w, h);
+    let s = r.draw_scene(&mut b, scene, cam, &NoImages);
+    (s, b.render())
+}
+
+#[test]
+fn zoom_past_power_of_two_draws_previous_raster_scaled() {
+    let (mut p, _) = grid(8, 8, 10);
+    let scene = p.scene();
+    let mut cam = Camera::new(Size::new(200.0, 200.0), 1.0);
+    cam.fit(scene.bounds().unwrap(), 10.0);
+    let mut r = Renderer::new();
+    r.set_raster_build_time(None);
+    while draw(&mut r, &scene, &cam).raster_builds > 0 {}
+    // Приблизили через степень двойки: растры прежней плотности уже не годятся.
+    let z = cam.zoom();
+    cam.set_zoom(2f64.powf(z.log2().floor() + 1.0) * 1.01);
+    // Время на растры — ноль: за кадр строится только один (гарантия прогресса).
+    r.set_raster_build_time(Some(std::time::Duration::ZERO));
+    let (s, stale) = frame_image(&mut r, &scene, &cam);
+    assert_eq!(s.raster_builds, 1, "{s:?}");
+    // Остальные 63 фрейма — прежние растры в новом масштабе, а не поштучно узлами.
+    assert_eq!(s.rasters, 64, "{s:?}");
+    assert_eq!((s.drawn, s.lod_rects), (0, 0), "{s:?}");
+    assert!(s.needs_another_frame, "растры ещё догоняют: {s:?}");
+    // Растянутый старый растр стоит на месте фрейма: картинка почти как у живой отрисовки.
+    let mut live = Renderer::new();
+    let (w, h) = cam.device_size();
+    let mut b = CpuBackend::new(w, h);
+    live.draw_scene(&mut NoRaster(&mut b), &scene, &cam, &NoImages);
+    let diff = mean_diff(&b.render(), &stale);
+    assert!(diff < 6.0, "среднее отличие {diff}");
+}
+
+#[test]
+fn raster_builds_are_budgeted_by_time_with_progress_guaranteed() {
+    let (mut p, _) = grid(2, 2, 10);
+    let scene = p.scene();
+    let mut cam = Camera::new(Size::new(100.0, 100.0), 1.0);
+    cam.fit(scene.bounds().unwrap(), 10.0);
+    let mut r = Renderer::new();
+    r.set_raster_build_time(Some(std::time::Duration::ZERO));
+    let builds: Vec<(usize, bool)> = (0..5)
+        .map(|_| {
+            let s = draw(&mut r, &scene, &cam);
+            (s.raster_builds, s.needs_another_frame)
+        })
+        .collect();
+    assert_eq!(
+        builds,
+        [(1, true), (1, true), (1, true), (1, false), (0, false)]
+    );
+}
+
+#[test]
+fn needs_another_frame_reports_pending_rasters_and_placeholders() {
+    // Растры: 64 фрейма по 32 за кадр — второй кадр строит последние, третий готов.
+    let (mut p, _) = grid(8, 8, 10);
+    let scene = p.scene();
+    let mut cam = Camera::new(Size::new(400.0, 400.0), 1.0);
+    cam.fit(scene.bounds().unwrap(), 10.0);
+    let mut r = Renderer::new();
+    r.set_raster_build_time(None);
+    let pending: Vec<bool> = (0..3)
+        .map(|_| draw(&mut r, &scene, &cam).needs_another_frame)
+        .collect();
+    assert_eq!(pending, [true, false, false]);
+
+    // Заглушка картинки: и узлом вблизи, и внутри растра фрейма издалека.
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            fills: solid(255, 255, 255),
+            ..rect(0.0, 0.0, 200.0, 200.0)
+        },
+    );
+    p.add(
+        Some(f),
+        NodeKind::Image,
+        PropsPatch {
+            fills: Some(vec![Fill::image("позже")]),
+            ..rect(50.0, 50.0, 100.0, 100.0)
+        },
+    );
+    let scene = p.scene();
+    let images: HashMap<String, Arc<Pixmap>> = [("позже".to_string(), red_image())].into();
+    let near = camera(200.0, 200.0);
+    let mut far = Camera::new(Size::new(40.0, 40.0), 1.0);
+    far.set_center(Point::new(100.0, 100.0));
+    far.set_zoom(0.2);
+    for cam in [near, far] {
+        let mut r = Renderer::new();
+        let (w, h) = cam.device_size();
+        let mut b = CpuBackend::new(w, h);
+        for _ in 0..2 {
+            let s = r.draw_scene(&mut b, &scene, &cam, &NoImages);
+            assert!(
+                s.needs_another_frame,
+                "картинки нет — нарисована заглушка: {s:?}"
+            );
+        }
+        let s = r.draw_scene(&mut b, &scene, &cam, &images);
+        assert!(!s.needs_another_frame, "картинка пришла: {s:?}");
+    }
+}
+
+#[test]
+fn over_budget_cold_frames_show_their_fill_and_edited_frames_draw_nodes() {
+    let (mut p, frames) = grid(2, 2, 10);
+    let mut scene = p.scene();
+    let mut cam = Camera::new(Size::new(100.0, 100.0), 1.0);
+    cam.fit(scene.bounds().unwrap(), 10.0);
+    let mut r = Renderer::new();
+    r.set_raster_build_time(Some(std::time::Duration::ZERO));
+    // Холодный кадр: один растр построен, у трёх фреймов растра ещё не было — пока
+    // только их собственная заливка, без 30 детей поштучно.
+    let s = draw(&mut r, &scene, &cam);
+    assert_eq!(
+        (s.raster_builds, s.rasters, s.drawn, s.lod_rects),
+        (1, 1, 3, 0)
+    );
+    assert!(s.needs_another_frame);
+    while draw(&mut r, &scene, &cam).raster_builds > 0 {}
+    // Правка в двух фреймах: один растр перестроен, второй фрейм — точно, узлами
+    // (его старый растр показывал бы прежнее содержимое).
+    for f in &frames[..2] {
+        let kid = scene.at(scene.slot(*f).unwrap()).children[0];
+        p.edit(
+            scene.at(kid).id,
+            PropsPatch {
+                fills: solid(0, 0, 0),
+                ..Default::default()
+            },
+        );
+    }
+    p.update(&mut scene);
+    let s = draw(&mut r, &scene, &cam);
+    assert_eq!((s.raster_builds, s.rasters), (1, 3), "{s:?}");
+    assert_eq!(s.drawn + s.lod_rects, 11, "{s:?}");
+    assert!(s.needs_another_frame);
 }

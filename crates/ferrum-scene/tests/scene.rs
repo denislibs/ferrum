@@ -649,3 +649,32 @@ fn opacity_and_clip_bump_subtree_version_of_node_and_ancestors_only() {
     )]);
     assert_ne!(scene.node(f).unwrap().subtree_version, fs);
 }
+
+#[test]
+fn change_counter_grows_on_every_apply_and_preview() {
+    // По счётчику холст узнаёт, что сцена изменилась и нужен новый кадр.
+    let (mut doc, page, ids) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let c0 = scene.change_counter();
+    doc.transact(page, vec![], |p| {
+        p.set_props(ids[1], &patch(11.0, 10.0, 50.0, 40.0))
+            .map(|_| vec![])
+    })
+    .unwrap();
+    apply(&mut scene, &mut doc, page);
+    let c1 = scene.change_counter();
+    assert!(c1 > c0);
+    // Пустые изменения сцену не меняют.
+    let empty = doc.take_changes(page);
+    scene.apply(&empty, doc.page(page).unwrap());
+    assert_eq!(scene.change_counter(), c1);
+    scene.set_preview(&[(ids[5], patch(1.0, 2.0, 3.0, 4.0))]);
+    let c2 = scene.change_counter();
+    assert!(c2 > c1);
+    scene.clear_preview();
+    let c3 = scene.change_counter();
+    assert!(c3 > c2);
+    // Сброс несуществующего превью — ничего не изменилось.
+    scene.clear_preview();
+    assert_eq!(scene.change_counter(), c3);
+}

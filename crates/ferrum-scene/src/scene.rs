@@ -153,6 +153,9 @@ pub struct Scene {
     /// Пометки для обходов без выделения памяти на каждый вызов.
     marks: Vec<u32>,
     mark: u32,
+    /// Растёт при каждом изменении сцены (`apply`, превью): холст по нему понимает,
+    /// что нужен новый кадр, не сравнивая сцены.
+    changes: u64,
 }
 
 impl Scene {
@@ -199,6 +202,13 @@ impl Scene {
 
     pub fn len(&self) -> usize {
         self.by_id.len()
+    }
+
+    /// Счётчик изменений: растёт при каждом непустом `apply` и каждом превью,
+    /// которое что-то поменяло. Значение само по себе смысла не имеет — только
+    /// сравнение с запомненным.
+    pub fn change_counter(&self) -> u64 {
+        self.changes
     }
 
     pub fn is_empty(&self) -> bool {
@@ -516,6 +526,7 @@ impl Scene {
         if changes.is_empty() {
             return;
         }
+        let counter = self.changes + 1;
         if self.try_apply(changes, page).is_none() {
             // Сцена разошлась с документом (например, построена по кэшу, который
             // документ отверг) — перестраиваем целиком, превью сохраняется.
@@ -527,6 +538,8 @@ impl Scene {
             *self = Scene::from_page(page);
             self.set_preview(&preview);
         }
+        // Пересборка целиком создаёт новую сцену: счётчик не должен откатиться.
+        self.changes = counter;
     }
 
     fn try_apply(&mut self, changes: &Changes, page: &PageDoc) -> Option<()> {
@@ -725,6 +738,9 @@ impl Scene {
             self.preview.insert(slot, (doc.clone(), patch.clone()));
             self.set_doc_props(slot, doc);
             dirty.push(slot);
+        }
+        if !dirty.is_empty() {
+            self.changes += 1;
         }
         self.recompute(dirty, Vec::new());
         self.flush_tree();
