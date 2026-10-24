@@ -135,8 +135,11 @@ impl Camera {
         }
     }
 
-    /// Показать прямоугольник мира целиком с отступом в CSS-пикселях. Пустой или
-    /// нечисловой прямоугольник и нечисловой отступ ничего не меняют.
+    /// Показать прямоугольник мира целиком с отступом в CSS-пикселях. Нечисловой
+    /// прямоугольник и нечисловой отступ ничего не меняют. Прямоугольник без площади
+    /// — выделенная горизонтальная или вертикальная линия, точка — тоже показывается:
+    /// камера встаёт на его центр и вписывает ненулевую сторону, а у точки оставляет
+    /// прежний зум (вписывать нечего, а «показать выделение» не должно молчать).
     pub fn fit(&mut self, world: Rect, padding: f64) {
         let finite_rect = [world.x0, world.y0, world.x1, world.y1]
             .iter()
@@ -146,7 +149,7 @@ impl Camera {
         }
         let world = world.abs();
         let (w, h) = (world.width(), world.height());
-        if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+        if !(w.is_finite() && h.is_finite()) {
             return;
         }
         let center = world.center();
@@ -155,7 +158,12 @@ impl Camera {
         }
         let avail_w = (self.viewport.width - 2.0 * padding).max(1.0);
         let avail_h = (self.viewport.height - 2.0 * padding).max(1.0);
-        self.set_zoom((avail_w / w).min(avail_h / h));
+        // Нулевая сторона не ограничивает зум: её отношение — бесконечность.
+        let fit_w = if w > 0.0 { avail_w / w } else { f64::INFINITY };
+        let fit_h = if h > 0.0 { avail_h / h } else { f64::INFINITY };
+        let zoom = fit_w.min(fit_h);
+        // У точки обе стороны нулевые: зум прежний (но в допустимом диапазоне).
+        self.set_zoom(if zoom.is_finite() { zoom } else { self.zoom });
         self.center = center;
     }
 

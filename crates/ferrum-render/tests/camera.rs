@@ -165,10 +165,29 @@ fn non_finite_fit_is_noop() {
         c.fit(Rect::new(v, 0.0, 10.0, 10.0), 0.0);
         c.fit(Rect::new(0.0, 0.0, 10.0, 10.0), v);
     }
-    // Пустой прямоугольник тоже ничего не меняет.
-    c.fit(Rect::new(5.0, 5.0, 5.0, 10.0), 0.0);
-    c.fit(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
     assert_eq!(c, before);
+}
+
+#[test]
+fn fit_zero_area_rects_centres_and_fits_the_nonzero_axis() {
+    // «Показать выделение» для горизонтальной линии: высоты нет, по ширине — вписать.
+    let mut c = Camera::new(Size::new(800.0, 600.0), 1.0);
+    c.set_zoom(3.0);
+    c.fit(Rect::new(100.0, 50.0, 500.0, 50.0), 0.0);
+    assert_eq!(c.center(), Point::new(300.0, 50.0));
+    assert_eq!(c.zoom(), 2.0);
+    // Вертикальная линия: по высоте, с отступом.
+    c.fit(Rect::new(-20.0, 0.0, -20.0, 1000.0), 50.0);
+    assert_eq!(c.center(), Point::new(-20.0, 500.0));
+    assert_eq!(c.zoom(), 0.5);
+    // Точка: только центр, зум прежний.
+    c.set_zoom(3.0);
+    c.fit(Rect::new(7.0, 8.0, 7.0, 8.0), 10.0);
+    assert_eq!(c.center(), Point::new(7.0, 8.0));
+    assert_eq!(c.zoom(), 3.0);
+    // Очень короткая линия: зум упирается в максимум, а не уходит в бесконечность.
+    c.fit(Rect::new(0.0, 0.0, 1e-12, 0.0), 0.0);
+    assert_eq!(c.zoom(), MAX_ZOOM);
 }
 
 #[test]
