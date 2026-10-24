@@ -26,6 +26,7 @@ use web_sys::{
     WebGl2RenderingContext,
 };
 
+use crate::present::PresentError;
 use crate::protocol::Backend;
 
 /// Пиксели кадра: готовые (CPU, WebGL2) или ещё копируются из GPU (WebGPU).
@@ -141,6 +142,8 @@ pub struct WebGpuSurface {
     /// потоков они вызываются в том же потоке.
     errors: Arc<Mutex<GpuErrors>>,
     readback: Option<PendingRead>,
+    /// Предел стороны текстуры устройства: холст больше не настроить.
+    max_side: u32,
 }
 
 /// Копия кадра для `ReadPixels`: буфер, байт в строке (кратно 256) и результат
@@ -156,6 +159,8 @@ struct PendingRead {
 
 pub struct WebGlSurface {
     canvas: OffscreenCanvas,
+    /// `MAX_TEXTURE_SIZE`: холст больше не нарисовать.
+    max_side: u32,
     pub backend: GpuBackend<WebGlDevice>,
 }
 
@@ -184,20 +189,6 @@ fn js_err(e: JsValue) -> String {
     e.as_string()
         .or_else(|| js_sys::Error::from(e).message().as_string())
         .unwrap_or_else(|| "ошибка JavaScript".into())
-}
-
-/// Параметры контекста WebGL2 — те же, что ставит `WebGlRenderer` (без сглаживания,
-/// без программного рендера, с буфером глубины).
-fn webgl_options() -> JsValue {
-    let o = js_sys::Object::new();
-    for (k, v) in [
-        ("antialias", false),
-        ("failIfMajorPerformanceCaveat", true),
-        ("depth", true),
-    ] {
-        let _ = js_sys::Reflect::set(&o, &k.into(), &v.into());
-    }
-    o.into()
 }
 
 impl Surface {
@@ -274,7 +265,7 @@ impl Surface {
     }
 
     /// Отправляет нарисованный кадр на холст. `read` — заодно прочитать пиксели.
-    pub fn present(&mut self, read: bool) -> Result<Option<Readback>, String> {
+    pub fn present(&mut self, read: bool) -> Result<Option<Readback>, PresentError> {
         match self {
             Surface::WebGpu(s) => s.present(read),
             Surface::WebGl(s) => s.present(read),
@@ -309,8 +300,14 @@ impl WebGpuSurface {
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .map_err(|e| format!("нет адаптера ({e})"))?;
-        if !software_ok && adapter.get_info().device_type == wgpu::DeviceType::Cpu {
-            return Err("только программный адаптер".into());
+        if !software_ok {
+            let info = adapter.get_info();
+            // Тип адаптера браузер сообщает не всегда: SwiftShader узнаём и по имени.
+            if info.device_type == wgpu::DeviceType::Cpu
+                || is_software_name(&[&info.name, &info.driver, &info.driver_info])
+            {
+                return Err(format!("только программный адаптер ({})", info.name));
+            }
         }
         // Пределы адаптера, а не умолчания WebGPU: иначе холст шире 8192 пикселей
         // устройства (широкий экран с dpr 2) не настроить.
@@ -321,6 +318,12 @@ impl WebGpuSurface {
             })
             .await
             .map_err(|e| format!("нет устройства ({e})"))?;
+        let max_side = device.limits().max_texture_dimension_2d;
+        if w as u32 > max_side || h as u32 > max_side {
+            return Err(format!(
+                "холст {w} × {h} больше предела устройства ({max_side})"
+            ));
+        }
         let errors = Arc::new(Mutex::new(GpuErrors::default()));
         {
             let e = errors.clone();
@@ -336,9 +339,6 @@ impl WebGpuSurface {
                 }
             }));
         }
-        let surface = instance
-            .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))
-            .map_err(|e| format!("нет поверхности ({e})"))?;
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let config = wgpu::SurfaceConfiguration {
             // COPY_SRC — для чтения пикселей в тестах (`ReadPixels`).
@@ -352,8 +352,7 @@ impl WebGpuSurface {
             view_formats: vec![],
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
-        surface.configure(&device, &config);
-        let atlas = atlas_for(device.limits().max_texture_dimension_2d, atlas_side);
+        let atlas = atlas_for(max_side, atlas_side);
         let settings = RenderSettings {
             memory_settings: MemorySettings {
                 image_atlas_config: atlas,
@@ -377,6 +376,13 @@ impl WebGpuSurface {
             queue,
             encoder: None,
         };
+        // Контекст холста — последним, после всего, что может не получиться: занятый
+        // `webgpu` холст уже не отдать ни WebGL2, ни 2D. Дальше только `configure`,
+        // у которого нет ошибки на выходе (проблемы придут обработчиком устройства).
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))
+            .map_err(|e| format!("нет поверхности ({e})"))?;
+        surface.configure(&dev.device, &config);
         Ok(WebGpuSurface {
             canvas: canvas.clone(),
             surface,
@@ -384,11 +390,18 @@ impl WebGpuSurface {
             backend: GpuBackend::new(w, h, dev, atlas),
             errors,
             readback: None,
+            max_side,
         })
     }
 
-    fn present(&mut self, read: bool) -> Result<Option<Readback>, String> {
+    fn present(&mut self, read: bool) -> Result<Option<Readback>, PresentError> {
         let (w, h) = self.backend.size();
+        if w as u32 > self.max_side || h as u32 > self.max_side {
+            return Err(PresentError::Failed(format!(
+                "кадр {w} × {h} больше предела устройства ({})",
+                self.max_side
+            )));
+        }
         if (w as u32, h as u32) != (self.config.width, self.config.height) {
             resize_canvas(&self.canvas, w, h);
             self.config.width = w as u32;
@@ -399,36 +412,46 @@ impl WebGpuSurface {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            other => {
+            other @ (wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Outdated) => {
                 // Конфигурация устарела (смена размера, вкладка в фоне): настроить
                 // заново, кадр нарисуется следующим.
                 self.surface
                     .configure(&self.backend.device().device, &self.config);
-                return Err(format!("кадр пропущен: {other:?}"));
+                return Err(PresentError::Skipped(format!("{other:?}")));
             }
+            // Потеря поверхности или ошибка проверки: повтор не поможет.
+            other => return Err(PresentError::Failed(format!("{other:?}"))),
         };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let (scene, dev) = self.backend.parts();
         let mut enc = dev.take_encoder();
-        dev.renderer
-            .render(
-                scene,
-                &mut dev.resources,
-                &dev.device,
-                &dev.queue,
-                &mut enc,
-                &RenderSize {
-                    width: w,
-                    height: h,
-                },
-                &view,
-                None,
-                &vello_gpu::TextureBindings::new(),
-                vello_gpu::TargetInit::Clear(vello_gpu::ClearSettings::default()),
-            )
-            .map_err(|e| format!("{e:?}"))?;
+        let rendered = dev.renderer.render(
+            scene,
+            &mut dev.resources,
+            &dev.device,
+            &dev.queue,
+            &mut enc,
+            &RenderSize {
+                width: w,
+                height: h,
+            },
+            &view,
+            None,
+            &vello_gpu::TextureBindings::new(),
+            vello_gpu::TargetInit::Clear(vello_gpu::ClearSettings::default()),
+        );
+        if let Err(e) = rendered {
+            // Загрузки картинок этого кадра были закодированы в `enc`, который не
+            // уйдёт в GPU: зеркало атласа считало бы их загруженными. Забыть всё —
+            // следующий кадр загрузит заново (место, занятое в атласе vello, до
+            // перезапуска не освободится, но ошибка рендера и так постоянная).
+            self.backend.reset_atlas();
+            return Err(PresentError::Failed(format!("{e:?}")));
+        }
         let mut pending = None;
         if read {
             let row = (w as u32 * 4).next_multiple_of(256);
@@ -527,17 +550,22 @@ fn software_renderer(gl: &WebGl2RenderingContext) -> Option<String> {
         _ => WebGl2RenderingContext::RENDERER,
     };
     let name = gl.get_parameter(param).ok()?.as_string()?;
-    let lower = name.to_lowercase();
-    [
+    is_software_name(&[&name]).then_some(name)
+}
+
+/// Имя (адаптера, драйвера, рендерера) программного GPU.
+fn is_software_name(names: &[&str]) -> bool {
+    const SOFTWARE: [&str; 5] = [
         "swiftshader",
         "llvmpipe",
         "softpipe",
         "software",
         "basic render",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-    .then_some(name)
+    ];
+    names.iter().any(|n| {
+        let lower = n.to_lowercase();
+        SOFTWARE.iter().any(|s| lower.contains(s))
+    })
 }
 
 impl WebGlSurface {
@@ -548,26 +576,26 @@ impl WebGlSurface {
         software_ok: bool,
         atlas_side: Option<u16>,
     ) -> Result<WebGlSurface, String> {
-        // Пробный холст: WebGL2 без программного рендера и с глубиной 24 бит. Если
-        // контекста нет, настоящий холст остаётся свободным для 2D.
+        // Сначала полный рендерер на пробном холсте 1×1: у `WebGlRenderer` контекст
+        // создаётся первым, а компиляция и сборка шейдеров падают позже. Упади они
+        // на настоящем холсте, он остался бы занят WebGL2 и CPU не получил бы 2D.
+        // Параметры контекста те же, что ставит сам `WebGlRenderer`.
         let probe = OffscreenCanvas::new(1, 1).map_err(js_err)?;
-        let ctx = probe
-            .get_context_with_context_options("webgl2", &webgl_options())
-            .map_err(js_err)?
-            .ok_or("WebGL2 недоступен (нет GPU или только программный рендер)")?;
-        let gl: WebGl2RenderingContext = ctx
-            .dyn_into()
-            .map_err(|_| "не контекст WebGL2".to_string())?;
-        if !software_ok {
-            if let Some(name) = software_renderer(&gl) {
-                return Err(format!("программный рендер ({name})"));
-            }
+        let probe_el: &HtmlCanvasElement = probe.unchecked_ref();
+        let (probe_renderer, _probe_resources) =
+            vello_gpu::WebGlRenderer::new_with(probe_el, RenderSettings::default(), true)
+                .map_err(|e| format!("WebGL2 недоступен ({e:?})"))?;
+        let gl = probe_renderer.gl_context().clone();
+        let checked = Self::check(&gl, w, h, software_ok);
+        // Контекст пробы отдаём сразу (браузеры держат мало живых контекстов).
+        drop(probe_renderer);
+        if let Ok(Some(ext)) = gl.get_extension("WEBGL_lose_context") {
+            let _ = js_sys::Reflect::get(&ext, &"loseContext".into())
+                .ok()
+                .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+                .map(|f| f.call0(&ext));
         }
-        let max_side = gl
-            .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(2048.0) as u32;
+        let max_side = checked?;
         let atlas = atlas_for(max_side, atlas_side);
         let settings = RenderSettings {
             memory_settings: MemorySettings {
@@ -584,6 +612,7 @@ impl WebGlSurface {
             .map_err(|e| format!("{e:?}"))?;
         Ok(WebGlSurface {
             canvas: canvas.clone(),
+            max_side,
             backend: GpuBackend::new(
                 w,
                 h,
@@ -596,22 +625,59 @@ impl WebGlSurface {
         })
     }
 
-    fn present(&mut self, read: bool) -> Result<Option<Readback>, String> {
+    /// Годится ли контекст: не программный и не мал для холста. Возвращает
+    /// `MAX_TEXTURE_SIZE`.
+    fn check(
+        gl: &WebGl2RenderingContext,
+        w: u16,
+        h: u16,
+        software_ok: bool,
+    ) -> Result<u32, String> {
+        if !software_ok {
+            if let Some(name) = software_renderer(gl) {
+                return Err(format!("программный рендер ({name})"));
+            }
+        }
+        let max_side = gl
+            .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(2048.0) as u32;
+        if w as u32 > max_side || h as u32 > max_side {
+            return Err(format!(
+                "холст {w} × {h} больше предела устройства ({max_side})"
+            ));
+        }
+        Ok(max_side)
+    }
+
+    fn present(&mut self, read: bool) -> Result<Option<Readback>, PresentError> {
         let (w, h) = self.backend.size();
+        if w as u32 > self.max_side || h as u32 > self.max_side {
+            return Err(PresentError::Failed(format!(
+                "кадр {w} × {h} больше предела устройства ({})",
+                self.max_side
+            )));
+        }
         resize_canvas(&self.canvas, w, h);
         let (scene, dev) = self.backend.parts();
-        dev.renderer
-            .render(
-                scene,
-                &mut dev.resources,
-                &RenderSize {
-                    width: w,
-                    height: h,
-                },
-                &vello_gpu::WebGlTextureBindings::new(),
-                ferrum_render::Rgba::new([0.0, 0.0, 0.0, 0.0]),
-            )
-            .map_err(|e| format!("{e:?}"))?;
+        let rendered = dev.renderer.render(
+            scene,
+            &mut dev.resources,
+            &RenderSize {
+                width: w,
+                height: h,
+            },
+            &vello_gpu::WebGlTextureBindings::new(),
+            ferrum_render::Rgba::new([0.0, 0.0, 0.0, 0.0]),
+        );
+        if let Err(e) = rendered {
+            // Зеркало атласа могло посчитать загруженными картинки этого кадра:
+            // забыть всё, следующий кадр загрузит заново.
+            self.backend.reset_atlas();
+            return Err(PresentError::Failed(format!("{e:?}")));
+        }
+        let dev = self.backend.device_mut();
         if !read {
             return Ok(None);
         }
@@ -629,7 +695,7 @@ impl WebGlSurface {
             WebGl2RenderingContext::UNSIGNED_BYTE,
             Some(&mut flipped),
         )
-        .map_err(js_err)?;
+        .map_err(|e| PresentError::Failed(js_err(e)))?;
         // В WebGL строки идут снизу вверх.
         let mut out = Vec::with_capacity(flipped.len());
         for r in flipped.chunks_exact(wu * 4).rev() {
@@ -660,7 +726,7 @@ impl CpuSurface {
         })
     }
 
-    fn present(&mut self, read: bool) -> Result<Option<Readback>, String> {
+    fn present(&mut self, read: bool) -> Result<Option<Readback>, PresentError> {
         let (w, h) = self.backend.size();
         resize_canvas(&self.canvas, w, h);
         let pixmap = self.backend.render();
@@ -671,8 +737,10 @@ impl CpuSurface {
             w as u32,
             h as u32,
         )
-        .map_err(js_err)?;
-        self.ctx.put_image_data(&img, 0.0, 0.0).map_err(js_err)?;
+        .map_err(|e| PresentError::Failed(js_err(e)))?;
+        self.ctx
+            .put_image_data(&img, 0.0, 0.0)
+            .map_err(|e| PresentError::Failed(js_err(e)))?;
         Ok(read.then(|| {
             Readback::Ready(Pixels {
                 width: w,

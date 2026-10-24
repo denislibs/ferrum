@@ -14,6 +14,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::OffscreenCanvas;
 
 use crate::core::Core;
+use crate::present::{Action, PresentWatch};
 use crate::protocol::{Backend, Command, CoreEvent};
 pub use clock::PerformanceClock;
 use surface::{Pixels, Readback, Surface};
@@ -35,6 +36,8 @@ pub struct WasmCore {
     awaiting: bool,
     /// Об ошибке атласа уже сообщили (она остаётся до перезапуска).
     atlas_reported: bool,
+    /// Ошибки показа кадра: повторы и постоянные отказы.
+    watch: PresentWatch,
 }
 
 /// Команда из JS-объекта. Неверная форма — текст ошибки, не паника.
@@ -122,6 +125,7 @@ impl WasmCore {
             dead: false,
             awaiting: false,
             atlas_reported: false,
+            watch: PresentWatch::default(),
         })
     }
 
@@ -208,17 +212,37 @@ impl WasmCore {
             }
         }
         let served = match self.surface.present(read_now) {
-            Ok(Some(Readback::Ready(p))) => {
-                self.pixels(self.surface.kind(), p);
-                true
+            Ok(readback) => {
+                self.watch.ok();
+                match readback {
+                    Some(Readback::Ready(p)) => {
+                        self.pixels(self.surface.kind(), p);
+                        true
+                    }
+                    Some(Readback::Pending) => {
+                        self.awaiting = true;
+                        true
+                    }
+                    None => false,
+                }
             }
-            Ok(Some(Readback::Pending)) => {
-                self.awaiting = true;
-                true
-            }
-            Ok(None) => false,
-            Err(_) => {
-                self.core.request_frame();
+            Err(e) => {
+                // Временный пропуск — рисуем снова, но не бесконечно; постоянная
+                // ошибка доходит до пользователя и останавливает перерисовку.
+                let message = match self.watch.error(e) {
+                    Action::Redraw => {
+                        self.core.request_frame();
+                        None
+                    }
+                    Action::Pause(m) => m,
+                    Action::Dead(m) => {
+                        self.dead = true;
+                        m
+                    }
+                };
+                if let Some(message) = message {
+                    self.core.push_event(CoreEvent::Error { message });
+                }
                 false
             }
         };

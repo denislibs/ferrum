@@ -489,3 +489,51 @@ fn request_frame_and_push_event_reach_the_loop() {
         .iter()
         .any(|e| matches!(e, CoreEvent::Error { message } if message == "x")));
 }
+
+mod present {
+    use ferrum_wasm::present::{Action, PresentError, PresentWatch, MAX_SKIPS};
+
+    fn skip() -> PresentError {
+        PresentError::Skipped("таймаут".into())
+    }
+
+    #[test]
+    fn transient_skips_redraw_until_the_limit_then_pause_once() {
+        let mut w = PresentWatch::default();
+        for _ in 1..MAX_SKIPS {
+            assert_eq!(w.error(skip()), Action::Redraw);
+        }
+        let Action::Pause(Some(m)) = w.error(skip()) else {
+            panic!("после предела — сообщение и пауза")
+        };
+        assert!(m.contains("таймаут"), "{m}");
+        // То же сообщение повторно не отдаётся, кадров не просим.
+        let Action::Pause(None) = w.error(skip()) else {
+            panic!()
+        };
+    }
+
+    #[test]
+    fn success_resets_the_skip_counter() {
+        let mut w = PresentWatch::default();
+        for _ in 1..MAX_SKIPS {
+            w.error(skip());
+        }
+        w.ok();
+        assert_eq!(w.error(skip()), Action::Redraw);
+    }
+
+    #[test]
+    fn persistent_failure_is_reported_once_and_kills_the_surface() {
+        let mut w = PresentWatch::default();
+        let f = || PresentError::Failed("шейдер".into());
+        let Action::Dead(Some(m)) = w.error(f()) else {
+            panic!()
+        };
+        assert!(m.starts_with("Не удалось показать кадр"), "{m}");
+        assert_eq!(w.error(f()), Action::Dead(None));
+        let Action::Dead(Some(_)) = w.error(PresentError::Failed("другое".into())) else {
+            panic!("другое сообщение — новое событие")
+        };
+    }
+}
