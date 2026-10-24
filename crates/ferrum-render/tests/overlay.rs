@@ -208,3 +208,40 @@ fn themes_follow_design_system() {
     assert_eq!(hex(dark.handle_fill), [255, 255, 255, 255]);
     assert_eq!(HANDLE_SIZE, 8.0);
 }
+
+#[test]
+fn hover_outline_is_not_drawn_for_hidden_nodes() {
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            visible: Some(false),
+            ..rect(10.0, 10.0, 60.0, 40.0)
+        },
+    );
+    // Видимый сам, но внутри скрытого фрейма — тоже скрыт.
+    let kid = p.add(Some(f), NodeKind::Rect, rect(5.0, 5.0, 20.0, 20.0));
+    let lone = p.add(
+        None,
+        NodeKind::Ellipse,
+        PropsPatch {
+            visible: Some(false),
+            ..rect(80.0, 10.0, 20.0, 20.0)
+        },
+    );
+    let scene = p.scene();
+    let cam = camera(120.0, 60.0);
+    let plain = render_overlay(&scene, &cam, &Overlay::default(), WHITE);
+    for id in [f, kid, lone] {
+        let hovered = Overlay {
+            hover: Some(id),
+            ..Default::default()
+        };
+        let img = render_overlay(&scene, &cam, &hovered, WHITE);
+        assert!(
+            img.data() == plain.data(),
+            "обводка наведения у скрытого узла"
+        );
+    }
+}

@@ -33,6 +33,11 @@ const LABEL_CACHE_LIMIT: usize = 512;
 /// несколько мегабайт раскладывалось бы целиком ради подписи в одну строку.
 pub const LABEL_MAX_CHARS: usize = 256;
 
+/// Сколько символов названия просматривается вообще. Подпись строится заново на
+/// каждом кадре (до кэша), и название из мегабайт пробелов иначе просматривалось бы
+/// целиком на каждом кадре ради пустой подписи.
+const LABEL_SCAN_CHARS: usize = 4 * LABEL_MAX_CHARS;
+
 /// Кэш с вытеснением давно не использованных записей (LRU) за O(1) в среднем.
 /// Очередь хранит обращения по порядку; запись в ней устарела, если у ключа с тех
 /// пор было обращение новее (его отметка в `map` больше). Вытеснение снимает с
@@ -95,19 +100,41 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
     }
 }
 
+/// Невидимые символы форматирования, которые выбрасываются из названия:
+/// встраивания, переопределения и изоляты направления письма (U+202A–U+202E,
+/// U+2066–U+2069), пробел нулевой ширины, метки направления LRM/RLM (U+200B,
+/// U+200E, U+200F) и BOM (U+FEFF). Ими название из чужого файла подделывает свой
+/// вид («txt.exe» справа налево). Соединители ZWNJ/ZWJ (U+200C, U+200D) остаются:
+/// без них распадаются эмодзи-последовательности и ломается начертание в
+/// персидском и индийских письменностях.
+fn is_hidden_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
 /// Приводит название к одной строке: управляющие символы и переводы строк (в том
-/// числе U+2028) становятся пробелами, серии пробелов схлопываются, край
-/// обрезается до `LABEL_MAX_CHARS` по границе символа с многоточием.
+/// числе U+2028) становятся пробелами, серии пробелов схлопываются, невидимые
+/// символы форматирования (`is_hidden_format`) выбрасываются. Результат — не больше
+/// `LABEL_MAX_CHARS` символов и многоточие, если название длиннее; просматривается
+/// не больше `LABEL_SCAN_CHARS` символов.
 fn sanitize(text: &str) -> String {
     let mut out = String::new();
     let mut chars = 0;
     let mut pending_space = false;
-    for c in text.chars() {
+    let mut scan = text.chars();
+    for c in scan.by_ref().take(LABEL_SCAN_CHARS) {
         if c.is_control() || c.is_whitespace() {
             pending_space = !out.is_empty();
             continue;
         }
-        if chars >= LABEL_MAX_CHARS {
+        if is_hidden_format(c) {
+            continue;
+        }
+        // Пробел перед символом тоже занимает место: без его учёта строка выходила
+        // на символ длиннее предела.
+        if chars + 1 + usize::from(pending_space) > LABEL_MAX_CHARS {
             out.push('…');
             return out;
         }
@@ -118,6 +145,10 @@ fn sanitize(text: &str) -> String {
         }
         out.push(c);
         chars += 1;
+    }
+    // Название не кончилось, а просмотр — да: подпись оборвана.
+    if !out.is_empty() && scan.next().is_some() {
+        out.push('…');
     }
     out
 }
@@ -462,6 +493,49 @@ impl OutlinePen for Pen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_strips_bidi_and_invisible_format_characters() {
+        // Переопределения и изоляты направления письма, невидимые пробелы и метки
+        // направления, BOM: в подписи их быть не должно (подмена вида названия).
+        let hostile = "a\u{202A}b\u{202B}c\u{202C}d\u{202D}e\u{202E}f\u{2066}g\u{2067}h\u{2068}i\u{2069}j\u{200B}k\u{200E}l\u{200F}m\u{FEFF}n";
+        assert_eq!(sanitize(hostile), "abcdefghijklmn");
+        // Соединители ZWJ/ZWNJ остаются: без них распадаются эмодзи-последовательности
+        // и меняется начертание в персидском и индийских письменностях.
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(sanitize(family), family);
+    }
+
+    #[test]
+    fn sanitize_never_exceeds_the_char_limit() {
+        let count = |s: &str| s.trim_end_matches('…').chars().count();
+        // Ровно предел — без многоточия.
+        let exact = "ы".repeat(LABEL_MAX_CHARS);
+        assert_eq!(sanitize(&exact), exact);
+        // На символ больше — предел и многоточие.
+        let over = sanitize(&"ы".repeat(LABEL_MAX_CHARS + 1));
+        assert_eq!((count(&over), over.ends_with('…')), (LABEL_MAX_CHARS, true));
+        // Пробел на границе: прежде строка выходила на 257 символов без многоточия.
+        let edge = format!("{} b", "a".repeat(LABEL_MAX_CHARS - 1));
+        let out = sanitize(&edge);
+        assert!(count(&out) <= LABEL_MAX_CHARS, "{} символов", count(&out));
+        assert!(out.ends_with('…'), "{out}");
+    }
+
+    #[test]
+    fn sanitize_scans_a_bounded_prefix() {
+        // Мегабайты пробелов перед текстом не просматриваются на каждом кадре:
+        // смотрится только начало названия.
+        let spaces = format!("{}x", " ".repeat(8 * 1024 * 1024));
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            assert_eq!(sanitize(&spaces), "");
+        }
+        assert!(start.elapsed().as_millis() < 50, "{:?}", start.elapsed());
+        // Длинное название, оборванное пределом просмотра, кончается многоточием.
+        let long = format!("{}abcdef", " ".repeat(LABEL_SCAN_CHARS - 3));
+        assert_eq!(sanitize(&long), "abc…");
+    }
 
     #[test]
     fn lru_evicts_least_recently_used_and_keeps_queue_bounded() {

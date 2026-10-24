@@ -204,8 +204,13 @@ impl Renderer {
             raster: false,
             retain: false,
         };
-        self.painter.begin_frame();
-        self.painter.draw(&mut backend, &ctx, &[slot]);
+        // Свой рисовальщик: экспорт — не кадр экрана. Общий сдвинул бы счётчик кадров,
+        // от которого зависит вытеснение растров и контуров на экране, и сбросил бы
+        // бюджет и статистику текущего кадра. Растров и сохранённых списков экспорт
+        // не использует (`raster`, `retain` выключены), так что терять нечего.
+        let mut painter = Painter::with_raster_limit(0);
+        painter.begin_frame();
+        painter.draw(&mut backend, &ctx, &[slot]);
         Ok(backend.render())
     }
 }

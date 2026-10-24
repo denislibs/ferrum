@@ -841,3 +841,40 @@ fn over_budget_cold_frames_show_their_fill_and_edited_frames_draw_nodes() {
     assert_eq!(s.drawn + s.lod_rects, 11, "{s:?}");
     assert!(s.needs_another_frame);
 }
+
+#[test]
+fn export_between_frames_does_not_disturb_the_screen_cache() {
+    // Экспорт не должен двигать счётчик кадров экранного рендерера: от него зависят
+    // вытеснение старых растров и контуров. Два одинаковых рендерера рисуют одни и
+    // те же кадры; у второго в начале — экспорт. Кадр 319 возвращается к виду
+    // кадра 1: растры ещё живы (вытесняются на кадре 320, раз не рисовались 300
+    // кадров), и у обоих перестраивать нечего.
+    let (mut p, frames) = grid(2, 2, 3);
+    let scene = p.scene();
+    let mut far = Camera::new(Size::new(100.0, 100.0), 1.0);
+    far.fit(scene.bounds().unwrap(), 10.0);
+    let mut away = far.clone();
+    away.set_center(Point::new(1e6, 1e6));
+    let (w, h) = far.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    let mut run = |export: bool| {
+        let mut r = Renderer::new();
+        r.set_raster_build_time(None);
+        let mut frame = |r: &mut Renderer, cam: &Camera| {
+            backend.begin_frame(w, h);
+            r.draw_scene(&mut backend, &scene, cam, &NoImages)
+        };
+        assert_eq!(frame(&mut r, &far).raster_builds, 4);
+        if export {
+            r.export_png(&scene, frames[0], 1.0, &NoImages).unwrap();
+        }
+        for _ in 2..319 {
+            frame(&mut r, &away);
+        }
+        frame(&mut r, &far)
+    };
+    let plain = run(false);
+    let exported = run(true);
+    assert_eq!(plain.raster_builds, 0);
+    assert_eq!(exported, plain, "экспорт изменил кадр на экране");
+}

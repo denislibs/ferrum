@@ -5,7 +5,7 @@
 
 use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::shape::Geometry;
-use ferrum_scene::Scene;
+use ferrum_scene::{Scene, SceneNode};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Shape, Stroke};
 use vello_cpu::peniko::Fill;
 
@@ -143,7 +143,12 @@ pub(crate) fn draw(
     if overlay.frame_labels {
         frame_labels(backend, text, scene, camera, overlay);
     }
-    if let Some(id) = overlay.hover.filter(|h| !overlay.selection.contains(h)) {
+    // Скрытый узел (или узел внутри скрытого) на холсте не виден — и обводки
+    // наведения у него нет, даже если редактор передал его из панели слоёв.
+    let hover = overlay.hover.filter(|h| {
+        !overlay.selection.contains(h) && scene.slot(*h).is_some_and(|s| scene.is_visible(s))
+    });
+    if let Some(id) = hover {
         if let Some(outline) = node_outline(scene, id, view) {
             backend.set_transform(Affine::IDENTITY);
             backend.set_color(theme.select);
@@ -264,6 +269,23 @@ fn frame_labels(
     }
 }
 
+/// Размер для бейджа: у одного узла — ширина и высота его формы (у повёрнутого —
+/// собственные, как в Figma), у нескольких — общая рамка их форм в мире. Обводки
+/// не входят ни там, ни там: иначе один и тот же узел показывал бы разный размер
+/// в одиночном и в общем выделении. Узлы — с `local_bounds`.
+fn selection_size(nodes: &[&SceneNode]) -> (f64, f64) {
+    if let [n] = nodes {
+        let b = n.local_bounds.expect("узел выделения с границами");
+        return (b.width(), b.height());
+    }
+    let world = nodes
+        .iter()
+        .filter_map(|n| n.local_bounds.map(|b| n.world.transform_rect_bbox(b)))
+        .reduce(|a, b| a.union(b))
+        .expect("непустое выделение");
+    (world.width(), world.height())
+}
+
 fn selection(
     backend: &mut impl RenderBackend,
     text: &mut TextEngine,
@@ -320,19 +342,10 @@ fn selection(
 
     // Ручки и бейдж: у одного узла — по его повёрнутой рамке, у нескольких — по
     // общей рамке на экране.
-    let (quad, size, is_line) = if let [n] = nodes[..] {
-        let b = n.local_bounds.expect("отфильтровано выше");
-        (
-            boxes[0],
-            (b.width(), b.height()),
-            n.props.kind == NodeKind::Line,
-        )
+    let size = selection_size(&nodes);
+    let (quad, is_line) = if let [n] = nodes[..] {
+        (boxes[0], n.props.kind == NodeKind::Line)
     } else {
-        let world = nodes
-            .iter()
-            .filter_map(|n| n.world_bounds)
-            .reduce(|a, b| a.union(b))
-            .expect("непустое выделение");
         let r = boxes
             .iter()
             .flat_map(|q| q.iter())
@@ -350,7 +363,7 @@ fn selection(
             Point::new(r.x1, r.y1),
             Point::new(r.x0, r.y1),
         ];
-        (quad, (world.width(), world.height()), false)
+        (quad, false)
     };
     let handles: Vec<Point> = if is_line {
         vec![quad[0], quad[1]]
@@ -404,6 +417,44 @@ fn selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrum_doc::{Document, PropsPatch, Stroke as DocStroke, StrokeAlign};
+
+    #[test]
+    fn multi_selection_size_ignores_strokes_like_single() {
+        // Размер в бейдже — по формам узлов, без обводок: у одного узла это его
+        // ширина и высота, у нескольких — общая рамка их форм в мире.
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let ids = doc
+            .transact(page, vec![], |p| {
+                let mut ids = Vec::new();
+                for (x, y) in [(0.0, 0.0), (100.0, 50.0)] {
+                    let id = p.create_node(None, None, NodeKind::Rect)?;
+                    p.set_props(
+                        id,
+                        &PropsPatch {
+                            x: Some(x),
+                            y: Some(y),
+                            w: Some(40.0),
+                            h: Some(30.0),
+                            strokes: Some(vec![DocStroke {
+                                color: ferrum_doc::Color::rgba(0, 0, 0, 255),
+                                width: 10.0,
+                                align: StrokeAlign::Outside,
+                            }]),
+                            ..Default::default()
+                        },
+                    )?;
+                    ids.push(id);
+                }
+                Ok(ids)
+            })
+            .unwrap();
+        let scene = Scene::from_page(doc.page(page).unwrap());
+        let nodes: Vec<_> = ids.iter().map(|id| scene.node(*id).unwrap()).collect();
+        assert_eq!(selection_size(&nodes[..1]), (40.0, 30.0));
+        assert_eq!(selection_size(&nodes), (140.0, 80.0));
+    }
 
     #[test]
     fn grid_lines_are_bounded_and_exact() {
