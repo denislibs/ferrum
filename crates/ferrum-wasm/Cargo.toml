@@ -13,7 +13,12 @@ crate-type = ["cdylib", "rlib"]
 ferrum-doc = { path = "../ferrum-doc" }
 ferrum-editor = { path = "../ferrum-editor" }
 kurbo.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+tsify.workspace = true
+wasm-bindgen.workspace = true
 
 # proptest под wasm32 не собирается (getrandom без бэкенда): нативные тесты.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest.workspace = true
+serde_json.workspace = true

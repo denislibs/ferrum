@@ -47,8 +47,8 @@ wasm-bindgen-futures = "=0.4.79"
 js-sys = "=0.3.106"
 web-sys = "=0.3.106"
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
-# Только объявления TypeScript (без JSON и serde-wasm-bindgen внутри tsify).
-tsify = { version = "=0.5.8", default-features = false, features = ["wasm-bindgen"] }
+# Типы TypeScript для serde-wasm-bindgen (фича `js`, без serde_json внутри tsify).
+tsify = { version = "=0.5.8", default-features = false, features = ["js"] }
 serde-wasm-bindgen = "=0.6.5"
 serde_bytes = "=0.11.19"
 console_error_panic_hook = "=0.1.7"
