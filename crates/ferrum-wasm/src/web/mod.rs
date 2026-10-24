@@ -175,7 +175,9 @@ impl WasmCore {
         if let Some(message) = soft {
             self.core.push_event(CoreEvent::Error { message });
         }
-        if let Some(message) = fatal {
+        // Потерянный контекст WebGL2 остаётся потерянным: `take_errors` отдаёт его
+        // каждый кадр, а сообщение нужно одно.
+        if let Some(message) = fatal.filter(|_| !self.dead) {
             self.dead = true;
             self.core.push_event(CoreEvent::Error { message });
         }
