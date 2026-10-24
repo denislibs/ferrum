@@ -251,6 +251,12 @@ impl Painter {
     /// Поместится ли растр `bytes` байт для `slot` в предел памяти, если вытеснить
     /// всё, что можно (`evictable`); старый растр этого же слота он заменит.
     fn raster_fits(&self, slot: Slot, bytes: usize) -> bool {
+        // Быстрый путь: место есть и без вытеснения (старый растр слота освободит
+        // ещё больше). Полный перебор кэша — только у предела: иначе он шёл бы для
+        // каждого фрейма без готового растра, O(фреймов × растров) за кадр.
+        if self.raster_bytes + bytes <= self.raster_limit {
+            return true;
+        }
         let frame = self.frame;
         let freeable: usize = self
             .rasters
