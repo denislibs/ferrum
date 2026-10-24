@@ -114,6 +114,10 @@ pub struct KeyEvent {
     pub modifiers: Modifiers,
     /// Автоповтор удерживаемой клавиши.
     pub repeat: bool,
+    /// Нажат AltGr (`getModifierState("AltGraph")`). На Windows он приходит как
+    /// Ctrl+Alt, поэтому с ним сочетания с Mod+Alt не срабатывают: пользователь
+    /// набирает символ, а не вызывает команду.
+    pub alt_graph: bool,
 }
 
 impl KeyEvent {
@@ -123,6 +127,7 @@ impl KeyEvent {
             key: String::new(),
             modifiers,
             repeat: false,
+            alt_graph: false,
         }
     }
 }

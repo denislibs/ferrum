@@ -67,6 +67,28 @@ pub struct Conflict {
     pub commands: Vec<CommandId>,
 }
 
+/// Почему `bind` ничего не изменил.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BindError {
+    /// Сочетание занято другими командами, а замена не разрешена: интерфейс
+    /// предлагает заменить.
+    #[error("Сочетание {} уже занято", .0.shortcut)]
+    Conflict(Conflict),
+    /// У команды уже `MAX_SHORTCUTS_PER_COMMAND` сочетаний.
+    #[error("У команды уже {MAX_SHORTCUTS_PER_COMMAND} сочетаний — сначала уберите одно")]
+    TooMany,
+}
+
+impl BindError {
+    /// Конфликт, если ошибка — занятое сочетание.
+    pub fn conflict(&self) -> Option<&Conflict> {
+        match self {
+            BindError::Conflict(c) => Some(c),
+            BindError::TooMany => None,
+        }
+    }
+}
+
 /// Допустимые физические клавиши: буквы, цифры, F1–F24, навигация и знаки.
 fn valid_code(code: &str) -> bool {
     const NAMED: &[&str] = &[
@@ -254,8 +276,18 @@ pub fn browser_reserved(platform: Platform) -> Vec<Shortcut> {
     .map(|s| format!("{primary}+{s}"))
     .collect();
     if platform == Platform::Mac {
-        // Выйти, скрыть приложение, свернуть окно.
-        list.extend(["Meta+KeyQ", "Meta+KeyH", "Meta+KeyM"].map(String::from));
+        // Выйти, скрыть приложение, свернуть окно; Ctrl+Tab и Ctrl+Shift+Tab
+        // переключают вкладки браузера и на маке.
+        list.extend(
+            [
+                "Meta+KeyQ",
+                "Meta+KeyH",
+                "Meta+KeyM",
+                "Ctrl+Tab",
+                "Ctrl+Shift+Tab",
+            ]
+            .map(String::from),
+        );
     } else {
         list.extend(["Alt+F4", "F11"].map(String::from));
     }
@@ -332,11 +364,22 @@ impl Keymap {
     }
 
     /// Команда для нажатой клавиши. При конфликте — первая по таблице команд.
+    ///
+    /// С AltGr (`KeyEvent::alt_graph`) сочетания с Mod+Alt не срабатывают: на
+    /// Windows AltGr приходит как Ctrl+Alt, и набор символа (например, «@» на
+    /// немецкой раскладке) иначе вызывал бы команду.
     pub fn lookup(&self, e: &KeyEvent) -> Option<CommandId> {
         let s = Shortcut {
             code: e.code.clone(),
             mods: e.modifiers.into(),
         };
+        let primary = match self.platform {
+            Platform::Mac => s.mods.meta,
+            _ => s.mods.ctrl,
+        };
+        if e.alt_graph && s.mods.alt && (s.mods.ctrl || primary) {
+            return None;
+        }
         self.index.get(&s).and_then(|ids| ids.first().copied())
     }
 
@@ -395,8 +438,15 @@ impl Keymap {
 
     /// Добавляет сочетание команде. Если оно занято другими командами: без `replace`
     /// — ничего не меняет и возвращает конфликт (интерфейс предлагает заменить),
-    /// с `replace` — снимает сочетание с этих команд.
-    pub fn bind(&mut self, id: CommandId, s: Shortcut, replace: bool) -> Result<(), Conflict> {
+    /// с `replace` — снимает сочетание с этих команд. Если у команды уже
+    /// `MAX_SHORTCUTS_PER_COMMAND` сочетаний, ничего не меняется и возвращается
+    /// `BindError::TooMany`: проверка идёт до снятия сочетания с других команд,
+    /// иначе оно пропало бы у обеих.
+    pub fn bind(&mut self, id: CommandId, s: Shortcut, replace: bool) -> Result<(), BindError> {
+        let current = self.bindings(id);
+        if !current.contains(&s) && current.len() >= MAX_SHORTCUTS_PER_COMMAND {
+            return Err(BindError::TooMany);
+        }
         let others: Vec<CommandId> = self
             .commands_for(&s)
             .into_iter()
@@ -404,10 +454,10 @@ impl Keymap {
             .collect();
         if !others.is_empty() {
             if !replace {
-                return Err(Conflict {
+                return Err(BindError::Conflict(Conflict {
                     shortcut: s,
                     commands: others,
-                });
+                }));
             }
             for other in others {
                 let list = self
@@ -505,15 +555,31 @@ impl Keymap {
                 warnings.push(format!("У команды {key} не список сочетаний — пропущена"));
                 continue;
             };
-            let mut list = Vec::new();
-            for item in items.iter().take(MAX_SHORTCUTS_PER_COMMAND) {
+            // Сначала разбираем все, потом применяем предел: иначе 8 непонятных
+            // сочетаний спрятали бы понятное девятое. Число элементов ограничено
+            // размером файла (64 КБ).
+            let mut list: Vec<Shortcut> = Vec::new();
+            for item in items {
                 match item.as_str().map(Shortcut::parse) {
-                    Some(Ok(s)) => list.push(s),
+                    Some(Ok(s)) => {
+                        if !list.contains(&s) {
+                            list.push(s);
+                        }
+                    }
                     Some(Err(e)) => warnings.push(format!("{key}: {e}")),
                     None => warnings.push(format!("{key}: сочетание должно быть строкой")),
                 }
             }
-            if items.len() > MAX_SHORTCUTS_PER_COMMAND {
+            // Ни одного понятного сочетания из непустого списка — это не намерение
+            // снять сочетания: команда пропускается и сохраняет умолчание.
+            if list.is_empty() && !items.is_empty() {
+                warnings.push(format!(
+                    "У команды {key} нет ни одного понятного сочетания — пропущена"
+                ));
+                continue;
+            }
+            if list.len() > MAX_SHORTCUTS_PER_COMMAND {
+                list.truncate(MAX_SHORTCUTS_PER_COMMAND);
                 warnings.push(format!(
                     "{key}: больше {MAX_SHORTCUTS_PER_COMMAND} сочетаний, лишние пропущены"
                 ));

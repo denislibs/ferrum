@@ -67,6 +67,8 @@ pub struct Command {
     pub defaults: &'static [&'static str],
     /// Дополнительные сочетания только для Windows и Linux.
     pub defaults_pc: &'static [&'static str],
+    /// Дополнительные сочетания только для macOS.
+    pub defaults_mac: &'static [&'static str],
 }
 
 const fn cmd(
@@ -81,6 +83,25 @@ const fn cmd(
         name,
         defaults,
         defaults_pc: &[],
+        defaults_mac: &[],
+    }
+}
+
+/// Команда с разными сочетаниями на macOS и на Windows/Linux.
+const fn cmd_per_platform(
+    id: CommandId,
+    key: &'static str,
+    name: &'static str,
+    mac: &'static [&'static str],
+    pc: &'static [&'static str],
+) -> Command {
+    Command {
+        id,
+        key,
+        name,
+        defaults: &[],
+        defaults_pc: pc,
+        defaults_mac: mac,
     }
 }
 
@@ -113,6 +134,7 @@ pub const COMMANDS: &[Command] = &[
         name: "Повторить",
         defaults: &["Mod+Shift+KeyZ"],
         defaults_pc: &["Ctrl+KeyY"],
+        defaults_mac: &[],
     },
     cmd(C::Copy, "edit.copy", "Копировать", &["Mod+KeyC"]),
     cmd(C::Cut, "edit.cut", "Вырезать", &["Mod+KeyX"]),
@@ -162,17 +184,21 @@ pub const COMMANDS: &[Command] = &[
         "Переместить назад",
         &["Mod+BracketLeft"],
     ),
-    cmd(
+    // На Windows и Linux Ctrl+Alt — это AltGr (символы на многих раскладках),
+    // поэтому там, как в Figma для Windows, — Ctrl+Shift+] / Ctrl+Shift+[.
+    cmd_per_platform(
         C::BringToFront,
         "arrange.front",
         "На передний план",
         &["Mod+Alt+BracketRight"],
+        &["Ctrl+Shift+BracketRight"],
     ),
-    cmd(
+    cmd_per_platform(
         C::SendToBack,
         "arrange.back",
         "На задний план",
         &["Mod+Alt+BracketLeft"],
+        &["Ctrl+Shift+BracketLeft"],
     ),
     cmd(C::NudgeLeft, "nudge.left", "Сдвинуть влево", &["ArrowLeft"]),
     cmd(
@@ -225,8 +251,19 @@ pub const COMMANDS: &[Command] = &[
         "Масштаб 100%",
         &["Shift+Digit0"],
     ),
-    cmd(C::ZoomIn, "view.zoom_in", "Приблизить", &["Equal"]),
-    cmd(C::ZoomOut, "view.zoom_out", "Отдалить", &["Minus"]),
+    // Shift+= — это «+» на раскладке US; цифровой блок — как в Figma.
+    cmd(
+        C::ZoomIn,
+        "view.zoom_in",
+        "Приблизить",
+        &["Equal", "Shift+Equal", "NumpadAdd"],
+    ),
+    cmd(
+        C::ZoomOut,
+        "view.zoom_out",
+        "Отдалить",
+        &["Minus", "NumpadSubtract"],
+    ),
     cmd(
         C::ToggleVisible,
         "object.toggle_visible",
@@ -289,7 +326,7 @@ impl CommandId {
             _ => "Ctrl",
         };
         let pc: &[&str] = if platform == Platform::Mac {
-            &[]
+            info.defaults_mac
         } else {
             info.defaults_pc
         };

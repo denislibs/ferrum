@@ -94,12 +94,13 @@ fn z_order_commands() {
     assert_eq!(h.children(None), vec![b, a, c, d]);
     let before = h.state();
     let steps = h.ed.step_count();
-    h.key("BracketRight", ctrl().with_alt());
+    // На Windows — Ctrl+Shift+]: Ctrl+Alt там совпадает с AltGr.
+    h.key("BracketRight", ctrl().with_shift());
     assert_eq!(h.children(None), vec![b, c, d, a]);
     h.assert_one_step(steps, &before);
     h.key("BracketLeft", ctrl());
     assert_eq!(h.children(None), vec![b, c, a, d]);
-    h.key("BracketLeft", ctrl().with_alt());
+    h.key("BracketLeft", ctrl().with_shift());
     assert_eq!(h.children(None), vec![a, b, c, d]);
     // Несколько выделенных сдвигаются вместе, верхний уже наверху не лезет дальше.
     h.ed.select(&[b, d]);
