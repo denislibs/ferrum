@@ -594,3 +594,110 @@ fn fix1_pixel_rounding_is_per_axis() {
         format!("{:?}", rigid_patches_snapped(&b, t, PixelSnap::from(true)))
     );
 }
+
+/// Границы узла по осям родителя: (min x, max x) и (min y, max y) по углам.
+fn fix2_extent(props: &Props, patch: &PropsPatch) -> ((f64, f64), (f64, f64)) {
+    let mut p = props.clone();
+    patch.apply_to(&mut p);
+    let m = shape::local_transform(&p);
+    let corners = [
+        Point::new(0.0, 0.0),
+        Point::new(p.w, 0.0),
+        Point::new(0.0, p.h),
+        Point::new(p.w, p.h),
+    ]
+    .map(|c| m * c);
+    let xs = corners.map(|c| c.x);
+    let ys = corners.map(|c| c.y);
+    let lo = |v: [f64; 4]| v.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = |v: [f64; 4]| v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    ((lo(xs), hi(xs)), (lo(ys), hi(ys)))
+}
+
+#[test]
+fn fix2_quarter_turn_rounds_sides_along_their_axis() {
+    for rot in [90.0, 270.0] {
+        let (mut doc, page, ids) = page(&[(
+            None,
+            NodeKind::Rect,
+            PropsPatch {
+                rotation: Some(rot),
+                ..patch(10.0, 10.0, 20.4, 10.4)
+            },
+        )]);
+        let scene = Scene::from_page(doc.page(page).unwrap());
+        let props = fix1_rotated(10.0, 10.0, rot, 20.4, 10.4);
+        let b = bases(&scene, &ids, false);
+        let off = scale_patches_snapped(&b, Affine::IDENTITY, PixelSnap { x: false, y: false });
+        // Сосед притянул x: высота у поворота на 90°/270° идёт вдоль x и не должна округляться.
+        let on_y = scale_patches_snapped(&b, Affine::IDENTITY, PixelSnap { x: false, y: true });
+        assert_eq!(
+            fix2_extent(&props, &on_y[0].1).0,
+            fix2_extent(&props, &off[0].1).0,
+            "поворот {rot}: правая/левая граница сдвинулась"
+        );
+        // Сосед притянул y: ширина у поворота вдоль y и не должна округляться.
+        let on_x = scale_patches_snapped(&b, Affine::IDENTITY, PixelSnap { x: true, y: false });
+        assert_eq!(
+            fix2_extent(&props, &on_x[0].1).1,
+            fix2_extent(&props, &off[0].1).1,
+            "поворот {rot}: верхняя/нижняя граница сдвинулась"
+        );
+    }
+}
+
+#[test]
+fn fix2_shear_keeps_area_and_w_edge() {
+    let (mut doc, page, ids) = page(&[(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            rotation: Some(45.0),
+            ..patch(0.0, 0.0, 10.0, 10.0)
+        },
+    )]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let props = fix1_rotated(0.0, 0.0, 45.0, 10.0, 10.0);
+    let t = Affine::scale_non_uniform(2.0, 1.0);
+    let p = scale_patches(&bases(&scene, &ids, false), t, false);
+    let mut q = props.clone();
+    p[0].1.apply_to(&mut q);
+    // |u| = sqrt(2.5): ширина по первой оси; площадь сохраняется (det = 2).
+    let su = 2.5f64.sqrt();
+    assert!((q.w - 10.0 * su).abs() < 1e-9, "w={}", q.w);
+    assert!((q.h - 200.0 / (10.0 * su)).abs() < 1e-9, "h={}", q.h);
+    assert!((q.w * q.h - 200.0).abs() < 1e-9);
+    // Центр по-прежнему в отображённой точке центра.
+    let want = t * shape::local_transform(&props) * Point::new(5.0, 5.0);
+    let got = shape::local_transform(&q) * Point::new(q.w / 2.0, q.h / 2.0);
+    assert!(
+        (got.x - want.x).abs() < 1e-6 && (got.y - want.y).abs() < 1e-6,
+        "{got:?} vs {want:?}"
+    );
+}
+
+#[test]
+fn fix2_axis_aligned_and_uniform_scales_stay_exact() {
+    let (mut doc, page, ids) = page(&[(None, NodeKind::Rect, patch(0.0, 0.0, 10.0, 20.0))]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let b = bases(&scene, &ids, false);
+    let props = Props {
+        w: 10.0,
+        h: 20.0,
+        ..Props::defaults(NodeKind::Rect)
+    };
+    for (t, want) in [
+        (Affine::scale_non_uniform(2.0, 3.0), (20.0, 60.0)),
+        (Affine::scale(2.0), (20.0, 40.0)),
+    ] {
+        let p = scale_patches(&b, t, false);
+        let mut q = props.clone();
+        p[0].1.apply_to(&mut q);
+        assert!(
+            (q.w - want.0).abs() < 1e-9 && (q.h - want.1).abs() < 1e-9,
+            "{t:?}: {} x {}",
+            q.w,
+            q.h
+        );
+    }
+}
