@@ -9,6 +9,7 @@ license.workspace = true
 ferrum-doc = { path = "../ferrum-doc" }
 ferrum-scene = { path = "../ferrum-scene" }
 ferrum-render = { path = "../ferrum-render" }
+blake3.workspace = true
 kurbo.workspace = true
 serde.workspace = true
 serde_json.workspace = true

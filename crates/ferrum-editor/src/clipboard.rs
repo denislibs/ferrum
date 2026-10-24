@@ -8,9 +8,13 @@
 //! У узлов верхнего уровня положение и поворот — мировые, у остальных — как в
 //! документе, относительно родителя.
 //!
-//! Вставка не доверяет данным: размеры и количества ограничены, числа проверяются,
-//! ссылки на родителя — только назад, хэш изображения сверяется с байтами.
-//! Узлы неизвестного типа (из будущих версий) пропускаются вместе с поддеревом.
+//! Вставка не доверяет данным: размеры и количества ограничены, длины проверяются
+//! до копирования, числа приводятся к пределам сцены, ссылки на родителя — только
+//! назад и только на контейнеры, хэш каждого изображения сверяется с его байтами, а
+//! каждая заливка с изображением должна ссылаться на переданные байты. Узлы
+//! неизвестного типа (из будущих версий) пропускаются вместе с поддеревом.
+
+use std::collections::HashSet;
 
 use ferrum_doc::{
     Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign,
@@ -23,10 +27,18 @@ pub const MAGIC: &[u8; 8] = b"FERRUMCB";
 pub const VERSION: u32 = 1;
 /// Пределы для не доверенных данных.
 pub const MAX_PAYLOAD: usize = 256 * 1024 * 1024;
+/// Предел длины JSON-секции; проверяется до разбора.
+pub const MAX_JSON: usize = 64 * 1024 * 1024;
+/// Предел одного изображения; проверяется до копирования его байтов.
+pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+/// Предел суммы байтов всех изображений.
+pub const MAX_IMAGES_TOTAL: usize = 192 * 1024 * 1024;
 pub const MAX_NODES: usize = 200_000;
 pub const MAX_IMAGES: usize = 4096;
 pub const MAX_PAINTS: usize = 64;
 pub const MAX_NAME: usize = 1024;
+/// Глубина вложенности: корень имеет глубину 0.
+pub const MAX_DEPTH: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ClipboardError {
@@ -130,6 +142,40 @@ fn align(a: StrokeAlign) -> &'static str {
     }
 }
 
+/// Хэш в каноническом виде: 64 hex-символа в нижнем регистре, иначе `None`.
+fn normalize_hash(h: &str) -> Option<String> {
+    (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| h.to_ascii_lowercase())
+}
+
+/// Длина для раскладки. Длина, не помещающаяся в u32, не обрезается молча: она
+/// насыщается, и разбор отвергает такой буфер.
+fn len_bytes(n: usize) -> [u8; 4] {
+    debug_assert!(u32::try_from(n).is_ok(), "длина {n} не помещается в u32");
+    u32::try_from(n).unwrap_or(u32::MAX).to_le_bytes()
+}
+
+/// Проверяет, что копию можно вставить обратно. Явно проверяются пределы, которые
+/// разбор молча обрезал бы (имя), остальное — тем же разбором собранных байтов.
+pub fn encodable(payload: &ClipPayload) -> Result<(), ClipboardError> {
+    if payload.nodes.len() > MAX_NODES {
+        return Err(ClipboardError::TooLarge("больше 200 000 узлов"));
+    }
+    if payload.images.len() > MAX_IMAGES {
+        return Err(ClipboardError::TooLarge("больше 4096 изображений"));
+    }
+    for n in &payload.nodes {
+        if n.props.name.chars().count() > MAX_NAME {
+            return Err(ClipboardError::TooLarge("имя длиннее 1024 символов"));
+        }
+        if n.props.fills.len() > MAX_PAINTS || n.props.strokes.len() > MAX_PAINTS {
+            return Err(ClipboardError::TooLarge(
+                "слишком много заливок или обводок",
+            ));
+        }
+    }
+    ClipPayload::decode(&payload.encode()).map(|_| ())
+}
+
 impl ClipPayload {
     pub fn encode(&self) -> Vec<u8> {
         let json = JsonPayload {
@@ -190,29 +236,37 @@ impl ClipPayload {
         );
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        out.extend_from_slice(&len_bytes(text.len()));
         out.extend_from_slice(&text);
-        out.extend_from_slice(&(self.images.len() as u32).to_le_bytes());
+        out.extend_from_slice(&len_bytes(self.images.len()));
         for (_, bytes) in &self.images {
-            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&len_bytes(bytes.len()));
             out.extend_from_slice(bytes);
         }
         out
     }
 
     pub fn decode(bytes: &[u8]) -> Result<ClipPayload, ClipboardError> {
+        // Размер всего буфера и заголовок проверяются до любого выделения памяти.
         if bytes.len() > MAX_PAYLOAD {
             return Err(ClipboardError::TooLarge("больше 256 МБ"));
         }
         let mut r = Reader { bytes, at: 0 };
+        // Короткий буфер тоже «не данные Ferrum», а не повреждённые данные.
         if r.take(8).ok() != Some(MAGIC.as_slice()) {
             return Err(ClipboardError::NotFerrum);
         }
         let version = r.u32()?;
+        if version == 0 {
+            return Err(corrupted("версия 0"));
+        }
         if version > VERSION {
             return Err(ClipboardError::NewerVersion(version));
         }
         let len = r.u32()? as usize;
+        if len > MAX_JSON {
+            return Err(ClipboardError::TooLarge("описание узлов больше 64 МБ"));
+        }
         let text = r.take(len)?;
         let json: JsonPayload =
             serde_json::from_slice(text).map_err(|e| corrupted(format!("описание узлов: {e}")))?;
@@ -226,11 +280,7 @@ impl ClipPayload {
         if count != json.images.len() {
             return Err(corrupted("число изображений не совпадает"));
         }
-        let mut images = Vec::with_capacity(count);
-        for hash in json.images {
-            let n = r.u32()? as usize;
-            images.push((hash, r.take(n)?.to_vec()));
-        }
+        let images = read_images(&mut r, json.images)?;
         if r.at != bytes.len() {
             return Err(corrupted("лишние байты в конце"));
         }
@@ -238,39 +288,106 @@ impl ClipPayload {
         if !b.iter().all(|v| v.is_finite()) {
             return Err(corrupted("границы"));
         }
-        // Узел неизвестного типа и его потомки пропускаются; индексы родителей
-        // пересчитываются под оставшиеся узлы.
-        let mut kept: Vec<Option<usize>> = Vec::with_capacity(json.nodes.len());
-        let mut nodes = Vec::new();
-        for (i, n) in json.nodes.into_iter().enumerate() {
-            let parent = match n.parent {
-                None => None,
-                Some(p) if p < i => match kept[p] {
-                    Some(k) => Some(k),
-                    None => {
-                        kept.push(None);
-                        continue;
-                    }
-                },
-                Some(_) => return Err(corrupted("ссылка на родителя вперёд")),
-            };
-            let Some(kind) = NodeKind::parse(&n.kind) else {
-                kept.push(None);
-                continue;
-            };
-            let props = props_from_json(kind, n)?;
-            kept.push(Some(nodes.len()));
-            nodes.push(ClipNode { parent, props });
-        }
+        let nodes = build_nodes(json.nodes)?;
         if nodes.is_empty() {
             return Err(ClipboardError::Empty);
         }
+        // Каждая заливка с изображением ссылается на переданные байты: висячих ссылок нет.
+        let have: HashSet<&str> = images.iter().map(|(h, _)| h.as_str()).collect();
+        for n in &nodes {
+            for f in &n.props.fills {
+                let dangling = match &f.image_hash {
+                    Some(h) => !have.contains(h.as_str()),
+                    None => f.kind == FillKind::Image,
+                };
+                if dangling {
+                    return Err(corrupted("заливка ссылается на отсутствующее изображение"));
+                }
+            }
+        }
+        // Рамка ограничена тем же пределом, что и координаты сцены: вставка не переполнится.
+        let clamp = |v: f64| v.clamp(-shape::COORD_LIMIT, shape::COORD_LIMIT);
         Ok(ClipPayload {
             nodes,
             images,
-            bounds: Rect::new(b[0], b[1], b[2], b[3]).abs(),
+            bounds: Rect::new(clamp(b[0]), clamp(b[1]), clamp(b[2]), clamp(b[3])).abs(),
         })
     }
+}
+
+/// Читает тела изображений: длина проверяется до копирования, хэш — до сохранения.
+fn read_images(
+    r: &mut Reader<'_>,
+    hashes: Vec<String>,
+) -> Result<Vec<(String, Vec<u8>)>, ClipboardError> {
+    let mut images = Vec::with_capacity(hashes.len());
+    let mut seen = HashSet::new();
+    let mut total = 0usize;
+    for claimed in hashes {
+        let hash = normalize_hash(&claimed).ok_or_else(|| corrupted("хэш изображения"))?;
+        let n = r.u32()? as usize;
+        if n > MAX_IMAGE_BYTES {
+            return Err(ClipboardError::TooLarge("изображение больше 64 МБ"));
+        }
+        total = total.saturating_add(n);
+        if total > MAX_IMAGES_TOTAL {
+            return Err(ClipboardError::TooLarge("изображения больше 192 МБ"));
+        }
+        let body = r.take(n)?;
+        if blake3::hash(body).to_hex().as_str() != hash.as_str() {
+            return Err(corrupted("байты изображения не сходятся с хэшем"));
+        }
+        if !seen.insert(hash.clone()) {
+            return Err(corrupted("повторный хэш изображения"));
+        }
+        images.push((hash, body.to_vec()));
+    }
+    Ok(images)
+}
+
+/// Собирает узлы: родитель — раньше в списке, контейнер (рамка или группа), глубина
+/// не больше `MAX_DEPTH`. Узел неизвестного типа пропускается вместе с потомками.
+fn build_nodes(json_nodes: Vec<JsonNode>) -> Result<Vec<ClipNode>, ClipboardError> {
+    // `kept[i]` — индекс узла `i` в результате или `None`, если он пропущен.
+    let mut kept: Vec<Option<usize>> = Vec::with_capacity(json_nodes.len());
+    let mut nodes: Vec<ClipNode> = Vec::new();
+    // Глубина каждого узла результата; считается по родителю, без рекурсии.
+    let mut depth: Vec<usize> = Vec::new();
+    for (i, n) in json_nodes.into_iter().enumerate() {
+        let parent = match n.parent {
+            None => None,
+            Some(p) if p < i => match kept[p] {
+                Some(k) => Some(k),
+                None => {
+                    kept.push(None);
+                    continue;
+                }
+            },
+            Some(_) => return Err(corrupted("ссылка на родителя вперёд")),
+        };
+        let Some(kind) = NodeKind::parse(&n.kind) else {
+            kept.push(None);
+            continue;
+        };
+        let (parent, d) = match parent {
+            None => (None, 0),
+            Some(k) => {
+                if !matches!(nodes[k].props.kind, NodeKind::Frame | NodeKind::Group) {
+                    return Err(corrupted("у узла этого типа не бывает потомков"));
+                }
+                let d = depth[k] + 1;
+                if d > MAX_DEPTH {
+                    return Err(ClipboardError::TooLarge("вложенность глубже 256 уровней"));
+                }
+                (Some(k), d)
+            }
+        };
+        let props = props_from_json(kind, n)?;
+        kept.push(Some(nodes.len()));
+        nodes.push(ClipNode { parent, props });
+        depth.push(d);
+    }
+    Ok(nodes)
 }
 
 fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError> {
@@ -293,9 +410,9 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
             "tile" => ScaleMode::Tile,
             _ => return Err(corrupted("режим изображения")),
         };
+        // Хэш приводится к нижнему регистру, чтобы совпасть с ключом изображения.
         let image_hash = match f.image_hash {
-            Some(h) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h),
-            Some(_) => return Err(corrupted("хэш изображения")),
+            Some(h) => Some(normalize_hash(&h).ok_or_else(|| corrupted("хэш изображения"))?),
             None => None,
         };
         fills.push(Fill {
