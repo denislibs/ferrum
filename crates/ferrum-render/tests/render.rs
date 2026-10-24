@@ -619,13 +619,17 @@ fn raster_cache_respects_byte_budget() {
     let all = free.raster_cache_bytes();
     assert!(all > 0);
     assert_eq!(draw(&mut free, &scene, &cam).raster_builds, 0);
-    // Бюджет на четверть: кэш не растёт выше, фреймы перестраиваются.
+    // Бюджет на четверть: кэш не растёт выше; не поместившиеся фреймы рисуются
+    // узлами, а растры видимых фреймов не вытесняют друг друга каждый кадр
+    // (прежде здесь ожидались перестройки — это и была бесконечная карусель).
     let limit = all / 4;
     let mut small = Renderer::with_raster_cache_bytes(limit);
     small.set_raster_build_time(None);
     warm(&mut small);
     assert!(small.raster_cache_bytes() <= limit);
-    assert!(draw(&mut small, &scene, &cam).raster_builds > 0);
+    let s = draw(&mut small, &scene, &cam);
+    assert_eq!(s.raster_builds, 0, "{s:?}");
+    assert!(s.rasters > 0 && s.drawn > 0, "{s:?}");
     assert!(small.raster_cache_bytes() <= limit);
 }
 
@@ -877,4 +881,40 @@ fn export_between_frames_does_not_disturb_the_screen_cache() {
     let exported = run(true);
     assert_eq!(plain.raster_builds, 0);
     assert_eq!(exported, plain, "экспорт изменил кадр на экране");
+}
+
+#[test]
+fn raster_byte_budget_pressure_draws_frames_by_nodes_not_fill_only() {
+    // Растры видимых фреймов не помещаются в бюджет памяти: недостающие фреймы
+    // рисуются узлами (полное содержимое), а не одной заливкой, и это устойчивое
+    // состояние — кадр не просит продолжения.
+    let (mut p, _) = grid(8, 8, 10);
+    let scene = p.scene();
+    let mut cam = Camera::new(Size::new(400.0, 400.0), 1.0);
+    cam.fit(scene.bounds().unwrap(), 10.0);
+    let mut free = Renderer::new();
+    free.set_raster_build_time(None);
+    while draw(&mut free, &scene, &cam).raster_builds > 0 {}
+    let limit = free.raster_cache_bytes() / 4;
+
+    let (w, h) = cam.device_size();
+    let mut reference = CpuBackend::new(w, h);
+    Renderer::new().draw_scene(&mut NoRaster(&mut reference), &scene, &cam, &NoImages);
+    let reference = reference.render();
+
+    let mut r = Renderer::with_raster_cache_bytes(limit);
+    let mut warm = 0;
+    while frame_image(&mut r, &scene, &cam).0.needs_another_frame {
+        warm += 1;
+        assert!(warm < 200, "кадр так и не стал полным");
+    }
+    for _ in 0..10 {
+        let (s, img) = frame_image(&mut r, &scene, &cam);
+        assert!(!s.needs_another_frame, "{s:?}");
+        assert!(r.raster_cache_bytes() <= limit);
+        // Рисуются все 64 фрейма: из растров или узлами (фрейм и 10 детей).
+        assert_eq!(s.rasters + (s.drawn + s.lod_rects) / 11, 64, "{s:?}");
+        let diff = mean_diff(&reference, &img);
+        assert!(diff < 4.0, "среднее отличие {diff}: {s:?}");
+    }
 }

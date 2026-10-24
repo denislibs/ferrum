@@ -153,6 +153,9 @@ pub struct Painter {
     /// Занято растрами и предел.
     raster_bytes: usize,
     raster_limit: usize,
+    /// В этом кадре растр уже не поместился в предел памяти: остальные фреймы
+    /// кадра — узлами.
+    raster_full: bool,
     /// В текущем рисовании встретилась заглушка вместо картинки.
     missing_image: bool,
     pub stats: FrameStats,
@@ -178,6 +181,7 @@ impl Painter {
             raster_bytes: 0,
             raster_limit: bytes,
             missing_image: false,
+            raster_full: false,
             stats: FrameStats::default(),
         }
     }
@@ -200,6 +204,7 @@ impl Painter {
         self.raster_budget = RASTER_BUILDS_PER_FRAME;
         self.raster_time_spent = Duration::ZERO;
         self.missing_image = false;
+        self.raster_full = false;
         if self.frame.is_multiple_of(64) {
             self.evict();
         }
@@ -229,10 +234,11 @@ impl Painter {
     /// `keep` — только что построенный растр: он нужен прямо сейчас.
     fn enforce_raster_limit(&mut self, keep: Slot) {
         while self.raster_bytes > self.raster_limit {
+            let frame = self.frame;
             let oldest = self
                 .rasters
                 .iter()
-                .filter(|(&s, _)| s != keep)
+                .filter(|(&s, r)| s != keep && evictable(r, frame))
                 .min_by_key(|(_, r)| r.last_used)
                 .map(|(&s, _)| s);
             let Some(slot) = oldest else { break };
@@ -240,6 +246,19 @@ impl Painter {
                 self.raster_bytes -= r.bytes();
             }
         }
+    }
+
+    /// Поместится ли растр `bytes` байт для `slot` в предел памяти, если вытеснить
+    /// всё, что можно (`evictable`); старый растр этого же слота он заменит.
+    fn raster_fits(&self, slot: Slot, bytes: usize) -> bool {
+        let frame = self.frame;
+        let freeable: usize = self
+            .rasters
+            .iter()
+            .filter(|(&s, r)| s == slot || evictable(r, frame))
+            .map(|(_, r)| r.bytes())
+            .sum();
+        self.raster_bytes - freeable + bytes <= self.raster_limit
     }
 
     /// Рисует поддеревья `roots` снизу вверх. Обход без рекурсии: глубина дерева из
@@ -460,6 +479,15 @@ impl Painter {
             if w > 2.0 * RASTER_MAX_PX || h > 2.0 * RASTER_MAX_PX {
                 return false;
             }
+            // Растры видимых фреймов не помещаются в предел памяти: до конца кадра
+            // новые не строятся, а оставшиеся фреймы рисуются узлами — полностью.
+            // Это устойчивое состояние, а не догоняние: кадр не помечается неполным
+            // (иначе холст перерисовывался бы вечно), и заглушка-заливка здесь не
+            // годится — она осталась бы на экране навсегда.
+            if self.raster_full || !self.raster_fits(slot, w as usize * h as usize * 4) {
+                self.raster_full = true;
+                return false;
+            }
             if !self.can_build_raster() {
                 // Бюджет кадра исчерпан: кадр неполный, растр догонит в следующих.
                 self.stats.needs_another_frame = true;
@@ -471,7 +499,8 @@ impl Painter {
                 if same {
                     return self.blit_raster(backend, ctx, slot);
                 }
-                // Растра этого узла ещё не было (первый показ страницы издалека):
+                // Растра этого узла ещё не было (первый показ страницы издалека), а
+                // в предел памяти он поместится (проверено выше):
                 // пока — только собственная заливка фрейма, без детей. Поштучная
                 // отрисовка сотни тысяч LOD-прямоугольников стоила бы ~10 мс на
                 // каждом кадре прогрева.
@@ -577,6 +606,15 @@ impl Painter {
         self.stats.rasters += 1;
         true
     }
+}
+
+/// Можно ли вытеснить растр ради нового. Нельзя — нарисованный в этом кадре или в
+/// прошлом: первый уже на экране, второй почти наверняка понадобится ниже в этом
+/// же кадре (порядок обхода тот же). Иначе при нехватке памяти растры видимых
+/// фреймов вытесняли бы друг друга каждый кадр, и часть фреймов не дорисовывалась
+/// бы никогда.
+fn evictable(r: &Raster, frame: u64) -> bool {
+    r.last_used + 1 < frame
 }
 
 /// Текущее время, если платформа его даёт. В `wasm32-unknown-unknown`

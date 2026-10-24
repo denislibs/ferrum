@@ -509,6 +509,43 @@ fn main() {
         }
         None => report.fail("Вся страница: прогрев кэша", "не прогрелся"),
     }
+    // Растры всей страницы не помещаются в предел памяти (четверть нужного):
+    // не поместившиеся фреймы рисуются узлами, кадр полный и устойчивый.
+    {
+        let limit = renderer.raster_cache_bytes() / 4;
+        let mut tight = Renderer::with_raster_cache_bytes(limit);
+        let mut worst = Duration::ZERO;
+        let mut warm_frames = 0;
+        let mut last = Default::default();
+        for i in 0..WARMUP_CAP + 10 {
+            backend.reset(w, h);
+            let t = Instant::now();
+            last = tight.draw_scene(&mut backend, &scene, &camera, &NoImages);
+            worst = worst.max(t.elapsed());
+            if last.needs_another_frame {
+                warm_frames = i + 1;
+            } else if i >= warm_frames + 10 {
+                break;
+            }
+        }
+        let ferrum_render::FrameStats {
+            rasters,
+            drawn,
+            lod_rects,
+            needs_another_frame,
+            ..
+        } = last;
+        report.info(
+            "Растры не помещаются в память (предел — четверть): кадров прогрева / из растров / узлами / LOD / кадр неполный",
+            format!("{warm_frames} / {rasters} / {drawn} / {lod_rects} / {needs_another_frame}"),
+        );
+        report.gate(
+            "Растры не помещаются в память: худший кадр (прогрев и 10 устойчивых)",
+            worst,
+            16.0,
+            "≤ 16 мс",
+        );
+    }
     let (whole, stats) = frame(&mut renderer, &mut backend, &scene, &camera);
     report.info(
         "Вся страница: зум / из растрового кэша / узлами / LOD-прямоугольников",
