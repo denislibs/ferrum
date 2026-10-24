@@ -552,7 +552,9 @@ fn request_frame_and_push_event_reach_the_loop() {
 }
 
 mod present {
-    use ferrum_wasm::present::{Action, PresentError, PresentWatch, MAX_SKIPS};
+    use ferrum_wasm::present::{
+        Action, PresentError, PresentWatch, Soft, SoftErrors, MAX_SKIPS, MAX_SOFT_ERRORS,
+    };
 
     fn skip() -> PresentError {
         PresentError::Skipped("таймаут".into())
@@ -596,5 +598,56 @@ mod present {
         let Action::Dead(Some(_)) = w.error(PresentError::Failed("другое".into())) else {
             panic!("другое сообщение — новое событие")
         };
+    }
+
+    #[test]
+    fn too_large_frame_pauses_with_one_message_and_recovers() {
+        let mut w = PresentWatch::default();
+        let big =
+            |w: u32| PresentError::TooLarge(format!("{w} × 720 больше предела устройства (16384)"));
+        let Action::Pause(Some(m)) = w.error(big(16385)) else {
+            panic!("слишком большой кадр — пауза, не смерть поверхности")
+        };
+        assert!(m.starts_with("Кадр не показан: 16385 × 720"), "{m}");
+        // Окно растёт дальше: размеры другие, но сообщение одно.
+        assert_eq!(w.error(big(16400)), Action::Pause(None));
+        assert_eq!(w.error(big(16500)), Action::Pause(None));
+        // Размер снова влез — кадр показан; следующий выход за предел — новое сообщение.
+        w.ok();
+        assert!(matches!(w.error(big(16385)), Action::Pause(Some(_))));
+    }
+
+    #[test]
+    fn soft_errors_are_reported_once_per_message() {
+        let mut s = SoftErrors::default();
+        let e = || "Ошибка WebGPU: текстура".to_string();
+        assert_eq!(s.error(e()), Soft::Report(e()));
+        for _ in 0..5 {
+            assert_eq!(
+                s.error(e()),
+                Soft::Quiet,
+                "тот же текст на следующих кадрах — тихо"
+            );
+        }
+        let other = "Ошибка WebGPU: буфер".to_string();
+        assert_eq!(s.error(other.clone()), Soft::Report(other));
+    }
+
+    #[test]
+    fn too_many_soft_errors_kill_the_surface_with_one_message() {
+        let mut s = SoftErrors::default();
+        for i in 0..MAX_SOFT_ERRORS {
+            let a = s.error(format!("Ошибка WebGPU: {}", i % 3));
+            assert!(!matches!(a, Soft::Dead(_)), "{i}: {a:?}");
+        }
+        let Soft::Dead(m) = s.error("Ошибка WebGPU: 0".into()) else {
+            panic!("после {MAX_SOFT_ERRORS} ошибок поверхность останавливается")
+        };
+        assert!(
+            m.contains(&MAX_SOFT_ERRORS.to_string()) && m.contains("Ошибка WebGPU: 0"),
+            "{m}"
+        );
+        // Дальше — тишина: сообщение об остановке одно.
+        assert_eq!(s.error("Ошибка WebGPU: новая".into()), Soft::Quiet);
     }
 }

@@ -167,6 +167,16 @@ async function poke(page: Page): Promise<void> {
   await drag(page, screen(l, 200, 40), 6, 0, 3);
 }
 
+/** Пиксель первого события `pixels` в точке холста: бэкенд и RGB. */
+function pixelsAt(page: Page, at: { x: number; y: number }): Promise<(string | number)[]> {
+  return page.evaluate(({ x, y }) => {
+    const p = window.__ferrum!.events.find((e) => e.type === 'pixels');
+    if (!p || p.type !== 'pixels') return [];
+    const i = (Math.round(y) * p.width + Math.round(x)) * 4;
+    return [p.backend, ...p.rgba.slice(i, i + 3)];
+  }, at);
+}
+
 /** Размер, на 1 больший предела WebGL2 (`MAX_TEXTURE_SIZE`) этого браузера. */
 function pastWebglLimit(page: Page): Promise<number> {
   return page.evaluate(() => {
@@ -351,7 +361,7 @@ test('ошибка показа кадра на WebGL2: одно сообщен�
 
 // --- 6. Размер больше предела после старта ------------------------------------
 
-test('окно выросло больше предела WebGL2: одно сообщение, поверхность не рисует', async ({ page }) => {
+test('окно выросло больше предела WebGL2: одно сообщение, пауза, после уменьшения рисует снова', async ({ page }) => {
   await open(page, '&backend=webgl');
   expect((await info(page)).backend).toBe('webgl');
   const width = await pastWebglLimit(page);
@@ -359,20 +369,29 @@ test('окно выросло больше предела WebGL2: одно со�
   await page.setViewportSize({ width, height: 720 });
   await expect.poll(async () => (await errors(page)).length).toBe(1);
   expect((await errors(page))[0]).toBe(
-    `Не удалось показать кадр: кадр ${width} × 720 больше предела устройства (${width - 1})`,
+    `Кадр не показан: ${width} × 720 больше предела устройства (${width - 1}); уменьшите окно`,
   );
   // Перерисовка не зациклена: кадров нет, сообщений больше нет.
   const frames = (await live(page)).frames;
   await page.waitForTimeout(500);
   expect((await live(page)).frames).toBe(frames);
-  // Записанное поведение: поверхность мертва насовсем. Вернули окно к прежнему
-  // размеру — кадры не возобновились, и сообщений по-прежнему одно.
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await liveWhen(page, 'l.viewportW === 1280');
-  await poke(page);
+  // Чтение пикселей, пока кадр не показать, отвечает ошибкой, а не перерисовкой
+  // каждый кадр (запрос не возвращается в очередь).
+  await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+  await expect.poll(async () => (await errors(page)).length).toBe(2);
+  expect((await errors(page))[1]).toBe('Пиксели не прочитать: кадр не показан');
+  const paused = (await live(page)).frames;
   await page.waitForTimeout(500);
-  expect((await live(page)).frames).toBe(frames);
-  expect(await errors(page)).toHaveLength(1);
+  expect((await live(page)).frames).toBe(paused);
+  // Окно уменьшили — кадры снова идут, и пиксели читаются.
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await liveWhen(page, `l.viewportW === 1280 && l.frames > ${paused}`);
+  const l = await live(page);
+  const at = screen(l, 200, 40);
+  await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+  await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'pixels'));
+  expect(await pixelsAt(page, at)).toEqual(['webgl', 1, 120, 200]);
+  expect(await errors(page)).toHaveLength(2);
 });
 
 // --- 7. Ошибки WebGPU вне вызовов --------------------------------------------
@@ -385,26 +404,23 @@ test('ошибка проверки WebGPU вне вызовов: сообщен
   await fault(page, 'uncaptured');
   await expect.poll(async () => (await errors(page)).length).toBe(1);
   expect((await errors(page))[0]).toMatch(/^Ошибка WebGPU: /);
-  // Записанное поведение: ошибка проверки не смертельна, устройство цело, кадры идут.
-  const frames = (await live(page)).frames;
-  await poke(page);
-  await liveWhen(page, `l.frames > ${frames}`);
+  // Та же ошибка на следующих кадрах — без новых сообщений. Ошибка проверки не
+  // смертельна: устройство цело, кадры идут.
+  for (let i = 0; i < 2; i++) {
+    const frames = (await live(page)).frames;
+    await fault(page, 'uncaptured');
+    await poke(page);
+    await liveWhen(page, `l.frames > ${frames}`);
+  }
+  await page.waitForTimeout(300);
+  expect(await errors(page)).toHaveLength(1);
   // Поверхность жива: пиксели читаются и «Слой 1» на месте (холст WebGPU снимок
   // страницы в headless может не показать, поэтому читаем из GPU).
   const l = await live(page);
   const at = screen(l, 200, 40);
   await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
   await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'pixels'));
-  const rgb = await page.evaluate(
-    ({ x, y }) => {
-      const p = window.__ferrum!.events.find((e) => e.type === 'pixels');
-      if (!p || p.type !== 'pixels') return [];
-      const i = (Math.round(y) * p.width + Math.round(x)) * 4;
-      return [p.backend, ...p.rgba.slice(i, i + 3)];
-    },
-    at,
-  );
-  expect(rgb).toEqual(['webgpu', 1, 120, 200]);
+  expect(await pixelsAt(page, at)).toEqual(['webgpu', 1, 120, 200]);
   expect(await errors(page)).toHaveLength(1);
 });
 

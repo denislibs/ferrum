@@ -26,7 +26,7 @@ use web_sys::{
     WebGl2RenderingContext,
 };
 
-use crate::present::PresentError;
+use crate::present::{PresentError, MAX_SOFT_ERRORS};
 use crate::protocol::Backend;
 
 /// Пиксели кадра: готовые (CPU, WebGL2) или ещё копируются из GPU (WebGPU).
@@ -130,7 +130,9 @@ impl GpuDevice for WebGlDevice {
 #[derive(Default)]
 struct GpuErrors {
     lost: Option<String>,
-    uncaptured: Option<String>,
+    /// Все ошибки с прошлого кадра, по порядку: политика (`SoftErrors`) считает
+    /// каждую. Больше предела не копим — после него поверхность и так остановится.
+    uncaptured: Vec<String>,
 }
 
 pub struct WebGpuSurface {
@@ -227,21 +229,21 @@ impl Surface {
     }
 
     /// Ошибка, после которой поверхность больше не рисует (потеря устройства или
-    /// контекста), и ошибка WebGPU, пришедшая вне вызовов (каждая — один раз).
-    pub fn take_errors(&mut self) -> (Option<String>, Option<String>) {
+    /// контекста), и ошибки WebGPU, пришедшие вне вызовов с прошлого раза.
+    pub fn take_errors(&mut self) -> (Option<String>, Vec<String>) {
         match self {
             Surface::WebGpu(s) => {
                 let mut e = s.errors.lock().unwrap_or_else(|p| p.into_inner());
-                (e.lost.take(), e.uncaptured.take())
+                (e.lost.take(), std::mem::take(&mut e.uncaptured))
             }
             Surface::WebGl(s) => {
                 let gl: &WebGl2RenderingContext = s.backend.device().renderer.gl_context();
                 let lost = gl
                     .is_context_lost()
                     .then(|| "Контекст WebGL2 потерян".to_string());
-                (lost, None)
+                (lost, Vec::new())
             }
-            Surface::Cpu(_) => (None, None),
+            Surface::Cpu(_) => (None, Vec::new()),
         }
     }
 
@@ -334,8 +336,8 @@ impl WebGpuSurface {
             let e = errors.clone();
             device.on_uncaptured_error(Arc::new(move |err| {
                 let mut e = e.lock().unwrap_or_else(|p| p.into_inner());
-                if e.uncaptured.is_none() {
-                    e.uncaptured = Some(format!("Ошибка WebGPU: {err}"));
+                if e.uncaptured.len() <= MAX_SOFT_ERRORS as usize {
+                    e.uncaptured.push(format!("Ошибка WebGPU: {err}"));
                 }
             }));
         }
@@ -397,8 +399,9 @@ impl WebGpuSurface {
     fn present(&mut self, read: bool) -> Result<Option<Readback>, PresentError> {
         let (w, h) = self.backend.size();
         if w as u32 > self.max_side || h as u32 > self.max_side {
-            return Err(PresentError::Failed(format!(
-                "кадр {w} × {h} больше предела устройства ({})",
+            // Окно выросло: пауза, а не смерть — уменьшат, и кадры пойдут снова.
+            return Err(PresentError::TooLarge(format!(
+                "{w} × {h} больше предела устройства ({})",
                 self.max_side
             )));
         }
@@ -654,8 +657,9 @@ impl WebGlSurface {
     fn present(&mut self, read: bool) -> Result<Option<Readback>, PresentError> {
         let (w, h) = self.backend.size();
         if w as u32 > self.max_side || h as u32 > self.max_side {
-            return Err(PresentError::Failed(format!(
-                "кадр {w} × {h} больше предела устройства ({})",
+            // Окно выросло: пауза, а не смерть — уменьшат, и кадры пойдут снова.
+            return Err(PresentError::TooLarge(format!(
+                "{w} × {h} больше предела устройства ({})",
                 self.max_side
             )));
         }

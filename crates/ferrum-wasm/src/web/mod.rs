@@ -14,7 +14,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::OffscreenCanvas;
 
 use crate::core::Core;
-use crate::present::{Action, PresentWatch};
+use crate::present::{Action, PresentWatch, Soft, SoftErrors};
 use crate::protocol::{Backend, Command, CoreEvent};
 pub use clock::PerformanceClock;
 use surface::{Pixels, Readback, Surface};
@@ -38,6 +38,8 @@ pub struct WasmCore {
     atlas_reported: bool,
     /// Ошибки показа кадра: повторы и постоянные отказы.
     watch: PresentWatch,
+    /// Ошибки WebGPU вне вызовов: каждый текст — один раз, слишком много — стоп.
+    soft: SoftErrors,
 }
 
 /// Команда из JS-объекта. Неверная форма — текст ошибки, не паника.
@@ -126,6 +128,7 @@ impl WasmCore {
             awaiting: false,
             atlas_reported: false,
             watch: PresentWatch::default(),
+            soft: SoftErrors::default(),
         })
     }
 
@@ -172,8 +175,19 @@ impl WasmCore {
             }
         }
         let (fatal, soft) = self.surface.take_errors();
-        if let Some(message) = soft {
-            self.core.push_event(CoreEvent::Error { message });
+        for message in soft {
+            if self.dead {
+                break;
+            }
+            // Одна и та же ошибка проверки обычно повторяется каждый кадр.
+            match self.soft.error(message) {
+                Soft::Report(message) => self.core.push_event(CoreEvent::Error { message }),
+                Soft::Quiet => {}
+                Soft::Dead(message) => {
+                    self.dead = true;
+                    self.core.push_event(CoreEvent::Error { message });
+                }
+            }
         }
         // Потерянный контекст WebGL2 остаётся потерянным: `take_errors` отдаёт его
         // каждый кадр, а сообщение нужно одно.
@@ -213,6 +227,8 @@ impl WasmCore {
                 self.core.draw(&mut s.backend);
             }
         }
+        // Кадр не показан и сам повторяться не будет (пауза или смерть поверхности).
+        let mut stopped = false;
         let served = match self.surface.present(read_now) {
             Ok(readback) => {
                 self.watch.ok();
@@ -236,9 +252,13 @@ impl WasmCore {
                         self.core.request_frame();
                         None
                     }
-                    Action::Pause(m) => m,
+                    Action::Pause(m) => {
+                        stopped = true;
+                        m
+                    }
                     Action::Dead(m) => {
                         self.dead = true;
+                        stopped = true;
                         m
                     }
                 };
@@ -249,6 +269,15 @@ impl WasmCore {
             }
         };
         match read {
+            // Кадр не показан, и следующего не будет: вернуть запрос в очередь —
+            // значит перерисовывать вечно. Ответ — ошибка.
+            Some(_) if !served && stopped => self.core.push_event(CoreEvent::Error {
+                message: if self.dead {
+                    "Пиксели не прочитать: поверхность не рисует".into()
+                } else {
+                    "Пиксели не прочитать: кадр не показан".into()
+                },
+            }),
             // Запрос не обслужен (кадр пропущен или ждём прошлое чтение): вернуть.
             Some(reference) if !served => self.core.command(Command::ReadPixels { reference }),
             Some(true) => {
