@@ -98,6 +98,17 @@ impl SceneNode {
     }
 }
 
+/// Временный узел жеста, которого нет в документе: фигура, которую рисуют, или копия
+/// при перетаскивании с Alt. Живёт только в сцене до конца жеста.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Draft {
+    /// Идентификатор, которого нет в документе (редактор берёт зарезервированный).
+    pub id: NodeId,
+    /// Родитель: узел документа или черновик раньше в том же списке; `None` — корень.
+    pub parent: Option<NodeId>,
+    pub props: Props,
+}
+
 /// Узлы хранятся кусками постоянной ёмкости, а не одним `Vec`: перераспределение
 /// массива на 100 000 узлов (~35 МБ) копирует его страницами с копированием при
 /// записи, и первая запись в каждую страницу после этого стоит микросекунды —
@@ -156,6 +167,9 @@ pub struct Scene {
     /// Растёт при каждом изменении сцены (`apply`, превью): холст по нему понимает,
     /// что нужен новый кадр, не сравнивая сцены.
     changes: u64,
+    /// Черновики жеста в порядке `set_drafts` и их слоты (в том же порядке).
+    drafts: Vec<Draft>,
+    draft_slots: Vec<Slot>,
 }
 
 impl Scene {
@@ -527,6 +541,18 @@ impl Scene {
             return;
         }
         let counter = self.changes + 1;
+        // Черновиков нет в документе, а позиции в `changes` посчитаны без них:
+        // на время обновления они убираются и потом ставятся обратно поверх.
+        let drafts = std::mem::take(&mut self.drafts);
+        let draft_patches: Vec<(NodeId, PropsPatch)> = self
+            .draft_slots
+            .iter()
+            .filter_map(|s| {
+                let (_, patch) = self.preview.get(s)?;
+                Some((self.at(*s).id, patch.clone()))
+            })
+            .collect();
+        self.remove_drafts();
         if self.try_apply(changes, page).is_none() {
             // Сцена разошлась с документом (например, построена по кэшу, который
             // документ отверг) — перестраиваем целиком, превью сохраняется.
@@ -537,6 +563,16 @@ impl Scene {
                 .collect();
             *self = Scene::from_page(page);
             self.set_preview(&preview);
+        }
+        if !drafts.is_empty() {
+            self.set_drafts(&drafts);
+            let mut patches: Vec<(NodeId, PropsPatch)> = self
+                .preview
+                .iter()
+                .map(|(&s, (_, patch))| (self.at(s).id, patch.clone()))
+                .collect();
+            patches.extend(draft_patches);
+            self.set_preview(&patches);
         }
         // Пересборка целиком создаёт новую сцену: счётчик не должен откатиться.
         self.changes = counter;
@@ -746,13 +782,79 @@ impl Scene {
         self.flush_tree();
     }
 
-    /// Убирает превью: все узлы возвращаются к свойствам документа.
+    /// Убирает превью и черновики: все узлы возвращаются к свойствам документа.
     pub fn clear_preview(&mut self) {
         self.set_preview(&[]);
+        self.set_drafts(&[]);
     }
 
+    /// Есть ли временные правки или черновики жеста.
     pub fn has_preview(&self) -> bool {
-        !self.preview.is_empty()
+        !self.preview.is_empty() || !self.drafts.is_empty()
+    }
+
+    /// Заменяет черновики жеста целиком. Каждый встаёт верхним ребёнком своего
+    /// родителя в порядке списка. Черновик с неизвестным родителем или с
+    /// идентификатором, который уже есть в сцене, пропускается вместе с поддеревом.
+    /// Двигать черновики можно обычным `set_preview`.
+    pub fn set_drafts(&mut self, drafts: &[Draft]) {
+        let had = !self.draft_slots.is_empty();
+        let regrouped = self.remove_drafts();
+        let mut dirty = Vec::new();
+        for d in drafts {
+            if self.by_id.contains_key(&d.id) {
+                continue;
+            }
+            let parent = match d.parent {
+                Some(p) => match self.slot(p) {
+                    Some(s) => Some(s),
+                    None => continue,
+                },
+                None => None,
+            };
+            let slot = self.alloc(d.id, d.props.clone());
+            self.link(slot, parent);
+            self.drafts.push(d.clone());
+            self.draft_slots.push(slot);
+            dirty.push(slot);
+        }
+        if had || !dirty.is_empty() {
+            self.changes += 1;
+        }
+        let regrouped = regrouped.into_iter().filter(|p| self.alive(*p)).collect();
+        self.recompute(dirty, regrouped);
+        self.flush_tree();
+    }
+
+    /// Узел — черновик жеста, а не узел документа.
+    pub fn is_draft(&self, id: NodeId) -> bool {
+        self.slot(id).is_some_and(|s| self.draft_slots.contains(&s))
+    }
+
+    /// Убирает черновики из списков детей и из таблицы. Черновики всегда верхние
+    /// дети своих родителей, поэтому позиции остальных детей не меняются.
+    /// Возвращает родителей-узлы документа: их границы нужно пересчитать.
+    fn remove_drafts(&mut self) -> Vec<Slot> {
+        self.drafts.clear();
+        let slots = std::mem::take(&mut self.draft_slots);
+        let mut parents = Vec::new();
+        // С конца: дети черновиков уходят раньше родителей-черновиков.
+        for &s in slots.iter().rev() {
+            if !self.alive(s) {
+                continue;
+            }
+            let parent = self.at(s).parent;
+            let i = self.index[s as usize] as usize;
+            let list = self.list_mut(parent);
+            debug_assert_eq!(list.get(i), Some(&s), "черновик расходится со списком");
+            list.remove(i);
+            self.remove_subtree(s);
+            if let Some(p) = parent {
+                parents.push(p);
+            }
+        }
+        parents.retain(|p| self.alive(*p) && !slots.contains(p));
+        parents
     }
 
     /// Узлы, чьи собственные границы пересекают прямоугольник (в мире), — запрос по

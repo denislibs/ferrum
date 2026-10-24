@@ -566,7 +566,9 @@ impl PageDoc {
         let mut at = index;
         for q in inside {
             if q <= at {
-                at += 1;
+                // `index` за концом (вплоть до `usize::MAX`) значит «в конец»: без
+                // насыщения сложение переполнилось бы и блок встал бы в начало.
+                at = at.saturating_add(1);
             } else {
                 break;
             }

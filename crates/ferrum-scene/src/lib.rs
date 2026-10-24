@@ -5,4 +5,4 @@
 mod scene;
 pub mod shape;
 
-pub use scene::{testing, Scene, SceneNode, Slot};
+pub use scene::{testing, Draft, Scene, SceneNode, Slot};
