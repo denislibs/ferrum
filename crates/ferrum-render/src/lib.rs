@@ -6,6 +6,8 @@ mod backend;
 mod camera;
 mod display;
 mod draw;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod image;
 mod overlay;
 mod text;
@@ -20,6 +22,8 @@ pub use draw::{
     FrameStats, EVICT_AFTER_FRAMES, LOD_RECT_PX, LOD_SKIP_PX, RASTER_BUILDS_PER_FRAME,
     RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
+#[cfg(feature = "gpu")]
+pub use gpu::GpuBackend;
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use overlay::{
     format_size, Overlay, OverlayTheme, HANDLE_SIZE, LABEL_SIZE, PIXEL_GRID_MIN_ZOOM,
