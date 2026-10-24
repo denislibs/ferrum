@@ -5,8 +5,12 @@
 //! Раскладка: `FERRUMCB` · версия (u32 LE) · длина JSON (u32 LE) · JSON · число
 //! изображений (u32 LE) · для каждого: длина (u32 LE) и байты. JSON описывает узлы в
 //! порядке обхода (родитель раньше детей) и хэши изображений в порядке их байтов.
-//! У узлов верхнего уровня положение и поворот — мировые, у остальных — как в
-//! документе, относительно родителя.
+//! У узлов верхнего уровня положение, поворот и отражение — мировые, у остальных —
+//! как в документе, относительно родителя. Поля отражения `flipX`/`flipY`
+//! необязательные и пишутся только со значением `true`: копия без отражений
+//! побайтно та же, что у сборок до отражения, а копия из такой сборки разбирается
+//! с `false`. Версия формата поэтому не менялась: старая сборка, получив копию с
+//! отражением, вставит её неотражённой, но без ошибки и без небезопасных данных.
 //!
 //! Вставка не доверяет данным: размеры и количества ограничены, длины проверяются
 //! до копирования, числа приводятся к пределам сцены, ссылки на родителя — только
@@ -97,8 +101,16 @@ struct JsonNode {
     locked: bool,
     corner_radius: f64,
     clip_content: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    flip_x: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    flip_y: bool,
     fills: Vec<JsonFill>,
     strokes: Vec<JsonStroke>,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[derive(Serialize, Deserialize)]
@@ -198,6 +210,8 @@ impl ClipPayload {
                         locked: p.locked,
                         corner_radius: p.corner_radius,
                         clip_content: p.clip_content,
+                        flip_x: p.flip_x,
+                        flip_y: p.flip_y,
                         fills: p
                             .fills
                             .iter()
@@ -451,8 +465,8 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
         locked: n.locked,
         corner_radius: n.corner_radius,
         clip_content: n.clip_content,
-        flip_x: false,
-        flip_y: false,
+        flip_x: n.flip_x,
+        flip_y: n.flip_y,
         fills,
         strokes,
     };

@@ -299,6 +299,56 @@ fn main() {
         "true",
     );
 
+    // 2а. Отражение 1000 выделенных (Shift+H): одна транзакция и её отмена — та же
+    // запись 1000 узлов, что и у перетаскивания, с теми же целями.
+    let mut flips = Vec::new();
+    let mut unflips = Vec::new();
+    let mut flip_ok = true;
+    let mut unflip_ok = true;
+    let steps0 = ed.step_count();
+    let props0 = ed.page_doc().props(sample).unwrap();
+    for _ in 0..COMMIT_RUNS {
+        ed.select(&children);
+        let t = Instant::now();
+        ed.execute(CommandId::FlipHorizontal);
+        flips.push(t.elapsed());
+        ed.take_events();
+        let p = ed.page_doc().props(sample).unwrap();
+        flip_ok &= p.flip_x != props0.flip_x && p.x != props0.x;
+        let t = Instant::now();
+        ed.execute(CommandId::Undo);
+        unflips.push(t.elapsed());
+        ed.take_events();
+        unflip_ok &= ed.page_doc().props(sample).unwrap() == props0;
+    }
+    assert_eq!(
+        ed.step_count(),
+        steps0 + COMMIT_RUNS as u64,
+        "каждое отражение — один шаг"
+    );
+    report.gate(
+        "Отражение 1000 выделенных (Shift+H: транзакция и сцена)",
+        median(flips),
+        20.0,
+    );
+    report.gate(
+        "Отмена отражения 1000 узлов (документ и сцена)",
+        median(unflips),
+        20.0,
+    );
+    report.check(
+        "Отражение: у образца переключён flip_x и сдвинуто положение",
+        flip_ok,
+        format!("{flip_ok}"),
+        "true",
+    );
+    report.check(
+        "Отмена отражения: образец вернулся точно",
+        unflip_ok,
+        format!("{unflip_ok}"),
+        "true",
+    );
+
     // 3. Один узел среди 98 соседей и фрейма: привязки к ним.
     let one = children[50];
     ed.select(&[one]);

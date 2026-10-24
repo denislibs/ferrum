@@ -85,9 +85,15 @@ fn resize_rect_anchors_aspect_and_center() {
         false,
     );
     assert_eq!(br, Rect::new(0.0, 0.0, 150.0, 80.0));
-    // За противоположную сторону: рамка меняет сторону, без отражения.
+    // За противоположную сторону: сторона, которую тащат, идёт за курсором, а рамка
+    // выворачивается (x1 < x0) — это отражение, как в Figma; противоположная сторона
+    // стоит на месте.
     let flip = resize_rect(r, Handle::Right, Point::new(-30.0, 999.0), false, false);
-    assert_eq!(flip, Rect::new(-30.0, 0.0, 0.0, 50.0));
+    assert_eq!(flip, Rect::new(0.0, 0.0, -30.0, 50.0));
+    assert!(flip.width() < 0.0 && flip.height() > 0.0);
+    let m = rect_map(r, flip);
+    assert_eq!(m * Point::new(100.0, 25.0), Point::new(-30.0, 25.0));
+    assert_eq!(m * Point::ZERO, Point::ZERO);
     // Пропорции: угол — по большему изменению; сторона — другая ось от центра.
     let k = resize_rect(r, Handle::BottomRight, Point::new(300.0, 60.0), true, false);
     assert_eq!(k, Rect::new(0.0, 0.0, 300.0, 150.0));
@@ -700,4 +706,195 @@ fn fix2_axis_aligned_and_uniform_scales_stay_exact() {
             q.h
         );
     }
+}
+
+#[test]
+fn resize_rect_crossing_keeps_handle_under_cursor_with_modifiers() {
+    let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+    // Верхняя сторона за нижнюю: y выворачивается.
+    let top = resize_rect(r, Handle::Top, Point::new(7.0, 80.0), false, false);
+    assert_eq!(top, Rect::new(0.0, 80.0, 100.0, 50.0));
+    // Угол за обе стороны.
+    let both = resize_rect(
+        r,
+        Handle::BottomRight,
+        Point::new(-40.0, -20.0),
+        false,
+        false,
+    );
+    assert_eq!(both, Rect::new(0.0, 0.0, -40.0, -20.0));
+    // Левая сторона за правую.
+    let left = resize_rect(r, Handle::Left, Point::new(130.0, 0.0), false, false);
+    assert_eq!(left, Rect::new(130.0, 0.0, 100.0, 50.0));
+    // Пропорции: модуль масштаба — по большему изменению, знак у каждой оси свой.
+    let k = resize_rect(r, Handle::BottomRight, Point::new(-60.0, 60.0), true, false);
+    assert_eq!(k, Rect::new(0.0, 0.0, -120.0, 60.0));
+    // Сторона с пропорциями: другая ось растёт от центра и не отражается.
+    let e = resize_rect(r, Handle::Bottom, Point::new(0.0, -100.0), true, false);
+    assert_eq!(e, Rect::new(-50.0, 0.0, 150.0, -100.0));
+    // От центра: правая ручка за центр — обе стороны меняются местами.
+    let c = resize_rect(r, Handle::Right, Point::new(20.0, 0.0), false, true);
+    assert_eq!(c, Rect::new(80.0, 0.0, 20.0, 50.0));
+    // Без перехода результат прежний: рамка не вывернута.
+    let plain = resize_rect(r, Handle::Right, Point::new(130.0, 0.0), false, false);
+    assert_eq!(plain, Rect::new(0.0, 0.0, 130.0, 50.0));
+}
+
+/// Узел с поворотом и отражениями — для проверки разложения.
+fn posed(rotation: f64, flip_x: bool, flip_y: bool) -> Props {
+    Props {
+        x: 15.5,
+        y: -7.0,
+        w: 40.0,
+        h: 10.0,
+        rotation,
+        flip_x,
+        flip_y,
+        ..Props::defaults(NodeKind::Rect)
+    }
+}
+
+fn same_affine(a: Affine, b: Affine) -> bool {
+    a.as_coeffs()
+        .iter()
+        .zip(b.as_coeffs())
+        .all(|(x, y)| (x - y).abs() < 1e-9)
+}
+
+#[test]
+fn decompose_takes_mirror_from_determinant_sign() {
+    for rotation in [0.0, 30.0, 90.0, 200.0, 270.0] {
+        for (fx, fy) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = posed(rotation, fx, fy);
+            let m = shape::local_transform(&p);
+            // С подсказкой — точно те же свойства.
+            let d = decompose_hinted(m, p.w, p.h, rotation, (fx, fy));
+            assert_eq!((d.flip_x, d.flip_y), (fx, fy), "{rotation} {fx} {fy}");
+            assert!(
+                close(d.x, p.x) && close(d.y, p.y) && close(d.w, p.w) && close(d.h, p.h),
+                "{d:?}"
+            );
+            assert!(close(d.rotation, rotation), "{d:?}");
+            // Без подсказки — какая-то из равных записей, но та же матрица, и
+            // нечётное число отражений при отрицательном определителе.
+            let d = decompose(m, p.w, p.h);
+            assert_eq!(d.flip_x ^ d.flip_y, m.determinant() < 0.0, "{d:?}");
+            let q = Props {
+                x: d.x,
+                y: d.y,
+                rotation: d.rotation,
+                flip_x: d.flip_x,
+                flip_y: d.flip_y,
+                ..p.clone()
+            };
+            assert!(
+                same_affine(shape::local_transform(&q), m),
+                "{rotation} {fx} {fy}: {d:?}"
+            );
+        }
+    }
+    // Неоднозначность (отражение по x с поворотом θ — то же, что по y с θ + 180°)
+    // решается ближайшим к прежнему поворотом.
+    let m = shape::local_transform(&posed(30.0, true, false));
+    let d = decompose_with(m, 40.0, 10.0, 30.0);
+    assert_eq!(
+        (d.flip_x, d.flip_y, d.rotation.round()),
+        (true, false, 30.0)
+    );
+    let d = decompose_with(m, 40.0, 10.0, 200.0);
+    assert_eq!(
+        (d.flip_x, d.flip_y, d.rotation.round()),
+        (false, true, 210.0)
+    );
+}
+
+#[test]
+fn world_mirror_of_rotated_node_negates_rotation() {
+    let (mut doc, pg, ids) = page(&[(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            rotation: Some(30.0),
+            ..patch(100.0, 100.0, 80.0, 40.0)
+        },
+    )]);
+    let scene = Scene::from_page(doc.page(pg).unwrap());
+    let w0 = scene.node(ids[0]).unwrap().world;
+    let b = bases(&scene, &ids, true);
+    let mx = Affine::translate((150.0, 0.0))
+        * Affine::scale_non_uniform(-1.0, 1.0)
+        * Affine::translate((-150.0, 0.0));
+    let patches = scale_patches(&b, mx, false);
+    let (_, p) = &patches[0];
+    assert_eq!(p.flip_x, Some(true));
+    assert_eq!(p.flip_y, None, "отражение по y не меняется");
+    assert!(close(p.rotation.unwrap(), 330.0), "{p:?}");
+    let base = &b[0].props;
+    assert!(same_affine(local_with(base, p), mx * w0));
+    // Ось мира на четверти поворота — это ось y узла: поворот не меняется.
+    let (mut doc, pg, ids) = page(&[(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            rotation: Some(90.0),
+            ..patch(100.0, 100.0, 80.0, 40.0)
+        },
+    )]);
+    let scene = Scene::from_page(doc.page(pg).unwrap());
+    let w0 = scene.node(ids[0]).unwrap().world;
+    let b = bases(&scene, &ids, true);
+    let (_, p) = &scale_patches(&b, mx, false)[0];
+    assert_eq!((p.flip_x, p.flip_y, p.rotation), (None, Some(true), None));
+    assert!(same_affine(local_with(&b[0].props, p), mx * w0));
+}
+
+#[test]
+fn rotation_keeps_flips_and_mirror_toggles_axis_in_node_frame() {
+    let (mut doc, page, ids) = page(&[(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            flip_x: Some(true),
+            ..patch(100.0, 100.0, 80.0, 40.0)
+        },
+    )]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let b = bases(&scene, &ids, false);
+    // Поворот на 180° — поворот, а не два отражения: флаги не меняются.
+    let r180 = Affine::translate((140.0, 120.0))
+        * Affine::rotate(std::f64::consts::PI)
+        * Affine::translate((-140.0, -120.0));
+    let (_, p) = &rigid_patches(&b, r180, false)[0];
+    assert_eq!((p.flip_x, p.flip_y), (None, None));
+    assert!(close(p.rotation.unwrap(), 180.0));
+    // Ресайз за обе стороны в осях узла — оба отражения переключаются, поворот тот же.
+    let both = Affine::translate((140.0, 120.0))
+        * Affine::scale(-1.0)
+        * Affine::translate((-140.0, -120.0));
+    let b = bases(&scene, &ids, true);
+    let (_, p) = &scale_patches(&b, both, false)[0];
+    assert_eq!(
+        (p.flip_x, p.flip_y, p.rotation),
+        (Some(false), Some(true), None)
+    );
+    assert_eq!((p.x, p.y), (Some(100.0), Some(100.0)));
+}
+
+#[test]
+fn mirrored_box_is_axis_aligned_for_snapping() {
+    let (mut doc, page, ids) = page(&[(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            flip_x: Some(true),
+            flip_y: Some(true),
+            ..patch(100.0, 100.0, 80.0, 40.0)
+        },
+    )]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let sbox = SelectionBox::of(&scene, &ids).unwrap();
+    assert!(sbox.axis_aligned());
+    // Ручки — в видимых углах: доли рамки берутся в осях узла.
+    assert_eq!(sbox.point(0.0, 0.0), Point::new(180.0, 140.0));
+    assert_eq!(sbox.point(1.0, 1.0), Point::new(100.0, 100.0));
 }

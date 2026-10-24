@@ -1,12 +1,12 @@
 //! Правки документа, общие для инструментов и команд: копии поддеревьев, перенос к
 //! другому родителю с сохранением положения на экране.
 
-use ferrum_doc::{DocResult, NodeId, PropsPatch, Tx};
+use ferrum_doc::{DocResult, NodeId, Props, PropsPatch, Tx};
 use ferrum_scene::Scene;
 use kurbo::{Affine, Vec2};
 
 use crate::clipboard::full_patch;
-use crate::geometry::{decompose, parent_world};
+use crate::geometry::{decompose_props, parent_world};
 
 /// Сдвиг в мире, переведённый в координаты родителя узла (только линейная часть).
 pub fn local_delta(parent_world: Affine, d: Vec2) -> Vec2 {
@@ -14,14 +14,19 @@ pub fn local_delta(parent_world: Affine, d: Vec2) -> Vec2 {
     Vec2::new(c[0] * d.x + c[2] * d.y, c[1] * d.x + c[3] * d.y)
 }
 
-/// Положение и поворот узла с мировой матрицей `world` у родителя с мировой
-/// матрицей `parent_world` — чтобы после переноса узел остался на месте.
-pub fn reposition(parent_world: Affine, world: Affine) -> PropsPatch {
-    let pose = decompose(parent_world.inverse() * world, 1.0, 1.0);
+/// Положение, поворот и отражение узла со свойствами `props` и мировой матрицей
+/// `world` у родителя с мировой матрицей `parent_world` — чтобы после переноса узел
+/// остался на месте. Отражение родителя переходит в отражение узла: узел, вынесенный
+/// из отражённого фрейма, выглядит так же. Размер нужен, потому что отражение
+/// идёт относительно центра рамки узла.
+pub fn reposition(parent_world: Affine, world: Affine, props: &Props) -> PropsPatch {
+    let pose = decompose_props(parent_world.inverse() * world, props);
     PropsPatch {
         x: Some(pose.x),
         y: Some(pose.y),
         rotation: Some(pose.rotation),
+        flip_x: (pose.flip_x != props.flip_x).then_some(pose.flip_x),
+        flip_y: (pose.flip_y != props.flip_y).then_some(pose.flip_y),
         ..Default::default()
     }
 }

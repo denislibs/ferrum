@@ -738,8 +738,8 @@ fn commit_drag(cx: &mut Ctx, d: Drag, pointer: Point) {
             let ids: Vec<NodeId> = moved.iter().map(|(_, m)| m.id).collect();
             tx.move_nodes(&ids, target, usize::MAX)?;
             for (_, m) in moved {
-                let world = shift * scene.node(m.id).expect("в сцене").world;
-                tx.set_props(m.id, &reposition(target_world, world))?;
+                let n = scene.node(m.id).expect("в сцене");
+                tx.set_props(m.id, &reposition(target_world, shift * n.world, &n.props))?;
             }
         }
         Ok(sel)

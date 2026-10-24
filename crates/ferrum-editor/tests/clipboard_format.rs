@@ -424,3 +424,33 @@ fn limits_are_enforced() {
         Err(ClipboardError::TooLarge(_))
     ));
 }
+
+#[test]
+fn flips_travel_in_props_and_old_payloads_decode_unmirrored() {
+    let mut p = sample();
+    p.nodes[0].props.flip_x = true;
+    p.nodes[1].props.flip_y = true;
+    let bytes = p.encode();
+    assert_eq!(ClipPayload::decode(&bytes).unwrap(), p);
+    let json = json_of(&bytes);
+    assert!(json.contains("\"flipX\":true"), "{json}");
+    assert!(json.contains("\"flipY\":true"), "{json}");
+    // Неотражённый узел пишется как раньше, без новых полей: старая сборка
+    // разберёт такую копию без потерь.
+    let plain = sample().encode();
+    assert!(!json_of(&plain).contains("flip"), "{}", json_of(&plain));
+    assert_eq!(VERSION, 1, "формат не менялся: поля необязательные");
+    // Копия из прежней версии (полный узел без полей отражения) — без отражения.
+    let old = format!(
+        "{{\"nodes\":[{}],\"images\":[],\"bounds\":[0.0,0.0,10.0,10.0]}}",
+        node_json(None, "rect")
+    );
+    let decoded = ClipPayload::decode(&with_json(&old)).unwrap();
+    assert!(!decoded.nodes[0].props.flip_x && !decoded.nodes[0].props.flip_y);
+    // Не логическое значение — повреждённые данные, а не молчаливое `false`.
+    let bad = old.replace("\"clipContent\"", "\"flipX\":\"да\",\"clipContent\"");
+    assert!(matches!(
+        ClipPayload::decode(&with_json(&bad)),
+        Err(ClipboardError::Corrupted(_))
+    ));
+}

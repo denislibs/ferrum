@@ -49,6 +49,10 @@ pub enum CommandId {
     ToggleVisible,
     ToggleLock,
     ToggleUi,
+    /// Отразить выделение по горизонтали (слева направо) относительно центра его рамки.
+    FlipHorizontal,
+    /// Отразить выделение по вертикали.
+    FlipVertical,
 }
 
 /// Строка таблицы команд.
@@ -240,6 +244,20 @@ pub const COMMANDS: &[Command] = &[
         "view.toggle_ui",
         "Скрыть интерфейс",
         &["Mod+Backslash"],
+    ),
+    // Shift+H и Shift+V, как в Figma: H без модификаторов — «Рука», V — «Перемещение»,
+    // Ctrl/Cmd+Shift+H — «Скрыть»; сочетания сравниваются точным набором модификаторов.
+    cmd(
+        C::FlipHorizontal,
+        "object.flip_horizontal",
+        "Отразить по горизонтали",
+        &["Shift+KeyH"],
+    ),
+    cmd(
+        C::FlipVertical,
+        "object.flip_vertical",
+        "Отразить по вертикали",
+        &["Shift+KeyV"],
     ),
 ];
 

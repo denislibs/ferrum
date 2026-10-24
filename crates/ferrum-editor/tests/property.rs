@@ -56,7 +56,7 @@ enum Act {
     },
 }
 
-const COMMANDS_USED: [CommandId; 22] = [
+const COMMANDS_USED: [CommandId; 24] = [
     CommandId::Undo,
     CommandId::Redo,
     CommandId::Delete,
@@ -79,6 +79,8 @@ const COMMANDS_USED: [CommandId; 22] = [
     CommandId::Copy,
     CommandId::Cut,
     CommandId::Paste,
+    CommandId::FlipHorizontal,
+    CommandId::FlipVertical,
 ];
 
 const TOOL_KEYS: [&str; 6] = ["KeyV", "KeyF", "KeyR", "KeyO", "KeyL", "KeyH"];
@@ -192,6 +194,11 @@ struct Stats {
     cancelled_previews: u64,
     marquees: u64,
     undo_checks: u64,
+    /// Записанные шаги (жесты и команды), после которых у какого-то узла сменилось
+    /// отражение: ресайз за противоположную сторону или команда отражения.
+    flips: u64,
+    /// Из них — ресайзы за противоположную сторону.
+    resize_flips: u64,
 }
 
 fn check_clean(h: &mut H, what: &str) -> Result<(), TestCaseError> {
@@ -324,6 +331,17 @@ fn run(acts: &[Act], stats: &mut Stats) -> Result<(), TestCaseError> {
             continue;
         }
         let after = h.state();
+        let flipped = after.iter().any(|(id, _, p)| {
+            before
+                .iter()
+                .any(|(q, _, b)| q == id && (b.flip_x, b.flip_y) != (p.flip_x, p.flip_y))
+        });
+        if flipped {
+            stats.flips += 1;
+            if kind == "resize" {
+                stats.resize_flips += 1;
+            }
+        }
         match kind {
             "command" => stats.command_steps += 1,
             "draw" => stats.draw_steps += 1,
@@ -383,4 +401,6 @@ fn random_event_sequences_keep_editor_consistent() {
     assert!(st.cancelled_previews > 30, "{st:?}");
     assert!(st.marquees > 30, "{st:?}");
     assert!(st.undo_checks > 300, "{st:?}");
+    assert!(st.flips > 30, "{st:?}");
+    assert!(st.resize_flips > 10, "{st:?}");
 }

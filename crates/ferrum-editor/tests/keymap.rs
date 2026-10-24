@@ -50,6 +50,8 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::Zoom100, &["Shift+Digit0"]),
     (CommandId::ToggleVisible, &["Mod+Shift+KeyH"]),
     (CommandId::ToggleLock, &["Mod+Shift+KeyL"]),
+    (CommandId::FlipHorizontal, &["Shift+KeyH"]),
+    (CommandId::FlipVertical, &["Shift+KeyV"]),
     (CommandId::ToggleUi, &["Mod+Backslash"]),
     (CommandId::Copy, &["Mod+KeyC"]),
     (CommandId::Paste, &["Mod+KeyV"]),
@@ -92,7 +94,7 @@ fn defaults_match_figma_on_both_platforms() {
         assert!(!map.bindings(c.id).is_empty(), "{:?}", c.id);
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 41);
+    assert_eq!(COMMANDS.len(), 43);
 }
 
 #[test]
@@ -116,7 +118,32 @@ fn lookup_by_physical_code_with_exact_modifiers() {
         win.lookup(&key("Digit1", false, false, true, false)),
         Some(CommandId::ZoomToFit)
     );
-    assert_eq!(win.lookup(&key("KeyV", false, false, true, false)), None);
+    // Модификаторы — точным набором: Shift+V — отражение, а не «Перемещение» (V),
+    // Shift+H — отражение, а не «Рука» (H) и не «Скрыть» (Ctrl+Shift+H).
+    assert_eq!(
+        win.lookup(&key("KeyV", false, false, true, false)),
+        Some(CommandId::FlipVertical)
+    );
+    assert_eq!(
+        win.lookup(&key("KeyV", false, false, false, false)),
+        Some(CommandId::ToolMove)
+    );
+    assert_eq!(
+        win.lookup(&key("KeyH", false, false, true, false)),
+        Some(CommandId::FlipHorizontal)
+    );
+    assert_eq!(
+        win.lookup(&key("KeyH", false, false, false, false)),
+        Some(CommandId::ToolHand)
+    );
+    assert_eq!(
+        win.lookup(&key("KeyH", true, false, true, false)),
+        Some(CommandId::ToggleVisible)
+    );
+    assert_eq!(
+        win.lookup(&key("KeyV", true, false, false, false)),
+        Some(CommandId::Paste)
+    );
 }
 
 #[test]

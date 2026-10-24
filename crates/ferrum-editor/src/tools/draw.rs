@@ -13,7 +13,7 @@ use kurbo::{Affine, Point, Rect, Vec2};
 
 use super::{Ctx, Cursor, Flow, Tool, ToolKind, ToolOverlay, DRAG_THRESHOLD_PX};
 use crate::clipboard::full_patch;
-use crate::geometry::{decompose, snap_angle};
+use crate::geometry::{decompose, decompose_with, snap_angle};
 use crate::input::{Modifiers, PointerEvent};
 use crate::selection::drop_frame_at;
 use crate::snap::{Snapper, SNAP_THRESHOLD_PX};
@@ -113,6 +113,7 @@ impl DrawTool {
             props.y = pose.y;
             props.w = pose.w;
             props.rotation = pose.rotation;
+            (props.flip_x, props.flip_y) = (pose.flip_x, pose.flip_y);
             return props;
         }
         let mut v = b - a;
@@ -134,10 +135,18 @@ impl DrawTool {
         } else {
             Rect::from_points(a, a + v)
         };
-        let pose = decompose(inv * Affine::translate(rect.origin().to_vec2()), 1.0, 1.0);
+        // Размер нужен разложению: в отражённом родителе фигура получает своё
+        // отражение относительно центра рамки и на экране выглядит неотражённой.
+        let pose = decompose_with(
+            inv * Affine::translate(rect.origin().to_vec2()),
+            rect.width(),
+            rect.height(),
+            0.0,
+        );
         props.x = pose.x;
         props.y = pose.y;
         props.rotation = pose.rotation;
+        (props.flip_x, props.flip_y) = (pose.flip_x, pose.flip_y);
         props.w = rect.width();
         props.h = rect.height();
         props

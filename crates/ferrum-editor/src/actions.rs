@@ -9,7 +9,10 @@ use kurbo::{Affine, Point, Rect, Vec2};
 use crate::clipboard::{encodable, full_patch, ClipNode, ClipPayload, ClipboardError};
 use crate::commands::CommandId;
 use crate::editor::{Editor, EditorEvent};
-use crate::geometry::{decompose, parent_world, top_level, world_box};
+use crate::geometry::{
+    bases, decompose_props, parent_world, scale_patches_snapped, top_level, world_box, PixelSnap,
+    SelectionBox,
+};
 use crate::ops::{duplicate, local_delta, reposition};
 use crate::presets::FramePreset;
 use crate::selection::locked;
@@ -129,6 +132,8 @@ impl Editor {
                 },
             ),
             C::ToggleUi => self.out.events.push(EditorEvent::ToggleUi),
+            C::FlipHorizontal => self.mirror(Vec2::new(-1.0, 1.0)),
+            C::FlipVertical => self.mirror(Vec2::new(1.0, -1.0)),
         }
     }
 
@@ -234,7 +239,7 @@ impl Editor {
                         },
                     )?;
                 } else {
-                    tx.set_props(*id, &reposition(c_world, n.world))?;
+                    tx.set_props(*id, &reposition(c_world, n.world, &n.props))?;
                 }
             }
             Ok(vec![c])
@@ -267,8 +272,8 @@ impl Editor {
                 let children = tx.children(Some(*g));
                 tx.move_nodes(&children, parent, index)?;
                 for c in &children {
-                    let world = scene.node(*c).expect("в сцене").world;
-                    tx.set_props(*c, &reposition(pw, world))?;
+                    let n = scene.node(*c).expect("в сцене");
+                    tx.set_props(*c, &reposition(pw, n.world, &n.props))?;
                 }
                 tx.delete_nodes(&[*g])?;
                 selection.extend(children);
@@ -366,6 +371,42 @@ impl Editor {
         });
     }
 
+    /// Shift+H и Shift+V: отражение выделения относительно центра его рамки по оси
+    /// мира, как в Figma (у повёрнутого узла поворот θ становится −θ). Считается тем
+    /// же масштабом с отрицательным знаком, что и ресайз за противоположную сторону:
+    /// узлы раскладываются с отражением, дети групп отражаются в координатах группы,
+    /// дети фреймов — вместе с фреймом. Без округления до пикселя: отражение не
+    /// должно сдвигать узлы. Один шаг отмены.
+    fn mirror(&mut self, scale: Vec2) {
+        let ids: Vec<NodeId> = top_level(&self.scene, &self.selection)
+            .into_iter()
+            .filter(|id| {
+                self.scene
+                    .slot(*id)
+                    .is_some_and(|s| !locked(&self.scene, s) && !self.scene.is_draft(*id))
+            })
+            .collect();
+        let Some(sbox) = SelectionBox::of(&self.scene, &ids) else {
+            return;
+        };
+        let c = sbox.center_world().to_vec2();
+        let t = Affine::translate(c)
+            * Affine::scale_non_uniform(scale.x, scale.y)
+            * Affine::translate(-c);
+        let patches = scale_patches_snapped(
+            &bases(&self.scene, &ids, true),
+            t,
+            PixelSnap { x: false, y: false },
+        );
+        let selection = self.selection.clone();
+        self.ctx().commit(|tx, _| {
+            for (id, patch) in &patches {
+                tx.set_props(*id, patch)?;
+            }
+            Ok(selection)
+        });
+    }
+
     /// Ctrl+Shift+H и Ctrl+Shift+L: если хоть один узел в состоянии «да» —
     /// все переходят в «нет», иначе все в «да».
     fn toggle(&mut self, get: fn(&Props) -> bool, set: fn(bool) -> PropsPatch) {
@@ -398,11 +439,13 @@ impl Editor {
         for id in &ids {
             let n = self.scene.node(*id)?;
             let mut props = page.props(*id).ok()?;
-            // Корень копии — с мировым положением и поворотом.
-            let pose = decompose(n.world, 1.0, 1.0);
+            // Корень копии — с мировым положением, поворотом и отражением: узел из
+            // отражённого фрейма вставится таким, каким его видно.
+            let pose = decompose_props(n.world, &props);
             props.x = pose.x;
             props.y = pose.y;
             props.rotation = pose.rotation;
+            (props.flip_x, props.flip_y) = (pose.flip_x, pose.flip_y);
             let root = nodes.len();
             nodes.push(ClipNode {
                 parent: None,
@@ -531,10 +574,11 @@ impl Editor {
                     Some(i) => Some(made[i]),
                     None => {
                         let world = shift * ferrum_scene::shape::local_transform(&props);
-                        let pose = decompose(target_world.inverse() * world, 1.0, 1.0);
+                        let pose = decompose_props(target_world.inverse() * world, &props);
                         props.x = pose.x;
                         props.y = pose.y;
                         props.rotation = pose.rotation;
+                        (props.flip_x, props.flip_y) = (pose.flip_x, pose.flip_y);
                         target
                     }
                 };
