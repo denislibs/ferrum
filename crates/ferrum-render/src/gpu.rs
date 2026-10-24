@@ -9,6 +9,9 @@
 //! сцена кадра ссылается на картинки по номеру, и освобождённый номер в ней дал бы
 //! чужие пиксели.
 //!
+//! Атлас glyph'ов vello делит `image_cache` с атласом изображений. Ferrum рисует
+//! текст контурами; рисование текста средствами vello разошлось бы с зеркалом.
+//!
 //! Место в атласе выделяется зеркальным кэшем (`vello_common::image_cache`) с той же
 //! конфигурацией, что у рендерера устройства. Алгоритм выделения детерминирован,
 //! поэтому зеркало заранее знает, поместится ли картинка: `vello_gpu` с wgpu при
@@ -40,6 +43,10 @@ pub const GPU_ATLAS_PAGES: usize = 4;
 
 /// Устройство, в атлас которого загружаются картинки (`vello_gpu::Renderer` с wgpu
 /// или `WebGlRenderer`).
+///
+/// Если устройство заменено или создано заново (потеря контекста), вызывающий обязан
+/// вызвать `GpuBackend::reset_atlas`: прежние `ImageId` недействительны, и
+/// разбор краски vello паникует на неизвестном номере.
 pub trait GpuDevice {
     /// Загружает картинку в атлас и возвращает её номер. Атлас устройства выделяет
     /// место тем же алгоритмом и с той же конфигурацией (`atlas_config`), что и
@@ -96,6 +103,7 @@ pub struct GpuBackend<D: GpuDevice> {
     pub scene: vello_gpu::Scene,
     device: D,
     mirror: ImageCache,
+    config: AtlasConfig,
     side: u16,
     entries: HashMap<ImageKey, Entry>,
     frame: u64,
@@ -112,6 +120,7 @@ impl<D: GpuDevice> GpuBackend<D> {
             device,
             side: atlas.atlas_size.0.min(atlas.atlas_size.1),
             mirror: ImageCache::new_with_config(atlas),
+            config: atlas,
             entries: HashMap::new(),
             frame: 0,
             stats: AtlasStats::default(),
@@ -127,6 +136,9 @@ impl<D: GpuDevice> GpuBackend<D> {
         &self.device
     }
 
+    /// Если устройство заменено или создано заново (потеря контекста), после этого
+    /// нужно вызвать `reset_atlas`: номера в сцене и в записях относятся к
+    /// прежнему устройству.
     pub fn device_mut(&mut self) -> &mut D {
         &mut self.device
     }
@@ -134,6 +146,16 @@ impl<D: GpuDevice> GpuBackend<D> {
     /// Сцена кадра и устройство вместе — чтобы отдать сцену рендереру устройства.
     pub fn parts(&mut self) -> (&vello_gpu::Scene, &mut D) {
         (&self.scene, &mut self.device)
+    }
+
+    /// Забывает все картинки и сбрасывает ошибку атласа: вызывать после замены или
+    /// пересоздания устройства. Старые `OpaqueId` в краске паникуют в разборе краски
+    /// vello, поэтому и сцену кадра нужно строить заново (`begin_frame`). Счётчики
+    /// статистики сохраняются.
+    pub fn reset_atlas(&mut self) {
+        self.entries.clear();
+        self.mirror = ImageCache::new_with_config(self.config);
+        self.broken = None;
     }
 
     pub fn atlas_stats(&self) -> AtlasStats {
@@ -156,12 +178,24 @@ impl<D: GpuDevice> GpuBackend<D> {
             return None;
         }
         let size = (image.pixmap.width(), image.pixmap.height());
+        // Пустая картинка: нечего выделять, а множители уменьшения дали бы NaN.
+        if size.0 == 0 || size.1 == 0 {
+            return None;
+        }
         if let Some(e) = self.entries.get_mut(&image.key) {
             if e.source == size {
                 e.last_used = self.frame;
                 return Some(scaled(e));
             }
             // Под тем же ключом картинка другого размера (перекодирована): заменить.
+            // Но не в кадре, где прежний номер уже в сцене: освобождённый номер
+            // достанется новой картинке (место выдаётся с конца), и ранее
+            // нарисованное в этом кадре показало бы её пиксели. Заглушка сейчас,
+            // замена в следующем кадре.
+            if e.last_used == self.frame {
+                self.stats.misses += 1;
+                return None;
+            }
             let old = self.entries.remove(&image.key).expect("запись есть");
             self.free(old.id);
         }

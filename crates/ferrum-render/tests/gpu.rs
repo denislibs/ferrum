@@ -16,8 +16,9 @@ use ferrum_render::{
 };
 use kurbo::{Affine, BezPath, Point, Rect, Size, Stroke};
 use vello_common::image_cache::ImageCache;
+use vello_common::paint::ImageSource;
 // Оба бэкенда используют один и тот же `peniko` (см. `cargo tree -d`).
-use vello_cpu::peniko::{Extend, Fill as FillRule};
+use vello_cpu::peniko::{Brush, Extend, Fill as FillRule};
 
 /// Устройство без GPU: выделяет место своим кэшем той же конфигурации — так же,
 /// как атлас настоящего рендерера, — и записывает загрузки и освобождения.
@@ -26,6 +27,8 @@ struct FakeDevice {
     log: Vec<String>,
     /// Сдвиг номеров: имитирует устройство, разошедшееся с зеркалом.
     skew: u32,
+    /// Номера, выданные `upload`, — чтобы сверять их с краской в сцене.
+    issued: Vec<ImageId>,
 }
 
 impl FakeDevice {
@@ -34,6 +37,7 @@ impl FakeDevice {
             atlas: ImageCache::new_with_config(config),
             log: vec![],
             skew: 0,
+            issued: vec![],
         }
     }
 }
@@ -46,7 +50,9 @@ impl GpuDevice for FakeDevice {
             .map_err(|e| e.to_string())?;
         self.log
             .push(format!("upload {}x{}", pixmap.width(), pixmap.height()));
-        Ok(ImageId::new(id.as_u32() + self.skew))
+        let out = ImageId::new(id.as_u32() + self.skew);
+        self.issued.push(out);
+        Ok(out)
     }
 
     fn destroy(&mut self, id: ImageId) {
@@ -79,11 +85,24 @@ fn paint(key: ImageKey, w: u16, h: u16) -> ImagePaint {
 }
 
 /// Рисует картинку прямоугольником и сообщает, попала ли в сцену картинка (а не
-/// заглушка-цвет).
+/// заглушка-цвет). Номер в краске обязан быть одним из выданных устройством.
 fn draw_image(b: &mut GpuBackend<FakeDevice>, p: &ImagePaint) -> bool {
     b.set_image(p);
     b.fill_rect(&Rect::new(0.0, 0.0, 10.0, 10.0));
-    format!("{:?}", b.scene.paint()).contains("Image")
+    match b.scene.paint() {
+        Brush::Image(img) => match &img.image {
+            ImageSource::OpaqueId { id, .. } => {
+                assert!(
+                    b.device().issued.contains(id),
+                    "номер {} не выдавало устройство",
+                    id.as_u32()
+                );
+                true
+            }
+            other => panic!("изображение не по номеру: {other:?}"),
+        },
+        _ => false,
+    }
 }
 
 /// Пересылает вызовы во внутренний бэкенд и записывает их имена; следит за
@@ -407,4 +426,108 @@ fn device_ids_out_of_step_with_mirror_break_the_atlas() {
     // Номер устройства освобождён, дальше — только заглушки, без загрузок.
     assert!(!draw_image(&mut b, &paint(ImageKey::Raster(2), 8, 8)));
     assert_eq!(b.device().log, ["upload 8x8", "destroy 1"]);
+}
+
+#[test]
+fn resized_key_is_not_replaced_while_drawn_this_frame() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    let k = ImageKey::Raster(9);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &paint(k, 8, 8)));
+    // Тот же ключ другого размера в том же кадре: старый номер уже в сцене.
+    assert!(!draw_image(&mut b, &paint(k, 16, 16)));
+    assert_eq!(b.atlas_stats().misses, 1);
+    assert_eq!(b.device().log, ["upload 8x8"]);
+    // В следующем кадре замена проходит.
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &paint(k, 16, 16)));
+    assert_eq!(b.device().log, ["upload 8x8", "destroy 0", "upload 16x16"]);
+}
+
+#[test]
+fn reset_atlas_after_device_swap_reuploads() {
+    let config = atlas_config(8192);
+    let mut b = gpu(64, 64, config);
+    let a = paint(ImageKey::Raster(1), 8, 8);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &a));
+    // Устройство потеряно и создано заново: прежние номера недействительны.
+    *b.device_mut() = FakeDevice::new(config);
+    b.reset_atlas();
+    assert_eq!(b.atlas_stats().images, 0);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &a));
+    assert_eq!(b.device().log, ["upload 8x8"]);
+    assert!(b.atlas_error().is_none());
+}
+
+#[test]
+fn reset_atlas_clears_broken_state() {
+    let config = atlas_config(8192);
+    let mut dev = FakeDevice::new(config);
+    dev.skew = 1;
+    let mut b = GpuBackend::new(64, 64, dev, config);
+    b.begin_frame(64, 64);
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(1), 8, 8)));
+    assert!(b.atlas_error().is_some());
+    *b.device_mut() = FakeDevice::new(config);
+    b.reset_atlas();
+    assert!(b.atlas_error().is_none());
+    assert!(draw_image(&mut b, &paint(ImageKey::Raster(1), 8, 8)));
+}
+
+#[test]
+fn zero_sized_image_is_placeholder_without_allocation() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    b.begin_frame(64, 64);
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(1), 0, 8)));
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(2), 8, 0)));
+    assert!(b.device().log.is_empty());
+    let s = b.atlas_stats();
+    assert_eq!((s.images, s.uploads, s.misses), (0, 0, 0));
+}
+
+#[test]
+fn eviction_takes_least_recently_drawn_first() {
+    // Страница 64×64: три картинки 64×20 занимают 60 строк.
+    let mut b = gpu(64, 64, tiny_atlas(64));
+    let (x, y, z) = (
+        paint(ImageKey::Raster(1), 64, 20),
+        paint(ImageKey::Raster(2), 64, 20),
+        paint(ImageKey::Raster(3), 64, 20),
+    );
+    for p in [&x, &y, &z, &x] {
+        b.begin_frame(64, 64);
+        assert!(draw_image(&mut b, p));
+    }
+    // Давность: y (кадр 2), z (3), x (4). Для 64×30 хватает вытеснить y и z.
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &paint(ImageKey::Raster(4), 64, 30)));
+    assert_eq!(
+        b.device().log,
+        [
+            "upload 64x20",
+            "upload 64x20",
+            "upload 64x20",
+            "destroy 1",
+            "destroy 2",
+            "upload 64x30"
+        ]
+    );
+    assert_eq!(b.atlas_stats().evictions, 2);
+}
+
+#[test]
+fn image_drawn_every_frame_survives_aging() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    let a = paint(ImageKey::Raster(1), 8, 8);
+    let gone = paint(ImageKey::Raster(2), 8, 8);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &gone));
+    for _ in 0..EVICT_AFTER_FRAMES + 200 {
+        b.begin_frame(64, 64);
+        assert!(draw_image(&mut b, &a));
+    }
+    let s = b.atlas_stats();
+    assert_eq!((s.images, s.uploads, s.evictions), (1, 2, 1));
 }
