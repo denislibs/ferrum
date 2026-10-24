@@ -21,6 +21,8 @@ pub(crate) mod key {
     pub const LOCKED: &str = "locked";
     pub const CORNER_RADIUS: &str = "cornerRadius";
     pub const CLIP_CONTENT: &str = "clipContent";
+    pub const FLIP_X: &str = "flipX";
+    pub const FLIP_Y: &str = "flipY";
     pub const FILLS: &str = "fills";
     pub const STROKES: &str = "strokes";
 }
@@ -94,6 +96,8 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
         locked: bool_or(map, key::LOCKED, d.locked),
         corner_radius: f64_or(map, key::CORNER_RADIUS, d.corner_radius),
         clip_content: bool_or(map, key::CLIP_CONTENT, d.clip_content),
+        flip_x: bool_or(map, key::FLIP_X, d.flip_x),
+        flip_y: bool_or(map, key::FLIP_Y, d.flip_y),
         fills: match value(map, key::FILLS) {
             Some(v) => read_list(&v, read_fill),
             None => d.fills,
@@ -103,6 +107,18 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
             None => d.strokes,
         },
     })
+}
+
+/// Хэши изображений в заливках узла — без разбора остальных свойств и типа узла:
+/// так читаются и узлы неизвестного типа, скрытые от модели.
+pub(crate) fn read_image_refs(map: &LoroMap) -> Vec<String> {
+    match value(map, key::FILLS) {
+        Some(v) => read_list(&v, read_fill)
+            .into_iter()
+            .filter_map(|f| f.image_hash)
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 /// Элементы, которые не удалось разобрать, пропускаются: лучше открыть файл
@@ -159,7 +175,7 @@ fn read_stroke(v: &LoroValue) -> Option<Stroke> {
 }
 
 /// Записывает свойства нового узла. Нейтральные значения (0, opacity 1, видим,
-/// не заблокирован) не пишутся: при чтении они подставляются как значения по умолчанию.
+/// не заблокирован, не отражён) не пишутся: при чтении они подставляются как значения по умолчанию.
 /// Поэтому нейтральные значения по умолчанию в схеме менять НЕЛЬЗЯ.
 pub(crate) fn write_props(map: &LoroMap, p: &Props) -> DocResult<()> {
     map.insert(key::TYPE, p.kind.as_str())?;
@@ -176,6 +192,8 @@ pub(crate) fn write_props(map: &LoroMap, p: &Props) -> DocResult<()> {
         locked: p.locked.then_some(true),
         corner_radius: neutral(p.corner_radius, 0.0),
         clip_content: Some(p.clip_content),
+        flip_x: p.flip_x.then_some(true),
+        flip_y: p.flip_y.then_some(true),
         fills: Some(p.fills.clone()),
         strokes: Some(p.strokes.clone()),
     };
@@ -203,6 +221,8 @@ pub(crate) fn write_patch(map: &LoroMap, p: &PropsPatch) -> DocResult<()> {
         (key::VISIBLE, p.visible),
         (key::LOCKED, p.locked),
         (key::CLIP_CONTENT, p.clip_content),
+        (key::FLIP_X, p.flip_x),
+        (key::FLIP_Y, p.flip_y),
     ] {
         if let Some(v) = v {
             map.insert(k, v)?;

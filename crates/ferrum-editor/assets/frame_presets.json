@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "presets": [
+    { "group": "Телефоны", "name": "iPhone 16", "width": 393, "height": 852 },
+    { "group": "Телефоны", "name": "iPhone 16 Pro Max", "width": 440, "height": 956 },
+    { "group": "Телефоны", "name": "Android Compact", "width": 412, "height": 917 },
+    { "group": "Планшеты", "name": "iPad mini", "width": 744, "height": 1133 },
+    { "group": "Планшеты", "name": "iPad Pro 11\"", "width": 834, "height": 1194 },
+    { "group": "Десктоп", "name": "Desktop", "width": 1440, "height": 1024 },
+    { "group": "Десктоп", "name": "MacBook Air", "width": 1280, "height": 832 },
+    { "group": "Десктоп", "name": "1920×1080", "width": 1920, "height": 1080 },
+    { "group": "Соцсети", "name": "Instagram post", "width": 1080, "height": 1350 },
+    { "group": "Соцсети", "name": "Story", "width": 1080, "height": 1920 },
+    { "group": "Бумага", "name": "A4", "width": 595, "height": 842 }
+  ]
+}

@@ -1,0 +1,21 @@
+[package]
+name = "ferrum-render"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Бэкенд vello_gpu (WebGPU через wgpu). Только сборка и кодирование сцены;
+# поверхности и растеризация на GPU — этап 4.
+gpu = ["dep:vello_gpu"]
+
+[dependencies]
+ferrum-doc = { path = "../ferrum-doc" }
+ferrum-scene = { path = "../ferrum-scene" }
+kurbo.workspace = true
+vello_cpu.workspace = true
+vello_gpu = { workspace = true, optional = true }
+parley.workspace = true
+skrifa.workspace = true
+thiserror.workspace = true
