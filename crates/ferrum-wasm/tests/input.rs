@@ -70,6 +70,53 @@ fn every_kind_round_trips() {
     assert_eq!((d.records, d.skipped), (all_kinds(), 0));
 }
 
+/// Записи для сверки с TypeScript: все виды из `all_kinds` и клавиши с обрезкой
+/// строки (в том числе посреди 4-байтного символа). Те же записи собирает
+/// `apps/web/e2e/shared.spec.ts` кодировщиком основного потока.
+fn golden_records() -> Vec<Record> {
+    let clipped = |code: &str, key: &str| {
+        Record::Input(Input::KeyDown(KeyEvent {
+            code: code.into(),
+            key: key.into(),
+            modifiers: Modifiers::NONE,
+            repeat: false,
+            alt_graph: false,
+        }))
+    };
+    let mut records = all_kinds();
+    records.push(clipped("LaunchApplication1", &"ы".repeat(14)));
+    records.push(clipped("KeyA", &format!("a{}", "\u{1F600}".repeat(6))));
+    records
+}
+
+/// Байты записей в шестнадцатеричном виде — по строке на запись.
+fn golden_text() -> String {
+    golden_records()
+        .iter()
+        .map(|r| {
+            let hex: String = encode(r).iter().map(|b| format!("{b:02x}")).collect();
+            format!("{hex}\n")
+        })
+        .collect()
+}
+
+#[test]
+fn encoded_bytes_match_the_golden_file_shared_with_typescript() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/input_records.hex");
+    if std::env::var_os("FERRUM_UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, golden_text()).unwrap();
+    }
+    let golden = std::fs::read_to_string(&path)
+        .expect("нет tests/golden/input_records.hex: FERRUM_UPDATE_GOLDEN=1 cargo test -p ferrum-wasm --test input");
+    assert_eq!(
+        golden,
+        golden_text(),
+        "кодирование изменилось: обновите golden-файл (FERRUM_UPDATE_GOLDEN=1) и кодировщик в apps/web/src/core/input.ts"
+    );
+}
+
 #[test]
 fn layout_of_a_pointer_record_is_fixed() {
     // Те же байты пишет TypeScript: поля на своих местах, little-endian.
