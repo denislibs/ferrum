@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-# Бэкенд vello_gpu (WebGPU через wgpu). Только сборка и кодирование сцены;
-# поверхности и растеризация на GPU — этап 4.
-gpu = ["dep:vello_gpu"]
+# Бэкенд vello_gpu: кодирование сцены и атлас изображений. Устройство и
+# поверхность (WebGPU, WebGL2) даёт ferrum-wasm через трейт `GpuDevice`.
+gpu = ["dep:vello_gpu", "dep:vello_common"]
 
 [dependencies]
 ferrum-doc = { path = "../ferrum-doc" }
@@ -16,6 +16,8 @@ ferrum-scene = { path = "../ferrum-scene" }
 kurbo.workspace = true
 vello_cpu.workspace = true
 vello_gpu = { workspace = true, optional = true }
+vello_common = { workspace = true, optional = true }
+blake3.workspace = true
 parley.workspace = true
 skrifa.workspace = true
 thiserror.workspace = true

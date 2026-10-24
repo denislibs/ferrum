@@ -17,7 +17,7 @@ use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::Scene;
 use kurbo::{Affine, Rect};
 
-pub use backend::{CpuBackend, ImagePaint, RenderBackend, Rgba};
+pub use backend::{CpuBackend, ImageKey, ImagePaint, RenderBackend, Rgba};
 pub use camera::{Camera, MAX_DEVICE_PIXELS, MAX_DEVICE_SIDE, MAX_ZOOM, MIN_ZOOM};
 #[cfg(not(target_arch = "wasm32"))]
 pub use clock::StdClock;
@@ -27,12 +27,14 @@ pub use draw::{
     RASTER_BUILD_TIME_PER_FRAME, RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
 #[cfg(feature = "gpu")]
-pub use gpu::GpuBackend;
+pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, GPU_ATLAS_SIDE};
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use overlay::{
     format_size, Overlay, OverlayTheme, HANDLE_SIZE, LABEL_SIZE, PIXEL_GRID_MIN_ZOOM,
 };
 pub use text::{Label, TextEngine, ONEST};
+#[cfg(feature = "gpu")]
+pub use vello_common::{multi_atlas::AtlasConfig, paint::ImageId};
 pub use vello_cpu::Pixmap;
 
 use draw::{DrawContext, Painter};

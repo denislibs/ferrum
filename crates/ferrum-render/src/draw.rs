@@ -12,7 +12,7 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use vello_cpu::peniko::{Extend, Fill};
 use vello_cpu::Pixmap;
 
-use crate::backend::{CpuBackend, ImagePaint, RenderBackend};
+use crate::backend::{CpuBackend, ImageKey, ImagePaint, RenderBackend};
 use crate::clock::{default_clock, Clock};
 use crate::display::{self, DisplayList, Item, Paint, IMAGE_PLACEHOLDER};
 use crate::image::ImageProvider;
@@ -123,6 +123,8 @@ struct Raster {
     scale: f64,
     origin: Point,
     pixmap: Arc<Pixmap>,
+    /// Ключ этого построения для кэшей бэкенда (атлас GPU).
+    key: ImageKey,
     last_used: u64,
     /// В растр попала заглушка вместо ещё не загруженной картинки. Такой растр не
     /// переиспользуется: картинка появится без изменения сцены, и устаревший
@@ -570,6 +572,7 @@ impl Painter {
                 scale,
                 origin: area.origin(),
                 pixmap: Arc::new(cpu.render()),
+                key: ImageKey::next_raster(),
                 last_used: self.frame,
                 placeholder,
             };
@@ -609,6 +612,7 @@ impl Painter {
         r.last_used = self.frame;
         backend.set_transform(ctx.transform);
         backend.set_image(&ImagePaint {
+            key: r.key,
             pixmap: r.pixmap.clone(),
             transform: Affine::translate(r.origin.to_vec2()) * Affine::scale(1.0 / r.scale),
             extend: Extend::Pad,
@@ -718,6 +722,7 @@ fn replay_items(
                 let (iw, ih) = (pixmap.width() as f64, pixmap.height() as f64);
                 let (transform, extend, fit) = place_image(*mode, area, iw, ih);
                 backend.set_image(&ImagePaint {
+                    key: ImageKey::for_hash(hash),
                     pixmap,
                     transform,
                     extend,

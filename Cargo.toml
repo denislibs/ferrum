@@ -28,6 +28,9 @@ rstar = "=0.12.2"
 # текстовых возможностей vello: глифы рисуются контурами из skrifa (см. text.rs).
 vello_cpu = { version = "=0.3.0", default-features = false, features = ["std", "png", "u8_pipeline"] }
 vello_gpu = { version = "=0.3.0", default-features = false, features = ["std", "wgpu"] }
+# Атлас изображений vello_gpu: зеркальный кэш выделений (см. ferrum-render/src/gpu.rs).
+# Та же версия, что тянут vello_cpu и vello_gpu.
+vello_common = { version = "=0.3.0", default-features = false, features = ["std"] }
 # Без системных шрифтов: подписи только встроенным Onest, одинаково везде.
 parley = { version = "=0.12.0", default-features = false, features = ["std"] }
 # Та же версия, что тянет parley 0.12: контуры глифов для подписей.

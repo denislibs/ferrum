@@ -760,12 +760,14 @@ dependencies = [
 name = "ferrum-render"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "ferrum-doc",
  "ferrum-scene",
  "kurbo",
  "parley",
  "skrifa",
  "thiserror 2.0.21",
+ "vello_common",
  "vello_cpu",
  "vello_gpu",
 ]
