@@ -345,14 +345,14 @@ impl Core {
     /// Переводит события редактора в события протокола.
     fn drain_editor(&mut self) {
         let mut document = false;
+        // Выделение, как курсор и документ, — состояние: в пачке важно последнее.
+        // Строки идентификаторов строятся один раз, для него, а не для каждого щелчка.
+        let mut selection = None;
         for e in self.editor.take_events() {
             match e {
                 EditorEvent::NeedsRedraw => self.dirty = true,
                 EditorEvent::DocumentChanged => document = true,
-                EditorEvent::SelectionChanged(ids) => self.events.push(selection_event(
-                    ids.len(),
-                    ids.iter().take(SELECTION_IDS_MAX).map(NodeId::to_string),
-                )),
+                EditorEvent::SelectionChanged(ids) => selection = Some(ids),
                 EditorEvent::ToolChanged(k) => self.events.push(CoreEvent::Tool { tool: tool(k) }),
                 EditorEvent::CursorChanged(c) => {
                     // Наведение меняет курсор часто: в пачке важен только последний.
@@ -373,6 +373,14 @@ impl Core {
                 EditorEvent::ToggleUi => self.events.push(CoreEvent::ToggleUi),
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
             }
+        }
+        if let Some(ids) = selection {
+            self.events
+                .retain(|e| !matches!(e, CoreEvent::Selection { .. }));
+            self.events.push(selection_event(
+                ids.len(),
+                ids.iter().take(SELECTION_IDS_MAX).map(NodeId::to_string),
+            ));
         }
         if document {
             self.events

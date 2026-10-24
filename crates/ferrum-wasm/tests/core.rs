@@ -332,6 +332,67 @@ fn oversized_demo_is_rejected_without_building_anything() {
     }
 }
 
+/// Щелчок записями кольцевого буфера.
+fn click_records(at: Point, t: f64) -> Vec<Record> {
+    vec![
+        Record::Input(Input::PointerDown(pointer(at, t))),
+        Record::Input(Input::PointerUp(pointer(at, t + 5.0))),
+    ]
+}
+
+#[test]
+fn selection_changes_in_one_batch_give_one_selection_event() {
+    let mut core = demo(1000);
+    frame(&mut core);
+    core.take_events();
+    // Выделить узел, снять выделение, выделить снова — в одной пачке ввода.
+    let mut recs = click_records(screen(200.0, 40.0), 1000.0);
+    recs.extend(click_records(Point::new(5.0, 5.0), 1100.0));
+    recs.extend(click_records(screen(200.0, 40.0), 1200.0));
+    recs.extend(click_records(Point::new(5.0, 5.0), 1300.0));
+    recs.extend(click_records(screen(200.0, 40.0), 1400.0));
+    let bytes: Vec<u8> = recs.iter().flat_map(encode).collect();
+    core.apply_input(&bytes);
+    let sel: Vec<_> = core
+        .take_events()
+        .into_iter()
+        .filter(|e| matches!(e, CoreEvent::Selection { .. }))
+        .collect();
+    assert_eq!(
+        sel.len(),
+        1,
+        "в пачке важно только последнее выделение: {sel:?}"
+    );
+    assert!(
+        matches!(sel[0], CoreEvent::Selection { count: 1, .. }),
+        "{sel:?}"
+    );
+}
+
+#[test]
+fn selection_after_open_replaces_the_one_from_opened_in_the_same_batch() {
+    // `Opened` даёт выделение 0; щелчок до отправки событий — то же окно событий.
+    let mut core = Core::new(Platform::Mac, VIEW, 1.0, Backend::Cpu);
+    core.command(Command::Demo { nodes: 1000 });
+    frame(&mut core);
+    core.apply_input(
+        &click_records(screen(200.0, 40.0), 1000.0)
+            .iter()
+            .flat_map(encode)
+            .collect::<Vec<u8>>(),
+    );
+    let sel: Vec<_> = core
+        .take_events()
+        .into_iter()
+        .filter(|e| matches!(e, CoreEvent::Selection { .. }))
+        .collect();
+    assert_eq!(sel.len(), 1, "{sel:?}");
+    assert!(
+        matches!(sel[0], CoreEvent::Selection { count: 1, .. }),
+        "{sel:?}"
+    );
+}
+
 // Страница в 110 тыс. узлов в отладочной сборке строится десятки секунд; предел
 // ID проверяет и быстрый модульный тест `selection_event` в core.rs.
 #[test]
