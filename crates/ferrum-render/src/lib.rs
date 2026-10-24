@@ -202,8 +202,7 @@ impl Renderer {
         if !(scale.is_finite() && scale > 0.0) {
             return Err(ExportError::BadScale);
         }
-        let mut slots = Vec::with_capacity(ids.len());
-        let mut area: Option<Rect> = None;
+        let mut items = Vec::with_capacity(ids.len());
         let mut known = false;
         for id in ids {
             let Some(slot) = scene.slot(*id) else {
@@ -211,7 +210,9 @@ impl Renderer {
             };
             known = true;
             let n = scene.at(slot);
-            // Скрытый узел (и узел без видимого содержимого) картинки не даёт.
+            // Скрытый узел (и узел без видимого содержимого) картинки не даёт. Скрытые
+            // предки здесь не проверяются: скрытый родитель скрывает всё поддерево,
+            // так что `subtree_bounds` у потомка уже пусто.
             if n.subtree_bounds.is_none() {
                 continue;
             }
@@ -223,18 +224,18 @@ impl Renderer {
                 },
             };
             if let Some(own) = own {
-                area = Some(area.map_or(own, |a| a.union(own)));
-                slots.push(slot);
+                items.push((slot, own));
             }
         }
         if !known {
             return Err(ExportError::NotFound);
         }
-        let area = area.ok_or(ExportError::Empty)?;
         // Узел, чей предок тоже экспортируется, уже нарисован вместе с предком:
-        // второй раз он лёг бы поверх (полупрозрачный — темнее).
-        let chosen: std::collections::HashSet<_> = slots.iter().copied().collect();
-        slots.retain(|&s| {
+        // второй раз он лёг бы поверх (полупрозрачный — темнее). Область считаем
+        // только по оставшимся: потомок, выступающий за обрезающий фрейм, холст
+        // не расширяет.
+        let chosen: std::collections::HashSet<_> = items.iter().map(|(s, _)| *s).collect();
+        items.retain(|&(s, _)| {
             let mut cur = scene.at(s).parent;
             while let Some(p) = cur {
                 if chosen.contains(&p) {
@@ -244,11 +245,22 @@ impl Renderer {
             }
             true
         });
+        let area = items
+            .iter()
+            .map(|&(_, r)| r)
+            .reduce(|a, b| a.union(b))
+            .ok_or(ExportError::Empty)?;
         // Порядок отрисовки: ключ — позиции от корня, без повторов.
+        let mut slots: Vec<_> = items.into_iter().map(|(s, _)| s).collect();
         slots.sort_by_cached_key(|s| scene.order_key(*s));
         slots.dedup();
         let w = (area.width() * scale).round();
         let h = (area.height() * scale).round();
+        // Нечисловые границы (NaN, бесконечность) картинки не дают: до приведения
+        // к целым они дали бы мусорный размер.
+        if !(w.is_finite() && h.is_finite()) {
+            return Err(ExportError::Empty);
+        }
         if w < 1.0 || h < 1.0 {
             return Err(ExportError::Empty);
         }
