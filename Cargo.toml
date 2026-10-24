@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ferrum-doc"]
+members = ["crates/ferrum-doc", "crates/ferrum-scene", "crates/ferrum-render"]
 
 [workspace.package]
 edition = "2021"
@@ -15,3 +15,15 @@ thiserror = "2.0.20"
 blake3 = "1.8"
 criterion = "0.8"
 proptest = "1.12"
+kurbo = "=0.13.1"
+# 0.13.0 не годится: после bulk_load вставка падает с «This is a bug in rstar»
+# (листья на разной глубине, georust/rstar#254 ещё не выпущен).
+rstar = "=0.12.2"
+# Рендер: vello_cpu сейчас, vello_gpu (бывший vello_hybrid) — на этапе 4. Без
+# текстовых возможностей vello: глифы рисуются контурами из skrifa (см. text.rs).
+vello_cpu = { version = "=0.3.0", default-features = false, features = ["std", "png", "u8_pipeline"] }
+vello_gpu = { version = "=0.3.0", default-features = false, features = ["std", "wgpu"] }
+# Без системных шрифтов: подписи только встроенным Onest, одинаково везде.
+parley = { version = "=0.12.0", default-features = false, features = ["std"] }
+# Та же версия, что тянет parley 0.12: контуры глифов для подписей.
+skrifa = "=0.44.0"
