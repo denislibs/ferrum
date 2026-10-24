@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use ferrum_doc::NodeKind;
+use ferrum_doc::{NodeKind, PropsPatch};
 use ferrum_editor::*;
 use kurbo::Point;
 
@@ -134,10 +134,7 @@ fn nudge_hide_lock_select_all_and_escape() {
     h.key("KeyL", ctrl().with_shift());
     assert!(h.props(a).locked && h.props(b).locked);
     h.key("KeyA", ctrl());
-    assert!(
-        h.sel().is_empty() || h.sel() == vec![f],
-        "заблокированные не выделяются"
-    );
+    assert!(h.sel().is_empty(), "заблокированные не выделяются");
     h.ed.select(&[a, b]);
     h.key("KeyL", ctrl().with_shift());
     assert!(!h.props(a).locked);
@@ -156,7 +153,7 @@ fn nudge_hide_lock_select_all_and_escape() {
 #[test]
 fn zoom_commands_and_events() {
     let mut h = H::new();
-    let a = h.rect(None, 0.0, 0.0, 2000.0, 1000.0);
+    h.rect(None, 0.0, 0.0, 2000.0, 1000.0);
     let b = h.rect(None, 5000.0, 5000.0, 100.0, 100.0);
     h.key("Digit1", shift());
     let cam = h.ed.camera().clone();
@@ -180,7 +177,6 @@ fn zoom_commands_and_events() {
     assert!(events.contains(&EditorEvent::ToggleUi));
     assert!(events.contains(&EditorEvent::ExportPng(vec![b])));
     assert!(events.contains(&EditorEvent::PasteRequested));
-    let _ = a;
 }
 
 #[test]
@@ -292,4 +288,37 @@ fn editor_uses_keymap_overrides() {
     assert_eq!(h.ed.tool_kind(), ToolKind::Move);
     h.key("KeyQ", none());
     assert_eq!(h.ed.tool_kind(), ToolKind::Rect);
+}
+
+#[test]
+fn group_of_children_from_different_parents_keeps_world_positions() {
+    let mut h = H::new();
+    let fa = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    let fb = h.frame(None, 500.0, 0.0, 400.0, 400.0);
+    h.set(
+        fb,
+        PropsPatch {
+            rotation: Some(30.0),
+            ..Default::default()
+        },
+    );
+    let a = h.rect(Some(fa), 100.0, 100.0, 50.0, 50.0);
+    let b = h.rect(Some(fb), 100.0, 50.0, 50.0, 50.0);
+    let (wa, wb) = (world_corner(&h, a), world_corner(&h, b));
+    h.ed.select(&[a, b]);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.key("KeyG", ctrl());
+    let g = h.sel()[0];
+    assert_eq!(h.children(Some(g)), vec![a, b], "порядок сохранён");
+    let (na, nb) = (world_corner(&h, a), world_corner(&h, b));
+    assert!((na - wa).hypot() < 1e-6 && (nb - wb).hypot() < 1e-6);
+    h.assert_one_step(steps, &before);
+    // assert_one_step оставляет правку применённой; ещё раз отменяем явно.
+    h.key("KeyZ", ctrl());
+    assert_eq!(h.parent(a), Some(fa));
+    assert_eq!(h.parent(b), Some(fb));
+    let (ua, ub) = (world_corner(&h, a), world_corner(&h, b));
+    assert!((ua - wa).hypot() < 1e-6 && (ub - wb).hypot() < 1e-6);
+    h.assert_scene_clean();
 }

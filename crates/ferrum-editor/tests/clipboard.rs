@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use ferrum_doc::{Fill, NodeKind, PropsPatch};
+use ferrum_doc::{Fill, PropsPatch};
 use ferrum_editor::clipboard::{ClipPayload, ClipboardError, MAGIC};
 use ferrum_editor::*;
 use kurbo::Point;
@@ -185,7 +185,6 @@ fn hostile_payloads_are_rejected_without_changes() {
     let huge = json.replace("\"w\":40.0", "\"w\":1e300");
     let p = ClipPayload::decode(&with_json(&huge)).unwrap();
     assert_eq!(p.nodes[0].props.w, ferrum_scene::shape::COORD_LIMIT);
-    let _ = NodeKind::Rect;
 }
 
 #[test]
@@ -243,4 +242,88 @@ fn failed_paste_keeps_images_and_history_untouched() {
         Vec::<ferrum_doc::NodeId>::new(),
         "отмена создания r, а не вставки"
     );
+}
+
+#[test]
+fn copy_and_cut_with_missing_image_fail_without_changes() {
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 40.0, 40.0);
+    h.set(
+        r,
+        PropsPatch {
+            fills: Some(vec![Fill::image("0".repeat(64))]),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[r]);
+    let steps = h.ed.step_count();
+    let before = h.state();
+    for code in ["KeyC", "KeyX"] {
+        h.ed.take_events();
+        h.key(code, ctrl());
+        let ev = h.ed.take_events();
+        assert!(
+            ev.iter().any(|e| matches!(e, EditorEvent::Error(_))),
+            "{code}"
+        );
+        assert!(
+            !ev.iter().any(|e| matches!(e, EditorEvent::Clipboard(_))),
+            "{code}"
+        );
+        assert_eq!(h.children(None), vec![r], "{code}");
+        assert_eq!(h.state(), before, "{code}");
+        assert_eq!(h.ed.step_count(), steps, "{code}");
+    }
+}
+
+#[test]
+fn paste_skips_locked_and_hidden_containers() {
+    let mut h = H::new();
+    let r = h.rect(None, 600.0, 600.0, 40.0, 40.0);
+    let outer = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    let inner = h.frame(Some(outer), 10.0, 10.0, 200.0, 200.0);
+    h.ed.select(&[r]);
+    let bytes = copy_of(&mut h);
+    // Заблокированный выделенный фрейм: вставка в ближайшего подходящего предка.
+    h.set(
+        inner,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[inner]);
+    h.ed.paste(&bytes).unwrap();
+    let c = h.sel()[0];
+    assert_eq!(h.parent(c), Some(outer));
+    // Скрытый внешний и заблокированный внутренний: в корень.
+    h.set(
+        outer,
+        PropsPatch {
+            visible: Some(false),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[inner]);
+    h.ed.paste(&bytes).unwrap();
+    let d = h.sel()[0];
+    assert_eq!(h.parent(d), None);
+    // Выбранный не-фрейм внутри скрытого фрейма: тоже в корень.
+    h.ed.select(&[c]);
+    h.ed.paste(&bytes).unwrap();
+    let e = h.sel()[0];
+    assert_eq!(h.parent(e), None);
+    // Скрытый выделенный фрейм сам по себе.
+    let hid = h.frame(None, 1000.0, 0.0, 100.0, 100.0);
+    h.set(
+        hid,
+        PropsPatch {
+            visible: Some(false),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[hid]);
+    h.ed.paste(&bytes).unwrap();
+    let f = h.sel()[0];
+    assert_eq!(h.parent(f), None);
 }

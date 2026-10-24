@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use ferrum_doc::{Fill, NodeId, NodeKind, Props, PropsPatch};
 use kurbo::{Affine, Point, Rect, Vec2};
 
-use crate::clipboard::{full_patch, ClipNode, ClipPayload, ClipboardError};
+use crate::clipboard::{encodable, full_patch, ClipNode, ClipPayload, ClipboardError};
 use crate::commands::CommandId;
 use crate::editor::{Editor, EditorEvent};
 use crate::geometry::{decompose, parent_world, top_level, world_box};
@@ -439,50 +439,55 @@ impl Editor {
             .filter_map(|s| world_box(&self.scene, s))
             .reduce(|a, b| a.union(b))
             .unwrap_or(Rect::ZERO);
-        Some(
-            ClipPayload {
-                nodes,
-                images,
-                bounds,
-            }
-            .encode(),
-        )
+        let payload = ClipPayload {
+            nodes,
+            images,
+            bounds,
+        };
+        // Проверка до события: копия, которую не вставить (нет байтов изображения,
+        // превышены пределы), не должна попасть в буфер, а вырезание — удалить узлы.
+        if let Err(e) = encodable(&payload) {
+            self.out.events.push(EditorEvent::Error(e.to_string()));
+            return None;
+        }
+        Some(payload.encode())
     }
 
     /// Куда вставлять: в единственный выделенный фрейм, иначе к родителю
     /// выделения, иначе в корень. Родитель, его мировая матрица и рамка фрейма.
     fn paste_target(&self) -> (Option<NodeId>, Affine, Option<Rect>) {
-        let frame_of = |id: NodeId| {
-            let s = self.scene.slot(id)?;
-            let n = self.scene.at(s);
-            Some((Some(id), n.world, world_box(&self.scene, s)))
-        };
-        if let [one] = self.selection[..] {
-            if self
-                .scene
-                .node(one)
-                .is_some_and(|n| n.props.kind == NodeKind::Frame)
+        let candidate = match self.selection[..] {
+            [one]
+                if self
+                    .scene
+                    .node(one)
+                    .is_some_and(|n| n.props.kind == NodeKind::Frame) =>
             {
-                if let Some(t) = frame_of(one) {
-                    return t;
-                }
+                self.scene.slot(one)
             }
-        }
-        let parent = self
-            .selection
-            .first()
-            .and_then(|id| self.scene.node(*id))
-            .and_then(|n| n.parent)
-            .map(|p| self.scene.at(p).id);
-        match parent.and_then(frame_of) {
-            Some((id, world, b)) => {
-                let is_frame = id
-                    .and_then(|i| self.scene.node(i))
-                    .is_some_and(|n| n.props.kind == NodeKind::Frame);
-                (id, world, if is_frame { b } else { None })
+            _ => self
+                .selection
+                .first()
+                .and_then(|id| self.scene.node(*id))
+                .and_then(|n| n.parent),
+        };
+        // Скрытый или заблокированный контейнер не принимает вставку: поднимаемся
+        // к ближайшему предку, который виден и не заблокирован, иначе — в корень.
+        let mut cur = candidate;
+        while let Some(s) = cur {
+            let n = self.scene.at(s);
+            if n.props.visible && !n.props.locked {
+                let is_frame = n.props.kind == NodeKind::Frame;
+                let b = if is_frame {
+                    world_box(&self.scene, s)
+                } else {
+                    None
+                };
+                return (Some(n.id), n.world, b);
             }
-            None => (None, Affine::IDENTITY, None),
+            cur = n.parent;
         }
+        (None, Affine::IDENTITY, None)
     }
 
     /// Сдвиг вставки: на месте, если исходное место видно и помещается в цель,
@@ -555,8 +560,18 @@ impl Editor {
         if ok {
             Ok(())
         } else {
-            // Причину (`Error`) commit уже отправил в события.
-            Err(ClipboardError::Corrupted("не удалось вставить узлы".into()))
+            // Причину commit уже отправил событием `Error`; берём её текст.
+            let reason = self
+                .out
+                .events
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    EditorEvent::Error(m) => Some(m.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "документ не принял вставку".into());
+            Err(ClipboardError::Corrupted(reason))
         }
     }
 
