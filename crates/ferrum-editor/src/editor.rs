@@ -680,8 +680,7 @@ impl Editor {
         self.seen = now;
     }
 
-    /// Точка мира в центре вьюпорта (нужна командам вставки следующей задачи).
-    #[allow(dead_code)]
+    /// Точка мира в центре вьюпорта (для вставки изображения и пресетов).
     pub(crate) fn view_center(&self) -> Point {
         self.camera.center()
     }

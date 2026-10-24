@@ -17,6 +17,7 @@ pub mod selection;
 pub mod snap;
 pub mod tools;
 
+pub use actions::{FIT_PADDING_PX, PRESET_GAP};
 pub use commands::{Command, CommandId, COMMANDS};
 pub use editor::{Editor, EditorEvent, Settings, WHEEL_ZOOM_SPEED};
 pub use input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
