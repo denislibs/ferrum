@@ -1,0 +1,19 @@
+[package]
+name = "ferrum-wasm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+# cdylib — модуль для браузера (wasm-bindgen), rlib — нативные тесты.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ferrum-doc = { path = "../ferrum-doc" }
+ferrum-editor = { path = "../ferrum-editor" }
+kurbo.workspace = true
+
+# proptest под wasm32 не собирается (getrandom без бэкенда): нативные тесты.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest.workspace = true

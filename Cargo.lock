@@ -783,6 +783,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum-wasm"
+version = "0.1.0"
+dependencies = [
+ "ferrum-doc",
+ "ferrum-editor",
+ "kurbo",
+ "proptest",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
