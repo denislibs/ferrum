@@ -279,7 +279,14 @@ fn check_model(doc: &mut Document, page: PageId, m: &Model) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    // Детерминированное зерно: каждый прогон проверяет одни и те же 64 сценария,
+    // и падение воспроизводимо, а не зависит от удачи.
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        rng_algorithm: proptest::test_runner::RngAlgorithm::ChaCha,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x0f_e2_2a_11),
+        ..ProptestConfig::default()
+    })]
     #[test]
     fn random_ops_keep_tree_valid_and_undo_all_empties_page(ops in prop::collection::vec(op(), 1..40)) {
         // Без создания узла проверять нечего: сценарий не считается.

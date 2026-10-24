@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use ferrum_doc::*;
 use ferrum_scene::{testing::snapshot, Scene};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestCaseError, TestRunner};
+use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 
 #[derive(Debug, Clone)]
 enum Edit {
@@ -240,14 +240,70 @@ fn has_hidden_parent_with_visible_child(p: &PageDoc) -> bool {
     })
 }
 
+/// Воспроизведение случая, на котором модель теста расходилась со сценой: в
+/// откатившейся транзакции узел с превью удалён, а затем перенос дал цикл. Откат
+/// вернул узел, сцена сохранила его превью и совпадает со сценой, построенной заново.
+#[test]
+fn rolled_back_delete_keeps_preview() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let (a, parent, child) = {
+        let ids = doc
+            .transact(page, vec![], |p| {
+                let a = p.create_node(None, None, NodeKind::Rect)?;
+                let parent = p.create_node(None, None, NodeKind::Frame)?;
+                let child = p.create_node(Some(parent), None, NodeKind::Rect)?;
+                Ok(vec![a, parent, child])
+            })
+            .unwrap();
+        (ids[0], ids[1], ids[2])
+    };
+    let _ = doc.take_changes(page);
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let preview = vec![(
+        a,
+        PropsPatch {
+            x: Some(50.0),
+            ..Default::default()
+        },
+    )];
+    scene.set_preview(&preview);
+    let r = doc.transact(page, vec![], |p| {
+        p.delete_nodes(&[a])?;
+        p.move_node(parent, Some(child), 0)?;
+        Ok(vec![])
+    });
+    assert!(matches!(r, Err(DocError::CyclicMove)), "{r:?}");
+    let changes = doc.take_changes(page);
+    // Ловушка для модели: узел числится удалённым, хотя откат его вернул.
+    assert!(changes.deleted.contains(&a), "{changes:?}");
+    let p = doc.page(page).unwrap();
+    assert!(p.placement(a).is_some(), "откат вернул узел");
+    scene.apply(&changes, p);
+    assert!(
+        scene.has_preview(),
+        "превью узла, которого откат не удалил, осталось"
+    );
+    let mut fresh = Scene::from_page(p);
+    fresh.set_preview(&preview);
+    assert_eq!(snapshot(&scene), snapshot(&fresh));
+}
+
 #[test]
 fn scene_after_changes_matches_rebuild() {
     let stats = RefCell::new(Stats::default());
-    let mut runner = TestRunner::new(Config {
-        cases: 96,
-        failure_persistence: None,
-        ..Config::default()
-    });
+    // Детерминированный генератор: пороги покрытия ниже проверяются на одних и тех же
+    // 96 сценариях. Со случайным зерном редкие прогоны недобирали трудных случаев
+    // (например, 8 шагов с повёрнутым фреймом при пороге 30), и тест падал без ошибки
+    // в сцене.
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 96,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+    );
     runner
         .run(&prop::collection::vec(step(), 1..40), |steps| {
             let mut doc = Document::new();
@@ -350,9 +406,12 @@ fn scene_after_changes_matches_rebuild() {
                         st.props_only += 1;
                     }
                 }
-                // Сцена забывает превью удалённого поддерева, даже если отмена вернёт узел.
-                preview.retain(|(id, _)| !changes.deleted.contains(id));
                 let p = doc.page(page).unwrap();
+                // Сцена забывает превью удалённого поддерева, даже если отмена вернёт узел.
+                // Но откатившаяся транзакция узел не удаляла: он на странице, и превью
+                // у него остаётся (см. `rolled_back_delete_keeps_preview`).
+                preview
+                    .retain(|(id, _)| !changes.deleted.contains(id) || p.placement(*id).is_some());
                 scene.apply(&changes, p);
                 {
                     let mut st = stats.borrow_mut();
@@ -374,6 +433,7 @@ fn scene_after_changes_matches_rebuild() {
         })
         .unwrap();
     let st = stats.into_inner();
+    println!("{st:?}");
     // Тест не должен проходить вхолостую: сцена обновлялась всеми путями.
     assert!(st.structural > 300, "структурных шагов: {}", st.structural);
     assert!(
