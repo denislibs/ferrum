@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/ferrum-doc", "crates/ferrum-scene", "crates/ferrum-render"]
+members = [
+    "crates/ferrum-doc",
+    "crates/ferrum-scene",
+    "crates/ferrum-render",
+    "crates/ferrum-editor",
+]
 
 [workspace.package]
 edition = "2021"
@@ -27,3 +32,7 @@ vello_gpu = { version = "=0.3.0", default-features = false, features = ["std", "
 parley = { version = "=0.12.0", default-features = false, features = ["std"] }
 # Та же версия, что тянет parley 0.12: контуры глифов для подписей.
 skrifa = "=0.44.0"
+# Редактор: таблица команд, раскладка клавиш и пресеты фреймов в JSON. Те же версии,
+# что уже есть в Cargo.lock (их тянут criterion и loro).
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.152"

@@ -742,6 +742,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum-editor"
+version = "0.1.0"
+dependencies = [
+ "ferrum-doc",
+ "ferrum-render",
+ "ferrum-scene",
+ "kurbo",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ferrum-render"
 version = "0.1.0"
 dependencies = [

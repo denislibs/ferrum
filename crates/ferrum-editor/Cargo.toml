@@ -1,0 +1,18 @@
+[package]
+name = "ferrum-editor"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ferrum-doc = { path = "../ferrum-doc" }
+ferrum-scene = { path = "../ferrum-scene" }
+ferrum-render = { path = "../ferrum-render" }
+kurbo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
