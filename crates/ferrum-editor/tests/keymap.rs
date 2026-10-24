@@ -350,8 +350,9 @@ fn import_with_only_bad_combos_keeps_default() {
     assert_eq!(map.bindings(CommandId::ToolRect), &[sc("KeyR")]);
     assert!(!map.is_overridden(CommandId::ToolRect));
     assert_eq!(map.bindings(CommandId::ToolEllipse), &[sc("KeyQ")]);
-    // По предупреждению на каждое плохое сочетание и одно — что команда пропущена.
-    assert!(warnings.len() >= 3 + 8 + 1, "{warnings:?}");
+    // По предупреждению на каждое плохое сочетание (3 + 8) и одно — что команда
+    // пропущена.
+    assert_eq!(warnings.len(), 3 + 8 + 1, "{warnings:?}");
     assert!(
         warnings
             .iter()

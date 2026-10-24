@@ -221,6 +221,111 @@ fn check_clean(h: &mut H, what: &str) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// Что сделал один шаг сценария — для подсчётов и проверок `run`.
+#[derive(Default)]
+struct Played {
+    kind: &'static str,
+    marquees: u64,
+    /// Жест закончен не отпусканием (Esc, потеря указателя или фокуса).
+    cancelled: bool,
+    had_preview: bool,
+}
+
+/// Подаёт редактору события одного шага сценария. Тот же код у проверок
+/// согласованности (`run`) и у проверки детерминизма (`replay`).
+fn play(
+    h: &mut H,
+    a: &Act,
+    clipboard: &mut Option<Vec<u8>>,
+) -> Result<Played, ferrum_editor::clipboard::ClipboardError> {
+    let mut out = Played::default();
+    match a {
+        Act::Gesture {
+            tool,
+            at,
+            to,
+            mods: bits,
+            toggle,
+            steps: n,
+            end,
+        } => {
+            if *tool > 0 {
+                h.key(TOOL_KEYS[*tool as usize], none());
+            }
+            let m = mods(*bits);
+            let p = resolve(h, at);
+            h.hover(p.x, p.y);
+            out.kind = match (h.ed.tool_kind(), h.ed.cursor()) {
+                (ToolKind::Move, Cursor::Resize { .. }) => "resize",
+                (ToolKind::Move, Cursor::Rotate { .. }) => "rotate",
+                (ToolKind::Move, _) => "move",
+                (ToolKind::Hand, _) => "hand",
+                _ => "draw",
+            };
+            h.down(p.x, p.y, m);
+            let mut cur = m;
+            for k in 1..=*n {
+                if k == *toggle {
+                    // Модификатор меняется посреди жеста.
+                    cur.shift = !cur.shift;
+                    cur.alt = !cur.alt && bits & 4 == 0;
+                    h.ev(Input::KeyDown(KeyEvent::new("ShiftLeft", cur)));
+                }
+                let t = k as f64 / *n as f64;
+                h.mv(p.x + to.0 as f64 * t, p.y + to.1 as f64 * t, cur);
+                if h.ed.overlay().marquee.is_some() {
+                    out.marquees += 1;
+                }
+            }
+            if h.ed.cursor() == Cursor::Duplicate {
+                out.kind = "duplicate";
+            }
+            let had_preview = h.ed.scene().has_preview();
+            let (ex, ey) = (p.x + to.0 as f64, p.y + to.1 as f64);
+            match end {
+                End::Up => h.up(ex, ey, cur),
+                End::Escape => {
+                    h.ev(Input::KeyDown(KeyEvent::new("Escape", none())));
+                    h.up(ex, ey, cur);
+                }
+                End::Cancel => h.ev(Input::PointerCancel),
+                End::Blur => h.ev(Input::Blur),
+                End::NanUp => h.up(f64::NAN, ey, cur),
+            }
+            out.cancelled = !matches!(end, End::Up);
+            out.had_preview = had_preview;
+        }
+        Act::Key(k) => {
+            let cmd = COMMANDS_USED[*k as usize];
+            out.kind = "command";
+            if cmd == CommandId::Paste {
+                if let Some(bytes) = clipboard.as_ref() {
+                    h.ed.paste(bytes)?;
+                }
+            } else {
+                h.ed.execute(cmd);
+            }
+            for e in h.ed.take_events() {
+                if let EditorEvent::Clipboard(b) = e {
+                    *clipboard = Some(b);
+                }
+            }
+            if matches!(cmd, CommandId::Undo | CommandId::Redo) {
+                out.kind = "history";
+            }
+        }
+        Act::Wheel { dy, zoom } => {
+            let m = if *zoom { ctrl() } else { none() };
+            h.ev(Input::Wheel(WheelEvent {
+                point: Point::new(500.0, 400.0),
+                delta: v(0.0, *dy as f64),
+                modifiers: m,
+            }));
+        }
+    }
+    Ok(out)
+}
+
 fn run(acts: &[Act], stats: &mut Stats) -> Result<(), TestCaseError> {
     let mut h = setup();
     let mut clipboard: Option<Vec<u8>> = None;
@@ -229,99 +334,19 @@ fn run(acts: &[Act], stats: &mut Stats) -> Result<(), TestCaseError> {
         let before = h.state();
         let steps = h.ed.step_count();
         let parents: Vec<_> = before.iter().map(|(id, p, _)| (*id, *p)).collect();
-        let mut kind = "";
-        match a {
-            Act::Gesture {
-                tool,
-                at,
-                to,
-                mods: bits,
-                toggle,
-                steps: n,
-                end,
-            } => {
-                if *tool > 0 {
-                    h.key(TOOL_KEYS[*tool as usize], none());
-                }
-                let m = mods(*bits);
-                let p = resolve(&h, at);
-                h.hover(p.x, p.y);
-                kind = match (h.ed.tool_kind(), h.ed.cursor()) {
-                    (ToolKind::Move, Cursor::Resize { .. }) => "resize",
-                    (ToolKind::Move, Cursor::Rotate { .. }) => "rotate",
-                    (ToolKind::Move, _) => "move",
-                    (ToolKind::Hand, _) => "hand",
-                    _ => "draw",
-                };
-                h.down(p.x, p.y, m);
-                let mut cur = m;
-                for k in 1..=*n {
-                    if k == *toggle {
-                        // Модификатор меняется посреди жеста.
-                        cur.shift = !cur.shift;
-                        cur.alt = !cur.alt && bits & 4 == 0;
-                        h.ev(Input::KeyDown(KeyEvent::new("ShiftLeft", cur)));
-                    }
-                    let t = k as f64 / *n as f64;
-                    h.mv(p.x + to.0 as f64 * t, p.y + to.1 as f64 * t, cur);
-                    if h.ed.overlay().marquee.is_some() {
-                        stats.marquees += 1;
-                    }
-                }
-                if h.ed.cursor() == Cursor::Duplicate {
-                    kind = "duplicate";
-                }
-                let had_preview = h.ed.scene().has_preview();
-                let (ex, ey) = (p.x + to.0 as f64, p.y + to.1 as f64);
-                match end {
-                    End::Up => h.up(ex, ey, cur),
-                    End::Escape => {
-                        h.ev(Input::KeyDown(KeyEvent::new("Escape", none())));
-                        h.up(ex, ey, cur);
-                    }
-                    End::Cancel => h.ev(Input::PointerCancel),
-                    End::Blur => h.ev(Input::Blur),
-                    End::NanUp => h.up(f64::NAN, ey, cur),
-                }
-                if !matches!(end, End::Up) {
-                    prop_assert_eq!(
-                        h.ed.step_count(),
-                        steps,
-                        "{}: отменённый жест записан",
-                        what
-                    );
-                    if had_preview {
-                        stats.cancelled_previews += 1;
-                    }
-                }
-            }
-            Act::Key(k) => {
-                let cmd = COMMANDS_USED[*k as usize];
-                kind = "command";
-                if cmd == CommandId::Paste {
-                    if let Some(bytes) = &clipboard {
-                        h.ed.paste(bytes)
-                            .map_err(|e| TestCaseError::fail(format!("{what}: {e}")))?;
-                    }
-                } else {
-                    h.ed.execute(cmd);
-                }
-                for e in h.ed.take_events() {
-                    if let EditorEvent::Clipboard(b) = e {
-                        clipboard = Some(b);
-                    }
-                }
-                if matches!(cmd, CommandId::Undo | CommandId::Redo) {
-                    kind = "history";
-                }
-            }
-            Act::Wheel { dy, zoom } => {
-                let m = if *zoom { ctrl() } else { none() };
-                h.ev(Input::Wheel(WheelEvent {
-                    point: Point::new(500.0, 400.0),
-                    delta: v(0.0, *dy as f64),
-                    modifiers: m,
-                }));
+        let played = play(&mut h, a, &mut clipboard)
+            .map_err(|e| TestCaseError::fail(format!("{what}: {e}")))?;
+        stats.marquees += played.marquees;
+        let kind = played.kind;
+        if played.cancelled {
+            prop_assert_eq!(
+                h.ed.step_count(),
+                steps,
+                "{}: отменённый жест записан",
+                what
+            );
+            if played.had_preview {
+                stats.cancelled_previews += 1;
             }
         }
         check_clean(&mut h, &what)?;
@@ -403,4 +428,78 @@ fn random_event_sequences_keep_editor_consistent() {
     assert!(st.undo_checks > 300, "{st:?}");
     assert!(st.flips > 30, "{st:?}");
     assert!(st.resize_flips > 10, "{st:?}");
+}
+
+/// Узлы страницы в порядке обхода: идентификатор, родитель, свойства.
+type Nodes = Vec<(String, Option<String>, ferrum_doc::Props)>;
+
+/// Узлы страницы с идентификаторами, где пир Loro заменён номером по порядку
+/// появления. Пир каждого документа Loro выбирает сам (случайно, вне редактора),
+/// а счётчик в `NodeId` и всё остальное задаёт последовательность правок.
+fn canonical(h: &mut H) -> (Nodes, Vec<String>) {
+    let mut peers: Vec<String> = Vec::new();
+    let mut canon = |id: ferrum_doc::NodeId| {
+        let s = id.to_string();
+        let (counter, peer) = s.split_once('@').expect("NodeId — счётчик@пир");
+        let n = match peers.iter().position(|p| p == peer) {
+            Some(n) => n,
+            None => {
+                peers.push(peer.to_string());
+                peers.len() - 1
+            }
+        };
+        format!("{counter}@p{n}")
+    };
+    let nodes = h
+        .state()
+        .into_iter()
+        .map(|(id, parent, props)| (canon(id), parent.map(&mut canon), props))
+        .collect();
+    let selection = h.sel().into_iter().map(canon).collect();
+    (nodes, selection)
+}
+
+/// Проигрывает сценарий на свежем редакторе без проверок между шагами.
+fn replay(acts: &[Act]) -> (Nodes, Vec<String>, u64) {
+    let mut h = setup();
+    let mut clipboard = None;
+    for a in acts {
+        // Ошибка вставки — тоже результат: у второго прогона она должна повториться.
+        let _ = play(&mut h, a, &mut clipboard);
+    }
+    let (nodes, selection) = canonical(&mut h);
+    (nodes, selection, h.ed.step_count())
+}
+
+/// Одна последовательность событий — один документ (раздел 7 спеки): два свежих
+/// редактора после одного сценария совпадают узел в узел, с идентификаторами,
+/// родителями, свойствами, выделением и числом шагов истории.
+#[test]
+fn same_events_give_same_document() {
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 48,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+    );
+    let total = RefCell::new((0usize, 0u64));
+    runner
+        .run(&prop::collection::vec(act(), 1..40), |acts| {
+            let a = replay(&acts);
+            let b = replay(&acts);
+            prop_assert_eq!(&a, &b);
+            let mut t = total.borrow_mut();
+            t.0 += a.0.len();
+            t.1 += a.2;
+            Ok(())
+        })
+        .unwrap();
+    // Против пустых прогонов: сценарии создавали узлы и записывали шаги.
+    let (nodes, steps) = total.into_inner();
+    assert!(
+        nodes > 48 * 4 && steps > 200,
+        "{nodes} узлов, {steps} шагов"
+    );
 }
