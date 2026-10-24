@@ -1,0 +1,327 @@
+//! Типы данных документа: идентификаторы, цвета, узлы и их свойства.
+
+use std::fmt;
+use std::str::FromStr;
+
+use loro::TreeID;
+
+use crate::error::DocError;
+
+/// Идентификатор узла. Обёртка над `TreeID` Loro: уникален и при совместной работе.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(pub(crate) TreeID);
+
+impl fmt::Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = DocError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        TreeID::try_from(s)
+            .map(NodeId)
+            .map_err(|_| DocError::InvalidId(s.to_string()))
+    }
+}
+
+/// Идентификатор страницы — узел в дереве страниц корневого документа.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PageId(pub(crate) TreeID);
+
+impl fmt::Display for PageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for PageId {
+    type Err = DocError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        TreeID::try_from(s)
+            .map(PageId)
+            .map_err(|_| DocError::InvalidId(s.to_string()))
+    }
+}
+
+/// Цвет sRGB с альфой. В документе хранится строкой `#rrggbbaa`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Color {
+    pub const BLACK: Color = Color::rgba(0, 0, 0, 255);
+    pub const WHITE: Color = Color::rgba(255, 255, 255, 255);
+    /// Серая заливка новых фигур, как в Figma.
+    pub const SHAPE_GRAY: Color = Color::rgba(0xd9, 0xd9, 0xd9, 255);
+
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
+        Color { r, g, b, a }
+    }
+
+    /// Принимает `#rrggbb` и `#rrggbbaa` в любом регистре.
+    pub fn parse(s: &str) -> Result<Color, DocError> {
+        let bad = || DocError::InvalidColor(s.to_string());
+        let hex = s.strip_prefix('#').ok_or_else(bad)?;
+        if !(hex.len() == 6 || hex.len() == 8) || !hex.is_ascii() {
+            return Err(bad());
+        }
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| bad());
+        let a = if hex.len() == 8 { byte(6)? } else { 255 };
+        Ok(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+    }
+
+    pub fn to_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeKind {
+    Frame,
+    Group,
+    Rect,
+    Ellipse,
+    Line,
+    Image,
+}
+
+impl NodeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NodeKind::Frame => "frame",
+            NodeKind::Group => "group",
+            NodeKind::Rect => "rect",
+            NodeKind::Ellipse => "ellipse",
+            NodeKind::Line => "line",
+            NodeKind::Image => "image",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<NodeKind> {
+        Some(match s {
+            "frame" => NodeKind::Frame,
+            "group" => NodeKind::Group,
+            "rect" => NodeKind::Rect,
+            "ellipse" => NodeKind::Ellipse,
+            "line" => NodeKind::Line,
+            "image" => NodeKind::Image,
+            _ => return None,
+        })
+    }
+
+    /// Имя нового узла в интерфейсе.
+    pub fn default_name(self) -> &'static str {
+        match self {
+            NodeKind::Frame => "Фрейм",
+            NodeKind::Group => "Группа",
+            NodeKind::Rect => "Прямоугольник",
+            NodeKind::Ellipse => "Эллипс",
+            NodeKind::Line => "Линия",
+            NodeKind::Image => "Изображение",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillKind {
+    Solid,
+    Image,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleMode {
+    Fill,
+    Fit,
+    Tile,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fill {
+    pub kind: FillKind,
+    pub color: Color,
+    /// Хэш blake3 (hex) байтов изображения; только для `FillKind::Image`.
+    pub image_hash: Option<String>,
+    pub scale_mode: ScaleMode,
+    pub opacity: f64,
+    pub visible: bool,
+}
+
+impl Fill {
+    pub fn solid(color: Color) -> Fill {
+        Fill {
+            kind: FillKind::Solid,
+            color,
+            image_hash: None,
+            scale_mode: ScaleMode::Fill,
+            opacity: 1.0,
+            visible: true,
+        }
+    }
+
+    pub fn image(hash: impl Into<String>) -> Fill {
+        Fill {
+            kind: FillKind::Image,
+            color: Color::WHITE,
+            image_hash: Some(hash.into()),
+            scale_mode: ScaleMode::Fill,
+            opacity: 1.0,
+            visible: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrokeAlign {
+    Inside,
+    Center,
+    Outside,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    pub color: Color,
+    pub width: f64,
+    pub align: StrokeAlign,
+}
+
+/// Полный набор свойств узла после чтения из документа.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Props {
+    pub kind: NodeKind,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    /// У группы не хранится: границы вычисляет сцена по детям.
+    pub w: f64,
+    pub h: f64,
+    pub rotation: f64,
+    pub opacity: f64,
+    pub visible: bool,
+    pub locked: bool,
+    pub corner_radius: f64,
+    pub clip_content: bool,
+    pub fills: Vec<Fill>,
+    pub strokes: Vec<Stroke>,
+}
+
+impl Props {
+    /// Значения по умолчанию для нового узла, как в Figma.
+    pub fn defaults(kind: NodeKind) -> Props {
+        let (w, h, fills, strokes) = match kind {
+            NodeKind::Frame => (100.0, 100.0, vec![Fill::solid(Color::WHITE)], vec![]),
+            NodeKind::Group => (0.0, 0.0, vec![], vec![]),
+            NodeKind::Rect | NodeKind::Ellipse => {
+                (100.0, 100.0, vec![Fill::solid(Color::SHAPE_GRAY)], vec![])
+            }
+            NodeKind::Line => (
+                100.0,
+                0.0,
+                vec![],
+                vec![Stroke {
+                    color: Color::BLACK,
+                    width: 1.0,
+                    align: StrokeAlign::Center,
+                }],
+            ),
+            NodeKind::Image => (100.0, 100.0, vec![], vec![]),
+        };
+        Props {
+            kind,
+            name: kind.default_name().to_string(),
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+            rotation: 0.0,
+            opacity: 1.0,
+            visible: true,
+            locked: false,
+            corner_radius: 0.0,
+            clip_content: kind == NodeKind::Frame,
+            fills,
+            strokes,
+        }
+    }
+}
+
+/// Частичное изменение свойств: `None` — не трогать.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PropsPatch {
+    pub name: Option<String>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub w: Option<f64>,
+    pub h: Option<f64>,
+    pub rotation: Option<f64>,
+    pub opacity: Option<f64>,
+    pub visible: Option<bool>,
+    pub locked: Option<bool>,
+    pub corner_radius: Option<f64>,
+    pub clip_content: Option<bool>,
+    pub fills: Option<Vec<Fill>>,
+    pub strokes: Option<Vec<Stroke>>,
+}
+
+impl PropsPatch {
+    /// Прежние значения тех полей, которые меняет этот патч, — патч для отмены.
+    pub fn previous(&self, before: &Props) -> PropsPatch {
+        PropsPatch {
+            name: self.name.as_ref().map(|_| before.name.clone()),
+            x: self.x.map(|_| before.x),
+            y: self.y.map(|_| before.y),
+            w: self.w.map(|_| before.w),
+            h: self.h.map(|_| before.h),
+            rotation: self.rotation.map(|_| before.rotation),
+            opacity: self.opacity.map(|_| before.opacity),
+            visible: self.visible.map(|_| before.visible),
+            locked: self.locked.map(|_| before.locked),
+            corner_radius: self.corner_radius.map(|_| before.corner_radius),
+            clip_content: self.clip_content.map(|_| before.clip_content),
+            fills: self.fills.as_ref().map(|_| before.fills.clone()),
+            strokes: self.strokes.as_ref().map(|_| before.strokes.clone()),
+        }
+    }
+
+    /// Применяет изменения к уже прочитанным свойствам (для зеркала страницы).
+    pub fn apply_to(&self, p: &mut Props) {
+        if let Some(v) = &self.name {
+            p.name = v.clone();
+        }
+        for (dst, src) in [
+            (&mut p.x, self.x),
+            (&mut p.y, self.y),
+            (&mut p.w, self.w),
+            (&mut p.h, self.h),
+            (&mut p.rotation, self.rotation),
+            (&mut p.opacity, self.opacity),
+            (&mut p.corner_radius, self.corner_radius),
+        ] {
+            if let Some(v) = src {
+                *dst = v;
+            }
+        }
+        for (dst, src) in [
+            (&mut p.visible, self.visible),
+            (&mut p.locked, self.locked),
+            (&mut p.clip_content, self.clip_content),
+        ] {
+            if let Some(v) = src {
+                *dst = v;
+            }
+        }
+        if let Some(v) = &self.fills {
+            p.fills = v.clone();
+        }
+        if let Some(v) = &self.strokes {
+            p.strokes = v.clone();
+        }
+    }
+}

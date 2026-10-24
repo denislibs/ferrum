@@ -1,0 +1,20 @@
+[package]
+name = "ferrum-doc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+loro.workspace = true
+loro-internal.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "doc_bench"
+harness = false
