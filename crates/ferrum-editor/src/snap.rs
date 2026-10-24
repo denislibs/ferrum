@@ -35,8 +35,9 @@ pub struct Snapper {
     excluded: HashSet<NodeId>,
     /// Родители двигающихся узлов: соседи — их дети (`None` — корень страницы).
     parents: HashSet<Option<NodeId>>,
-    /// Рамки родительских фреймов в мире: к их краям и центру тоже привязываемся.
-    frames: Vec<Rect>,
+    /// Рамки родительских фреймов в мире с порядком узла: к их краям и центру тоже
+    /// привязываемся. Порядок нужен для детерминированного выбора при равных сдвигах.
+    frames: Vec<(Rect, Vec<u32>)>,
 }
 
 impl Snapper {
@@ -61,18 +62,14 @@ impl Snapper {
         parents: HashSet<Option<NodeId>>,
         exclude: &[NodeId],
     ) -> Snapper {
-        let mut frames: Vec<Rect> = parents
+        // Порядок рамок не важен: выбор сдвига не зависит от него (см. `best_offset`).
+        let frames: Vec<(Rect, Vec<u32>)> = parents
             .iter()
             .flatten()
             .filter_map(|p| scene.slot(*p))
             .filter(|s| scene.at(*s).props.kind == NodeKind::Frame)
-            .filter_map(|s| world_box(scene, s))
+            .filter_map(|s| world_box(scene, s).map(|b| (b, scene.order_key(s))))
             .collect();
-        frames.sort_by(|a, b| {
-            (a.x0, a.y0, a.x1, a.y1)
-                .partial_cmp(&(b.x0, b.y0, b.x1, b.y1))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
         Snapper {
             excluded: exclude.iter().copied().collect(),
             parents,
@@ -102,22 +99,23 @@ impl Snapper {
     }
 
     /// Рамки кандидатов, пересекающих полосу.
-    fn candidates(&self, scene: &Scene, band: Rect) -> Vec<Rect> {
-        let mut out: Vec<Rect> = scene
+    fn candidates(&self, scene: &Scene, band: Rect) -> Vec<(Rect, Vec<u32>)> {
+        let mut out: Vec<(Rect, Vec<u32>)> = scene
             .query_rect(band)
             .into_iter()
             .filter_map(|id| scene.slot(id))
             .filter(|s| self.eligible(scene, *s))
-            .filter_map(|s| world_box(scene, s))
+            .filter_map(|s| world_box(scene, s).map(|b| (b, scene.order_key(s))))
             .collect();
-        out.extend(self.frames.iter().copied());
+        out.extend(self.frames.iter().cloned());
         out
     }
 
     /// Привязывает двигающиеся координаты `xs` и `ys` (края и центр рамки или точка
     /// ручки) к ближайшим краям и центрам соседей не дальше `threshold` (в мире).
     /// `moving` — рамка жеста до привязки (для длины линий), `view` — видимая
-    /// часть мира. Пустой список координат выключает ось.
+    /// часть мира. Пустой список координат выключает ось. Ось с нечисловой
+    /// координатой выключается целиком: запроса к R-tree и привязки по ней нет.
     pub fn snap(
         &self,
         scene: &Scene,
@@ -127,6 +125,12 @@ impl Snapper {
         threshold: f64,
         view: Rect,
     ) -> Snap {
+        let finite = |v: &[f64]| v.iter().all(|x| x.is_finite());
+        if !threshold.is_finite() || !rect_finite(view) {
+            return Snap::default();
+        }
+        let xs: &[f64] = if finite(xs) { xs } else { &[] };
+        let ys: &[f64] = if finite(ys) { ys } else { &[] };
         let span = |v: &[f64]| {
             v.iter()
                 .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
@@ -151,24 +155,8 @@ impl Snapper {
                 Rect::new(view.x0, lo - threshold, view.x1, hi + threshold),
             )
         };
-        let xt = |b: &Rect| [b.x0, (b.x0 + b.x1) / 2.0, b.x1];
-        let yt = |b: &Rect| [b.y0, (b.y0 + b.y1) / 2.0, b.y1];
-        let best = |vals: &[f64], cands: &[Rect], targets: &dyn Fn(&Rect) -> [f64; 3]| {
-            let mut best: Option<f64> = None;
-            for b in cands {
-                for t in targets(b) {
-                    for m in vals {
-                        let d = t - m;
-                        if d.abs() <= threshold && best.is_none_or(|x| d.abs() < x.abs()) {
-                            best = Some(d);
-                        }
-                    }
-                }
-            }
-            best
-        };
-        let dx = best(xs, &x_cands, &xt);
-        let dy = best(ys, &y_cands, &yt);
+        let dx = best_offset(xs, &x_cands, x_targets, threshold);
+        let dy = best_offset(ys, &y_cands, y_targets, threshold);
         let moved = moving + kurbo::Vec2::new(dx.unwrap_or(0.0), dy.unwrap_or(0.0));
         let mut lines = Vec::new();
         if let Some(d) = dx {
@@ -183,11 +171,65 @@ impl Snapper {
     }
 }
 
+fn rect_finite(r: Rect) -> bool {
+    [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite())
+}
+
+/// Цели по x кандидата: левый край, центр, правый край.
+fn x_targets(b: &Rect) -> [f64; 3] {
+    [b.x0, (b.x0 + b.x1) / 2.0, b.x1]
+}
+
+/// Цели по y кандидата: верхний край, центр, нижний край.
+fn y_targets(b: &Rect) -> [f64; 3] {
+    [b.y0, (b.y0 + b.y1) / 2.0, b.y1]
+}
+
+/// Ближайший сдвиг до цели в пределах `threshold`. При равном |сдвиге| выигрывает
+/// меньшая цель, затем меньший порядок узла: результат не зависит от порядка
+/// кандидатов в R-tree, а он меняется после пересборки сцены.
+fn best_offset(
+    vals: &[f64],
+    cands: &[(Rect, Vec<u32>)],
+    targets: fn(&Rect) -> [f64; 3],
+    threshold: f64,
+) -> Option<f64> {
+    let mut best: Option<(f64, f64, &[u32])> = None; // (сдвиг, цель, порядок)
+    for (b, key) in cands {
+        for t in targets(b) {
+            for m in vals {
+                let d = t - m;
+                if d.abs() > threshold {
+                    continue;
+                }
+                let better = match best {
+                    None => true,
+                    Some((bd, bt, bk)) => d
+                        .abs()
+                        .total_cmp(&bd.abs())
+                        .then(t.total_cmp(&bt))
+                        .then_with(|| key.as_slice().cmp(bk))
+                        .is_lt(),
+                };
+                if better {
+                    best = Some((d, t, key.as_slice()));
+                }
+            }
+        }
+    }
+    best.map(|(d, _, _)| d)
+}
+
 /// Линии привязки: по одной на каждую совпавшую координату, от двигающейся рамки
 /// до самого дальнего совпавшего соседа.
-fn guide_lines(values: &[f64], cands: &[Rect], moving: Rect, vertical: bool) -> Vec<Line> {
+fn guide_lines(
+    values: &[f64],
+    cands: &[(Rect, Vec<u32>)],
+    moving: Rect,
+    vertical: bool,
+) -> Vec<Line> {
     let mut out: Vec<(f64, f64, f64)> = Vec::new();
-    for b in cands {
+    for (b, _) in cands {
         let targets = if vertical {
             [b.x0, (b.x0 + b.x1) / 2.0, b.x1]
         } else {

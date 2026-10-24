@@ -14,6 +14,8 @@ use ferrum_doc::{NodeId, NodeKind, Props, PropsPatch};
 use ferrum_scene::{shape, Scene, Slot};
 use kurbo::{Affine, Point, Rect, Vec2};
 
+use crate::snap::Snap;
+
 /// Положение узла в координатах родителя — то, что хранит модель.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pose {
@@ -28,6 +30,10 @@ pub struct Pose {
 /// Угол в `[0, 360)`; почти целые значения округляются, чтобы поворот на 90° не
 /// оставлял 89.99999999999999 в документе.
 pub fn normalize_deg(deg: f64) -> f64 {
+    // Нечисловой угол не может стать документом: ноль, а не NaN в свойствах.
+    if !deg.is_finite() {
+        return 0.0;
+    }
     let r = deg.rem_euclid(360.0);
     let rounded = r.round();
     let r = if (r - rounded).abs() < 1e-9 {
@@ -42,10 +48,31 @@ pub fn normalize_deg(deg: f64) -> f64 {
     }
 }
 
+/// Конечны ли все коэффициенты матрицы. Нечисловая матрица не даёт положения, поэтому
+/// жесты подменяют её тождественной, а не пишут NaN в документ.
+fn finite_affine(m: Affine) -> bool {
+    m.as_coeffs().iter().all(|v| v.is_finite())
+}
+
+fn rect_finite(r: Rect) -> bool {
+    [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite())
+}
+
 /// Раскладывает локальную матрицу узла (сдвиг, поворот и, возможно, масштаб жеста)
-/// на положение и размер узла с исходным размером `w × h`.
-pub fn decompose(m: Affine, w: f64, h: f64) -> Pose {
+/// на положение и размер узла с исходным размером `w × h`. Без поворота в матрице
+/// (оба направления схлопнуты масштабом 0) берётся `fallback_deg`: схлопнутый узел
+/// не должен терять свой угол.
+pub fn decompose_with(m: Affine, w: f64, h: f64, fallback_deg: f64) -> Pose {
     let c = m.as_coeffs();
+    if !c.iter().all(|v| v.is_finite()) {
+        return Pose {
+            x: 0.0,
+            y: 0.0,
+            rotation: normalize_deg(fallback_deg),
+            w,
+            h,
+        };
+    }
     let u = Vec2::new(c[0], c[1]);
     let v = Vec2::new(c[2], c[3]);
     let (su, sv) = (u.hypot(), v.hypot());
@@ -54,7 +81,8 @@ pub fn decompose(m: Affine, w: f64, h: f64) -> Pose {
     } else if sv > 1e-12 {
         v.y.atan2(v.x) - FRAC_PI_2
     } else {
-        0.0
+        // Угла в матрице нет: возвращаем прежний поворот (с обратным знаком, как в angle).
+        -fallback_deg.to_radians()
     };
     Pose {
         x: c[4],
@@ -63,6 +91,29 @@ pub fn decompose(m: Affine, w: f64, h: f64) -> Pose {
         w: w * su,
         h: h * sv,
     }
+}
+
+/// `decompose_with` без запасного угла: для схлопнутой матрицы поворот — нулевой.
+pub fn decompose(m: Affine, w: f64, h: f64) -> Pose {
+    decompose_with(m, w, h, 0.0)
+}
+
+/// Как `decompose_with`, но центр узла попадает точно в мировую точку центра `m · (w/2, h/2)`.
+/// Угол и размер из `decompose_with` верны, а верхний левый угол — нет: у повёрнутого
+/// квадрата 10×10 под 45° при растяжении ×2 по x центр уехал бы с (14.14, 0) на
+/// (10.61, 3.54). Линии сюда не относятся: у них точен `decompose_with`.
+fn decompose_centred(m: Affine, w: f64, h: f64, fallback_deg: f64) -> Pose {
+    let mut pose = decompose_with(m, w, h, fallback_deg);
+    if !finite_affine(m) {
+        return pose;
+    }
+    let centre = m * Point::new(w / 2.0, h / 2.0);
+    // Смещение центра от верхнего левого угла в новой позе: тот же поворот, что в
+    // `shape::local_transform`, применённый к половинам нового размера.
+    let off = Affine::rotate(-pose.rotation.to_radians()) * Point::new(pose.w / 2.0, pose.h / 2.0);
+    pose.x = centre.x - off.x;
+    pose.y = centre.y - off.y;
+    pose
 }
 
 /// Мировая матрица родителя узла (у корневого — единичная).
@@ -210,6 +261,10 @@ pub fn resize_rect(
     keep_aspect: bool,
     from_center: bool,
 ) -> Rect {
+    // Нечисловая точка не двигает рамку: возвращаем её как была.
+    if !p.x.is_finite() || !p.y.is_finite() || !rect_finite(rect) {
+        return rect;
+    }
     let (fx, fy) = handle.frac();
     let c = rect.center();
     // Одна ось: неподвижная точка и новая протяжённость.
@@ -260,6 +315,9 @@ pub fn resize_rect(
 /// Матрица, переводящая прямоугольник `from` в `to` (сдвиг и масштаб по осям).
 /// Нулевая сторона не масштабируется: вертикальную линию нельзя растянуть вширь.
 pub fn rect_map(from: Rect, to: Rect) -> Affine {
+    if !rect_finite(from) || !rect_finite(to) {
+        return Affine::IDENTITY;
+    }
     let sx = if from.width() > 0.0 {
         to.width() / from.width()
     } else {
@@ -329,15 +387,51 @@ pub fn bases(scene: &Scene, ids: &[NodeId], with_group_children: bool) -> Vec<Ba
     out
 }
 
-fn pose_patch(base: &Props, pose: Pose, size: bool, pixel_snap: bool) -> PropsPatch {
+/// Какие оси округлять до пикселя. Ось, которую притянул сосед (раздел 7.3 спеки),
+/// не округляется: привязка к соседу важнее сетки пикселей.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelSnap {
+    pub x: bool,
+    pub y: bool,
+}
+
+impl PixelSnap {
+    /// Пиксельная привязка включена: округляются оси, которые сосед не притянул.
+    /// Редактор передаёт сюда результат `Snapper::snap`.
+    pub fn unless_snapped(snap: &Snap) -> PixelSnap {
+        PixelSnap {
+            x: snap.dx.is_none(),
+            y: snap.dy.is_none(),
+        }
+    }
+}
+
+impl From<bool> for PixelSnap {
+    /// Прежнее `pixel_snap: bool`: обе оси или ни одной.
+    fn from(on: bool) -> PixelSnap {
+        PixelSnap { x: on, y: on }
+    }
+}
+
+/// Порог, с которого поворот считается изменившимся. Меньшие отличия — ошибки
+/// округления `atan2`, а не правка пользователя.
+const ANGLE_EPS: f64 = 1e-9;
+
+fn pose_patch(base: &Props, pose: Pose, size: bool, pixel: PixelSnap) -> PropsPatch {
     let mut pose = pose;
-    if pixel_snap {
-        if size {
+    if size {
+        if pixel.x {
             pose.w = pose.w.round();
+        }
+        if pixel.y {
             pose.h = pose.h.round();
         }
-        if pose.rotation % 90.0 == 0.0 {
+    }
+    if pose.rotation % 90.0 == 0.0 {
+        if pixel.x {
             pose.x = pose.x.round();
+        }
+        if pixel.y {
             pose.y = pose.y.round();
         }
     }
@@ -346,7 +440,9 @@ fn pose_patch(base: &Props, pose: Pose, size: bool, pixel_snap: bool) -> PropsPa
         y: Some(pose.y),
         ..Default::default()
     };
-    if pose.rotation != base.rotation {
+    // Поворот по модулю 360: 359.9999 и 0 — один угол, правки не нужно.
+    let diff = (pose.rotation - base.rotation).rem_euclid(360.0);
+    if diff.min(360.0 - diff) > ANGLE_EPS {
         patch.rotation = Some(pose.rotation);
     }
     if size && base.kind != NodeKind::Group {
@@ -360,13 +456,28 @@ fn pose_patch(base: &Props, pose: Pose, size: bool, pixel_snap: bool) -> PropsPa
 
 /// Правки свойств для жёсткого движения (сдвиг и поворот) `t` в мире.
 pub fn rigid_patches(bases: &[Base], t: Affine, pixel_snap: bool) -> Vec<(NodeId, PropsPatch)> {
+    rigid_patches_snapped(bases, t, PixelSnap::from(pixel_snap))
+}
+
+/// Как `rigid_patches`, но округление — по осям (см. `PixelSnap`). Нечисловой `t`
+/// заменяется тождественным: узлы остаются как были.
+pub fn rigid_patches_snapped(
+    bases: &[Base],
+    t: Affine,
+    pixel: PixelSnap,
+) -> Vec<(NodeId, PropsPatch)> {
+    let t = if finite_affine(t) {
+        t
+    } else {
+        Affine::IDENTITY
+    };
     bases
         .iter()
         .filter(|b| b.parent.is_none())
         .map(|b| {
             let m = b.parent_world.inverse() * t * b.parent_world * b.local;
-            let pose = decompose(m, b.props.w, b.props.h);
-            (b.id, pose_patch(&b.props, pose, false, pixel_snap))
+            let pose = decompose_with(m, b.props.w, b.props.h, b.props.rotation);
+            (b.id, pose_patch(&b.props, pose, false, pixel))
         })
         .collect()
 }
@@ -374,6 +485,21 @@ pub fn rigid_patches(bases: &[Base], t: Affine, pixel_snap: bool) -> Vec<(NodeId
 /// Правки свойств для масштаба `t` в мире: узлы меняют положение и размер, у групп
 /// масштабируются дети в координатах группы.
 pub fn scale_patches(bases: &[Base], t: Affine, pixel_snap: bool) -> Vec<(NodeId, PropsPatch)> {
+    scale_patches_snapped(bases, t, PixelSnap::from(pixel_snap))
+}
+
+/// Как `scale_patches`, но округление — по осям (см. `PixelSnap`). Ширина
+/// округляется вместе с осью x, высота — с осью y. Нечисловой `t` заменяется тождественным.
+pub fn scale_patches_snapped(
+    bases: &[Base],
+    t: Affine,
+    pixel: PixelSnap,
+) -> Vec<(NodeId, PropsPatch)> {
+    let t = if finite_affine(t) {
+        t
+    } else {
+        Affine::IDENTITY
+    };
     // Масштаб в координатах родителя каждого узла; для детей группы — в
     // координатах группы, посчитанный при обработке самой группы.
     let mut in_parent: Vec<Affine> = Vec::with_capacity(bases.len());
@@ -390,8 +516,14 @@ pub fn scale_patches(bases: &[Base], t: Affine, pixel_snap: bool) -> Vec<(NodeId
         if b.props.kind == NodeKind::Group {
             continue;
         }
-        let pose = decompose(tp * b.local, b.props.w, b.props.h);
-        out.push((b.id, pose_patch(&b.props, pose, true, pixel_snap)));
+        let m = tp * b.local;
+        // Линии: у них точен сдвиг по u, а центр лежит на линии и уехать не может.
+        let pose = if b.props.kind == NodeKind::Line {
+            decompose_with(m, b.props.w, b.props.h, b.props.rotation)
+        } else {
+            decompose_centred(m, b.props.w, b.props.h, b.props.rotation)
+        };
+        out.push((b.id, pose_patch(&b.props, pose, true, pixel)));
     }
     out
 }
@@ -405,5 +537,9 @@ pub fn local_with(props: &Props, patch: &PropsPatch) -> Affine {
 
 /// Округление угла до шага `step` градусов.
 pub fn snap_angle(deg: f64, step: f64) -> f64 {
+    // Нечисловой угол или шаг округлять нечего: возвращаем угол как был.
+    if !deg.is_finite() || !step.is_finite() || step <= 0.0 {
+        return deg;
+    }
     (deg / step).round() * step
 }

@@ -170,6 +170,9 @@ pub struct Scene {
     /// Черновики жеста в порядке `set_drafts` и их слоты (в том же порядке).
     drafts: Vec<Draft>,
     draft_slots: Vec<Slot>,
+    /// Те же слоты, что в `draft_slots`, — для `is_draft` за O(1): его вызывают на
+    /// каждое событие указателя и на каждого кандидата привязки.
+    draft_set: HashSet<Slot>,
 }
 
 impl Scene {
@@ -816,6 +819,7 @@ impl Scene {
             self.link(slot, parent);
             self.drafts.push(d.clone());
             self.draft_slots.push(slot);
+            self.draft_set.insert(slot);
             dirty.push(slot);
         }
         if had || !dirty.is_empty() {
@@ -828,7 +832,7 @@ impl Scene {
 
     /// Узел — черновик жеста, а не узел документа.
     pub fn is_draft(&self, id: NodeId) -> bool {
-        self.slot(id).is_some_and(|s| self.draft_slots.contains(&s))
+        self.slot(id).is_some_and(|s| self.draft_set.contains(&s))
     }
 
     /// Убирает черновики из списков детей и из таблицы. Черновики всегда верхние
@@ -836,6 +840,7 @@ impl Scene {
     /// Возвращает родителей-узлы документа: их границы нужно пересчитать.
     fn remove_drafts(&mut self) -> Vec<Slot> {
         self.drafts.clear();
+        self.draft_set.clear();
         let slots = std::mem::take(&mut self.draft_slots);
         let mut parents = Vec::new();
         // С конца: дети черновиков уходят раньше родителей-черновиков.

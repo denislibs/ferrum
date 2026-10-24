@@ -5,10 +5,10 @@ use std::collections::HashSet;
 use ferrum_doc::{Document, NodeId, NodeKind, PageId, Props, PropsPatch};
 use ferrum_editor::geometry::*;
 use ferrum_editor::selection::{self, Pick};
-use ferrum_editor::snap::Snapper;
+use ferrum_editor::snap::{Snap, Snapper};
 use ferrum_editor::{frame_presets, parse_presets};
 use ferrum_render::Camera;
-use ferrum_scene::{shape, Scene};
+use ferrum_scene::{shape, Draft, Scene};
 use kurbo::{Affine, Point, Rect, Size};
 
 fn patch(x: f64, y: f64, w: f64, h: f64) -> PropsPatch {
@@ -323,4 +323,274 @@ fn builtin_presets_match_spec() {
         r#"{"version":1,"presets":[{"group":"x","name":"y","width":1e9,"height":5}]}"#
     )
     .is_err());
+}
+
+/// Центр узла после правки: локальная матрица из новых свойств и центр в ней.
+fn fix1_centre(props: &Props, patch: &PropsPatch) -> Point {
+    let mut p = props.clone();
+    patch.apply_to(&mut p);
+    shape::local_transform(&p) * Point::new(p.w / 2.0, p.h / 2.0)
+}
+
+/// Свойства прямоугольника с поворотом (для расчёта ожидаемого центра).
+fn fix1_rotated(x: f64, y: f64, rotation: f64, w: f64, h: f64) -> Props {
+    Props {
+        x,
+        y,
+        rotation,
+        w,
+        h,
+        ..Props::defaults(NodeKind::Rect)
+    }
+}
+
+#[test]
+fn fix1_scaled_rotated_child_centre_maps_exactly() {
+    // Квадрат 10×10 под 45° в группе, растянутой ×2 по x: центр должен лечь в (14.14, 0).
+    let (mut doc, page, ids) = page(&[
+        (None, NodeKind::Group, PropsPatch::default()),
+        (
+            Some(0),
+            NodeKind::Rect,
+            PropsPatch {
+                rotation: Some(45.0),
+                ..patch(0.0, 0.0, 10.0, 10.0)
+            },
+        ),
+    ]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let child = fix1_rotated(0.0, 0.0, 45.0, 10.0, 10.0);
+    let t = Affine::scale_non_uniform(2.0, 1.0);
+    let want = t * shape::local_transform(&child) * Point::new(5.0, 5.0);
+    assert!(
+        (want.x - 14.142135).abs() < 1e-5 && want.y.abs() < 1e-9,
+        "{want:?}"
+    );
+    let patches = scale_patches(&bases(&scene, &[ids[0]], true), t, false);
+    assert_eq!(patches[0].0, ids[1]);
+    let got = fix1_centre(&child, &patches[0].1);
+    assert!(
+        (got.x - want.x).abs() < 1e-6 && (got.y - want.y).abs() < 1e-6,
+        "центр {got:?}, ожидался {want:?}"
+    );
+}
+
+#[test]
+fn fix1_rotated_child_in_multi_selection_resize_keeps_centre() {
+    let (mut doc, page, ids) = page(&[
+        (
+            None,
+            NodeKind::Rect,
+            PropsPatch {
+                rotation: Some(45.0),
+                ..patch(0.0, 0.0, 10.0, 10.0)
+            },
+        ),
+        (None, NodeKind::Rect, patch(50.0, 0.0, 10.0, 10.0)),
+    ]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let a = fix1_rotated(0.0, 0.0, 45.0, 10.0, 10.0);
+    let t = Affine::translate((3.0, 4.0)) * Affine::scale_non_uniform(2.0, 0.5);
+    let want = t * shape::local_transform(&a) * Point::new(5.0, 5.0);
+    let patches = scale_patches(&bases(&scene, &ids, false), t, false);
+    assert_eq!(patches[0].0, ids[0]);
+    let got = fix1_centre(&a, &patches[0].1);
+    assert!(
+        (got.x - want.x).abs() < 1e-6 && (got.y - want.y).abs() < 1e-6,
+        "центр {got:?}, ожидался {want:?}"
+    );
+}
+
+#[test]
+fn fix1_snap_tie_break_is_stable_after_rebuild() {
+    // Цели 150 (справа от соседа A) и 154 (слева от соседа B) при движущемся левом
+    // крае 152: |d| равны, выигрывает меньшая цель 150, в любом порядке узлов.
+    for b_first in [false, true] {
+        let mut nodes = vec![(None, NodeKind::Frame, patch(0.0, 0.0, 400.0, 400.0))];
+        let a = (Some(0), NodeKind::Rect, patch(100.0, 100.0, 50.0, 50.0));
+        let b = (Some(0), NodeKind::Rect, patch(154.0, 300.0, 20.0, 20.0));
+        let m = (Some(0), NodeKind::Rect, patch(300.0, 300.0, 20.0, 20.0));
+        if b_first {
+            nodes.extend([b, a, m]);
+        } else {
+            nodes.extend([a, b, m]);
+        }
+        let (mut doc, page, ids) = page(&nodes);
+        let moving = *ids.last().unwrap();
+        let view = Rect::new(-1000.0, -1000.0, 1000.0, 1000.0);
+        let rect = Rect::new(152.0, 300.0, 172.0, 320.0);
+        let scene = Scene::from_page(doc.page(page).unwrap());
+        let s = Snapper::new(&scene, &[moving]).snap(&scene, &[152.0], &[], rect, 4.0, view);
+        assert_eq!(s.dx, Some(-2.0), "порядок b_first={b_first}: {s:?}");
+        // После пересборки сцены (другой порядок R-tree) ответ тот же.
+        let scene2 = Scene::from_page(doc.page(page).unwrap());
+        let s2 = Snapper::new(&scene2, &[moving]).snap(&scene2, &[152.0], &[], rect, 4.0, view);
+        assert_eq!(
+            s2.dx,
+            Some(-2.0),
+            "после пересборки, b_first={b_first}: {s2:?}"
+        );
+    }
+}
+
+#[test]
+fn fix1_non_finite_snap_axes_are_ignored() {
+    let (mut doc, page, ids) = page(&[
+        (None, NodeKind::Frame, patch(0.0, 0.0, 400.0, 400.0)),
+        (Some(0), NodeKind::Rect, patch(100.0, 100.0, 50.0, 50.0)),
+        (Some(0), NodeKind::Rect, patch(300.0, 300.0, 20.0, 20.0)),
+    ]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let snapper = Snapper::new(&scene, &[ids[2]]);
+    let view = Rect::new(-1000.0, -1000.0, 1000.0, 1000.0);
+    let rect = Rect::new(152.0, 300.0, 172.0, 320.0);
+    // Нечисловые координаты: ни запроса, ни привязки.
+    let s = snapper.snap(&scene, &[f64::NAN], &[], rect, 4.0, view);
+    assert_eq!(s, Snap::default());
+    // Нечисловая ось не отключает другую: x привязывается, y — нет.
+    let s = snapper.snap(&scene, &[152.0], &[f64::INFINITY], rect, 4.0, view);
+    assert_eq!(s.dx, Some(-2.0));
+    assert_eq!(s.dy, None);
+}
+
+#[test]
+fn fix1_non_finite_geometry_returns_base() {
+    let (mut doc, page, ids) = page(&[(None, NodeKind::Rect, patch(10.0, 10.0, 20.0, 20.0))]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let b = bases(&scene, &ids, false);
+    let nan = Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let fmt = |v: Vec<(NodeId, PropsPatch)>| format!("{v:?}");
+    assert_eq!(
+        fmt(rigid_patches(&b, nan, false)),
+        fmt(rigid_patches(&b, Affine::IDENTITY, false))
+    );
+    assert_eq!(
+        fmt(scale_patches(&b, nan, false)),
+        fmt(scale_patches(&b, Affine::IDENTITY, false))
+    );
+    let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+    assert_eq!(
+        resize_rect(
+            r,
+            Handle::BottomRight,
+            Point::new(f64::NAN, 3.0),
+            false,
+            false
+        ),
+        r
+    );
+    assert_eq!(
+        rect_map(r, Rect::new(f64::NAN, 0.0, 1.0, 1.0)),
+        Affine::IDENTITY
+    );
+    assert!(snap_angle(f64::NAN, 15.0).is_nan());
+}
+
+#[test]
+fn fix1_collapsed_rotated_node_keeps_rotation() {
+    let (mut doc, page, ids) = page(&[
+        (None, NodeKind::Group, PropsPatch::default()),
+        (
+            Some(0),
+            NodeKind::Rect,
+            PropsPatch {
+                rotation: Some(30.5),
+                ..patch(10.0, 10.0, 20.0, 20.0)
+            },
+        ),
+    ]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    // Масштаб 0 схлопывает ребёнка: угол не меняется, поэтому правки поворота нет.
+    let p = scale_patches(&bases(&scene, &[ids[0]], true), Affine::scale(0.0), false);
+    assert_eq!(p[0].1.rotation, None, "{:?}", p[0].1);
+}
+
+#[test]
+fn fix1_translate_only_has_no_rotation_patch() {
+    let (mut doc, page, ids) = page(&[(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            rotation: Some(30.5),
+            ..patch(10.0, 10.0, 20.0, 20.0)
+        },
+    )]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let r = rigid_patches(
+        &bases(&scene, &ids, false),
+        Affine::translate((5.0, 5.0)),
+        false,
+    );
+    assert_eq!(r[0].1.rotation, None, "{:?}", r[0].1);
+    assert_eq!(r[0].1.x, Some(15.0));
+}
+
+#[test]
+fn fix1_marquee_full_enclosure_is_inclusive_and_normalised() {
+    let (mut doc, page, ids) = page(&[
+        (None, NodeKind::Frame, patch(0.0, 0.0, 400.0, 400.0)),
+        (None, NodeKind::Rect, patch(500.0, 0.0, 50.0, 50.0)),
+    ]);
+    let [f] = [ids[0]];
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    // Правый и нижний края фрейма совпадают с краями рамки: это полное охватывание.
+    let m = selection::marquee(&scene, Rect::new(-10.0, -10.0, 400.0, 400.0), None);
+    assert_eq!(m, vec![f]);
+    // Рамка с обратным порядком углов даёт тот же результат.
+    let m2 = selection::marquee(&scene, Rect::new(400.0, 400.0, -10.0, -10.0), None);
+    assert_eq!(m2, m);
+}
+
+#[test]
+fn fix1_root_frame_at_skips_drafts() {
+    let (mut doc, page, ids) = page(&[(None, NodeKind::Frame, patch(0.0, 0.0, 400.0, 400.0))]);
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    assert_eq!(
+        selection::root_frame_at(&scene, Point::new(20.0, 20.0), 0.0),
+        Some(ids[0])
+    );
+    // Черновик фрейма (id, которого нет в документе) не выбирается рамкой.
+    let d: NodeId = "0@18446744073709551615".parse().unwrap();
+    scene.set_drafts(&[Draft {
+        id: d,
+        parent: None,
+        props: Props {
+            x: 500.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            ..Props::defaults(NodeKind::Frame)
+        },
+    }]);
+    assert_eq!(
+        selection::root_frame_at(&scene, Point::new(550.0, 50.0), 0.0),
+        None
+    );
+}
+
+#[test]
+fn fix1_pixel_rounding_is_per_axis() {
+    // Сосед притянул x к 150.5: x не округляется, y — округляется.
+    let (mut doc, page, ids) = page(&[(None, NodeKind::Rect, patch(0.0, 0.0, 20.0, 20.0))]);
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let b = bases(&scene, &ids, false);
+    let t = Affine::translate((150.5, 20.3));
+    let y_only = rigid_patches_snapped(&b, t, PixelSnap { x: false, y: true });
+    assert_eq!((y_only[0].1.x, y_only[0].1.y), (Some(150.5), Some(20.0)));
+    let both = rigid_patches_snapped(&b, t, PixelSnap::from(true));
+    assert_eq!((both[0].1.x, both[0].1.y), (Some(151.0), Some(20.0)));
+    // Привязка по x выключает округление именно этой оси.
+    let s = Snap {
+        dx: Some(-2.0),
+        ..Default::default()
+    };
+    assert_eq!(
+        PixelSnap::unless_snapped(&s),
+        PixelSnap { x: false, y: true }
+    );
+    // Старая обёртка `pixel_snap: bool` ведёт себя как обе оси.
+    assert_eq!(
+        format!("{:?}", rigid_patches(&b, t, true)),
+        format!("{:?}", rigid_patches_snapped(&b, t, PixelSnap::from(true)))
+    );
 }

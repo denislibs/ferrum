@@ -136,14 +136,19 @@ pub fn frame_label_at(scene: &Scene, camera: &Camera, screen: Point) -> Option<N
     best.map(|(_, id)| id)
 }
 
-/// Фрейм верхнего уровня под точкой: в нём начинается рамка выделения.
+/// Фрейм верхнего уровня под точкой: в нём начинается рамка выделения. Черновики
+/// жеста (их фреймы тоже временные) не выбираются.
 pub fn root_frame_at(scene: &Scene, world: Point, tolerance: f64) -> Option<NodeId> {
     scene
         .hit_test_all(world, tolerance)
         .into_iter()
         .filter_map(|id| scene.slot(id))
         .map(|s| chain(scene, s)[0])
-        .find(|&r| scene.at(r).props.kind == NodeKind::Frame && !locked(scene, r))
+        .find(|&r| {
+            scene.at(r).props.kind == NodeKind::Frame
+                && !locked(scene, r)
+                && !scene.is_draft(scene.at(r).id)
+        })
         .map(|r| scene.at(r).id)
 }
 
@@ -184,14 +189,16 @@ pub const MARQUEE_SCAN_CHILDREN: usize = 4096;
 
 /// Узлы под рамкой выделения в контексте `context` (дети фрейма или корень
 /// страницы): видимые, не заблокированные, пересекающие рамку. Фреймы верхнего
-/// уровня выбираются, только если рамка охватывает их целиком: иначе рамка,
-/// начатая на холсте, цепляла бы монтажные области, через которые прошла.
-/// Порядок — порядок отрисовки, снизу вверх.
+/// уровня выбираются, только если рамка охватывает их целиком (края включительно:
+/// фрейм вровень с краем рамки охвачен): иначе рамка, начатая на холсте, цепляла
+/// бы монтажные области, через которые прошла. Порядок — порядок отрисовки, снизу вверх.
+/// Рамка нормализуется: углы можно задавать в любом порядке.
 ///
 /// Кандидаты — дети контекста перебором, если их не больше
 /// `MARQUEE_SCAN_CHILDREN`, иначе запрос к R-tree по рамке. Оба пути
 /// ограничены: перебор — числом детей, запрос — числом узлов под рамкой.
 pub fn marquee(scene: &Scene, rect: Rect, context: Option<NodeId>) -> Vec<NodeId> {
+    let rect = rect.abs();
     let context_slot = match context {
         Some(c) => match scene.slot(c) {
             Some(s) => Some(s),
@@ -224,9 +231,11 @@ pub fn marquee(scene: &Scene, rect: Rect, context: Option<NodeId>) -> Vec<NodeId
             };
             let root_frame = context.is_none() && scene.at(*s).props.kind == NodeKind::Frame;
             if root_frame {
-                rect.contains(b.origin()) && rect.contains(Point::new(b.x1, b.y1))
+                // Края включительно: `Rect::contains` не берёт правый и нижний край,
+                // а фрейм вровень с рамкой должен охватываться.
+                b.x0 >= rect.x0 && b.x1 <= rect.x1 && b.y0 >= rect.y0 && b.y1 <= rect.y1
             } else {
-                rect.overlaps(b) || rect.contains(b.origin())
+                rect.overlaps(b)
             }
         })
         .map(|(s, id)| (scene.order_key(s), id))
