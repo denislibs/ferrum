@@ -918,3 +918,38 @@ fn raster_byte_budget_pressure_draws_frames_by_nodes_not_fill_only() {
         assert!(diff < 4.0, "среднее отличие {diff}: {s:?}");
     }
 }
+
+#[test]
+fn culling_sees_children_of_mirrored_frame_where_they_are_drawn() {
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            flip_x: Some(true),
+            ..rect(0.0, 0.0, 1000.0, 100.0)
+        },
+    );
+    // Локально у левого края (10..50), в мире — у правого (950..990).
+    p.add(
+        Some(f),
+        NodeKind::Rect,
+        PropsPatch {
+            fills: solid(0, 0, 255),
+            ..rect(10.0, 10.0, 40.0, 40.0)
+        },
+    );
+    let scene = p.scene();
+    // Вьюпорт только над отражённым местом ребёнка: при отсечении по неотражённым
+    // границам он не нарисовался бы.
+    let mut cam = Camera::new(Size::new(100.0, 100.0), 1.0);
+    cam.set_center(Point::new(950.0, 50.0));
+    let img = render(&scene, &cam);
+    // Мир (970, 30) — экран (70, 30).
+    assert_px(&img, 70, 30, [0, 0, 255], 0);
+    // Прежнее место ребёнка за кадром; в кадре слева от него — белый фрейм.
+    assert_px(&img, 20, 30, [255, 255, 255], 0);
+    let mut r = Renderer::new();
+    let stats = draw(&mut r, &scene, &cam);
+    assert_eq!(stats.drawn, 2, "фрейм и ребёнок нарисованы");
+}

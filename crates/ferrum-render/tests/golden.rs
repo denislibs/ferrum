@@ -611,3 +611,94 @@ fn light_theme_labels() {
     assert!(dark > 40, "тёмных пикселей подписи: {dark}");
     golden("light_theme_labels", &img);
 }
+
+/// Картинка 16×8 из четырёх четвертей: красная слева сверху, зелёная справа сверху,
+/// синяя слева снизу, жёлтая справа снизу — по ней видно отражение по обеим осям.
+fn quadrants() -> Arc<Pixmap> {
+    let mut img = Pixmap::new(16, 8);
+    for y in 0..8u16 {
+        for x in 0..16u16 {
+            let (r, g, b) = match (x < 8, y < 4) {
+                (true, true) => (255, 0, 0),
+                (false, true) => (0, 255, 0),
+                (true, false) => (0, 0, 255),
+                (false, false) => (255, 255, 0),
+            };
+            img.set_pixel(x, y, PremulRgba8 { r, g, b, a: 255 });
+        }
+    }
+    Arc::new(img)
+}
+
+#[test]
+fn mirroring() {
+    let mut p = Page::new();
+    let image = |flip_x: bool, flip_y: bool, x: f64| PropsPatch {
+        fills: Some(vec![Fill::image("quadrants")]),
+        flip_x: Some(flip_x),
+        flip_y: Some(flip_y),
+        // Рамка 64×32 в пропорциях картинки: масштаб 4, четверть — 32×16.
+        ..rect(x, 10.0, 64.0, 32.0)
+    };
+    p.add(None, NodeKind::Image, image(false, false, 10.0));
+    let mirrored = p.add(None, NodeKind::Image, image(true, false, 84.0));
+    p.add(None, NodeKind::Image, image(true, true, 158.0));
+    // Отражённый по x фрейм: ребёнок у левого края рисуется у правого.
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            fills: solid(220, 220, 220, 255),
+            flip_x: Some(true),
+            ..rect(10.0, 60.0, 100.0, 60.0)
+        },
+    );
+    p.add(
+        Some(f),
+        NodeKind::Rect,
+        PropsPatch {
+            fills: solid(255, 140, 0, 255),
+            ..rect(5.0, 5.0, 30.0, 20.0)
+        },
+    );
+    let scene = p.scene();
+    let images: HashMap<String, Arc<Pixmap>> = [("quadrants".to_string(), quadrants())].into();
+    let cam = camera(240.0, 130.0);
+    let (w, h) = cam.device_size();
+    let mut backend = ferrum_render::CpuBackend::new(w, h);
+    let overlay = Overlay {
+        theme: OverlayTheme::light(),
+        selection: vec![mirrored],
+        frame_labels: false,
+        ..Default::default()
+    };
+    Renderer::new().render(&mut backend, &scene, &cam, &overlay, &images, Some(WHITE));
+    let img = backend.render();
+    let (red, green, blue, yellow) = ([255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]);
+    // Без отражения: четверти на своих местах (центры четвертей).
+    assert_px(&img, 26, 18, red, 8);
+    assert_px(&img, 58, 18, green, 8);
+    assert_px(&img, 26, 34, blue, 8);
+    assert_px(&img, 58, 34, yellow, 8);
+    // Отражение по x, как в Figma: левая и правая половины поменялись.
+    assert_px(&img, 100, 18, green, 8);
+    assert_px(&img, 132, 18, red, 8);
+    assert_px(&img, 100, 34, yellow, 8);
+    assert_px(&img, 132, 34, blue, 8);
+    // По обеим осям: картинка повёрнута на 180°.
+    assert_px(&img, 174, 18, yellow, 8);
+    assert_px(&img, 206, 18, blue, 8);
+    assert_px(&img, 174, 34, green, 8);
+    assert_px(&img, 206, 34, red, 8);
+    // Ребёнок отражённого фрейма: 10 + 100 − 5 − 30 = 75..105 по x, 65..85 по y.
+    assert_px(&img, 90, 75, [255, 140, 0], 0);
+    assert_px(&img, 25, 75, [220, 220, 220], 0);
+    // Рамка выделения отражённой картинки лежит на её видимых краях, ручки — в
+    // видимых углах: белая середина ручки в углах (84, 10) и (148, 42), рамка между
+    // ручками на верхнем крае.
+    assert_px(&img, 84, 10, [255, 255, 255], 30);
+    assert_px(&img, 148, 42, [255, 255, 255], 30);
+    let edge = px(&img, 100, 10);
+    assert!(edge[2] > 180 && edge[0] < 80, "рамка выделения: {edge:?}");
+    golden("mirroring", &img);
+}
