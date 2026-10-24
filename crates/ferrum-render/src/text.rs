@@ -6,7 +6,7 @@
 //! GPU-устройством, а контуры одинаково рисуются любым бэкендом и в эталонных
 //! тестах. Контуры кэшируются в единицах шрифта, раскладки — по тексту и стилю.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use kurbo::{Affine, BezPath, Point};
@@ -33,42 +33,65 @@ const LABEL_CACHE_LIMIT: usize = 512;
 /// несколько мегабайт раскладывалось бы целиком ради подписи в одну строку.
 pub const LABEL_MAX_CHARS: usize = 256;
 
-/// Кэш с вытеснением давно не использованных записей (LRU).
+/// Кэш с вытеснением давно не использованных записей (LRU) за O(1) в среднем.
+/// Очередь хранит обращения по порядку; запись в ней устарела, если у ключа с тех
+/// пор было обращение новее (его отметка в `map` больше). Вытеснение снимает с
+/// головы очереди устаревшие записи до первой живой. Прежний поиск минимума по
+/// всем 512 записям на каждой вставке стоил десятки микросекунд на подпись при зуме.
 struct Lru<K, V> {
     map: HashMap<K, (V, u64)>,
+    order: VecDeque<(K, u64)>,
     tick: u64,
+    limit: usize,
 }
 
 impl<K: std::hash::Hash + Eq + Clone, V: Clone> Lru<K, V> {
     fn new() -> Self {
+        Lru::with_limit(LABEL_CACHE_LIMIT)
+    }
+
+    fn with_limit(limit: usize) -> Self {
         Lru {
             map: HashMap::new(),
+            order: VecDeque::new(),
             tick: 0,
+            limit: limit.max(1),
         }
     }
 
     fn get(&mut self, key: &K) -> Option<V> {
+        let (v, used) = self.map.get_mut(key)?;
         self.tick += 1;
-        let tick = self.tick;
-        self.map.get_mut(key).map(|(v, used)| {
-            *used = tick;
-            v.clone()
-        })
+        *used = self.tick;
+        let v = v.clone();
+        self.order.push_back((key.clone(), self.tick));
+        self.compact();
+        Some(v)
     }
 
     fn insert(&mut self, key: K, value: V) {
         self.tick += 1;
-        if self.map.len() >= LABEL_CACHE_LIMIT && !self.map.contains_key(&key) {
-            let oldest = self
-                .map
-                .iter()
-                .min_by_key(|(_, (_, used))| *used)
-                .map(|(k, _)| k.clone());
-            if let Some(k) = oldest {
-                self.map.remove(&k);
+        if self.map.len() >= self.limit && !self.map.contains_key(&key) {
+            while let Some((k, t)) = self.order.pop_front() {
+                if self.map.get(&k).is_some_and(|(_, used)| *used == t) {
+                    self.map.remove(&k);
+                    break;
+                }
             }
         }
-        self.map.insert(key, (value, self.tick));
+        self.map.insert(key.clone(), (value, self.tick));
+        self.order.push_back((key, self.tick));
+        self.compact();
+    }
+
+    /// Очередь растёт с каждым обращением; когда в ней вчетверо больше записей, чем
+    /// ключей, устаревшие выбрасываются одним проходом — в среднем O(1) на обращение.
+    fn compact(&mut self) {
+        if self.order.len() > 4 * self.limit {
+            let map = &self.map;
+            self.order
+                .retain(|(k, t)| map.get(k).is_some_and(|(_, used)| used == t));
+        }
     }
 }
 
@@ -101,9 +124,24 @@ fn sanitize(text: &str) -> String {
 
 type TextKey = (String, u32, u16);
 
+/// Граница кластера в раскладке полного текста: усечение режет строку только по
+/// ним, и подпись любой ширины собирается из готовых глифов без новой раскладки.
+#[derive(Clone, Copy)]
+struct Cut {
+    /// Глифов до конца кластера включительно.
+    glyphs: usize,
+    /// Правый край кластера по базовой линии.
+    x: f64,
+    /// Кластер — пробел: на нём строка перед многоточием не кончается.
+    space: bool,
+}
+
 /// Разложенная подпись: глифы в координатах строки (ноль — левый край базовой линии).
 pub struct Label {
     glyphs: Vec<(Arc<BezPath>, Point, f64)>,
+    /// Границы кластеров слева направо. `None` — текст справа налево или раскладка,
+    /// где глифы не сопоставились с кластерами: тогда усечение раскладывает префиксы.
+    cuts: Option<Vec<Cut>>,
     /// Ширина строки.
     pub width: f64,
     /// Подъём над базовой линией и спуск под ней.
@@ -214,20 +252,41 @@ impl TextEngine {
         if full.width <= max_width {
             return Some(full);
         }
-        // Самый длинный префикс, который вместе с «…» помещается в ширину.
-        let weight = base.2;
-        let text = base.0.as_str();
-        let ellipsis = self.full_layout(&("…".to_string(), base.1, weight), size);
+        let ellipsis = self.full_layout(&("…".to_string(), base.1, base.2), size);
         if ellipsis.width > max_width {
             return None;
         }
+        // Быстрый путь: префикс берётся из раскладки полного текста по границам
+        // кластеров. При зуме ширина фрейма меняется каждый кадр, и прежний поиск
+        // делением пополам раскладывал до восьми префиксов на каждую подпись.
+        if let Some(cuts) = &full.cuts {
+            let fit = cuts.partition_point(|c| c.x + ellipsis.width <= max_width);
+            return Some(match (0..fit).rev().find(|&k| !cuts[k].space) {
+                Some(k) => Arc::new(full.prefix(cuts[k], &ellipsis)),
+                None => ellipsis,
+            });
+        }
+        Some(self.fit_by_layout(base, size, max_width, ellipsis))
+    }
+
+    /// Медленный путь усечения (текст справа налево): самый длинный префикс, который
+    /// вместе с «…» помещается в ширину, — поиском делением пополам с раскладкой
+    /// каждого кандидата.
+    fn fit_by_layout(
+        &mut self,
+        base: &TextKey,
+        size: f64,
+        max_width: f64,
+        ellipsis: Arc<Label>,
+    ) -> Arc<Label> {
+        let text = base.0.as_str();
         let cuts: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
         let mut best = ellipsis;
         let (mut lo, mut hi) = (0, cuts.len() - 1);
         while lo < hi {
             let mid = (lo + hi).div_ceil(2);
             let candidate = format!("{}…", text[..cuts[mid]].trim_end());
-            let laid = self.layout(&candidate, size, weight);
+            let laid = self.layout(&candidate, size, base.2);
             if laid.width <= max_width {
                 best = Arc::new(laid);
                 lo = mid;
@@ -235,7 +294,7 @@ impl TextEngine {
                 hi = mid - 1;
             }
         }
-        Some(best)
+        best
     }
 
     /// Сколько раскладок выполнено (для проверки кэша).
@@ -256,6 +315,9 @@ impl TextEngine {
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(None);
         let mut glyphs = Vec::new();
+        // Границы кластеров: число глифов к концу кластера и признак пробела.
+        let mut clusters: Vec<(usize, bool)> = Vec::new();
+        let mut prefixable = true;
         let (mut ascent, mut descent) = (0.0f64, 0.0f64);
         let mut baseline = None;
         for line in layout.lines() {
@@ -265,6 +327,13 @@ impl TextEngine {
                     continue;
                 };
                 let r = run.run();
+                prefixable &= !r.is_rtl();
+                let before = clusters.last().map_or(0, |c| c.0);
+                let mut count = before;
+                for c in r.visual_clusters() {
+                    count += c.glyphs().count();
+                    clusters.push((count, c.is_space_or_nbsp()));
+                }
                 let m = r.font_metrics();
                 ascent = ascent.max(m.ascent as f64);
                 descent = descent.max(m.descent.abs() as f64);
@@ -285,9 +354,26 @@ impl TextEngine {
                 }
             }
         }
+        let width = layout.width() as f64;
+        // Правый край кластера — начало первого глифа следующего (у последнего —
+        // ширина строки). Если глифов не столько, сколько насчитали кластеры,
+        // сопоставление ненадёжно: усечение пойдёт медленным путём.
+        prefixable &=
+            layout.lines().count() <= 1 && clusters.last().map_or(0, |c| c.0) == glyphs.len();
+        let cuts = prefixable.then(|| {
+            clusters
+                .iter()
+                .map(|&(end, space)| Cut {
+                    glyphs: end,
+                    x: glyphs.get(end).map_or(width, |g| g.1.x),
+                    space,
+                })
+                .collect()
+        });
         Label {
             glyphs,
-            width: layout.width() as f64,
+            cuts,
+            width,
             ascent,
             descent,
         }
@@ -318,6 +404,24 @@ impl TextEngine {
 }
 
 impl Label {
+    /// Префикс подписи до границы `cut` и многоточие сразу за ним.
+    fn prefix(&self, cut: Cut, ellipsis: &Label) -> Label {
+        let mut glyphs = self.glyphs[..cut.glyphs].to_vec();
+        glyphs.extend(
+            ellipsis
+                .glyphs
+                .iter()
+                .map(|(p, at, s)| (p.clone(), Point::new(at.x + cut.x, at.y), *s)),
+        );
+        Label {
+            glyphs,
+            cuts: None,
+            width: cut.x + ellipsis.width,
+            ascent: self.ascent.max(ellipsis.ascent),
+            descent: self.descent.max(ellipsis.descent),
+        }
+    }
+
     /// Рисует подпись: `origin` — левый край базовой линии в пикселях устройства.
     pub fn draw(&self, backend: &mut impl RenderBackend, origin: Point, color: Rgba) {
         backend.set_color(color);
@@ -352,5 +456,73 @@ impl OutlinePen for Pen {
     }
     fn close(&mut self) {
         self.0.close_path();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lru_evicts_least_recently_used_and_keeps_queue_bounded() {
+        let mut lru: Lru<u32, u32> = Lru::with_limit(3);
+        for k in 0..3 {
+            lru.insert(k, k * 10);
+        }
+        // Обращение к 0 делает его свежим: вытесняется 1.
+        assert_eq!(lru.get(&0), Some(0));
+        lru.insert(3, 30);
+        assert_eq!(lru.get(&1), None);
+        assert_eq!(
+            (lru.get(&0), lru.get(&2), lru.get(&3)),
+            (Some(0), Some(20), Some(30))
+        );
+        // Тысячи обращений не раздувают очередь сверх 4 × предел.
+        for i in 0..10_000 {
+            lru.get(&(i % 3 * 3 / 3));
+            assert!(lru.order.len() <= 4 * 3 + 1, "{}", lru.order.len());
+        }
+        assert_eq!(lru.map.len(), 3);
+    }
+
+    #[test]
+    fn prefix_truncation_matches_relayout() {
+        // Усечение по раскладке полного текста даёт ту же подпись, что раскладка
+        // каждого префикса заново: тот же префикс, ширина — с точностью до кернинга
+        // последней буквы со следующей (в полном тексте её пара — не «…»), меньше
+        // пикселя на кегле 11.
+        let mut t = TextEngine::new();
+        for text in [
+            "Главный экран оформления",
+            "Profile settings — dark",
+            "Экран 12: вход",
+        ] {
+            let base: TextKey = (text.to_string(), (11.0 * 64.0) as u32, 400);
+            let full = t.full_layout(&base, 11.0);
+            assert!(full.cuts.is_some(), "{text}");
+            for w in (8..full.width as usize).step_by(3) {
+                let w = w as f64;
+                let fast = t.fit(&base, 11.0, w);
+                let ellipsis = t.full_layout(&("…".to_string(), base.1, 400), 11.0);
+                let slow = (ellipsis.width <= w).then(|| t.fit_by_layout(&base, 11.0, w, ellipsis));
+                match (fast, slow) {
+                    (Some(f), Some(s)) => {
+                        assert!(f.width <= w, "{text} {w}: {}", f.width);
+                        assert!(
+                            (f.width - s.width).abs() < 1.0,
+                            "{text} {w}: {} vs {}",
+                            f.width,
+                            s.width
+                        );
+                        assert_eq!(f.glyphs.len(), s.glyphs.len(), "{text} {w}");
+                    }
+                    (None, None) => {}
+                    other => panic!("{text} {w}: {:?}", (other.0.is_some(), other.1.is_some())),
+                }
+            }
+        }
+        // Справа налево — медленный путь.
+        let rtl: TextKey = ("שלום עולם".to_string(), (11.0 * 64.0) as u32, 400);
+        assert!(t.full_layout(&rtl, 11.0).cuts.is_none());
     }
 }

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use ferrum_doc::container::{decode, encode};
 use ferrum_doc::fixture::fill;
 use ferrum_doc::{Document, NodeId, NodeKind, PageId, PropsPatch};
-use ferrum_render::{Camera, CpuBackend, NoImages, Renderer};
+use ferrum_render::{Camera, CpuBackend, NoImages, Overlay, Renderer, TextEngine, LABEL_SIZE};
 use ferrum_scene::Scene;
 use kurbo::{Point, Size};
 
@@ -41,6 +41,9 @@ const APPLY_RUNS: usize = 5;
 /// Предел кадров прогрева: больше — кэш не сходится, это провал.
 const WARMUP_CAP: usize = 2000;
 const VIEWPORT: Size = Size::new(1920.0, 1080.0);
+/// Фреймов с усечёнными подписями и кадров зума в замере подписей.
+const LABEL_FRAMES: usize = 60;
+const LABEL_ZOOM_FRAMES: usize = 60;
 
 /// Медиана нескольких замеров: один прогон на ноутбуке шумит на десятки процентов.
 fn median(mut runs: Vec<Duration>) -> Duration {
@@ -600,6 +603,101 @@ fn main() {
             None => report.fail("Прогрев после зума через степень двойки", "не прогрелся"),
         }
         camera.set_zoom(z);
+    }
+
+    // Подписи фреймов при плавном зуме: 60 фреймов с длинными названиями, все
+    // подписи усечены, ширина каждой меняется на каждом кадре. Фреймы без заливки и
+    // детей: время кадра — почти целиком работа с подписями.
+    {
+        let mut ldoc = Document::new();
+        let lpage = ldoc.pages()[0].0;
+        ldoc.transact(lpage, vec![], |p| {
+            for i in 0..LABEL_FRAMES {
+                let id = p.create_node(None, None, NodeKind::Frame)?;
+                p.set_props(
+                    id,
+                    &PropsPatch {
+                        name: Some(format!(
+                            "Экран оформления заказа {i}: доставка, оплата и подтверждение"
+                        )),
+                        x: Some((i % 10) as f64 * 260.0),
+                        y: Some((i / 10) as f64 * 300.0),
+                        w: Some(200.0),
+                        h: Some(200.0),
+                        fills: Some(vec![]),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(vec![])
+        })
+        .unwrap();
+        let _ = ldoc.take_changes(lpage);
+        let lscene = Scene::from_page(ldoc.page(lpage).unwrap());
+        let mut lcam = Camera::new(VIEWPORT, 1.0);
+        lcam.fit(lscene.bounds().unwrap(), 40.0);
+        let overlay = Overlay::default();
+        let mut lr = Renderer::new();
+        let (lw, lh) = lcam.device_size();
+        let mut lb = CpuBackend::new(lw, lh);
+        // Первый кадр раскладывает полные названия — прогрев.
+        lr.render(&mut lb, &lscene, &lcam, &overlay, &NoImages, None);
+        let warm = lr.text_layouts();
+        let mut worst = Duration::ZERO;
+        for _ in 0..LABEL_ZOOM_FRAMES {
+            lcam.set_zoom(lcam.zoom() * 1.002);
+            let t = Instant::now();
+            lr.render(&mut lb, &lscene, &lcam, &overlay, &NoImages, None);
+            worst = worst.max(t.elapsed());
+        }
+        let layouts = (lr.text_layouts() - warm) as f64 / LABEL_ZOOM_FRAMES as f64;
+        // Сама работа с подписями — то, что оверлей делает с каждым названием на
+        // кадре (очистка, кэш, усечение до ширины фрейма), без заливки глифов:
+        // тот же зум, те же ширины, отдельный `TextEngine`.
+        let mut text = TextEngine::new();
+        let mut zcam = Camera::new(VIEWPORT, 1.0);
+        zcam.fit(lscene.bounds().unwrap(), 40.0);
+        let names: Vec<(String, f64)> = lscene
+            .roots()
+            .iter()
+            .map(|&s| {
+                let n = lscene.at(s);
+                (n.props.name.clone(), n.world_bounds.unwrap().width())
+            })
+            .collect();
+        let mut label_work = |cam: &Camera| {
+            let t = Instant::now();
+            for (name, w) in &names {
+                std::hint::black_box(text.label(name, LABEL_SIZE, 400, w * cam.device_scale()));
+            }
+            t.elapsed()
+        };
+        label_work(&zcam);
+        let mut label_worst = Duration::ZERO;
+        for _ in 0..LABEL_ZOOM_FRAMES {
+            zcam.set_zoom(zcam.zoom() * 1.002);
+            label_worst = label_worst.max(label_work(&zcam));
+        }
+        report.info(
+            "Подписи при зуме: фреймов с усечённой подписью / раскладок в прогреве",
+            format!("{LABEL_FRAMES} / {warm}"),
+        );
+        report.0.push(Row {
+            metric: "Подписи при зуме: раскладок текста на кадр после прогрева".to_string(),
+            value: format!("{layouts:.2}"),
+            limit: "0",
+            pass: Some(layouts == 0.0),
+        });
+        report.gate(
+            "Подписи при зуме: работа с подписями за кадр (худший кадр)",
+            label_worst,
+            1.0,
+            "≤ 1 мс",
+        );
+        report.info(
+            "Подписи при зуме: кадр целиком с заливкой глифов (худший)",
+            ms(worst),
+        );
     }
 
     // Экспорт фрейма @3x — справочно.
