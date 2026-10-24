@@ -51,6 +51,7 @@ async function main(): Promise<void> {
   canvas.focus();
 }
 
+// Отказ `Core.start` уже начинается с «Ядро не запустилось: …».
 main().catch((e: unknown) => {
-  hud.textContent = `Ядро не запустилось: ${e instanceof Error ? e.message : String(e)}`;
+  hud.textContent = e instanceof Error ? e.message : `Ядро не запустилось: ${String(e)}`;
 });

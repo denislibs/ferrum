@@ -23,6 +23,12 @@ export interface CoreOptions {
   atlasSide?: number;
 }
 
+/** Сколько ждать события `ready` после запуска worker'а. */
+export const START_TIMEOUT_MS = 20_000;
+
+/** Все отказы `start` — с этим началом: плашка показывает текст как есть. */
+const NOT_STARTED = 'Ядро не запустилось';
+
 /** Время обработчиков основного потока по кадрам — для бюджета ≤ 4 мс. */
 export interface MainThreadStats {
   frames: number;
@@ -83,6 +89,8 @@ export class Core {
   private maxCost = 0;
   private disposers: (() => void)[] = [];
   private failed: ((e: Error) => void) | null = null;
+  /** Ядро остановлено (сбой worker'а): сообщение было, кадров и ввода больше нет. */
+  private stopped = false;
 
   private constructor(
     private readonly worker: Worker,
@@ -92,13 +100,18 @@ export class Core {
     this.mode = transport.mode;
   }
 
-  /** Запускает worker на холсте и ждёт события `ready`. */
+  /** Запускает worker на холсте и ждёт события `ready` (не дольше
+   * `START_TIMEOUT_MS`). Отказ — `Error` с текстом «Ядро не запустилось: …». */
   static async start(canvas: HTMLCanvasElement, opts: CoreOptions = {}): Promise<Core> {
     const worker = new Worker(new URL('../worker/core.worker.ts', import.meta.url), { type: 'module' });
     const transport = createTransport(worker, opts.transport);
     const core = new Core(worker, transport, canvas);
+    let timer = 0;
     const ready = new Promise<void>((resolve, reject) => {
       core.failed = reject;
+      // Worker, который так и не ответил (завис на загрузке ядра), не должен
+      // вешать запуск навсегда.
+      timer = self.setTimeout(() => core.fail('истекло время ожидания'), START_TIMEOUT_MS);
       core.on((e) => {
         if (e.type === 'ready') {
           core.backend = e.backend;
@@ -111,7 +124,8 @@ export class Core {
     // Сбои самого worker'а (не загрузился скрипт, исключение вне наших обработчиков).
     worker.onerror = (e) => {
       e.preventDefault?.();
-      core.fail(e.message || 'сбой worker\'а');
+      // Без текста приходит отказ загрузки или разбора самого скрипта.
+      core.fail(e.message || (core.failed ? 'скрипт worker\'а не загрузился' : 'сбой worker\'а'));
     };
     worker.onmessageerror = () => core.fail('сообщение worker\'а не удалось разобрать');
     const r = canvas.getBoundingClientRect();
@@ -136,6 +150,8 @@ export class Core {
     } catch (e) {
       worker.terminate();
       throw e;
+    } finally {
+      clearTimeout(timer);
     }
     core.failed = null;
     core.listen();
@@ -162,6 +178,10 @@ export class Core {
 
   /** Команда ядру. Байты (`Uint8Array`) передаются без копии. */
   send(cmd: Command): void {
+    if (this.stopped) {
+      this.emit({ type: 'error', message: 'Ядро остановлено, команда не выполнена' });
+      return;
+    }
     const prepared = prepareCommand(cmd);
     if ('error' in prepared) {
       this.emit({ type: 'error', message: prepared.error });
@@ -175,10 +195,21 @@ export class Core {
     for (const l of this.listeners) l(e);
   }
 
-  /** Отказ worker'а: до `ready` — `start` отклоняется, после — событие `error`. */
+  /** Отказ worker'а: до `ready` — `start` отклоняется, после — событие `error`.
+   * Один раз: об одном сбое могут сообщить и worker (`fatal`), и `onerror`. После
+   * него кадры не идут и ввод не пересылается. */
   private fail(message: string): void {
-    if (this.failed) this.failed(new Error(message));
+    if (this.stopped) return;
+    this.stopped = true;
+    this.stop();
+    if (this.failed) this.failed(new Error(`${NOT_STARTED}: ${message}`));
     else this.emit({ type: 'error', message: `Ядро остановлено: ${message}` });
+  }
+
+  /** Цикл кадров и слушатели ввода — снять. */
+  private stop(): void {
+    cancelAnimationFrame(this.raf);
+    for (const d of this.disposers.splice(0)) d();
   }
 
   /** Бюджет основного потока: время обработчиков ввода и кадра. */
@@ -304,6 +335,7 @@ export class Core {
 
   private loop(): void {
     const frame = () => {
+      if (this.stopped) return;
       const t = performance.now();
       this.transport.tick();
       const live = this.transport.live();
@@ -329,8 +361,8 @@ export class Core {
   }
 
   dispose(): void {
-    cancelAnimationFrame(this.raf);
-    for (const d of this.disposers.splice(0)) d();
+    this.stopped = true;
+    this.stop();
     this.worker.terminate();
   }
 }

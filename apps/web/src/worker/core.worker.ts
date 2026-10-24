@@ -5,7 +5,7 @@
 import init, { WasmCore } from '../wasm/ferrum_wasm.js';
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import { Ctrl, CTRL_BYTES, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET } from '../core/layout.gen';
-import { commandSizeError, type FromWorker, type ToWorker } from '../core/messages';
+import { commandSizeError, isToWorker, type FromWorker, type ToWorker } from '../core/messages';
 import { drainRing, writeLive as writeLiveSlots } from '../core/shared';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -17,6 +17,8 @@ const drained = new Uint8Array(RING_CAPACITY * RECORD_SIZE);
 const early: ToWorker[] = [];
 /** После фатальной ошибки worker молчит: входящее не копим и не разбираем. */
 let dead = false;
+/** `init` уже пришёл: второй не запускает ядро заново поверх первого. */
+let started = false;
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
   scope.postMessage(msg, transfer);
@@ -28,6 +30,11 @@ function fatal(e: unknown): void {
   early.length = 0;
   post({ t: 'fatal', message: e instanceof Error ? e.message : String(e) });
   core = null;
+}
+
+/** Ошибка для пользователя без остановки ядра (неверное сообщение). */
+function postError(message: string): void {
+  post({ t: 'events', events: [{ type: 'error', message }] });
 }
 
 /** Байты событий уходят без копии: их буферы передаются основному потоку. */
@@ -95,49 +102,63 @@ async function sabLoop(): Promise<void> {
 
 function handle(msg: ToWorker): void {
   if (!core) return;
-  switch (msg.t) {
-    case 'cmd':
-      {
+  // Целиком под try: сбой в разборе чужого сообщения не уходит мимо `fatal`.
+  try {
+    switch (msg.t) {
+      case 'cmd': {
         // Предел размера проверяем и здесь: основной поток не доверенный.
         const error = commandSizeError(msg.cmd);
         if (error) {
-          post({ t: 'events', events: [{ type: 'error', message: error }] });
+          postError(error);
           return;
         }
-      }
-      try {
         core.command(msg.cmd);
         // Ответы на команды (сохранение, ошибки) — сразу, кадр нарисуется по тику.
         sendEvents();
-      } catch (e) {
-        fatal(e);
+        break;
       }
-      break;
-    case 'tick':
-      try {
-        step(msg.input ? new Uint8Array(msg.input) : sab ? drain() : null);
-      } catch (e) {
-        fatal(e);
-      }
-      break;
-    case 'init':
-      break;
+      case 'tick':
+        step(msg.input instanceof ArrayBuffer ? new Uint8Array(msg.input) : sab ? drain() : null);
+        break;
+      case 'init':
+        break;
+    }
+  } catch (e) {
+    fatal(e);
   }
 }
 
 // Сбои вне наших try/catch (отклонённые обещания, ошибки в обработчиках) тоже
-// доходят до основного потока, а не остаются в консоли worker'а.
-scope.addEventListener('unhandledrejection', (e) => fatal((e as PromiseRejectionEvent).reason));
-scope.addEventListener('error', (e) => fatal((e as ErrorEvent).error ?? (e as ErrorEvent).message));
+// доходят до основного потока, а не остаются в консоли worker'а. `preventDefault`:
+// иначе то же исключение дошло бы и до `worker.onerror` основного потока, и
+// пользователь увидел бы о нём два сообщения.
+scope.addEventListener('unhandledrejection', (e) => {
+  e.preventDefault();
+  fatal((e as PromiseRejectionEvent).reason);
+});
+scope.addEventListener('error', (e) => {
+  e.preventDefault();
+  fatal((e as ErrorEvent).error ?? (e as ErrorEvent).message);
+});
 
-scope.onmessage = async (e: MessageEvent<ToWorker>) => {
+scope.onmessage = async (e: MessageEvent<unknown>) => {
   if (dead) return;
   const msg = e.data;
+  // Конверт не доверенный: не объект или неизвестный вид — ошибка, не сбой ядра.
+  if (!isToWorker(msg)) {
+    postError('Неверное сообщение для ядра');
+    return;
+  }
   if (msg.t !== 'init') {
     if (core) handle(msg);
     else early.push(msg);
     return;
   }
+  if (started) {
+    postError('Ядро уже запущено: повторный init пропущен');
+    return;
+  }
+  started = true;
   try {
     await init();
     core = await WasmCore.create(msg.canvas, msg.platform, msg.width, msg.height, msg.dpr, msg.backend, msg.atlas);

@@ -1,5 +1,5 @@
-// Отказы бэкендов рендера: что видит пользователь, когда WebGPU, WebGL2 или показ
-// кадра не работают. Условия — настоящие, где браузер их даёт (программный
+// Отказы бэкендов рендера и самого worker'а: что видит пользователь, когда WebGPU,
+// WebGL2, показ кадра или ядро не работают. Условия — настоящие, где браузер их даёт (программный
 // SwiftShader, холст больше предела устройства, смена размера окна), и внедрённые
 // там, где иначе не получить.
 //
@@ -9,8 +9,9 @@
 // в собранном бандле нет ни хуков, ни параметров адреса для тестов — заглушки
 // живут только в этом файле и только в тестовом браузере. Заглушки включаются
 // условиями пролога (`Opt`) или сообщением `{ t: '__fault', name }` в worker уже
-// после старта (его второй слушатель — в прологе; сам worker неизвестные сообщения
-// пропускает).
+// после старта (его слушатель — в прологе, раньше обработчика worker'а: служебные
+// сообщения дальше пролога не идут, иначе worker ответил бы на них ошибкой
+// «неверное сообщение»).
 
 import { expect, test, type Page } from '@playwright/test';
 import { drag, expectPixel, live, liveWhen, open, screen } from './helpers';
@@ -27,6 +28,8 @@ interface Opt {
   /** Предел стороны текстуры у WebGPU и WebGL2 (на видеокарте он 16384 — как и
    * потолок размера холста ядра, так что настоящим размером его не превысить). */
   maxTexture?: number;
+  /** Сообщение `init` до worker'а не доходит: запуск ядра висит. */
+  stallInit?: boolean;
 }
 
 /** Код пролога: заглушки в worker'е. Выполняется до кода worker'а. */
@@ -110,9 +113,16 @@ function prelude(opt: Opt): string {
   }
 
   self.addEventListener('message', (e) => {
+    if (OPT.stallInit && e.data && e.data.t === 'init') {
+      e.stopImmediatePropagation();
+      return;
+    }
     const name = e.data && e.data.t === '__fault' ? e.data.name : null;
     if (!name) return;
+    e.stopImmediatePropagation();
     F[name] = true;
+    // Исключение вне обработчиков worker'а — как настоящий сбой в коде worker'а.
+    if (name === 'throw') setTimeout(() => fail('throw'));
     // Ошибка проверки WebGPU вне вызовов wgpu: событие uncapturederror устройства.
     // Команда доходит до GPU вместе с отправкой очереди: без отправки очереди событие не приходит.
     if (name === 'uncaptured') {
@@ -442,4 +452,34 @@ test('потеря контекста WebGL2: сообщение, поверхн
   await fault(page, 'loseGl');
   await poke(page);
   await expectDead(page, /^Контекст WebGL2 потерян/);
+});
+
+// --- 8. Сбои самого worker'а ----------------------------------------------------
+
+test('исключение в worker\'е после запуска: одно сообщение с причиной, команды отвечают ошибкой', async ({ page }) => {
+  await stubWorker(page, {});
+  await open(page);
+  await page.evaluate(() => (window.__ferrum!.events.length = 0));
+  await fault(page, 'throw');
+  await expect.poll(async () => (await errors(page)).length).toBe(1);
+  // Слушатель `error` worker'а и `onerror` в основном потоке видят одно исключение:
+  // сообщение должно быть одно.
+  await page.waitForTimeout(500);
+  expect(await errors(page)).toEqual(['Ядро остановлено: внедрённый сбой: throw']);
+  await expect(page.locator('#hud')).toContainText('внедрённый сбой: throw');
+  // Команда остановленному ядру не теряется молча.
+  await page.evaluate(() => window.__ferrum!.core.send({ type: 'save' }));
+  await expect.poll(async () => (await errors(page)).length).toBe(2);
+  expect((await errors(page))[1]).toBe('Ядро остановлено, команда не выполнена');
+  expect(await page.evaluate(() => window.__ferrum!.events.some((e) => e.type === 'saved'))).toBe(false);
+});
+
+test('worker не ответил на запуск: start отклоняется по таймауту, worker остановлен', async ({ page }) => {
+  await stubWorker(page, { stallInit: true });
+  let closed = false;
+  page.on('worker', (w) => w.on('close', () => (closed = true)));
+  await page.goto('/?nodes=10');
+  await expect(page.locator('#hud')).toHaveText('Ядро не запустилось: истекло время ожидания', { timeout: 40_000 });
+  await expect.poll(() => closed).toBe(true);
+  expect(await page.evaluate(() => window.__ferrum === undefined)).toBe(true);
 });

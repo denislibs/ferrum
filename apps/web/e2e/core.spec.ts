@@ -175,12 +175,39 @@ test('неверная команда не роняет worker', async ({ page }
   expect(l.nodes).toBe(1000);
 });
 
+test('неверный конверт сообщения не роняет worker', async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => (window.__ferrum!.events.length = 0));
+  // Сообщения worker'у не доверенные: не объект, неизвестный вид, команда не объект.
+  await page.evaluate(() => {
+    const worker = (window.__ferrum!.core as unknown as { worker: Worker }).worker;
+    for (const m of [null, { t: 'cmd', cmd: null }, { t: 'cmd', cmd: 42 }, {}, { t: 'init' }]) worker.postMessage(m);
+  });
+  const errors = () =>
+    page.evaluate(() => window.__ferrum!.events.flatMap((e) => (e.type === 'error' ? [e.message] : [])));
+  await expect.poll(async () => (await errors()).length).toBe(5);
+  const [nul, cmdNull, cmd42, empty, init] = await errors();
+  expect(nul).toBe('Неверное сообщение для ядра');
+  expect(cmdNull).toMatch(/^Неверная команда/);
+  expect(cmd42).toMatch(/^Неверная команда/);
+  expect(empty).toBe('Неверное сообщение для ядра');
+  expect(init).toBe('Ядро уже запущено: повторный init пропущен');
+  // Ядро работает дальше.
+  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'view.zoom_in' }));
+  const l = await liveWhen(page, 'l.zoom > 0.5');
+  expect(l.nodes).toBe(1000);
+  expect((await errors()).filter((m) => m.startsWith('Ядро остановлено'))).toEqual([]);
+});
+
 // Сбои worker'а не должны вешать запуск и не должны быть тихими.
 test.describe('сбои worker\'а', () => {
   test('ядро не загрузилось: плашка показывает причину, start не висит', async ({ page }) => {
     await page.route('**/*.wasm', (route) => route.fulfill({ status: 200, contentType: 'application/wasm', body: 'не wasm' }));
     await page.goto('/?nodes=10');
-    await expect(page.locator('#hud')).toContainText('Ядро не запустилось', { timeout: 20_000 });
+    // Причина — ошибка компиляции wasm, а не только «не запустилось».
+    await expect(page.locator('#hud')).toHaveText(/^Ядро не запустилось: WebAssembly\.\w+\(\): expected magic word/, {
+      timeout: 20_000,
+    });
     expect(await page.evaluate(() => window.__ferrum === undefined)).toBe(true);
   });
 
@@ -189,7 +216,9 @@ test.describe('сбои worker\'а', () => {
       route.fulfill({ status: 200, contentType: 'text/javascript', body: 'это не javascript (' }),
     );
     await page.goto('/?nodes=10');
-    await expect(page.locator('#hud')).toContainText('Ядро не запустилось', { timeout: 20_000 });
+    await expect(page.locator('#hud')).toHaveText('Ядро не запустилось: скрипт worker\'а не загрузился', {
+      timeout: 20_000,
+    });
   });
 
   test('сбой после запуска приходит событием error и попадает на плашку', async ({ page }) => {

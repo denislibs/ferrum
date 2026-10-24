@@ -37,8 +37,10 @@ const mb = (n: number) => Math.ceil(n / (1024 * 1024));
 
 /** Текст ошибки, если команда не годится к отправке (байты больше предела, не
  * `Uint8Array` или лежат в общей памяти); `null` — можно слать. Проверку делают
- * обе стороны: команды из основного потока не доверенные. */
+ * обе стороны: команды из основного потока не доверенные. Не объект — тоже
+ * `null`: форму целиком проверяет разбор команды в ядре («Неверная команда»). */
 export function commandSizeError(cmd: Command): string | null {
+  if (typeof cmd !== 'object' || cmd === null) return null;
   if (cmd.type !== 'open' && cmd.type !== 'paste' && cmd.type !== 'placeImage') return null;
   const bytes = (cmd as { bytes: unknown }).bytes;
   if (!(bytes instanceof Uint8Array)) return 'Неверная команда: байты должны быть Uint8Array.';
@@ -59,10 +61,19 @@ export function commandSizeError(cmd: Command): string | null {
 export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transferable[] } | { error: string } {
   const error = commandSizeError(cmd);
   if (error) return { error };
-  if (!('bytes' in cmd)) return { cmd, transfer: [] };
+  if (typeof cmd !== 'object' || cmd === null || !('bytes' in cmd)) return { cmd, transfer: [] };
   let bytes = cmd.bytes as unknown as Uint8Array;
   if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) bytes = bytes.slice();
   return { cmd: { ...cmd, bytes } as Command, transfer: [bytes.buffer as ArrayBuffer] };
+}
+
+/** Виды сообщений worker'у: остальное — неверный конверт. */
+export const TO_WORKER_KINDS: ReadonlySet<string> = new Set(['init', 'cmd', 'tick']);
+
+/** Конверт сообщения worker'у: объект известного вида. Содержимое команды
+ * проверяет ядро. */
+export function isToWorker(m: unknown): m is ToWorker {
+  return typeof m === 'object' && m !== null && TO_WORKER_KINDS.has((m as { t?: unknown }).t as string);
 }
 
 export type FromWorker =
