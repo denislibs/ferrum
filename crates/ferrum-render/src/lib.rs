@@ -4,6 +4,7 @@
 
 mod backend;
 mod camera;
+mod clock;
 mod display;
 mod draw;
 #[cfg(feature = "gpu")]
@@ -18,6 +19,9 @@ use kurbo::{Affine, Rect};
 
 pub use backend::{CpuBackend, ImagePaint, RenderBackend, Rgba};
 pub use camera::{Camera, MAX_DEVICE_PIXELS, MAX_DEVICE_SIDE, MAX_ZOOM, MIN_ZOOM};
+#[cfg(not(target_arch = "wasm32"))]
+pub use clock::StdClock;
+pub use clock::{default_clock, Clock};
 pub use draw::{
     FrameStats, EVICT_AFTER_FRAMES, LOD_RECT_PX, LOD_SKIP_PX, RASTER_BUILDS_PER_FRAME,
     RASTER_BUILD_TIME_PER_FRAME, RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
@@ -78,6 +82,13 @@ impl Renderer {
     /// `RASTER_BUILDS_PER_FRAME`: число кадров прогрева не зависит от скорости машины.
     pub fn set_raster_build_time(&mut self, budget: Option<std::time::Duration>) {
         self.painter.set_raster_time(budget);
+    }
+
+    /// Часы для предела времени на растры. По умолчанию нативно — `StdClock`, в
+    /// wasm32 часов нет (там `Instant` паникует) и работает только счётный предел,
+    /// пока `ferrum-wasm` не поставит `performance.now()`.
+    pub fn set_clock(&mut self, clock: Option<Box<dyn Clock>>) {
+        self.painter.set_clock(clock);
     }
 
     /// Сколько байт сейчас занимает растровый кэш фреймов.
