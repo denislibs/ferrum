@@ -1,5 +1,6 @@
 // Сборка ядра для браузера: cargo (wasm32, release) → wasm-bindgen → src/wasm.
 // Каталог сборки — CARGO_TARGET_DIR, если задан (у каждой копии репозитория свой).
+// `--locked`: версии зависимостей — ровно из Cargo.lock, сборка их не обновляет.
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -16,10 +17,23 @@ if (version !== `wasm-bindgen ${WASM_BINDGEN}`) {
   console.error(`Установите: cargo install wasm-bindgen-cli --version ${WASM_BINDGEN} --locked`);
   process.exit(1);
 }
+// SIMD128 включает `.cargo/config.toml` (`target.wasm32-unknown-unknown.rustflags`),
+// но заданный RUSTFLAGS (или CARGO_ENCODED_RUSTFLAGS) cargo берёт вместо него, и
+// ядро молча собралось бы без SIMD. Флаг дописывается к заданным.
+const SIMD = ['-C', 'target-feature=+simd128'];
+const env = { ...process.env };
+for (const [name, sep] of [['CARGO_ENCODED_RUSTFLAGS', '\x1f'], ['RUSTFLAGS', ' ']]) {
+  const value = env[name];
+  if (value === undefined || value.trim() === '') continue;
+  if (!value.includes('+simd128')) {
+    console.warn(`${name} задан («${value}»): cargo не возьмёт флаги из .cargo/config.toml, SIMD128 дописан.`);
+    env[name] = [value, ...SIMD].join(sep);
+  }
+}
 execFileSync(
   'cargo',
-  ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'ferrum-wasm'],
-  { cwd: root, stdio: 'inherit' },
+  ['build', '--release', '--locked', '--target', 'wasm32-unknown-unknown', '-p', 'ferrum-wasm'],
+  { cwd: root, stdio: 'inherit', env },
 );
 execFileSync(
   'wasm-bindgen',

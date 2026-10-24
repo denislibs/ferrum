@@ -19,9 +19,15 @@ const MAIN_BUDGET_MS = 4;
 /** 60 fps: 95-й процентиль времени кадра worker'а (спека 3). */
 const WORKER_P95_MS = 16.7;
 
+/** Длинная задача основного потока: начало от старта замера и длительность, мс. */
+interface LongTask {
+  startMs: number;
+  durationMs: number;
+}
+
 interface Sample {
   backend: string;
-  longTasks: number[];
+  longTasks: LongTask[];
   mainMaxMs: number;
   mainP95Ms: number;
   mainFrames: number;
@@ -31,6 +37,7 @@ interface Sample {
   workerMax: number;
   openMs: number;
   dropped: number;
+  /** Наибольшее число картинок в атласе GPU за замер (растры фреймов при зуме). */
   atlasImages: number;
   atlasMisses: number;
   minZoom: number;
@@ -114,11 +121,13 @@ async function measure(page: Page, query: string): Promise<Sample> {
     const w = window as unknown as { __frameMs: number[] };
     w.__frameMs = [];
     let seen = window.__ferrum!.core.live!.frames;
-    const z = window as unknown as { __minZoom: number };
+    const z = window as unknown as { __minZoom: number; __atlasMax: number };
     z.__minZoom = Infinity;
+    z.__atlasMax = 0;
     const tick = () => {
       const l = window.__ferrum!.core.live!;
       z.__minZoom = Math.min(z.__minZoom, l.zoom);
+      z.__atlasMax = Math.max(z.__atlasMax, l.atlasImages);
       if (l.frames !== seen) {
         seen = l.frames;
         w.__frameMs.push(l.frameMs);
@@ -140,7 +149,9 @@ async function measure(page: Page, query: string): Promise<Sample> {
     const pick = (q: number) => (frames.length ? frames[Math.min(frames.length - 1, Math.round((frames.length - 1) * q))] : 0);
     return {
       backend: core.backend ?? 'none',
-      longTasks: w.__longTasks.filter((t) => t.start >= start && t.duration > 50).map((t) => Math.round(t.duration)),
+      longTasks: w.__longTasks
+        .filter((t) => t.start >= start && t.duration > 50)
+        .map((t) => ({ startMs: Math.round(t.start - start), durationMs: Math.round(t.duration) })),
       mainMaxMs: main.maxMs,
       mainP95Ms: main.p95Ms,
       mainFrames: main.frames,
@@ -150,7 +161,7 @@ async function measure(page: Page, query: string): Promise<Sample> {
       workerMax: frames.length ? frames[frames.length - 1] : 0,
       openMs: 0,
       dropped: core.droppedInput(),
-      atlasImages: core.live!.atlasImages,
+      atlasImages: (window as unknown as { __atlasMax: number }).__atlasMax,
       atlasMisses: core.live!.atlasMisses,
       minZoom: (window as unknown as { __minZoom: number }).__minZoom,
     };
@@ -177,6 +188,10 @@ for (const backend of ['auto', 'webgpu', 'webgl', 'cpu'] as const) {
     // Зум дошёл до всей страницы: растровый кэш фреймов был в работе.
     expect(s.minZoom).toBeLessThan(0.05);
     expect(s.atlasMisses, 'картинкам не хватило места в атласе').toBe(0);
+    // На GPU растры фреймов рисуются из атласа: без картинок в нём замер не тот.
+    if (s.backend === 'webgpu' || s.backend === 'webgl') {
+      expect(s.atlasImages, 'атлас GPU пуст: растры фреймов не дошли до GPU').toBeGreaterThan(0);
+    }
     if (s.backend === 'cpu' || s.backend === 'webgl') {
       expect(s.workerP95, 'p95 кадра worker\'а').toBeLessThanOrEqual(WORKER_P95_MS);
     }
