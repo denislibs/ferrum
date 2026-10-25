@@ -11,7 +11,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { gotoDebug, live, screen } from './helpers';
+import { gotoDebug, live, liveWhen, screen } from './helpers';
 
 const NODES = 100_000;
 /** Бюджет основного потока на кадр (спека 4.2). */
@@ -197,3 +197,102 @@ for (const backend of ['auto', 'webgpu', 'webgl', 'cpu'] as const) {
     }
   });
 }
+
+// --- Интерфейс (этап 5) -------------------------------------------------------
+//
+// Редактор с панелями на 100 000 узлах: дерево слоёв раскрыто на десяти фреймах,
+// выделено 1000 строк (10 фреймов и 990 их детей), панель свойств показывает
+// сводку выделения. 3 секунды выделение перетаскивается на холсте, а дерево
+// слоёв прокручивается. Ворота: длинных задач нет, основной поток (обработчики,
+// планировщик, обновления Solid) — не дольше 4 мс за кадр, в DOM дерева — только
+// окно строк, панель получает живые значения жеста.
+
+/** Наибольшее окно строк: экран 900 px / 28 px + запас по 10 строк сверху и снизу. */
+const MAX_TREE_ROWS = Math.ceil(900 / 28) + 20 + 1;
+
+test('интерфейс на 100 000 узлах: перетаскивание 1000 выделенных и прокрутка слоёв @perf', async ({ page }, info) => {
+  test.skip(info.project.name !== 'chromium', 'замер интерфейса — в проекте chromium');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => {
+    const w = window as unknown as { __longTasks: { start: number; duration: number }[] };
+    w.__longTasks = [];
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) w.__longTasks.push({ start: e.startTime, duration: e.duration });
+    }).observe({ type: 'longtask', buffered: true });
+  });
+  await page.goto(`/?nodes=${NODES}`);
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 120_000 });
+  const tree = page.getByRole('tree', { name: 'Слои' });
+  // Раскрыть десять верхних фреймов («Экран 999» … «Экран 990»): первый — кнопкой
+  // строки, остальные — той же командой (их строки уходят за окно списка).
+  await tree.getByRole('treeitem', { name: 'Экран 999', exact: true }).getByRole('button', { name: 'Развернуть' }).click();
+  await page.evaluate(() => {
+    const rows = window.__ferrum!.ui!.layers.rows.filter((r) => r.depth === 0).slice(0, 10);
+    for (const r of rows) window.__ferrum!.core.send({ type: 'expandLayer', id: r.id, expanded: true });
+  });
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.layers.total)).toBe(1000 + 990);
+  // Выделить строки 0 … 999 (10 фреймов и 990 их детей): первая — щелчком,
+  // последняя («Слой 0» фрейма «Экран 990») — с Shift после прокрутки.
+  await tree.getByRole('treeitem', { name: 'Экран 999', exact: true }).click();
+  await tree.evaluate((el) => (el.scrollTop = 999 * 28 - 400));
+  const last = tree.locator(`[role="treeitem"][style*="top: ${999 * 28}px"]`);
+  await expect(last).toHaveAccessibleName('Слой 0');
+  await last.click({ modifiers: ['Shift'] });
+  await liveWhen(page, 'l.selectionCount === 1000');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.summary?.count)).toBe(1000);
+  // Выделение — в кадр, затем жест из центра холста (внутри общей рамки).
+  await page.locator('canvas').focus();
+  await page.keyboard.press('Shift+Digit2');
+  await page.waitForTimeout(500);
+  const box = (await page.locator('canvas').boundingBox())!;
+  const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const start = await page.evaluate(() => {
+    window.__ferrum!.core.resetMainThreadStats();
+    return performance.now();
+  });
+  const steps0 = (await live(page)).steps;
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  let maxRows = 0;
+  // Значения живого состояния, которые дошли до панели (общая рамка выделения).
+  const liveX = new Set<number>();
+  const end = Date.now() + 3000;
+  for (let i = 0; Date.now() < end; i++) {
+    await page.mouse.move(from.x + (i % 60) * 3, from.y + Math.sin(i / 8) * 30);
+    // Прокрутка дерева слоёв во время жеста.
+    const rows = await tree.evaluate((el, i) => {
+      el.scrollTop = ((i * 37) % 900) * 28;
+      return el.querySelectorAll('[role="treeitem"]').length;
+    }, i);
+    maxRows = Math.max(maxRows, rows);
+    liveX.add(await page.evaluate(() => window.__ferrum!.ui!.live.x));
+    await page.waitForTimeout(16);
+  }
+  await page.mouse.up();
+  const after = await liveWhen(page, `l.steps === ${steps0 + 1} && l.busy === 0`);
+  const sample = await page.evaluate((start) => {
+    const w = window as unknown as { __longTasks: { start: number; duration: number }[] };
+    const main = window.__ferrum!.core.mainThreadStats();
+    return {
+      longTasks: w.__longTasks
+        .filter((t) => t.start >= start && t.duration > 50)
+        .map((t) => ({ startMs: Math.round(t.start - start), durationMs: Math.round(t.duration) })),
+      mainMaxMs: main.maxMs,
+      mainP95Ms: main.p95Ms,
+      mainFrames: main.frames,
+      dropped: window.__ferrum!.core.droppedInput(),
+    };
+  }, start);
+  const out = path.join(info.project.outputDir, 'perf-ui.json');
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, JSON.stringify({ ...sample, maxRows, liveX: liveX.size }, null, 2));
+  console.log(`perf ui: ${JSON.stringify({ ...sample, maxRows, liveX: liveX.size })}`);
+  expect(after.nodes).toBe(NODES);
+  expect(sample.mainFrames).toBeGreaterThan(100);
+  expect(sample.longTasks, 'длинные задачи в основном потоке').toEqual([]);
+  expect(sample.mainMaxMs, 'обработчики, планировщик и Solid за кадр').toBeLessThanOrEqual(MAIN_BUDGET_MS);
+  expect(sample.dropped).toBe(0);
+  expect(maxRows, 'строк дерева в DOM').toBeLessThanOrEqual(MAX_TREE_ROWS);
+  // Рамка выделения во время жеста доходила до интерфейса из общей памяти.
+  expect(liveX.size, 'живые значения жеста в панели').toBeGreaterThan(10);
+});
