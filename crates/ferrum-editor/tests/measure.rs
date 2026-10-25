@@ -552,3 +552,78 @@ fn rotated_objects_use_world_bounds() {
     // Ближний край T — левый край его рамки в мире, а не угол повёрнутого квадрата.
     assert_eq!(m[0].line.p1.x, wb.x0);
 }
+
+#[test]
+fn no_measurements_during_panel_gesture() {
+    let mut h = H::new();
+    let f = h.frame(None, 0.0, 0.0, 400.0, 300.0);
+    let s = h.rect(Some(f), 100.0, 50.0, 80.0, 40.0);
+    select_and_alt(&mut h, s);
+    h.alt_hover(700.0, 600.0);
+    assert_eq!(h.measures().len(), 4);
+    // Перетаскивание подписи поля X (Alt — шаг ×0.1): жест панели, превью в сцене.
+    let edit = |value| PanelEdit::Number {
+        field: NumField::X,
+        value,
+        relative: false,
+    };
+    h.ed.edit_selection(&edit(101.5), Phase::Preview);
+    assert_eq!(h.measures(), [], "во время жеста панели измерений нет");
+    h.ed.edit_selection(&edit(102.0), Phase::Preview);
+    assert_eq!(h.measures(), []);
+    h.ed.edit_selection(&edit(102.0), Phase::Commit);
+    // Жест закончен, Alt всё ещё нажат — измерения от сдвинутого узла.
+    assert_eq!(h.measures()[0], d((102.0, 70.0), (0.0, 70.0), 102.0));
+}
+
+#[test]
+fn camera_change_retargets_hover_and_measurements() {
+    let mut h = H::new();
+    let s = h.rect(None, 100.0, 100.0, 80.0, 40.0);
+    let b = h.rect(None, 300.0, 120.0, 60.0, 60.0);
+    let c = h.rect(None, 300.0, 300.0, 60.0, 60.0);
+    select_and_alt(&mut h, s);
+    h.alt_hover(330.0, 150.0);
+    assert_eq!(h.ed.overlay().hover, Some(b));
+    let cam = h.ed.camera().clone();
+    // Колесо сдвигает холст на 180 вниз по миру: под тем же курсором теперь C.
+    h.ev(Input::Wheel(WheelEvent {
+        point: kurbo::Point::new(330.0, 150.0),
+        delta: kurbo::Vec2::new(0.0, 180.0),
+        modifiers: ALT,
+    }));
+    assert_eq!(
+        h.ed.overlay().hover,
+        Some(c),
+        "наведение следует за камерой"
+    );
+    let sr = Rect::new(100.0, 100.0, 180.0, 140.0);
+    assert_eq!(
+        h.measures(),
+        measure(sr, Rect::new(300.0, 300.0, 360.0, 360.0))
+    );
+    // Камера целиком (восстановление вида) — по последней точке указателя.
+    h.ed.set_camera(cam);
+    assert_eq!(h.ed.overlay().hover, Some(b));
+    assert_eq!(h.measures(), [d((180.0, 130.0), (300.0, 130.0), 120.0)]);
+}
+
+#[test]
+fn guide_only_when_line_misses_target_edge() {
+    let mut h = H::new();
+    // Горизонтальная линия (рамка нулевой высоты) на уровне верхнего края T: линия
+    // приходит прямо в угол T, направляющая вдоль всего края не нужна.
+    let s = h.add(None, NodeKind::Line, patch(100.0, 100.0, 80.0, 0.0));
+    h.rect(None, 300.0, 100.0, 60.0, 100.0);
+    select_and_alt(&mut h, s);
+    h.alt_hover(330.0, 150.0);
+    assert_eq!(h.measures(), [d((180.0, 100.0), (300.0, 100.0), 120.0)]);
+    // То же для вертикальной линии у левого края T снизу.
+    assert_eq!(
+        measure(
+            Rect::new(300.0, 300.0, 300.0, 380.0),
+            Rect::new(300.0, 100.0, 400.0, 160.0)
+        ),
+        [d((300.0, 300.0), (300.0, 160.0), 140.0)]
+    );
+}

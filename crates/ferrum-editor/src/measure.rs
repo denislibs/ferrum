@@ -83,7 +83,9 @@ pub fn measure(s: Rect, t: Rect) -> Vec<Measure> {
             (s.x0, t.x1)
         };
         let y = if oy { my } else { c.y };
-        if distance(&mut out, Line::new((a, y), (b, y))) && !oy {
+        // Направляющая — только если линия проходит мимо края T (у S нулевой высоты
+        // на уровне края T линия и так приходит в его угол).
+        if distance(&mut out, Line::new((a, y), (b, y))) && (y < t.y0 || y > t.y1) {
             let edge = if y < t.y0 { t.y0 } else { t.y1 };
             guide(&mut out, Line::new((b, y), (b, edge)));
         }
@@ -95,7 +97,7 @@ pub fn measure(s: Rect, t: Rect) -> Vec<Measure> {
             (s.y0, t.y1)
         };
         let x = if ox { mx } else { c.x };
-        if distance(&mut out, Line::new((x, a), (x, b))) && !ox {
+        if distance(&mut out, Line::new((x, a), (x, b))) && (x < t.x0 || x > t.x1) {
             let edge = if x < t.x0 { t.x0 } else { t.x1 };
             guide(&mut out, Line::new((x, b), (edge, b)));
         }

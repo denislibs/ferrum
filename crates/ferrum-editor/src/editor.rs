@@ -18,7 +18,7 @@ use kurbo::{Point, Size, Vec2};
 
 use crate::commands::CommandId;
 use crate::geometry::world_box;
-use crate::input::{Input, KeyEvent, Platform, PointerButton, PointerEvent, WheelEvent};
+use crate::input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 use crate::keymap::Keymap;
 use crate::measure::{measure, AltState, MeasureCache};
 use crate::panel::PanelGesture;
@@ -302,12 +302,14 @@ impl Editor {
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
         self.refresh_gesture();
+        self.rehover(None, None);
         self.emit();
     }
 
     pub fn set_viewport(&mut self, viewport: Size, dpr: f64) {
         self.camera.set_viewport(viewport);
         self.camera.set_dpr(dpr);
+        self.rehover(None, None);
         self.emit();
     }
 
@@ -407,6 +409,7 @@ impl Editor {
             Input::Pinch { point, scale } => {
                 self.camera.zoom_at(point, scale);
                 self.refresh_gesture();
+                self.rehover(Some(point), None);
             }
             Input::KeyDown(e) => self.key_down(e),
             Input::KeyUp(e) => self.key_up(e),
@@ -485,6 +488,7 @@ impl Editor {
             self.camera.pan_by(-d);
         }
         self.refresh_gesture();
+        self.rehover(Some(e.point), Some(e.modifiers));
     }
 
     /// Камера сдвинулась во время жеста: та же экранная точка теперь над другим
@@ -494,6 +498,30 @@ impl Editor {
             let (tool, mut cx) = self.split();
             tool.pointer_move(&mut cx, &e);
         }
+    }
+
+    /// Камера сменилась без жеста: под неподвижным указателем теперь другое место
+    /// мира — наведение (а с ним обводка и измерения с Alt) пересчитывается тем же
+    /// hit-test, что и при движении. Точка — из колеса или щипка, иначе последняя
+    /// точка указателя. Наведение есть только у «Перемещения».
+    fn rehover(&mut self, point: Option<Point>, modifiers: Option<Modifiers>) {
+        if self.is_busy() || self.tool.kind() != ToolKind::Move {
+            return;
+        }
+        let mut e = match (self.last_pointer, point) {
+            (Some(e), _) => e,
+            (None, Some(p)) => PointerEvent::new(p, Modifiers::NONE, 0.0),
+            (None, None) => return,
+        };
+        if let Some(p) = point {
+            e.point = p;
+        }
+        if let Some(m) = modifiers {
+            e.modifiers = m;
+        }
+        self.last_pointer = Some(e);
+        let (tool, mut cx) = self.split();
+        tool.pointer_move(&mut cx, &e);
     }
 
     fn key_down(&mut self, e: KeyEvent) {
@@ -724,7 +752,8 @@ impl Editor {
 
     /// Измерения с Alt (раздел 7.3 спеки): от рамки выделения до наведённого
     /// объекта, а без него или над родительским фреймом — до этого фрейма. Только
-    /// у «Перемещения» без жеста и не над ручками рамки; над выделенным — ничего.
+    /// у «Перемещения» без жеста холста или панели и не над ручками рамки; над
+    /// выделенным — ничего.
     /// На движение — O(1): выделение берётся из кэша, наведённый — по слоту.
     fn update_measures(&mut self) {
         let over_box = matches!(
@@ -733,6 +762,7 @@ impl Editor {
         );
         if !self.alt.held()
             || self.is_busy()
+            || self.panel.is_some()
             || self.tool.kind() != ToolKind::Move
             || self.selection.is_empty()
             || over_box
