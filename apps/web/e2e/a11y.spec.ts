@@ -177,14 +177,27 @@ test('prefers-reduced-motion: ни у одного элемента нет ан�
   await openApp(page);
   await page.getByRole('treeitem', { name: 'Экран 9', exact: true }).click();
   await page.getByRole('button', { name: 'Меню файла' }).click();
-  const moving = await page.evaluate(() =>
-    Array.from(document.querySelectorAll<HTMLElement>('body *'))
-      .filter((el) => {
-        const s = getComputedStyle(el);
-        const dur = (v: string) => v.split(',').some((x) => parseFloat(x) > 0.001);
-        return (s.animationName !== 'none' && dur(s.animationDuration)) || dur(s.transitionDuration);
-      })
-      .map((el) => el.className.toString().slice(0, 40)),
-  );
-  expect(moving).toEqual([]);
+  const scan = () =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('body *'))
+        .filter((el) => {
+          const s = getComputedStyle(el);
+          const dur = (v: string) => v.split(',').some((x) => parseFloat(x) > 0.001);
+          return (s.animationName !== 'none' && dur(s.animationDuration)) || dur(s.transitionDuration);
+        })
+        .map((el) => el.className.toString().slice(0, 40)),
+    );
+  // Открыта анимированная поверхность (меню) и палитра — и всё равно ничего не движется.
+  await page.getByRole('menu').waitFor();
+  expect(await scan()).toEqual([]);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Цвет заливки' }).click();
+  await expect(page.getByRole('dialog', { name: 'Цвет заливки' })).toBeVisible();
+  expect(await scan()).toEqual([]);
+  // Положительный контроль: без запроса уменьшить движение та же сканировка находит анимацию.
+  await page.keyboard.press('Escape');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('menu').waitFor();
+  expect((await scan()).length, 'сканировка видит анимацию меню').toBeGreaterThan(0);
 });

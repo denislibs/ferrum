@@ -214,11 +214,12 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   test.skip(info.project.name !== 'chromium', 'замер интерфейса — в проекте chromium');
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => {
-    const w = window as unknown as { __longTasks: { start: number; duration: number }[] };
+    const w = window as unknown as { __longTasks: { start: number; duration: number }[]; __longObs: PerformanceObserver };
     w.__longTasks = [];
-    new PerformanceObserver((list) => {
+    w.__longObs = new PerformanceObserver((list) => {
       for (const e of list.getEntries()) w.__longTasks.push({ start: e.startTime, duration: e.duration });
-    }).observe({ type: 'longtask', buffered: true });
+    });
+    w.__longObs.observe({ type: 'longtask', buffered: true });
   });
   await page.goto(`/?nodes=${NODES}`);
   await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 120_000 });
@@ -240,6 +241,12 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   await last.click({ modifiers: ['Shift'] });
   await liveWhen(page, 'l.selectionCount === 1000');
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.summary?.count)).toBe(1000);
+  // Панель свойств на этом окне видна и показывает выделение из 1000 слоёв.
+  const panel = page.locator('#panel-design');
+  await expect(panel).toBeInViewport();
+  const xField = panel.locator('input[aria-label="X"]');
+  await expect(xField).toBeVisible();
+  await expect(xField).toHaveValue('Смешанные');
   // Выделение — в кадр, затем жест из центра холста (внутри общей рамки).
   await page.locator('canvas').focus();
   await page.keyboard.press('Shift+Digit2');
@@ -247,6 +254,15 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   const box = (await page.locator('canvas').boundingBox())!;
   const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   const start = await page.evaluate(() => {
+    // Запросы окна строк, ушедшие ядру во время жеста.
+    const w = window as unknown as { __windowReqs: number };
+    w.__windowReqs = 0;
+    const core = window.__ferrum!.core;
+    const send = core.send.bind(core);
+    core.send = (cmd) => {
+      if (cmd.type === 'layersWindow') w.__windowReqs++;
+      send(cmd);
+    };
     window.__ferrum!.core.resetMainThreadStats();
     return performance.now();
   });
@@ -254,26 +270,43 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
   let maxRows = 0;
+  let minRows = Infinity;
+  /** Верх окна строк, пришедший от worker'а: прокрутка дерева дошла до ядра и обратно. */
+  const starts = new Set<number>();
+  /** Что показывает поле X панели во время жеста (из DOM). */
+  const shownX = new Set<string>();
   // Значения живого состояния, которые дошли до панели (общая рамка выделения).
   const liveX = new Set<number>();
   const end = Date.now() + 3000;
   for (let i = 0; Date.now() < end; i++) {
     await page.mouse.move(from.x + (i % 60) * 3, from.y + Math.sin(i / 8) * 30);
-    // Прокрутка дерева слоёв во время жеста.
-    const rows = await tree.evaluate((el, i) => {
-      el.scrollTop = ((i * 37) % 900) * 28;
-      return el.querySelectorAll('[role="treeitem"]').length;
-    }, i);
-    maxRows = Math.max(maxRows, rows);
-    liveX.add(await page.evaluate(() => window.__ferrum!.ui!.live.x));
+    // Прокрутка дерева слоёв во время жеста; строки читаются после отрисовки.
+    await tree.evaluate((el, i) => (el.scrollTop = ((i * 37) % 900) * 28), i);
     await page.waitForTimeout(16);
+    const seen = await page.evaluate(() => ({
+      rows: document.querySelectorAll('[role="tree"] [role="treeitem"]').length,
+      start: window.__ferrum!.ui!.layers.start,
+      live: window.__ferrum!.ui!.live.x,
+      x: document.querySelector<HTMLInputElement>('#panel-design input[aria-label="X"]')?.value ?? '',
+    }));
+    maxRows = Math.max(maxRows, seen.rows);
+    minRows = Math.min(minRows, seen.rows);
+    starts.add(seen.start);
+    liveX.add(seen.live);
+    shownX.add(seen.x);
   }
   await page.mouse.up();
   const after = await liveWhen(page, `l.steps === ${steps0 + 1} && l.busy === 0`);
   const sample = await page.evaluate((start) => {
     const w = window as unknown as { __longTasks: { start: number; duration: number }[] };
     const main = window.__ferrum!.core.mainThreadStats();
+    const w2 = w as unknown as { __longObs: PerformanceObserver };
+    // Записи, ещё не доставленные наблюдателю, тоже в счёт.
+    for (const e of w2.__longObs.takeRecords()) w.__longTasks.push({ start: e.startTime, duration: e.duration });
     return {
+      windowRequests: (window as unknown as { __windowReqs: number }).__windowReqs,
+      selectionCount: window.__ferrum!.ui!.selectionCount,
+      summaryCount: window.__ferrum!.ui!.summary?.count,
       longTasks: w.__longTasks
         .filter((t) => t.start >= start && t.duration > 50)
         .map((t) => ({ startMs: Math.round(t.start - start), durationMs: Math.round(t.duration) })),
@@ -285,14 +318,26 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   }, start);
   const out = path.join(info.project.outputDir, 'perf-ui.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify({ ...sample, maxRows, liveX: liveX.size }, null, 2));
-  console.log(`perf ui: ${JSON.stringify({ ...sample, maxRows, liveX: liveX.size })}`);
+  fs.writeFileSync(out, JSON.stringify({ ...sample, maxRows, minRows, layerStarts: starts.size, liveX: liveX.size, shownX: shownX.size }, null, 2));
+  console.log(`perf ui: ${JSON.stringify({ ...sample, maxRows, minRows, layerStarts: starts.size, liveX: liveX.size, shownX: [...shownX].slice(0, 5) })}`);
   expect(after.nodes).toBe(NODES);
   expect(sample.mainFrames).toBeGreaterThan(100);
   expect(sample.longTasks, 'длинные задачи в основном потоке').toEqual([]);
   expect(sample.mainMaxMs, 'обработчики, планировщик и Solid за кадр').toBeLessThanOrEqual(MAIN_BUDGET_MS);
   expect(sample.dropped).toBe(0);
   expect(maxRows, 'строк дерева в DOM').toBeLessThanOrEqual(MAX_TREE_ROWS);
+  // Прокрутка не вхолостую: строки были, окно сменилось много раз, запросы ушли ядру.
+  expect(minRows, 'дерево во время прокрутки не пустело').toBeGreaterThan(0);
+  expect(starts.size, 'разных окон строк от worker\'а').toBeGreaterThanOrEqual(10);
+  expect(sample.windowRequests, 'запросов окна строк за жест').toBeGreaterThan(10);
+  // Панель свойств всё время жеста — в состоянии выделения тысячи: поле X «Смешанные».
+  // Живые значения жеста панель показывает только для одного узла (`liveOne`), поэтому
+  // число разных значений в поле X здесь не проверить; они доходят до store (liveX выше).
+  expect([...shownX], 'поле X панели во время жеста').toEqual(['Смешанные']);
+  // Жест двигал именно выделенную тысячу.
+  expect(sample.selectionCount).toBe(1000);
+  expect(sample.summaryCount).toBe(1000);
+  expect(after.selectionCount).toBe(1000);
   // Рамка выделения во время жеста доходила до интерфейса из общей памяти.
   expect(liveX.size, 'живые значения жеста в панели').toBeGreaterThan(10);
 });
