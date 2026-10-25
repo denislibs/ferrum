@@ -359,3 +359,42 @@ test('перетаскивание: Esc отменяет, невалидная �
   await page.waitForTimeout(200);
   expect((await live(page)).steps).toBe(steps);
 });
+
+// ——— Fix round 2 ———
+
+test('событие страниц во время переименования не сбрасывает набранное', async ({ page }) => {
+  await openApp(page);
+  await page.getByRole('button', { name: 'Добавить страницу' }).click();
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  await expect(pages.getByRole('option')).toHaveCount(2);
+  await pages.getByRole('option', { name: /Страница 2/ }).dblclick();
+  const input = pages.getByRole('textbox', { name: 'Имя страницы' });
+  await input.fill('Набрано');
+  // Событие страниц, пока поле открыто: переименовать другую страницу через ядро.
+  await page.evaluate(() => {
+    const p = window.__ferrum!.ui!.pages.list[0];
+    window.__ferrum!.core.send({ type: 'renamePage', id: p.id, name: 'Первая' });
+  });
+  await expect(pages.getByRole('option', { name: /Первая/ })).toBeVisible();
+  await expect(input).toHaveValue('Набрано');
+  await input.press('Enter');
+  await expect(pages.getByRole('option', { name: /Набрано/ })).toBeVisible();
+});
+
+test('событие слоёв во время переименования не сбрасывает набранное', async ({ page }) => {
+  await openApp(page);
+  await row(page, 'Экран 9').dblclick();
+  const input = tree(page).getByRole('textbox', { name: 'Имя слоя' });
+  await input.fill('Набрано');
+  const seq = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.length);
+  expect(seq).toBeGreaterThan(0);
+  // Выделение другого слоя через ядро: приходит событие слоёв с новыми объектами.
+  await page.evaluate(() => {
+    const r = window.__ferrum!.ui!.layers.rows[3];
+    window.__ferrum!.core.send({ type: 'select', ids: [r.id], mode: 'replace' });
+  });
+  await expect(row(page, 'Экран 6')).toHaveAttribute('aria-selected', 'true');
+  await expect(input).toHaveValue('Набрано');
+  await input.press('Enter');
+  await expect(row(page, 'Набрано')).toBeVisible();
+});

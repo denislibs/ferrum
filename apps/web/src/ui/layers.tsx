@@ -5,7 +5,7 @@
 // порядка и вложенности, кнопки «скрыть» и «заблокировать», наведение
 // подсвечивает узел на холсте, выделение синхронно в обе стороны.
 
-import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import type { DropPosition, LayerRow, NodeType } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { Icon, type IconName } from './icons';
@@ -447,7 +447,8 @@ export function LayersPanel() {
                         class="fe-rename fe-layer__rename"
                         aria-label="Имя слоя"
                         maxlength={MAX_NAME_CHARS}
-                        value={row().name}
+                        // Набранное поле не перезаписывается событиями: имя берётся один раз.
+                        value={untrack(() => row().name)}
                         onPointerDown={(e) => e.stopPropagation()}
                         onKeyDown={(e) => {
                           e.stopPropagation();

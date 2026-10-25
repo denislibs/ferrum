@@ -2,7 +2,7 @@
 // переключить. Операции со страницами в историю отмены не попадают, поэтому
 // удаление — только после подтверждения.
 
-import { createSignal, Index, Show } from 'solid-js';
+import { createSignal, Index, Show, untrack } from 'solid-js';
 import type { PageInfo } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { ConfirmDialog } from './dialog';
@@ -80,7 +80,7 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
                       class="fe-rename"
                       aria-label="Имя страницы"
                       maxlength={MAX_NAME_CHARS}
-                      value={page().name}
+                      value={untrack(() => page().name)}
                       ref={(el) =>
                         queueMicrotask(() => {
                           el.focus();
