@@ -14,7 +14,7 @@ pub use draw::{DrawTool, Shape};
 pub use hand::HandTool;
 pub use select::SelectTool;
 
-use ferrum_doc::{DocResult, Document, NodeId, PageId, Tx};
+use ferrum_doc::{Changes, DocResult, Document, NodeId, PageId, Tx};
 use ferrum_render::Camera;
 use ferrum_scene::Scene;
 use kurbo::{Line, Point, Rect};
@@ -148,7 +148,15 @@ pub(crate) struct Outbox {
     /// Шагов истории, созданных редактором (транзакции с изменениями).
     pub steps: u64,
     next_draft: u32,
+    /// Изменения, применённые к сцене текущей страницы с прошлого
+    /// `Editor::take_applied` (кэши потребителя, например имён слоёв, обновляются
+    /// по ним без полного обхода). Не больше `MAX_APPLIED`: при переполнении
+    /// старые отбрасываются, и потребитель видит пропуск по метке сцены.
+    pub applied: Vec<Changes>,
 }
+
+/// Сколько применённых пачек изменений копится до `Editor::take_applied`.
+pub const MAX_APPLIED: usize = 64;
 
 impl Ctx<'_> {
     pub fn scene(&self) -> &Scene {
@@ -239,6 +247,10 @@ pub(crate) fn sync(doc: &mut Document, page: PageId, scene: &mut Scene, out: &mu
         if p == page {
             if let Ok(pd) = doc.page(p) {
                 scene.apply(&changes, pd);
+                if out.applied.len() >= MAX_APPLIED {
+                    out.applied.clear();
+                }
+                out.applied.push(changes);
             }
         }
     }

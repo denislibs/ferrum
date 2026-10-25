@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use ferrum_doc::{DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
+use ferrum_doc::{Changes, DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
 use ferrum_render::{Camera, Overlay, OverlayTheme};
 use ferrum_scene::Scene;
 use kurbo::{Point, Size, Vec2};
@@ -266,6 +266,14 @@ impl Editor {
     /// Шагов истории, созданных редактором (жесты и команды с изменениями).
     pub fn step_count(&self) -> u64 {
         self.out.steps
+    }
+
+    /// Непустые изменения, применённые к сцене текущей страницы с прошлого вызова,
+    /// по порядку (правка, отмена и повтор, вставка, правка из панели). Новая сцена
+    /// (другая страница, пересборка) сюда не попадает: у неё другой
+    /// `Scene::generation`. Не больше `tools::MAX_APPLIED` последних.
+    pub fn take_applied(&mut self) -> Vec<Changes> {
+        std::mem::take(&mut self.out.applied)
     }
 
     /// Идёт ли жест (кнопка нажата).

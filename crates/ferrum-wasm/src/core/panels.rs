@@ -6,7 +6,7 @@
 use ferrum_doc::{Color, Fill, FillKind, NodeId, PageId, ScaleMode, Stroke, StrokeAlign};
 use ferrum_editor::{
     browser_reserved, frame_presets, BindError, CommandId, DropTarget, KeymapError, NumField,
-    PanelEdit, Phase, Shortcut, COMMANDS,
+    PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
 };
 use ferrum_render::decode_png;
 use ferrum_scene::shape::COORD_LIMIT;
@@ -20,10 +20,19 @@ use crate::protocol::{
 };
 use crate::summary::{summarize, MAX_PAINTS};
 
+/// Наибольший размер картинки из буфера обмена (`PasteImage`).
+pub const MAX_PASTE_BYTES: usize = 64 << 20;
+
+/// Имя для события: имя страницы или документа из файла может быть любой длины.
+pub(super) fn event_name(name: &str) -> String {
+    name.chars().take(MAX_NAME_CHARS).collect()
+}
+
 /// Имя файла экспорта: без знаков, которые не любят файловые системы.
 fn file_name(name: &str, scale: f64) -> String {
     let base: String = name
         .chars()
+        .take(MAX_NAME_CHARS)
         .map(|c| {
             if "/\\:*?\"<>|".contains(c) || c.is_control() {
                 '_'
@@ -309,6 +318,8 @@ impl Core {
                 }
             }
             Command::SetPageBackground { color: c, phase } => {
+                // Отмена жеста не читает цвет: неверный не должен оставить превью.
+                let c = if phase == EditPhase::Cancel { None } else { c };
                 let parsed = match c.as_deref().map(color).transpose() {
                     Ok(v) => v,
                     Err(m) => {
@@ -335,7 +346,9 @@ impl Core {
             Command::SetDocumentName { name } => {
                 if self.text(&name) {
                     match self.editor.set_document_name(&name) {
-                        Ok(name) => self.events.push(CoreEvent::DocumentName { name }),
+                        Ok(name) => self.events.push(CoreEvent::DocumentName {
+                            name: event_name(&name),
+                        }),
                         Err(e) => self.error(e.to_string()),
                     }
                 }
@@ -586,6 +599,10 @@ impl Core {
     }
 
     fn paste_image(&mut self, bytes: ByteBuf) {
+        if bytes.len() > MAX_PASTE_BYTES {
+            self.error("Не удалось вставить изображение: файл больше 64 МБ");
+            return;
+        }
         let Some(pixmap) = decode_png(&bytes) else {
             self.error("Не удалось вставить изображение: нужен PNG не больше 8192 px");
             return;
@@ -631,7 +648,7 @@ impl Core {
                 .into_iter()
                 .map(|(id, name)| PageInfo {
                     id: id.to_string(),
-                    name,
+                    name: event_name(&name),
                 })
                 .collect();
             let background = self.editor.page_background().map(|c| c.to_hex());

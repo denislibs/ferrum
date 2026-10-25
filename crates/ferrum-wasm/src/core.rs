@@ -193,6 +193,11 @@ impl Core {
         &self.editor
     }
 
+    /// Дерево слоёв панели (для тестов: кэши и счётчики).
+    pub fn layers(&self) -> &Layers {
+        &self.layers
+    }
+
     pub fn renderer_mut(&mut self) -> &mut Renderer {
         &mut self.renderer
     }
@@ -236,7 +241,7 @@ impl Core {
     fn push_opened(&mut self, warnings: Vec<String>) {
         let pages = self.editor.document().pages().len() as u32;
         let nodes = self.editor.scene().len() as u32;
-        let name = self.editor.document().name();
+        let name = panels::event_name(&self.editor.document().name());
         self.events.push(CoreEvent::Opened {
             pages,
             nodes,
@@ -393,6 +398,11 @@ impl Core {
 
     /// Переводит события редактора в события протокола.
     fn drain_editor(&mut self) {
+        // Кэш имён слоёв учитывает каждую применённую к сцене правку (иначе при
+        // активном поиске каждая правка обходила бы страницу заново). Строки и
+        // совпадения кэш пересобирает сам: их метка — `Scene::structure_stamp`.
+        let applied = self.editor.take_applied();
+        self.layers.note_applied(&applied, self.editor.scene());
         let mut document = false;
         // Выделение, как курсор и документ, — состояние: в пачке важно последнее.
         // Строки идентификаторов строятся один раз, для него, а не для каждого щелчка.
@@ -402,7 +412,6 @@ impl Core {
                 EditorEvent::NeedsRedraw => self.dirty = true,
                 EditorEvent::DocumentChanged => {
                     document = true;
-                    self.layers.invalidate();
                     self.ui.layers = true;
                     self.ui.properties = true;
                 }

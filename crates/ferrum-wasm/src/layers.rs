@@ -126,6 +126,9 @@ pub struct Layers {
     last: Option<LayerWindow>,
     /// Начало диапазона для выделения с Shift.
     anchor: Option<NodeId>,
+    /// Сколько раз кэш имён строился полным обходом страницы (для проверки, что
+    /// правки не роняют его).
+    name_scans: u64,
 }
 
 /// Имя узла в слоте в нижнем регистре; `None` — слот не занят.
@@ -205,6 +208,11 @@ impl Layers {
         &self.filter
     }
 
+    /// Сколько раз кэш имён строился полным обходом страницы.
+    pub fn name_scans(&self) -> u64 {
+        self.name_scans
+    }
+
     pub fn set_anchor(&mut self, id: Option<NodeId>) {
         self.anchor = id;
     }
@@ -246,16 +254,31 @@ impl Layers {
     /// прошлой сверкой и этим вызовом сцена менялась ещё (пропущенный вызов, превью
     /// имени), кэш имён сбрасывается.
     pub fn note_changes(&mut self, changes: &Changes, scene: &Scene) {
+        self.note_applied(std::slice::from_ref(changes), scene);
+    }
+
+    /// То же для нескольких `Scene::apply` подряд (пачка событий worker'а): метка
+    /// сцены должна сдвинуться ровно на их число, иначе кэш имён сбрасывается.
+    /// Имена берутся из сцены после всех правок, поэтому порядок пачек не важен.
+    pub fn note_applied(&mut self, applied: &[Changes], scene: &Scene) {
+        if applied.is_empty() {
+            return;
+        }
         let stamp = scene.structure_stamp();
         let in_step = self.generation == Some(scene.generation())
-            && self.names_stamp.is_some_and(|n| n + 1 == stamp);
+            && self
+                .names_stamp
+                .is_some_and(|n| n + applied.len() as u64 == stamp);
         if !in_step {
             // Сцена другая или пропущены шаги: следующий sync всё сбросит.
             self.generation = None;
             return;
         }
         if self.lower_full {
-            for id in changes.created.iter().chain(&changes.props) {
+            let ids = applied
+                .iter()
+                .flat_map(|c| c.created.iter().chain(&c.props));
+            for id in ids {
                 let Some(slot) = scene.slot(*id) else {
                     continue;
                 };
@@ -280,6 +303,7 @@ impl Layers {
         if self.lower_full {
             return;
         }
+        self.name_scans += 1;
         let mut stack: Vec<Slot> = scene.roots().to_vec();
         while let Some(s) = stack.pop() {
             if scene.is_draft_slot(s) {
