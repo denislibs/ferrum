@@ -21,6 +21,13 @@ function testMode(params: URLSearchParams): boolean {
   return params.has('debug') || (window as { __ferrumTest?: boolean }).__ferrumTest === true;
 }
 
+/** Замер производительности (`window.__ferrumPerf` до загрузки): ядро и планировщик
+ * доступны тесту, но без журнала событий и защиты чтений layout тестового режима —
+ * они сами стоят времени основного потока. */
+function perfHook(): boolean {
+  return (window as { __ferrumPerf?: boolean }).__ferrumPerf === true;
+}
+
 /** Запись журнала: тип и размер, но не сами данные (картинки и буфер обмена — до 64 МБ). */
 function note(e: CoreEvent): { type: string; size?: number; message?: string } {
   const n: { type: string; size?: number; message?: string } = { type: e.type };
@@ -94,8 +101,17 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     const l = core.live;
     if (l) return () => store.applyLive(l);
   });
-  window.__ferrum = { core, events: [], uiEvents: test ? uiEvents : undefined, ready: false, ui: store.state };
-  (window.__ferrum as unknown as { scheduler: typeof scheduler }).scheduler = scheduler;
+  // Ядро и планировщик — только тестам и замерам: в обычном режиме страница их не
+  // раскрывает (ни скриптам, ни расширениям). Готовность и состояние интерфейса — всегда.
+  const expose = test || perfHook();
+  window.__ferrum = {
+    core: expose ? core : undefined,
+    events: [],
+    uiEvents: test ? uiEvents : undefined,
+    ready: false,
+    ui: store.state,
+  } as unknown as NonNullable<Window['__ferrum']>;
+  if (expose) (window.__ferrum as unknown as { scheduler: typeof scheduler }).scheduler = scheduler;
   // Раскладка клавиатуры для подписей: приходит позже запуска и может смениться.
   const [layout, setLayout] = createSignal<LayoutMap>();
   const refreshLayout = () => void loadLayoutMap().then((m) => setLayout(() => m));

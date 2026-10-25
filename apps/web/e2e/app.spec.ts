@@ -124,6 +124,22 @@ test('в обычном режиме журнал событий не ведёт
   await page.goto('/?nodes=10');
   await page.waitForFunction(() => window.__ferrum?.ui?.ready === true);
   expect(await page.evaluate(() => [window.__ferrum!.events.length, window.__ferrum!.uiEvents])).toEqual([0, undefined]);
+  // Ядро и планировщик в обычном режиме не раскрыты.
+  expect(
+    await page.evaluate(() => {
+      const f = window.__ferrum as unknown as Record<string, unknown>;
+      return [f.core === undefined, f.scheduler === undefined];
+    }),
+  ).toEqual([true, true]);
+});
+
+test('замер (__ferrumPerf): ядро доступно, журнала и защиты layout нет', async ({ page }) => {
+  await page.addInitScript(() => ((window as { __ferrumPerf?: boolean }).__ferrumPerf = true));
+  await page.goto('/?nodes=10');
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true);
+  expect(await page.evaluate(() => [typeof window.__ferrum!.core?.send, window.__ferrum!.uiEvents])).toEqual(['function', undefined]);
+  await page.evaluate(() => document.querySelector('canvas')!.getBoundingClientRect());
+  expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings)).toBeUndefined();
 });
 
 test('сбой ядра после запуска виден пользователю один раз', async ({ page }) => {
