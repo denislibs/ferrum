@@ -720,29 +720,30 @@ test('«Скачать копию (.ferrum)» и «Открыть в новой 
 
 test('Ctrl/Cmd+S не открывает диалог сохранения страницы: на экране файлов и в поле панели', async ({ page }) => {
   await openFiles(page);
-  const prevented = () =>
-    page.evaluate(
-      () =>
-        new Promise<boolean>((resolve) => {
-          const on = (e: KeyboardEvent) => {
-            if (e.code !== 'KeyS') return;
-            window.removeEventListener('keydown', on);
-            setTimeout(() => resolve(e.defaultPrevented));
-          };
-          window.addEventListener('keydown', on);
-        }),
-    );
-  let p = prevented();
+  // Слушатель ставится до нажатия (и ждётся), результат читается после.
+  const listen = () =>
+    page.evaluate(() => {
+      const w = window as unknown as { __saveKey?: boolean };
+      delete w.__saveKey;
+      const on = (e: KeyboardEvent) => {
+        if (e.code !== 'KeyS') return;
+        window.removeEventListener('keydown', on);
+        setTimeout(() => (w.__saveKey = e.defaultPrevented));
+      };
+      window.addEventListener('keydown', on);
+    });
+  const prevented = () => page.evaluate(() => (window as unknown as { __saveKey?: boolean }).__saveKey);
+  await listen();
   await page.keyboard.press('ControlOrMeta+KeyS');
-  expect(await p).toBe(true);
+  await expect.poll(prevented).toBe(true);
   await page.getByRole('main').getByRole('button', { name: 'Новый файл' }).first().click();
   await editorReady(page);
   await drawRect(page);
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
   await page.getByRole('searchbox', { name: 'Поиск слоёв' }).focus();
-  p = prevented();
+  await listen();
   await page.keyboard.press('ControlOrMeta+KeyS');
-  expect(await p).toBe(true);
+  await expect.poll(prevented).toBe(true);
   // И сохраняет сразу (не через 2 с): фокус в поле, клавиша до ядра не дошла.
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified), { timeout: 1500 }).toBe(false);
 });
