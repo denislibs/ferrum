@@ -164,6 +164,40 @@ pub fn stroke_dto(s: &Stroke) -> StrokeDto {
     }
 }
 
+/// Допуск сравнения чисел: относительный, от большего из модулей (но не меньше
+/// единицы). Панель показывает числа с точностью заведомо грубее, поэтому
+/// различие меньше допуска — шум вычислений (`0.1 + 0.2` и `0.3`), а не «Смешанные».
+pub const MIXED_EPS: f64 = 1e-6;
+
+/// Равны ли числа с допуском `MIXED_EPS`.
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() <= MIXED_EPS * a.abs().max(b.abs()).max(1.0)
+}
+
+/// Равны ли углы в градусах с учётом оборота: 360 и 0, 180 и -180 — одно и то же.
+fn near_angle(a: f64, b: f64) -> bool {
+    near((a - b + 180.0).rem_euclid(360.0) - 180.0, 0.0)
+}
+
+fn fills_eq(a: &[Fill], b: &[Fill]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.kind == y.kind
+                && x.color == y.color
+                && x.image_hash == y.image_hash
+                && x.scale_mode == y.scale_mode
+                && x.visible == y.visible
+                && near(x.opacity, y.opacity)
+        })
+}
+
+fn strokes_eq(a: &[Stroke], b: &[Stroke]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.color == y.color && x.align == y.align && near(x.width, y.width))
+}
+
 /// Накопитель поля: первое значение и было ли отличие.
 struct Acc<T> {
     first: Option<T>,
@@ -179,16 +213,29 @@ impl<T> Default for Acc<T> {
     }
 }
 
-impl<T: PartialEq> Acc<T> {
-    fn add(&mut self, v: T) {
+impl<T> Acc<T> {
+    /// Добавить значение; `eq` решает, считать ли его равным первому.
+    fn add_by(&mut self, v: T, eq: impl Fn(&T, &T) -> bool) {
         match &self.first {
             None => self.first = Some(v),
             Some(f) => {
-                if !self.mixed && *f != v {
+                if !self.mixed && !eq(f, &v) {
                     self.mixed = true;
                 }
             }
         }
+    }
+}
+
+impl<T: PartialEq> Acc<T> {
+    fn add(&mut self, v: T) {
+        self.add_by(v, |a, b| a == b);
+    }
+}
+
+impl Acc<f64> {
+    fn add_num(&mut self, v: f64) {
+        self.add_by(v, |a, b| near(*a, *b));
     }
 }
 
@@ -205,13 +252,11 @@ impl Acc<f64> {
 pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
     let mut count = 0u32;
     let mut kind: Acc<NodeKind> = Acc::default();
-    let (mut x, mut y, mut w, mut h, mut rot) = (
-        Acc::default(),
-        Acc::default(),
-        Acc::default(),
-        Acc::default(),
-        Acc::default(),
-    );
+    let mut x: Acc<f64> = Acc::default();
+    let mut y: Acc<f64> = Acc::default();
+    let mut w: Acc<f64> = Acc::default();
+    let mut h: Acc<f64> = Acc::default();
+    let mut rot: Acc<f64> = Acc::default();
     let mut opacity: Acc<f64> = Acc::default();
     let mut radius: Acc<f64> = Acc::default();
     let mut clip: Acc<bool> = Acc::default();
@@ -230,25 +275,25 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
         count += 1;
         kind.add(p.kind);
         let pose = panel_pose(scene, slot);
-        x.add(pose.x);
-        y.add(pose.y);
-        w.add(pose.w);
+        x.add_num(pose.x);
+        y.add_num(pose.y);
+        w.add_num(pose.w);
         if field_applies(NumField::H, p.kind) {
-            h.add(pose.h);
+            h.add_num(pose.h);
         }
-        rot.add(pose.rotation);
-        opacity.add(p.opacity);
+        rot.add_by(pose.rotation, |a, b| near_angle(*a, *b));
+        opacity.add_num(p.opacity);
         if field_applies(NumField::CornerRadius, p.kind) {
-            radius.add(p.corner_radius);
+            radius.add_num(p.corner_radius);
         }
         if p.kind == NodeKind::Frame {
             clip.add(p.clip_content);
         }
         if p.kind != NodeKind::Group && p.kind != NodeKind::Line {
-            fills.add(&p.fills);
+            fills.add_by(&p.fills, |a, b| fills_eq(a, b));
         }
         if p.kind != NodeKind::Group {
-            strokes.add(&p.strokes);
+            strokes.add_by(&p.strokes, |a, b| strokes_eq(a, b));
         }
         if count == 1 {
             name = Some(p.name.chars().take(MAX_ROW_NAME_CHARS).collect::<String>());
@@ -308,7 +353,7 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
 
 /// Ключ актуальности сводки: экземпляр сцены, счётчик изменений (правки и превью
 /// жеста) и версия выделения. Пока он не изменился, сводка не пересчитывается.
-type CacheKey = (u64, u64, u64);
+type CacheKey = (u64, u64, u64, usize);
 
 /// Кэш сводки: во время жеста с тысячей выделенных узлов сводка считается только
 /// когда что-то поменялось, а не в каждом кадре.
@@ -323,9 +368,18 @@ impl SummaryCache {
         SummaryCache::default()
     }
 
-    /// Сводка выделения; `selection_version` — `Editor::selection_version`.
+    /// Сводка выделения. Контракт: `ids` — выделение, которому соответствует
+    /// `selection_version` (`Editor::selection_version`); при том же ключе
+    /// `(экземпляр сцены, счётчик изменений, версия выделения, число id)` возвращается
+    /// прежний результат, а `ids` не читаются. Число id — дешёвая страховка от
+    /// забытой версии выделения.
     pub fn get(&mut self, scene: &Scene, ids: &[NodeId], selection_version: u64) -> &Summary {
-        let key = (scene.generation(), scene.change_counter(), selection_version);
+        let key = (
+            scene.generation(),
+            scene.change_counter(),
+            selection_version,
+            ids.len(),
+        );
         if self.key != Some(key) || self.value.is_none() {
             self.value = Some(summarize(scene, ids));
             self.key = Some(key);
