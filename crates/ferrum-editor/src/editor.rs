@@ -318,6 +318,7 @@ impl Editor {
             snap_lines: t.snap_lines,
             frame_labels: true,
             pixel_grid: self.settings.pixel_grid,
+            measurements: Vec::new(),
         }
     }
 

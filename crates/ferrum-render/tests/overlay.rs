@@ -206,6 +206,9 @@ fn themes_follow_design_system() {
     assert_eq!(hex(dark.frame_label), [0xa9, 0xa3, 0x9c, 255]);
     assert_eq!(hex(light.frame_label), [0x65, 0x5f, 0x58, 255]);
     assert_eq!(hex(dark.handle_fill), [255, 255, 255, 255]);
+    // Измерения с Alt — `danger` дизайн-системы.
+    assert_eq!(hex(dark.measure), [0xff, 0x7a, 0x7a, 255]);
+    assert_eq!(hex(light.measure), [0xc2, 0x2c, 0x2c, 255]);
     assert_eq!(HANDLE_SIZE, 8.0);
 }
 
