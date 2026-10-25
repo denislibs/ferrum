@@ -459,3 +459,37 @@ test('переименование слоя применяется, когда �
   await pages.getByRole('option', { name: /Страница 1/ }).click();
   await expect(row(page, 'Главная')).toBeVisible();
 });
+
+// ——— Остатки повторного ревью ———
+
+for (const stop of ['lostpointercapture', 'blur', 'buttons'] as const) {
+  test(`застрявшее перетаскивание строки (${stop}) кончается: клавиши снова работают, ничего не перенесено`, async ({ page }) => {
+    await openApp(page);
+    await row(page, 'Экран 9').click();
+    const before = await liveWhen(page, 'l.selectionCount === 1');
+    const from = (await row(page, 'Экран 9').boundingBox())!;
+    const to = (await row(page, 'Экран 7').boundingBox())!;
+    await page.mouse.move(from.x + 60, from.y + 14);
+    await page.mouse.down();
+    await page.mouse.move(from.x + 60, to.y + 25, { steps: 6 });
+    await expect(row(page, 'Экран 7')).toHaveClass(/fe-layer--drop-below/);
+    // Захват потерян без pointerup (Cmd+Tab посреди жеста, системное окно).
+    await page.evaluate(
+      ({ stop, y }) => {
+        const el = document.querySelector<HTMLElement>('[role="treeitem"][aria-label="Экран 9"]')!;
+        if (stop === 'lostpointercapture') el.dispatchEvent(new PointerEvent('lostpointercapture', { pointerId: 1, bubbles: true }));
+        else if (stop === 'blur') window.dispatchEvent(new Event('blur'));
+        else el.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, isPrimary: true, buttons: 0, clientY: y, bubbles: true }));
+      },
+      { stop, y: to.y + 25 },
+    );
+    await expect(tree(page).locator('[class*="fe-layer--drop-"]')).toHaveCount(0);
+    // Клавиши снова доходят: Ctrl+A выделяет всё.
+    await page.keyboard.press('ControlOrMeta+a');
+    await liveWhen(page, 'l.selectionCount > 1');
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    expect((await names(page)).slice(0, 3)).toEqual(['Экран 9', 'Экран 8', 'Экран 7']);
+    expect((await live(page)).steps).toBe(before.steps);
+  });
+}

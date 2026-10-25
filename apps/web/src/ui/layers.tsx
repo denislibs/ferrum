@@ -215,6 +215,7 @@ export function LayersPanel() {
     setDrop(null);
     setDenied(false);
     window.removeEventListener('keydown', onDragKey, true);
+    window.removeEventListener('blur', endDrag);
   };
   /** Во время перетаскивания клавиши не действуют (Ctrl+A, Delete сменили бы, что
    * переносится); Esc отменяет жест — без переноса и шага. Ядру ничего не уходит. */
@@ -259,9 +260,17 @@ export function LayersPanel() {
   const onPointerMove = ed.core.costed((e: PointerEvent) => {
     if (!drag || treeTop === null) return;
     if (!drag.active && Math.abs(e.clientY - drag.y0) < DRAG_START_PX) return;
+    // Кнопку отпустили там, откуда pointerup не дошёл: жест кончился без броска.
+    if (e.buttons === 0) {
+      endDrag();
+      return;
+    }
     if (!drag.active) {
       drag.active = true;
+      // Клавиши глушатся только пока жест жив: окно потеряло фокус (Cmd+Tab) —
+      // жест кончается, иначе клавиатура осталась бы заглушённой.
       window.addEventListener('keydown', onDragKey, true);
+      window.addEventListener('blur', endDrag);
       // Как в Figma: невыделенная строка выделяется и переносится одна.
       if (!drag.selected) {
         ed.send({ type: 'select', ids: [drag.id], mode: 'replace' });
@@ -403,6 +412,9 @@ export function LayersPanel() {
                 onPointerMove={onPointerMove}
                 onPointerUp={(e) => onPointerUp(row(), e)}
                 onPointerCancel={endDrag}
+                // Захват отняли без pointerup: жест кончается без броска (после
+                // обычного отпускания `drag` уже пуст).
+                onLostPointerCapture={endDrag}
                 onFocus={() => setFocusedSig(row().id)}
                 onDblClick={() => startRename(row())}
                 onKeyDown={(e) => onKey(row(), index(), e)}
