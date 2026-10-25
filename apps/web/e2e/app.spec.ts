@@ -156,3 +156,34 @@ test('сбой ядра после запуска виден пользоват�
   await expect(page.locator('.fe-toast')).toHaveCount(0);
   expect(await page.evaluate(() => window.__ferrum!.ui!.toasts.length)).toBe(0);
 });
+
+test('экран запуска виден до загрузки приложения и уходит после готовности ядра', async ({ page }) => {
+  // Без бандла: заставка из index.html видна сразу, анимируется и подписана.
+  await page.route('**/assets/main-*.js', (r) => r.abort());
+  await page.goto('/');
+  const splash = page.locator('#fe-splash');
+  await expect(splash).toBeVisible();
+  await expect(splash).toHaveAttribute('role', 'status');
+  await expect(splash).toContainText('Запуск редактора');
+  const running = await page.evaluate(() =>
+    document.querySelector('.fe-splash__frame')!.getAnimations().length,
+  );
+  expect(running).toBeGreaterThan(0);
+
+  // С бандлом: после готовности ядра заставки в DOM нет.
+  await page.unroute('**/assets/main-*.js');
+  await openApp(page);
+  await expect(page.locator('#fe-splash')).toHaveCount(0);
+});
+
+test('экран запуска без анимаций при prefers-reduced-motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.route('**/assets/main-*.js', (r) => r.abort());
+  await page.goto('/');
+  await expect(page.locator('#fe-splash')).toBeVisible();
+  const running = await page.evaluate(() => document.getAnimations().length);
+  expect(running).toBe(0);
+  // Готовая картинка: фрейм с ручками и заливкой видна целиком.
+  const fill = await page.evaluate(() => getComputedStyle(document.querySelector('.fe-splash__fill')!).opacity);
+  expect(fill).toBe('1');
+});
