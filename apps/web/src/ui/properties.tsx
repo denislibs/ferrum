@@ -252,7 +252,7 @@ function ExportSection() {
   };
   return (
     <Section title="Экспорт">
-      <div class="fe-row">
+      <div class="fe-export">
         <div ref={group} class="fe-segmented" role="radiogroup" aria-label="Масштаб экспорта" onKeyDown={onKey}>
           <For each={SCALES}>
             {(k) => (
@@ -268,11 +268,9 @@ function ExportSection() {
             )}
           </For>
         </div>
-        <span class="fe-format t-num" aria-label="Формат">
-          PNG
-        </span>
+        <span class="fe-format t-num">PNG</span>
       </div>
-      <button class="fe-btn fe-btn--secondary fe-btn--wide" onClick={() => ed.send({ type: 'export', scale: scale() })}>
+      <button class="fe-btn fe-btn--soft fe-btn--wide" onClick={() => ed.send({ type: 'export', scale: scale() })}>
         <Icon name="download" />
         <span class="fe-ellipsis">Экспортировать {target()}</span>
       </button>

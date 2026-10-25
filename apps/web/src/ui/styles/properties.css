@@ -103,12 +103,38 @@
   color: var(--ink);
   box-shadow: 0 0 0 1px var(--line);
 }
+/* Формат — как поле панели: та же высота и подложка, что у переключателя масштаба. */
 .fe-format {
-  color: var(--ink-muted);
+  flex: 1;
+  display: flex;
+  align-items: center;
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.fe-export {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
 }
 .fe-btn--wide {
   width: 100%;
   justify-content: center;
+}
+/* Действие внутри секции: мягкая заливка как у полей, без контура. */
+.fe-btn--soft {
+  background: var(--surface-hover);
+}
+.fe-btn--soft:hover {
+  background: var(--line);
+}
+.fe-btn--soft:active {
+  background: var(--line-control);
+}
+.fe-btn--soft .fe-ico {
+  color: var(--ink-muted);
 }
 .fe-ellipsis {
   min-width: 0;
