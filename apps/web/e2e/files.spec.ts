@@ -521,7 +521,8 @@ test('вторая вкладка с тем же файлом: «Файл отк
   await other.evaluate(async (i) => {
     const s = window.__ferrumFiles!.store;
     const m = (await s.get(i))!;
-    await s.write(i, 'Чужая', new ArrayBuffer(8), null, m.version);
+    await s.write(i, new ArrayBuffer(8), null, m.version);
+    await s.rename(i, 'Чужая');
   }, id);
   await drawRect(page);
   await page.keyboard.press('ControlOrMeta+KeyS');
@@ -560,6 +561,9 @@ test('испорченная сохранённая раскладка не ме
 test('ядро остановилось с несохранёнными правками: уйти можно, но с вопросом; история без лишних записей', async ({ page }) => {
   await setup(page);
   await page.goto('/#/');
+  // История: файлы (0) → черновики (1) → файл (2).
+  await page.getByRole('listbox', { name: 'Разделы' }).getByRole('option', { name: 'Черновики' }).click();
+  await expect(page).toHaveURL(/#\/drafts$/);
   await page.getByRole('main').getByRole('button', { name: 'Новый файл' }).first().click();
   await editorReady(page);
   const id = fileId(page);
@@ -567,19 +571,102 @@ test('ядро остановилось с несохранёнными прав
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
   await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
   await expect(page.getByRole('alert')).toContainText('Ядро остановлено: проверка');
-  const length = await page.evaluate(() => history.length);
-  // «Назад» браузера: вопрос; «Остаться» — снова на файле, записи истории те же.
-  await page.goBack();
   const ask = page.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' });
+  // «Назад» дважды, пока открыт вопрос: вопрос один, «Остаться» — снова на файле.
+  await page.goBack();
   await expect(ask).toContainText('Ядро остановлено — изменения не сохранены');
+  await page.goBack();
+  await expect(ask).toHaveCount(1);
   await ask.getByRole('button', { name: 'Остаться' }).click();
+  await expect(ask).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`#/file/${id}$`));
-  expect(await page.evaluate(() => history.length)).toBe(length);
-  // «Назад к файлам» → «Уйти»: экран файлов, ядро остановлено и убрано.
-  await page.getByRole('button', { name: 'Назад к файлам' }).click();
+  await page.waitForTimeout(300);
+  await expect(page).toHaveURL(new RegExp(`#/file/${id}$`));
+  // Записей-двойников нет: «назад» ведёт на предыдущую запись — черновики.
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/drafts$/);
   await ask.getByRole('button', { name: 'Уйти' }).click();
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Черновики');
   await expect(card(page, 'Без названия')).toBeVisible();
+});
+
+test('своя вкладка: файлы → тот же файл и перезагрузка не упираются в блокировку; отказ Web Locks — сообщение', async ({ page }) => {
+  await openFiles(page);
+  await create(page, 'Макет');
+  await card(page, 'Макет').click();
+  await editorReady(page);
+  await page.getByRole('button', { name: 'Назад к файлам' }).click();
+  await card(page, 'Макет').click();
+  await editorReady(page);
+  await expect(page.locator('.fe-toast', { hasText: 'Файл открыт в другой вкладке' })).toHaveCount(0);
+  await page.reload();
+  await editorReady(page);
+  expect(page.url()).toMatch(/#\/file\//);
+  // API блокировок отказывает: не вечное ожидание, а экран файлов с сообщением.
+  const other = await page.context().newPage();
+  await setup(other);
+  await other.addInitScript(() => {
+    navigator.locks.request = (() => Promise.reject(new DOMException('запрещено', 'SecurityError'))) as LockManager['request'];
+  });
+  const id = fileId(page);
+  await other.goto(`/#/file/${id}`);
+  await expect(other.locator('.fe-toast', { hasText: 'Не удалось открыть файл: блокировка недоступна' })).toHaveCount(1);
+  await expect(other).toHaveURL(/#\/$/);
+});
+
+test('переименование и удаление в другой вкладке: имя не затирается, удалённый — одно сообщение', async ({ page, context }) => {
+  await setup(page);
+  await page.goto('/#/new');
+  await editorReady(page);
+  const id = fileId(page);
+  const other = await context.newPage();
+  await setup(other);
+  await other.goto('/');
+  await other.evaluate((i) => window.__ferrumFiles!.store.rename(i, 'Новое имя'), id);
+  await drawRect(page);
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  expect(await page.evaluate((i) => window.__ferrumFiles!.store.get(i).then((m) => m?.name), id)).toBe('Новое имя');
+  // Удалили навсегда: запись не воскресает, одно сообщение, документ изменён.
+  await other.evaluate((i) => window.__ferrumFiles!.store.remove(i), id);
+  await page.locator('canvas').focus();
+  await page.keyboard.press('Delete');
+  await page.keyboard.press('ControlOrMeta+KeyA');
+  await page.keyboard.press('Delete');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  const gone = page.locator('.fe-toast', { hasText: 'Файл удалён в другой вкладке — сохраните копию на диск' });
+  await expect(gone).toHaveCount(1);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await page.waitForTimeout(300);
+  await expect(gone).toHaveCount(1);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  expect(await page.evaluate((i) => window.__ferrumFiles!.store.get(i), id)).toBeNull();
+});
+
+test('отложенное открытие по имени отменяется действием с другой карточкой', async ({ page }) => {
+  await openFiles(page);
+  await create(page, 'Первый');
+  await create(page, 'Второй');
+  await expect(files(page).getByRole('option')).toHaveCount(2);
+  await card(page, 'Первый').locator('.fe-card__name').click();
+  await card(page, 'Второй').click({ button: 'right' });
+  await expect(page.getByRole('menu', { name: 'Действия с файлом' })).toBeVisible();
+  await page.waitForTimeout(400);
+  await expect(page).not.toHaveURL(/#\/file\//);
+});
+
+test('заставка: уход к экрану файлов убирает её сразу, не дожидаясь 2 с', async ({ page }) => {
+  // Обычный режим: у редактора заставка держится 2 с с открытия страницы.
+  await page.goto('/#/new');
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 90_000 });
+  const t = await page.evaluate(() => performance.now());
+  test.skip(t > 1500, `ядро готово поздно (${Math.round(t)} мс): проверять нечего`);
+  await expect(page.locator('#fe-splash')).toHaveCount(1);
+  await page.evaluate(() => (location.hash = '#/'));
+  await expect(page.locator('#fe-splash')).toHaveCount(0, { timeout: 1000 });
+  expect(await page.evaluate(() => performance.now())).toBeLessThan(2000);
 });
 
 test('файл из корзины по адресу не открывается для правки', async ({ page }) => {
