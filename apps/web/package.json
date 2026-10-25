@@ -11,7 +11,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.e2e.json",
     "unit": "playwright test -c playwright.unit.config.ts",
     "e2e": "playwright test",
-    "e2e:ci": "playwright test --project=chromium"
+    "e2e:ci": "playwright test --project=chromium --grep-invert @perf"
   },
   "dependencies": {
     "@fontsource-variable/onest": "5.3.1",

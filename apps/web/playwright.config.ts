@@ -7,7 +7,9 @@ import { defineConfig } from '@playwright/test';
 // SwiftShader (автовыбор падает на WebGL2); `gpu` — тот же Chromium с настоящим GPU
 // (ANGLE Metal / Vulkan) и WebGPU: тесты с меткой @gpu и замеры @perf.
 // Флаги `gpu` — под Metal, то есть только для macOS с видеокартой; в CI на Linux
-// без GPU запускается только `chromium` (`npm run e2e:ci`).
+// без GPU запускается только `chromium` (`npm run e2e:ci`) и без замеров @perf:
+// на программном SwiftShader общей машины их ворота времени не о нас. Локальный
+// полный прогон (`npx playwright test`) включает замеры обоих проектов.
 const GPU_ARGS = ['--enable-unsafe-webgpu', '--enable-gpu', '--use-angle=metal', '--ignore-gpu-blocklist'];
 
 export default defineConfig({

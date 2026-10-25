@@ -213,6 +213,8 @@ const MAX_TREE_ROWS = Math.ceil(900 / 28) + 20 + 1;
 test('интерфейс на 100 000 узлах: перетаскивание 1000 выделенных и прокрутка слоёв @perf', async ({ page }, info) => {
   test.skip(info.project.name !== 'chromium', 'замер интерфейса — в проекте chromium');
   await page.setViewportSize({ width: 1440, height: 900 });
+  // Ядро — тесту, но без журнала и защиты layout тестового режима: они сами стоят времени.
+  await page.addInitScript(() => ((window as { __ferrumPerf?: boolean }).__ferrumPerf = true));
   await page.addInitScript(() => {
     const w = window as unknown as { __longTasks: { start: number; duration: number }[]; __longObs: PerformanceObserver };
     w.__longTasks = [];
