@@ -72,6 +72,8 @@ pub enum EditorEvent {
     RequestImage,
     /// Скрыть или показать интерфейс (Ctrl+\).
     ToggleUi,
+    /// Сохранить файл (Ctrl/Cmd+S): запись в хранилище ведёт интерфейс.
+    SaveRequested,
     /// Сообщение об ошибке для пользователя.
     Error(String),
 }

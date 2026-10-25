@@ -174,8 +174,10 @@ fn zoom_commands_and_events() {
     h.key("Backslash", ctrl());
     h.key("KeyC", ctrl().with_shift());
     h.key("KeyV", ctrl());
+    h.key("KeyS", ctrl());
     let events = h.ed.take_events();
     assert!(events.contains(&EditorEvent::ToggleUi));
+    assert!(events.contains(&EditorEvent::SaveRequested));
     assert!(events.contains(&EditorEvent::ExportPng(vec![b])));
     assert!(events.contains(&EditorEvent::PasteRequested));
 }
