@@ -337,3 +337,241 @@ fn command_during_panel_gesture_cancels_it() {
     assert!(h.children(None).is_empty());
     h.assert_scene_clean();
 }
+
+fn group_of(h: &mut H, ids: &[ferrum_doc::NodeId]) -> ferrum_doc::NodeId {
+    h.ed.select(ids);
+    h.key("KeyG", ctrl());
+    h.sel()[0]
+}
+
+fn world_of(h: &H, id: ferrum_doc::NodeId) -> kurbo::Affine {
+    h.ed.scene().node(id).unwrap().world
+}
+
+fn assert_same_affine(a: kurbo::Affine, b: kurbo::Affine) {
+    for (x, y) in a.as_coeffs().iter().zip(b.as_coeffs()) {
+        assert!(close(*x, y), "{a:?} ≠ {b:?}");
+    }
+}
+
+#[test]
+fn selected_ancestor_and_child_move_once() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 30.0, 0.0, 10.0, 10.0);
+    let g = group_of(&mut h, &[a, b]);
+    h.ed.select(&[g, a]);
+    let (wa, wb) = (world_of(&h, a), world_of(&h, b));
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.ed.edit_selection(&add(NumField::X, 10.0), Phase::Commit);
+    assert_same_affine(world_of(&h, a), kurbo::Affine::translate((10.0, 0.0)) * wa);
+    assert_same_affine(world_of(&h, b), kurbo::Affine::translate((10.0, 0.0)) * wb);
+    h.assert_one_step(steps, &before);
+}
+
+#[test]
+fn selected_ancestor_and_child_rotate_once() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 30.0, 0.0, 10.0, 10.0);
+    let g = group_of(&mut h, &[a, b]);
+    h.ed.select(&[g, a]);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.ed.edit_selection(&add(NumField::Rotation, 30.0), Phase::Commit);
+    assert!(close(h.props(g).rotation, 30.0), "{}", h.props(g).rotation);
+    assert!(
+        close(h.props(a).rotation, 0.0),
+        "ребёнок не поворачивается сам"
+    );
+    h.assert_one_step(steps, &before);
+}
+
+#[test]
+fn selected_group_and_child_resize_once() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 30.0, 0.0, 10.0, 10.0);
+    let g = group_of(&mut h, &[a, b]);
+    h.ed.select(&[g, a]);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.ed.edit_selection(&num(NumField::W, 80.0), Phase::Commit);
+    let pose = panel_pose(h.ed.scene(), h.ed.scene().slot(g).unwrap());
+    assert!(close(pose.w, 80.0), "{pose:?}");
+    assert!(close(h.props(a).w, 20.0) && close(h.props(b).w, 20.0));
+    assert!(close(h.props(b).x, 60.0));
+    h.assert_one_step(steps, &before);
+    h.ed.edit_selection(&PanelEdit::Size { w: 40.0, h: 20.0 }, Phase::Commit);
+    let pose = panel_pose(h.ed.scene(), h.ed.scene().slot(g).unwrap());
+    assert!(close(pose.w, 40.0) && close(pose.h, 20.0), "{pose:?}");
+    assert!(close(h.props(a).w, 10.0), "{:?}", h.props(a));
+}
+
+#[test]
+fn equivalent_rotation_is_not_a_step() {
+    let mut h = H::new();
+    let r = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    h.ed.select(&[r]);
+    h.ed.edit_selection(&num(NumField::Rotation, 30.0), Phase::Commit);
+    let steps = h.ed.step_count();
+    h.ed.edit_selection(&num(NumField::Rotation, 390.0), Phase::Commit);
+    h.ed.edit_selection(&num(NumField::Rotation, -330.0), Phase::Commit);
+    h.ed.edit_selection(&add(NumField::Rotation, 360.0), Phase::Commit);
+    assert_eq!(h.ed.step_count(), steps, "полный оборот не правка");
+    assert!(close(h.props(r).rotation, 30.0));
+}
+
+#[test]
+fn rotation_edit_is_one_step() {
+    let mut h = H::new();
+    let r = h.rect(None, 0.0, 0.0, 100.0, 50.0);
+    h.ed.select(&[r]);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.ed.edit_selection(&num(NumField::Rotation, 45.0), Phase::Commit);
+    h.assert_one_step(steps, &before);
+}
+
+#[test]
+fn repeated_size_edits_do_not_drift_on_rotated_and_flipped() {
+    let mut h = H::new();
+    let r = h.rect(None, 10.0, 20.0, 50.0, 40.0);
+    h.set(
+        r,
+        PropsPatch {
+            rotation: Some(30.0),
+            ..Default::default()
+        },
+    );
+    let flipped = h.rect(None, 200.0, 20.0, 50.0, 40.0);
+    h.set(
+        flipped,
+        PropsPatch {
+            flip_x: Some(true),
+            rotation: Some(20.0),
+            ..Default::default()
+        },
+    );
+    for id in [r, flipped] {
+        h.ed.select(&[id]);
+        let (x, y) = (h.props(id).x, h.props(id).y);
+        let corner = world_of(&h, id) * Point::ORIGIN;
+        for i in 0..6 {
+            h.ed.edit_selection(&num(NumField::W, 70.0 + f64::from(i)), Phase::Commit);
+            h.ed.edit_selection(&num(NumField::H, 30.0 + f64::from(i)), Phase::Commit);
+        }
+        let p = h.props(id);
+        assert_eq!((p.x, p.y, p.w, p.h), (x, y, 75.0, 35.0), "{p:?}");
+        let c2 = world_of(&h, id) * Point::ORIGIN;
+        if id == r {
+            assert!(
+                close(corner.x, c2.x) && close(corner.y, c2.y),
+                "{corner:?} {c2:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn infinite_and_huge_inputs_are_rejected_or_clamped() {
+    let limit = ferrum_scene::shape::COORD_LIMIT;
+    let mut h = H::new();
+    let r = h.rect(None, 10.0, 0.0, 50.0, 50.0);
+    h.ed.select(&[r]);
+    let steps = h.ed.step_count();
+    for f in [
+        NumField::X,
+        NumField::W,
+        NumField::Opacity,
+        NumField::Rotation,
+    ] {
+        h.ed.edit_selection(&num(f, f64::INFINITY), Phase::Commit);
+        h.ed.edit_selection(&add(f, f64::NEG_INFINITY), Phase::Commit);
+    }
+    h.ed.edit_selection(
+        &PanelEdit::Size {
+            w: f64::INFINITY,
+            h: 5.0,
+        },
+        Phase::Commit,
+    );
+    assert_eq!(h.ed.step_count(), steps, "бесконечность — не правка");
+    h.ed.edit_selection(&num(NumField::X, 1e300), Phase::Commit);
+    h.ed.edit_selection(&num(NumField::W, 1e300), Phase::Commit);
+    h.ed.edit_selection(&num(NumField::CornerRadius, 1e300), Phase::Commit);
+    let p = h.props(r);
+    assert_eq!((p.x, p.w, p.corner_radius), (limit, limit, limit));
+}
+
+#[test]
+fn escape_select_undo_and_page_switch_cancel_panel_preview() {
+    for case in 0..4 {
+        let mut h = H::new();
+        let a = h.rect(None, 10.0, 0.0, 50.0, 50.0);
+        h.ed.select(&[a]);
+        h.ed.rename_node(a, "Один");
+        let steps = h.ed.step_count();
+        let page2 = h.ed.add_page("Вторая").unwrap();
+        let first = h.ed.page();
+        h.ed.edit_selection(&num(NumField::X, 300.0), Phase::Preview);
+        assert_eq!(h.ed.scene().node(a).unwrap().props.x, 300.0);
+        match case {
+            0 => h.ed.execute(CommandId::Escape),
+            1 => h.ed.select(&[a]),
+            2 => h.ed.execute(CommandId::Undo),
+            _ => h.ed.set_page(page2).unwrap(),
+        }
+        if case == 3 {
+            h.ed.set_page(first).unwrap();
+        }
+        assert!(!h.ed.scene().has_preview(), "случай {case}");
+        // Отпускание после отмены ничего не пишет.
+        let steps_now = h.ed.step_count();
+        if case != 2 {
+            assert_eq!(steps_now, steps, "случай {case}");
+        }
+        h.ed.select(&[a]);
+        h.ed.edit_selection(&num(NumField::X, 10.0), Phase::Commit);
+        assert_eq!(h.ed.step_count(), steps_now, "случай {case}");
+        assert_eq!(h.props(a).x, 10.0, "случай {case}");
+        h.assert_scene_clean();
+    }
+}
+
+#[test]
+fn move_layers_block_into_group_and_undo() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 20.0, 0.0, 10.0, 10.0);
+    let c = h.rect(None, 40.0, 0.0, 10.0, 10.0);
+    let d = h.rect(None, 60.0, 0.0, 10.0, 10.0);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    // Блок {c, a} (в любом порядке на входе) встаёт над «d» в прежнем порядке.
+    assert!(h.ed.move_layers(&[c, a], DropTarget::Above(d)));
+    assert_eq!(h.children(None), vec![b, d, a, c]);
+    assert_eq!(h.sel(), vec![a, c]);
+    h.assert_one_step(steps, &before);
+    h.ed.execute(CommandId::Undo);
+    assert_eq!(h.children(None), vec![a, b, c, d], "отмена вернула порядок");
+    h.ed.execute(CommandId::Redo);
+    h.ed.execute(CommandId::Undo);
+
+    let x = h.rect(None, 100.0, 0.0, 10.0, 10.0);
+    let y = h.rect(None, 130.0, 0.0, 10.0, 10.0);
+    let g = group_of(&mut h, &[x, y]);
+    let (wa, wb) = (world_of(&h, a), world_of(&h, b));
+    let before = h.state();
+    let steps = h.ed.step_count();
+    assert!(h.ed.move_layers(&[a, b], DropTarget::Into(g)));
+    assert_eq!(h.children(Some(g)), vec![x, y, a, b]);
+    assert_eq!((h.parent(a), h.parent(b)), (Some(g), Some(g)));
+    assert_same_affine(world_of(&h, a), wa);
+    assert_same_affine(world_of(&h, b), wb);
+    h.assert_one_step(steps, &before);
+    h.ed.execute(CommandId::Undo);
+    assert_eq!((h.parent(a), h.parent(b)), (None, None));
+    assert_eq!(h.children(Some(g)), vec![x, y]);
+}

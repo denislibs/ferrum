@@ -134,7 +134,12 @@ struct Target {
     world: Affine,
     bounds: Option<Rect>,
     pose: PanelPose,
-    /// Поддерево для масштаба (группа масштабирует детей).
+    /// Узел верхнего уровня выделения: ни один его предок не выделен. Геометрию
+    /// (сдвиг, поворот, размер) меняют только такие узлы — потомки выделенного
+    /// предка двигаются вместе с ним, второй раз их трогать нельзя.
+    top: bool,
+    /// База узла; с `deep` у группы — и поддерево для масштаба. Пусто у узлов не
+    /// верхнего уровня.
     bases: Vec<Base>,
 }
 
@@ -142,15 +147,51 @@ struct Target {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PanelGesture {
     targets: Vec<Target>,
+    /// Базы групп собраны вместе с поддеревом (нужно только для размера).
+    deep: bool,
 }
 
-fn capture(scene: &Scene, ids: &[NodeId]) -> PanelGesture {
-    let targets = ids
+/// Правке нужно поддерево групп: ширина и высота масштабируют детей группы.
+fn needs_children(edit: &PanelEdit) -> bool {
+    matches!(
+        edit,
+        PanelEdit::Size { .. }
+            | PanelEdit::Number {
+                field: NumField::W | NumField::H,
+                ..
+            }
+    )
+}
+
+/// Правка меняет положение, поворот или размер — её не применяют к потомкам
+/// выделенного предка, иначе они сдвинутся дважды.
+fn is_geometric(edit: &PanelEdit) -> bool {
+    match edit {
+        PanelEdit::Number {
+            field, relative, ..
+        } => match field {
+            NumField::X | NumField::Y => *relative,
+            NumField::W | NumField::H | NumField::Rotation => true,
+            _ => false,
+        },
+        PanelEdit::Size { .. } => true,
+        _ => false,
+    }
+}
+
+fn capture(scene: &Scene, ids: &[NodeId], deep: bool) -> PanelGesture {
+    let live: Vec<NodeId> = ids
         .iter()
-        .filter(|id| !scene.is_draft(**id))
+        .copied()
+        .filter(|id| !scene.is_draft(*id) && scene.slot(*id).is_some())
+        .collect();
+    let top: HashSet<NodeId> = top_level(scene, &live).into_iter().collect();
+    let targets = live
+        .iter()
         .filter_map(|id| scene.slot(*id).map(|s| (*id, s)))
         .map(|(id, slot)| {
             let n = scene.at(slot);
+            let is_top = top.contains(&id);
             Target {
                 id,
                 props: n.props.clone(),
@@ -159,11 +200,16 @@ fn capture(scene: &Scene, ids: &[NodeId]) -> PanelGesture {
                 world: n.world,
                 bounds: n.local_bounds,
                 pose: panel_pose(scene, slot),
-                bases: bases(scene, &[id], true),
+                top: is_top,
+                bases: if is_top {
+                    bases(scene, &[id], deep)
+                } else {
+                    vec![]
+                },
             }
         })
         .collect();
-    PanelGesture { targets }
+    PanelGesture { targets, deep }
 }
 
 fn finite_or(v: f64, base: f64) -> f64 {
@@ -250,8 +296,10 @@ fn number_patches(
         NumField::W => size_patches(t, Some(target_value(t.pose.w, value, relative)), None),
         NumField::H => size_patches(t, None, Some(target_value(t.pose.h, value, relative))),
         NumField::Rotation => {
-            let delta = target_value(t.pose.rotation, value, relative) - t.pose.rotation;
-            if delta.abs() < 1e-12 {
+            // Дельта — кратчайший поворот: полный оборот не правка.
+            let delta =
+                display_rotation(target_value(t.pose.rotation, value, relative) - t.pose.rotation);
+            if delta.abs() < 1e-9 {
                 return vec![];
             }
             // Поворот вокруг центра рамки (как в Figma); в модели — против часовой
@@ -296,7 +344,11 @@ fn number_patches(
 
 fn patches(g: &PanelGesture, edit: &PanelEdit) -> Vec<(NodeId, PropsPatch)> {
     let mut out = Vec::new();
+    let geometric = is_geometric(edit);
     for t in &g.targets {
+        if geometric && !t.top {
+            continue;
+        }
         let kind = t.props.kind;
         match edit {
             PanelEdit::Number {
@@ -345,17 +397,14 @@ fn patches(g: &PanelGesture, edit: &PanelEdit) -> Vec<(NodeId, PropsPatch)> {
             }
         }
     }
-    // Узел мог попасть дважды (группа и её выделенный ребёнок при масштабе группы):
-    // правки одного узла сливаются, последняя — главнее.
-    let mut seen: HashSet<NodeId> = HashSet::new();
-    let mut merged: Vec<(NodeId, PropsPatch)> = Vec::with_capacity(out.len());
-    for (id, p) in out.into_iter().rev() {
-        if seen.insert(id) {
-            merged.push((id, p));
-        }
-    }
-    merged.reverse();
-    merged
+    debug_assert!(
+        {
+            let mut seen = HashSet::new();
+            out.iter().all(|(id, _)| seen.insert(*id))
+        },
+        "узел правится дважды"
+    );
+    out
 }
 
 /// Куда положить слои, перетащенные в панели слоёв (строки сверху вниз — от
@@ -377,19 +426,27 @@ impl Editor {
         match phase {
             Phase::Cancel => self.cancel_panel(),
             Phase::Preview => {
+                let deep = needs_children(edit);
+                // Жест начался с правки без поддерева групп, а теперь оно нужно:
+                // превью снимается, базы собираются заново.
+                if self.panel.as_ref().is_some_and(|g| deep && !g.deep) {
+                    self.cancel_panel();
+                }
                 if self.panel.is_none() {
                     self.cancel_gesture();
-                    self.panel = Some(capture(&self.scene, &self.selection));
+                    self.panel = Some(capture(&self.scene, &self.selection, deep));
                 }
                 let p = patches(self.panel.as_ref().expect("задан выше"), edit);
                 self.scene.set_preview(&p);
             }
             Phase::Commit => {
+                let deep = needs_children(edit);
                 let g = match self.panel.take() {
-                    Some(g) => g,
-                    None => {
+                    Some(g) if g.deep || !deep => g,
+                    _ => {
                         self.cancel_gesture();
-                        capture(&self.scene, &self.selection)
+                        self.scene.clear_preview();
+                        capture(&self.scene, &self.selection, deep)
                     }
                 };
                 let p = patches(&g, edit);
