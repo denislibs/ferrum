@@ -337,3 +337,85 @@ test('край панели: правая кнопка мыши не начин�
   await page.keyboard.press('Escape');
   await expect(edge).toHaveAttribute('aria-valuenow', '248');
 });
+
+// ——— Итоговая волна исправлений ———
+
+/** Выделение и число шагов: ни одна клавиша на виджете панели не должна их менять. */
+const docState = (page: Page) =>
+  page.evaluate(() => ({
+    steps: window.__ferrum!.core.live!.steps,
+    nodes: window.__ferrum!.core.live!.nodes,
+    x: window.__ferrum!.core.live!.selectionX,
+    ids: [...window.__ferrum!.ui!.selectionIds],
+    background: window.__ferrum!.ui!.pages.background,
+  }));
+
+test('стрелки, Delete и Backspace на кнопках панелей не доходят до холста', async ({ page }) => {
+  await openApp(page);
+  const tree = page.getByRole('tree', { name: 'Слои' });
+  await tree.getByRole('treeitem', { name: 'Экран 9', exact: true }).click();
+  await liveWhen(page, 'l.selectionCount === 1');
+  const panel = page.locator('#panel-design');
+  // Обводка — чтобы была её кнопка «Удалить обводку».
+  const s0 = (await live(page)).steps;
+  await panel.getByRole('button', { name: 'Добавить обводку' }).click();
+  await liveWhen(page, `l.steps === ${s0 + 1}`);
+  await expect(panel.getByRole('button', { name: 'Удалить обводку' })).toHaveCount(1);
+  const controls = [
+    panel.getByRole('button', { name: 'Отразить по горизонтали' }),
+    panel.getByRole('button', { name: 'Пресет размера' }),
+    panel.getByRole('radio', { name: '2×' }),
+    panel.getByRole('button', { name: 'Добавить заливку' }),
+    panel.getByRole('button', { name: 'Удалить заливку' }).first(),
+    panel.getByRole('button', { name: 'Скрыть заливку' }).first(),
+    panel.getByRole('button', { name: 'Цвет заливки' }).first(),
+    panel.getByRole('button', { name: 'Удалить обводку' }),
+    page.getByRole('button', { name: 'Меню файла' }),
+    page.getByRole('button', { name: 'Масштаб', exact: true }),
+    page.getByRole('button', { name: 'Страницы', exact: true }),
+    page.getByRole('button', { name: 'Добавить страницу' }),
+  ];
+  const before = await docState(page);
+  expect(before.ids).toHaveLength(1);
+  for (const c of controls) {
+    const name = (await c.getAttribute('aria-label')) ?? (await c.textContent());
+    await c.focus();
+    for (const k of ['ArrowLeft', 'Delete', 'Backspace', 'ArrowDown', 'Home']) await page.keyboard.press(k);
+    await page.waitForTimeout(150);
+    expect(await docState(page), `клавиши на «${name}»`).toEqual(before);
+  }
+  // Фон страницы: без выделения, свой фон задан — кнопка «Фон как в теме».
+  await page.locator('canvas').focus();
+  await page.keyboard.press('Escape');
+  await liveWhen(page, 'l.selectionCount === 0');
+  const hex = panel.getByRole('textbox', { name: 'HEX фона страницы' });
+  await hex.fill('123456');
+  await hex.press('Enter');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.pages.background)).toBe('#123456ff');
+  const reset = panel.getByRole('button', { name: 'Фон как в теме' });
+  const bare = await docState(page);
+  await reset.focus();
+  for (const k of ['ArrowLeft', 'Delete', 'Backspace']) await page.keyboard.press(k);
+  await page.waitForTimeout(150);
+  expect(await docState(page)).toEqual(bare);
+});
+
+test('масштаб экспорта — группа переключателей: стрелки выбирают, одна точка Tab', async ({ page }) => {
+  await openApp(page);
+  const group = page.getByRole('radiogroup', { name: 'Масштаб экспорта' });
+  const radio = (n: string) => group.getByRole('radio', { name: n });
+  await expect(radio('1×')).toHaveAttribute('tabindex', '0');
+  await expect(radio('2×')).toHaveAttribute('tabindex', '-1');
+  await radio('1×').focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(radio('2×')).toBeFocused();
+  await expect(radio('2×')).toHaveAttribute('aria-checked', 'true');
+  await expect(radio('1×')).toHaveAttribute('aria-checked', 'false');
+  await expect(radio('2×')).toHaveAttribute('tabindex', '0');
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  await expect(radio('3×')).toBeFocused();
+  await expect(radio('3×')).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Home');
+  await expect(radio('1×')).toHaveAttribute('aria-checked', 'true');
+});

@@ -215,6 +215,36 @@ const SCALES = [1, 2, 3] as const;
 function ExportSection() {
   const ed = useEditor();
   const [scale, setScale] = createSignal<number>(1);
+  let group!: HTMLDivElement;
+  // Группа переключателей: одна точка Tab (выбранный), стрелки и Home/End выбирают
+  // соседний и переводят на него фокус.
+  const onKey = (e: KeyboardEvent) => {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    const at = SCALES.indexOf(scale() as (typeof SCALES)[number]);
+    const n = SCALES.length;
+    let next: number;
+    switch (e.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = (at + 1) % n;
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = (at - 1 + n) % n;
+        break;
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = n - 1;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    setScale(SCALES[next]);
+    group.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
   const target = () => {
     const s = ed.store.state.summary;
     if (!s || s.count === 0) return 'страницу';
@@ -223,10 +253,16 @@ function ExportSection() {
   return (
     <Section title="Экспорт">
       <div class="fe-row">
-        <div class="fe-segmented" role="radiogroup" aria-label="Масштаб экспорта">
+        <div ref={group} class="fe-segmented" role="radiogroup" aria-label="Масштаб экспорта" onKeyDown={onKey}>
           <For each={SCALES}>
             {(k) => (
-              <button role="radio" aria-checked={scale() === k} class="fe-segmented__item t-num" onClick={() => setScale(k)}>
+              <button
+                role="radio"
+                aria-checked={scale() === k}
+                tabindex={scale() === k ? 0 : -1}
+                class="fe-segmented__item t-num"
+                onClick={() => setScale(k)}
+              >
                 {k}×
               </button>
             )}
