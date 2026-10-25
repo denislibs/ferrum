@@ -88,7 +88,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
             <h1 class="t-heading" id="fe-settings-title">
               Настройки
             </h1>
-            <button class="fe-tool fe-tool--small" aria-label="Закрыть настройки" onClick={close}>
+            <button
+              class="fe-tool fe-tool--small"
+              aria-label="Закрыть настройки"
+              data-tip="Закрыть настройки"
+              data-tip-key="Esc"
+              onClick={close}
+            >
               <Icon name="close" />
             </button>
           </div>

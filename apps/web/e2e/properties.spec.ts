@@ -371,7 +371,7 @@ test('превью подписи — не чаще кадра и без пов�
   // 40 движений в одной задаче: до кадра превью уходит не больше одного.
   await page.getByRole('tabpanel').locator('.fe-field__label', { hasText: /^X$/ }).evaluate((el, x0) => {
     for (let i = 1; i <= 40; i++) {
-      el.dispatchEvent(new PointerEvent('pointermove', { clientX: x0 + i, clientY: 10, bubbles: true, pointerId: 1 }));
+      el.dispatchEvent(new PointerEvent('pointermove', { clientX: x0 + i, clientY: 10, bubbles: true, pointerId: 1, buttons: 1 }));
     }
   }, box.x + 5);
   await page.waitForTimeout(100);

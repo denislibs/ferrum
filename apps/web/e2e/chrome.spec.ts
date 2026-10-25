@@ -511,3 +511,34 @@ test('край панели: потеря захвата и движение б�
     await page.mouse.up();
   }
 });
+
+test('у кнопок-иконок панелей — подсказки «Название» или «Название  Клавиша»', async ({ page }) => {
+  await openApp(page);
+  const tree = page.getByRole('tree', { name: 'Слои' });
+  const r = tree.getByRole('treeitem', { name: 'Экран 9', exact: true });
+  await r.click();
+  await liveWhen(page, 'l.selectionCount === 1');
+  const panel = page.locator('#panel-design');
+  await panel.getByRole('button', { name: 'Добавить обводку' }).click();
+  await expect(panel.getByRole('button', { name: 'Удалить обводку' })).toHaveCount(1);
+  const tip = page.getByRole('tooltip');
+  const cases: [ReturnType<Page['locator']>, string][] = [
+    [panel.getByRole('button', { name: 'Скрыть заливку' }).first(), 'Скрыть заливку'],
+    [panel.getByRole('button', { name: 'Удалить заливку' }).first(), 'Удалить заливку'],
+    [panel.getByRole('button', { name: 'Удалить обводку' }), 'Удалить обводку'],
+  ];
+  for (const [el, text] of cases) {
+    await el.hover();
+    await expect(tip, text).toHaveText(text);
+    await page.mouse.move(700, 400);
+    await expect(tip).toHaveCount(0);
+  }
+  await r.hover();
+  await r.getByRole('button', { name: 'Заблокировать' }).hover();
+  await expect(tip).toHaveText('Заблокировать');
+  await r.getByRole('button', { name: 'Скрыть' }).hover();
+  await expect(tip).toHaveText('Скрыть');
+  await panel.getByRole('button', { name: 'Цвет заливки' }).first().click();
+  await page.getByRole('dialog', { name: 'Цвет заливки' }).getByRole('button', { name: 'Закрыть палитру' }).hover();
+  await expect(tip).toHaveText('Закрыть палитру  Esc');
+});

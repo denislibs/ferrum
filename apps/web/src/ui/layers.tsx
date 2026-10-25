@@ -450,6 +450,7 @@ export function LayersPanel() {
                     classList={{ 'fe-layer__flag--on': row().locked }}
                     tabindex="-1"
                     aria-label={row().locked ? 'Разблокировать' : 'Заблокировать'}
+                    data-tip={row().locked ? 'Разблокировать' : 'Заблокировать'}
                     aria-pressed={row().locked}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
@@ -464,6 +465,7 @@ export function LayersPanel() {
                     classList={{ 'fe-layer__flag--on': !row().visible }}
                     tabindex="-1"
                     aria-label={row().visible ? 'Скрыть' : 'Показать'}
+                    data-tip={row().visible ? 'Скрыть' : 'Показать'}
                     aria-pressed={!row().visible}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {

@@ -269,7 +269,7 @@ export function ColorPicker<C extends Capture>(props: PickerProps<C>) {
       <div ref={el} class="fe-picker" role="dialog" aria-label={props.title} style={{ visibility: 'hidden' }}>
         <div class="fe-picker__head">
           <span class="t-strong">{props.title}</span>
-          <button class="fe-tool fe-tool--small" aria-label="Закрыть палитру" onClick={close}>
+          <button class="fe-tool fe-tool--small" aria-label="Закрыть палитру" data-tip="Закрыть палитру" data-tip-key="Esc" onClick={close}>
             <Icon name="close" />
           </button>
         </div>

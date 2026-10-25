@@ -100,35 +100,25 @@ export function NumberField<T = undefined>(props: NumberFieldProps<T>) {
   // Правка относится к тем, кого выделяли в её начале (как в Figma): выделение
   // успевает смениться до того, как набранное применится. Здесь же — значение поля
   // на тот момент, от которого считаются `*2` и `%`.
-  interface Session {
-    target: EditTarget;
-    /** Выделено больше, чем id в событии: списка нет, действует версия. */
-    capped: boolean;
+  interface Session extends EditCapture {
     raw: number;
     current: number;
     mixed: boolean;
     base: T;
   }
   let session: Session | null = null;
+  // Адресат и «выделение сменилось» — те же, что у палитры и текстовых полей (`captureEdit`).
   const snapshot = (): Session =>
-    untrack(() => {
-      const st = ed.store.state;
-      const capped = st.selectionCount > st.selectionIds.length;
-      return {
-        target: capped
-          ? { ids: undefined, selectionVersion: st.selectionVersion }
-          : { ids: [...st.selectionIds], selectionVersion: undefined },
-        capped,
-        raw: props.value,
-        current: props.value * scale(),
-        mixed: !!props.mixed,
-        base: props.capture?.() as T,
-      };
-    });
+    untrack(() => ({
+      ...captureEdit(ed),
+      raw: props.value,
+      current: props.value * scale(),
+      mixed: !!props.mixed,
+      base: props.capture?.() as T,
+    }));
   const begin = (): Session => (session ??= snapshot());
   // Выделение больше предела id сменилось: правка без списка попала бы в новое.
-  const stale = (s: Session) =>
-    s.capped && untrack(() => ed.store.state.selectionVersion) !== s.target.selectionVersion;
+  const stale = (s: Session) => s.capped && s.changed();
 
   let scrub: { x: number; start: number; moved: boolean; s: Session } | null = null;
   let pending: FieldInput | null = null;
@@ -174,17 +164,12 @@ export function NumberField<T = undefined>(props: NumberFieldProps<T>) {
   };
 
   // Выделение сменилось, пока в поле набрано: щелчок в другом месте применяет
-  // набранное к прежним узлам.
+  // набранное к прежним узлам (при выделении больше предела id — откатывает).
   createEffect(
     on(
-      () => ed.store.state.selectionIds,
-      (ids) => {
-        if (!dirty() || !session) return;
-        const s = session;
-        const same = s.capped
-          ? !stale(s)
-          : ids.length === s.target.ids!.length && ids.every((id, i) => id === s.target.ids![i]);
-        if (!same) commitText();
+      () => [ed.store.state.selectionIds, ed.store.state.selectionVersion],
+      () => {
+        if (dirty() && session?.changed()) commitText();
       },
       { defer: true },
     ),

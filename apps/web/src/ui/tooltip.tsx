@@ -1,7 +1,8 @@
 // Всплывающие подсказки: у каждой кнопки-иконки — «Название  Клавиша», клавиша
 // из действующей раскладки (переназначили — подсказка сразу другая). Один слой на
 // весь интерфейс, делегирование событий: элемент с `data-tip` (и `data-command` —
-// ключ команды, чьё сочетание показать). Положение считается в фазе measure.
+// ключ команды, чьё сочетание показать, или `data-tip-key` — клавиша не из
+// раскладки, например Esc). Положение считается в фазе measure.
 
 import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { useEditor } from './context';
@@ -13,6 +14,8 @@ export const TOOLTIP_DELAY_MS = 500;
 interface Tip {
   text: string;
   command: string;
+  /** Клавиша не из раскладки (`data-tip-key`). */
+  key: string;
   x: number;
   y: number;
   above: boolean;
@@ -49,7 +52,8 @@ export function TooltipLayer() {
         const x = Math.min(Math.max(r.left + r.width / 2, 80), innerWidth - 80);
         const text = el.dataset.tip ?? '';
         const command = el.dataset.command ?? '';
-        ed.scheduler.mutate(() => setTip({ text, command, x, y: above ? r.top - 6 : r.bottom + 6, above }));
+        const key = el.dataset.tipKey ?? '';
+        ed.scheduler.mutate(() => setTip({ text, command, key, x, y: above ? r.top - 6 : r.bottom + 6, above }));
       });
     }, delay);
   };
@@ -96,8 +100,8 @@ export function TooltipLayer() {
         >
           {/* «Название  Клавиша»: два пробела — часть текста (white-space: pre). */}
           <span>{t().text}</span>
-          <Show when={keyOf(t().command)}>
-            <span class="fe-tooltip__key">{tipText('', keyOf(t().command))}</span>
+          <Show when={keyOf(t().command) || t().key}>
+            {(key) => <span class="fe-tooltip__key">{tipText('', key())}</span>}
           </Show>
         </div>
       )}

@@ -174,6 +174,7 @@ export function FillsSection() {
                   <button
                     class="fe-tool fe-tool--small fe-tool--muted"
                     aria-label={fill().visible ? 'Скрыть заливку' : 'Показать заливку'}
+                    data-tip={fill().visible ? 'Скрыть заливку' : 'Показать заливку'}
                     aria-pressed={!fill().visible}
                     onClick={() => {
                       const b = begin();
@@ -185,6 +186,7 @@ export function FillsSection() {
                   <button
                     class="fe-tool fe-tool--small fe-tool--muted"
                     aria-label="Удалить заливку"
+                    data-tip="Удалить заливку"
                     onClick={() => {
                       const b = begin();
                       send(b, b.list.filter((_, j) => j !== index()), 'commit');
@@ -296,6 +298,7 @@ export function StrokesSection() {
                     <button
                       class="fe-tool fe-tool--small fe-tool--muted"
                       aria-label="Удалить обводку"
+                      data-tip="Удалить обводку"
                       onClick={() => {
                         const b = begin();
                         send(b, b.list.filter((_, j) => j !== i()), 'commit');
@@ -310,14 +313,15 @@ export function StrokesSection() {
                       name="Толщина обводки"
                       value={stroke.width}
                       min={0}
-                      capture={begin}
+                      // Индекс строки — на начало набора или жеста, как у HEX и заливок.
+                      capture={(): Row<StrokeBase> => ({ ...begin(), index: i() })}
                       onEdit={(input, phase, target, b) => {
-                        const now = b.list[i()];
+                        const now = b.list[b.index];
                         if (!now) return;
                         const width = input.kind === 'set' ? input.value : now.width + input.delta;
                         sendEdit(
                           ed.send,
-                          { type: 'strokes', strokes: b.list.map((x, j) => (j === i() ? { ...x, width } : x)) },
+                          { type: 'strokes', strokes: b.list.map((x, j) => (j === b.index ? { ...x, width } : x)) },
                           phase,
                           target,
                         );
