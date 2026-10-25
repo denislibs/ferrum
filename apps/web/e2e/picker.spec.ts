@@ -9,6 +9,13 @@ import { appScreen, expectPixel, live, liveWhen, openApp, pixel } from './helper
 const fills = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!.summary?.fills ?? null)));
 
 /** Выделить «Слой 1» первого фрейма щелчком на холсте (мир (200, 40)). */
+/** Id строки слоя по имени: окно строк после выделения с холста (раскрытие, прокрутка
+ * к строке) приходит не сразу — ждём, пока строка будет в нём. */
+async function rowId(page: Page, name: string): Promise<string> {
+  const h = await page.waitForFunction((n) => window.__ferrum!.ui!.layers.rows.find((r) => r.name === n)?.id, name);
+  return (await h.jsonValue()) as string;
+}
+
 async function selectShape(page: Page): Promise<{ x: number; y: number }> {
   const l = await live(page);
   const at = await appScreen(page, l, 200, 40);
@@ -236,7 +243,7 @@ test('выделение сменилось посреди жеста: прав�
   await openApp(page);
   const at = await selectShape(page);
   const shapeId = await selectedId(page);
-  const frame = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  const frame = await rowId(page, 'Экран 9');
   await recordSent(page);
   const before = await steps(page);
   await page.getByRole('button', { name: 'Цвет заливки' }).click();
@@ -269,7 +276,7 @@ test('HEX и прозрачность: то же значение — не пр�
   await openApp(page);
   await selectShape(page);
   const shapeId = await selectedId(page);
-  const frame = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  const frame = await rowId(page, 'Экран 9');
   await recordSent(page);
   const before = await steps(page);
   const hex = page.getByRole('textbox', { name: 'HEX заливки' });
@@ -407,7 +414,7 @@ test('несколько объектов: «Смешанные» заливки
   await openApp(page);
   await selectShape(page);
   const shapeId = await selectedId(page);
-  const frame = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  const frame = await rowId(page, 'Экран 9');
   await coreSend(page, { type: 'select', ids: [frame, shapeId], mode: 'replace' });
   await liveWhen(page, 'l.selectionCount === 2');
   await expect(page.getByText('Смешанные заливки')).toBeVisible();
@@ -472,7 +479,7 @@ test('обводка: ширина жестом идёт к тем, кого п�
   await openApp(page);
   await selectShape(page);
   const shapeId = await selectedId(page);
-  const frame = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  const frame = await rowId(page, 'Экран 9');
   await recordSent(page);
   const before = await steps(page);
   const label = page.getByRole('tabpanel').locator('.fe-stroke .fe-field__label', { hasText: /^W$/ });
@@ -551,7 +558,7 @@ test('палитра с клавиатуры: фокус внутрь, стре�
 /** Фигура A (две заливки у неё после «+») и рамка B с нужным числом заливок. */
 async function twoNodes(page: Page, aExtra: number, bExtra: number) {
   await openApp(page);
-  const b = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  const b = await rowId(page, 'Экран 9');
   await selectShape(page);
   const a = await selectedId(page);
   for (let i = 0; i < aExtra; i++) {
@@ -660,7 +667,7 @@ test('тон на стрелках переходит через 0 и 360', asyn
 test('смена выделения закрывает палитру: фокус не падает на body', async ({ page }) => {
   await openApp(page);
   await selectShape(page);
-  const frame = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  const frame = await rowId(page, 'Экран 9');
   await page.getByRole('button', { name: 'Добавить заливку' }).click();
   await page.getByRole('button', { name: 'Цвет заливки' }).last().click();
   await expect(page.getByRole('dialog', { name: 'Цвет заливки' }).getByRole('slider', { name: 'Насыщенность и яркость' })).toBeFocused();
