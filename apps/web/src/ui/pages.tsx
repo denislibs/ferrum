@@ -7,7 +7,7 @@ import type { PageInfo } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { ConfirmDialog } from './dialog';
 import { Icon } from './icons';
-import { MAX_NAME_CHARS } from '../core/limits';
+import { RenameInput } from './rename-input';
 
 export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => void }) {
   const ed = useEditor();
@@ -17,11 +17,9 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
   const askDelete = (p: PageInfo) => {
     if (pages().list.length > 1) setDeleting(p);
   };
-  const rename = (p: PageInfo, name: string) => {
-    // Esc уже закрыл поле: blur удаляемого поля не должен применять набранное.
-    if (renaming() !== p.id) return;
-    setRenaming(null);
-    if (name.trim() && name !== p.name) ed.send({ type: 'renamePage', id: p.id, name });
+  /** Имя на момент открытия поля, по id страницы (строка списка могла смениться). */
+  const rename = (id: string, original: string, name: string) => {
+    if (name.trim() && name !== original) ed.send({ type: 'renamePage', id, name });
   };
   return (
     <section class="fe-pages" aria-label="Страницы">
@@ -51,8 +49,10 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
           <Index each={pages().list}>
             {(page) => {
               const current = () => page().id === pages().current;
+              let li!: HTMLLIElement;
               return (
                 <li
+                  ref={li}
                   class="fe-page"
                   role="option"
                   aria-selected={current()}
@@ -76,25 +76,18 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
                     </Show>
                   </span>
                   <Show when={renaming() === page().id} fallback={<span class="fe-page__name">{page().name}</span>}>
-                    <input
-                      class="fe-rename"
-                      aria-label="Имя страницы"
-                      maxlength={MAX_NAME_CHARS}
-                      value={untrack(() => page().name)}
-                      ref={(el) =>
-                        queueMicrotask(() => {
-                          el.focus();
-                          el.select();
-                        })
-                      }
-                      onClick={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter') rename(page(), e.currentTarget.value);
-                        if (e.key === 'Escape') setRenaming(null);
-                      }}
-                      onBlur={(e) => rename(page(), e.currentTarget.value)}
-                    />
+                    {(() => {
+                      const { id, name } = untrack(page);
+                      return (
+                        <RenameInput
+                          label="Имя страницы"
+                          value={name}
+                          onCommit={(typed) => rename(id, name, typed)}
+                          onClose={() => renaming() === id && setRenaming(null)}
+                          returnFocus={() => li}
+                        />
+                      );
+                    })()}
                   </Show>
                   <button
                     class="fe-tool fe-tool--small fe-tool--muted fe-page__delete"

@@ -5,6 +5,7 @@ import { createSignal, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { useEditor } from './context';
 import { Caret, Icon } from './icons';
 import { Menu, type MenuItem } from './menu';
+import { RenameInput } from './rename-input';
 import { roving } from './roving';
 import { clampPanel, PANEL_MAX, PANEL_MIN } from './settings';
 
@@ -16,38 +17,38 @@ export function FileHeader(props: { items: () => MenuItem[] }) {
   const ed = useEditor();
   const [menu, setMenu] = createSignal<HTMLElement | null>(null);
   const [editing, setEditing] = createSignal(false);
-  const commit = (value: string) => {
-    // Esc уже закрыл поле: blur удаляемого поля не должен применять набранное.
-    if (!editing()) return;
-    setEditing(false);
-    if (value.trim() && value !== ed.store.state.documentName) ed.send({ type: 'setDocumentName', name: value });
-  };
+  let file!: HTMLDivElement;
   return (
     <div class="fe-panel-head">
       <span class="fe-panel-head__mark" aria-hidden="true" />
-      <div class="fe-panel-head__file">
+      <div ref={file} class="fe-panel-head__file">
         <Show
           when={editing()}
           fallback={
-            <span
+            // Имя — кнопка: двойной щелчок, Enter или F2 открывают переименование.
+            <button
               class="fe-panel-head__name"
               title={ed.store.state.documentName}
+              aria-keyshortcuts="Enter F2"
               onDblClick={() => setEditing(true)}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== 'F2') return;
+                e.preventDefault();
+                setEditing(true);
+              }}
             >
               {ed.store.state.documentName}
-            </span>
+            </button>
           }
         >
-          <input
-            class="fe-rename"
-            aria-label="Имя файла"
+          <RenameInput
+            label="Имя файла"
             value={ed.store.state.documentName}
-            ref={(el) => queueMicrotask(() => el.select())}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commit(e.currentTarget.value);
-              if (e.key === 'Escape') setEditing(false);
+            onCommit={(name) => {
+              if (name.trim() && name !== ed.store.state.documentName) ed.send({ type: 'setDocumentName', name });
             }}
-            onBlur={(e) => commit(e.currentTarget.value)}
+            onClose={() => setEditing(false)}
+            returnFocus={() => file.querySelector<HTMLElement>('.fe-panel-head__name')}
           />
         </Show>
         <span class="fe-panel-head__project">Черновики</span>

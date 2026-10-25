@@ -460,3 +460,25 @@ test('«Создать» спрашивает и после правок вне 
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
 });
+
+test('имя файла: Enter и F2 открывают поле, предел длины, фокус возвращается', async ({ page }) => {
+  await openApp(page);
+  const name = page.locator('.fe-panel-head__name');
+  const input = page.getByRole('textbox', { name: 'Имя файла' });
+  await name.focus();
+  await page.keyboard.press('F2');
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute('maxlength', '256');
+  await input.fill('План');
+  await page.keyboard.press('Enter');
+  await expect(name).toHaveText('План');
+  await expect(name).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(input).toBeFocused();
+  await input.fill('Не то');
+  await page.keyboard.press('Escape');
+  await expect(name).toHaveText('План');
+  await expect(name).toBeFocused();
+  // F2 на имени не дошёл до холста: шагов нет.
+  expect((await live(page)).steps).toBe(0);
+});

@@ -427,3 +427,35 @@ test('во время перетаскивания строк клавиши н�
   await page.keyboard.press('Delete');
   await liveWhen(page, `l.steps === ${before.steps + 2} && l.selectionCount === 0`);
 });
+
+test('имя страницы: предел длины, фокус возвращается к странице после Enter и Esc', async ({ page }) => {
+  await openApp(page);
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  const option = pages.getByRole('option', { name: /Страница 1/ });
+  await option.focus();
+  await page.keyboard.press('F2');
+  const input = pages.getByRole('textbox', { name: 'Имя страницы' });
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute('maxlength', '256');
+  await input.fill('Первая');
+  await page.keyboard.press('Enter');
+  const renamed = pages.getByRole('option', { name: /Первая/ });
+  await expect(renamed).toBeFocused();
+  await page.keyboard.press('F2');
+  await input.fill('Не то');
+  await page.keyboard.press('Escape');
+  await expect(renamed).toBeFocused();
+});
+
+test('переименование слоя применяется, когда переходят на другую страницу', async ({ page }) => {
+  await openApp(page);
+  await page.getByRole('button', { name: 'Добавить страницу' }).click();
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  await pages.getByRole('option', { name: /Страница 1/ }).click();
+  await row(page, 'Экран 9').dblclick();
+  await tree(page).getByRole('textbox', { name: 'Имя слоя' }).fill('Главная');
+  await pages.getByRole('option', { name: /Страница 2/ }).click();
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.layers.total)).toBe(0);
+  await pages.getByRole('option', { name: /Страница 1/ }).click();
+  await expect(row(page, 'Главная')).toBeVisible();
+});

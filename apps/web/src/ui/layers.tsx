@@ -7,9 +7,9 @@
 
 import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import type { DropPosition, LayerRow, NodeType } from '../wasm/ferrum_wasm';
-import { MAX_NAME_CHARS } from '../core/limits';
 import { useEditor } from './context';
 import { Icon, type IconName } from './icons';
+import { RenameInput } from './rename-input';
 
 /** Высота строки — `row-height` дизайн-системы. */
 export const ROW = 28;
@@ -70,8 +70,6 @@ export function LayersPanel() {
   const [denied, setDenied] = createSignal(false);
   const [focusedSig, setFocusedSig] = createSignal<string | null>(null);
   const [topRow, setTopRow] = createSignal(0);
-  /** Поле имени фокусируется только если переименование начал пользователь только что. */
-  let wantFocus = false;
   let hovered = false;
   let search!: HTMLInputElement;
   const [drop, setDrop] = createSignal<{ index: number; position: DropPosition } | null>(null);
@@ -294,23 +292,7 @@ export function LayersPanel() {
     ed.send({ type: 'moveLayers', ids: d.ids, selectionVersion: d.version, target: target.id, position: d.target!.position });
   };
 
-  const startRename = (row: LayerRow) => {
-    wantFocus = true;
-    setRenaming({ id: row.id, original: row.name });
-  };
-
-  /** Применить имя слоя по id (поле могло переехать на другую строку окна). */
-  const commitRename = (id: string, name: string) => {
-    const r = renaming();
-    // Esc или уже применено: удаляемое поле ничего не применяет.
-    if (!r || r.id !== id) return;
-    setRenaming(null);
-    if (name !== r.original) ed.send({ type: 'renameLayer', id, name });
-  };
-
-  /** После Enter и Esc поле имени исчезает вместе с фокусом: он возвращается к строке. */
-  const refocusRow = (id: string) =>
-    queueMicrotask(() => tree.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }));
+  const startRename = (row: LayerRow) => setRenaming({ id: row.id, original: row.name });
 
   const onKey = (row: LayerRow, index: number, e: KeyboardEvent) => {
     switch (e.key) {
@@ -447,38 +429,17 @@ export function LayersPanel() {
                 </span>
                 <Show when={renaming()?.id === row().id} fallback={<span class="fe-layer__name">{row().name}</span>}>
                   {(() => {
-                    // Поле принадлежит слою, а не месту: исчезло из окна — применяется по id.
-                    const id = row().id;
-                    let el!: HTMLInputElement;
-                    const focus = wantFocus;
-                    wantFocus = false;
-                    onCleanup(() => commitRename(id, el.value));
-                    if (focus)
-                      queueMicrotask(() => {
-                        el.focus();
-                        el.select();
-                      });
+                    // Поле принадлежит слою, а не месту: исчезло из окна строк или
+                    // сменилась страница — набранное применяется по id, а не теряется.
+                    const r = untrack(renaming)!;
                     return (
-                      <input
-                        ref={el}
-                        class="fe-rename fe-layer__rename"
-                        aria-label="Имя слоя"
-                        maxlength={MAX_NAME_CHARS}
-                        // Набранное поле не перезаписывается событиями: имя берётся один раз.
-                        value={untrack(() => row().name)}
-                        onPointerDown={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => {
-                          e.stopPropagation();
-                          if (e.key === 'Enter') {
-                            commitRename(id, e.currentTarget.value);
-                            refocusRow(id);
-                          }
-                          if (e.key === 'Escape') {
-                            setRenaming(null);
-                            refocusRow(id);
-                          }
-                        }}
-                        onBlur={(e) => commitRename(id, e.currentTarget.value)}
+                      <RenameInput
+                        label="Имя слоя"
+                        class="fe-layer__rename"
+                        value={r.original}
+                        onCommit={(name) => name !== r.original && ed.send({ type: 'renameLayer', id: r.id, name })}
+                        onClose={() => renaming()?.id === r.id && setRenaming(null)}
+                        returnFocus={() => tree.querySelector<HTMLElement>(`[data-id="${CSS.escape(r.id)}"]`)}
                       />
                     );
                   })()}

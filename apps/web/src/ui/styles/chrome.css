@@ -48,7 +48,17 @@
   flex: 1;
 }
 .fe-panel-head__name {
+  /* Кнопка (переименование с клавиатуры), но выглядит как подпись. */
+  justify-self: start;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
   font-weight: 600;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
