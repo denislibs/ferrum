@@ -1,15 +1,22 @@
-// Редактор: холст под управлением worker'а и панели вокруг него.
+// Редактор: холст под управлением worker'а и панели вокруг него (раскладка UI3).
 
 import { createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { boot } from './boot';
+import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { EditorContext, type Editor } from './context';
+import { Menu, type MenuItem } from './menu';
 import { createUiStore } from './store';
 import { Toasts } from './toasts';
+import { Toolbar } from './toolbar';
+import { TooltipLayer } from './tooltip';
 
 export function App() {
   const store = createUiStore();
   const [editor, setEditor] = createSignal<Editor>();
   const [failure, setFailure] = createSignal('');
+  const [left, setLeft] = createSignal(248);
+  const [right, setRight] = createSignal(248);
+  const [context, setContext] = createSignal<{ x: number; y: number } | null>(null);
   let canvas!: HTMLCanvasElement;
 
   onMount(() => {
@@ -23,6 +30,10 @@ export function App() {
   });
   onCleanup(() => editor()?.core.dispose());
 
+  const fileItems = (ed: Editor): MenuItem[] => [
+    { label: 'Создать', onSelect: () => ed.send({ type: 'demo', nodes: 0 }) },
+  ];
+
   return (
     <ErrorBoundary
       fallback={(err: unknown) => (
@@ -31,9 +42,21 @@ export function App() {
         </div>
       )}
     >
-    <div class="fe-app" classList={{ 'fe-app--bare': store.state.uiHidden }}>
+    <div
+      class="fe-app"
+      classList={{ 'fe-app--bare': store.state.uiHidden }}
+      style={{ '--left-w': `${left()}px`, '--right-w': `${right()}px` }}
+    >
       <main class="fe-stage">
-        <canvas ref={canvas} class="fe-canvas" tabindex="0" aria-label="Холст" />
+        <canvas
+          ref={canvas}
+          class="fe-canvas"
+          tabindex="0"
+          aria-label="Холст"
+          onContextMenu={(e) => {
+            if (editor()) setContext({ x: e.clientX, y: e.clientY });
+          }}
+        />
         <Show when={!store.state.ready}>
           <div class="fe-boot" classList={{ 'fe-boot--error': !!failure() }} role="status">
             {failure() || 'Запуск редактора…'}
@@ -46,8 +69,39 @@ export function App() {
             </div>
           )}
         </Show>
+        <Show when={editor()}>
+          {(ed) => (
+            <EditorContext.Provider value={ed()}>
+              <Toolbar />
+            </EditorContext.Provider>
+          )}
+        </Show>
       </main>
-      <Show when={editor()}>{(ed) => <EditorContext.Provider value={ed()}>{null}</EditorContext.Provider>}</Show>
+      <Show when={editor()}>
+        {(ed) => (
+          <EditorContext.Provider value={ed()}>
+            <aside class="fe-side fe-side--left" aria-label="Страницы и слои">
+              <FileHeader items={() => fileItems(ed())} />
+              <ResizeEdge side="left" width={left()} onWidth={setLeft} />
+            </aside>
+            <aside class="fe-side fe-side--right" aria-label="Свойства">
+              <DesignHeader />
+              <ResizeEdge side="right" width={right()} onWidth={setRight} />
+            </aside>
+            <TooltipLayer />
+            <Show when={context()}>
+              {(at) => (
+                <Menu
+                  label="Действия с выделением"
+                  items={canvasMenu(store.state.selectionCount)}
+                  anchor={at()}
+                  onClose={() => setContext(null)}
+                />
+              )}
+            </Show>
+          </EditorContext.Provider>
+        )}
+      </Show>
       <Toasts store={store} />
     </div>
     </ErrorBoundary>

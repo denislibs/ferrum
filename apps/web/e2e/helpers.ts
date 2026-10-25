@@ -95,3 +95,10 @@ export async function openApp(page: Page, nodes = 1000, query = ''): Promise<voi
   });
   await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0);
 }
+
+/** Точка мира на экране редактора: холст между панелями, его угол — со страницы. */
+export async function appScreen(page: Page, l: LiveState, x: number, y: number): Promise<{ x: number; y: number }> {
+  const box = (await page.locator('canvas').boundingBox())!;
+  const p = screen(l, x, y);
+  return { x: box.x + p.x, y: box.y + p.y };
+}

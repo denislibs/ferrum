@@ -123,9 +123,6 @@ select {
   cursor: default;
   filter: none;
 }
-.fe-btn--primary:disabled {
-  background: var(--surface-hover);
-}
 
 /* Квадратная кнопка-иконка (тулбар, шапки, строки). */
 .fe-tool {
@@ -208,7 +205,7 @@ select {
   position: fixed;
   z-index: 50;
   display: flex;
-  gap: var(--space-2);
+  white-space: pre;
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-md);
   background: var(--surface-raised);
@@ -216,7 +213,6 @@ select {
   color: var(--ink);
   font-size: 12px;
   line-height: 16px;
-  white-space: nowrap;
   pointer-events: none;
   animation: fe-pop 120ms ease-out;
 }
