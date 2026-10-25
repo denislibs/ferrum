@@ -176,6 +176,7 @@ fn edit_selection_is_one_step_and_updates_summary() {
                 relative: true,
             },
             phase: EditPhase::Preview,
+            ids: None,
         });
     }
     assert_eq!(document_steps(&core), steps, "превью — без шагов");
@@ -186,6 +187,7 @@ fn edit_selection_is_one_step_and_updates_summary() {
             relative: true,
         },
         phase: EditPhase::Commit,
+        ids: None,
     });
     assert_eq!(document_steps(&core), steps + 1.0);
     let s = summary(&core.take_events()).expect("сводка обновилась");
@@ -223,6 +225,7 @@ fn fills_from_panel_are_validated() {
             fills: vec![red.clone()],
         },
         phase: EditPhase::Commit,
+        ids: None,
     });
     let s = summary(&core.take_events()).unwrap();
     assert_eq!(s.fills.unwrap().list[0].color, "#ff0000ff");
@@ -244,6 +247,7 @@ fn fills_from_panel_are_validated() {
         core.command(Command::EditSelection {
             edit: Edit::Fills { fills: vec![bad] },
             phase: EditPhase::Commit,
+            ids: None,
         });
         assert_eq!(errors(&core.take_events()).len(), 1);
     }
@@ -252,6 +256,7 @@ fn fills_from_panel_are_validated() {
             fills: vec![red; 65],
         },
         phase: EditPhase::Commit,
+        ids: None,
     });
     assert_eq!(errors(&core.take_events()).len(), 1, "предел заливок");
     assert_eq!(document_steps(&core), steps + 1.0, "неверное не правит");
@@ -507,6 +512,7 @@ fn malformed_panel_commands_are_errors() {
                 relative: false,
             },
             phase: EditPhase::Commit,
+            ids: None,
         },
         Command::SetPageBackground {
             color: Some("#12".into()),
@@ -659,6 +665,7 @@ fn search_name_cache_stays_warm_across_every_kind_of_edit() {
             relative: true,
         },
         phase: EditPhase::Commit,
+        ids: None,
     });
     // Жест холста (перенос «Слой 1» в «Экран 0»): правка приходит из ввода.
     drag(&mut core, (140.0, 64.0), (160.0, 64.0), 1000.0);
@@ -882,6 +889,7 @@ fn panel_command_and_event_caps() {
                 strokes: vec![stroke.clone(); 65],
             },
             phase: EditPhase::Commit,
+            ids: None,
         },
         Command::EditSelection {
             edit: Edit::Strokes {
@@ -891,6 +899,7 @@ fn panel_command_and_event_caps() {
                 }],
             },
             phase: EditPhase::Commit,
+            ids: None,
         },
         Command::EditSelection {
             edit: Edit::Size {
@@ -898,6 +907,7 @@ fn panel_command_and_event_caps() {
                 h: 1.0,
             },
             phase: EditPhase::Preview,
+            ids: None,
         },
         Command::SetDocumentName {
             name: "я".repeat(3000),
@@ -948,4 +958,62 @@ fn panel_command_and_event_caps() {
     };
     assert_eq!(name.chars().count(), 256);
     assert_eq!(pages(&ev)[0].0[0].name.chars().count(), 256);
+}
+
+#[test]
+fn edit_with_explicit_ids_applies_to_them_not_to_selection() {
+    let mut core = demo(200);
+    core.command(Command::LayersWindow {
+        start: 0,
+        count: 40,
+    });
+    let (_, _, rows, _) = layers(&core.take_events()).unwrap();
+    let x_of = |core: &mut Core, id: &str| {
+        core.command(Command::Select {
+            ids: vec![id.into()],
+            mode: SelectMode::Replace,
+        });
+        summary(&core.take_events()).unwrap().x.value
+    };
+    let (a, b) = (rows[0].id.clone(), rows[1].id.clone());
+    let (xa, xb) = (x_of(&mut core, &a), x_of(&mut core, &b));
+    // Выделен b, а правка адресована a: превью и шаг — у a.
+    let steps = document_steps(&core);
+    for phase in [EditPhase::Preview, EditPhase::Commit] {
+        core.command(Command::EditSelection {
+            edit: Edit::Number {
+                field: Field::X,
+                value: 30.0,
+                relative: true,
+            },
+            phase,
+            ids: Some(vec![a.clone()]),
+        });
+    }
+    assert_eq!(document_steps(&core), steps + 1.0);
+    assert_eq!(x_of(&mut core, &a), xa + 30.0);
+    assert_eq!(x_of(&mut core, &b), xb, "выделенный не тронут");
+    // Мёртвый узел отфильтровывается; пустой список — правки нет; лишний — ошибка.
+    core.take_events();
+    let steps = document_steps(&core);
+    for ids in [vec!["999999@1".to_string()], vec![]] {
+        core.command(Command::EditSelection {
+            edit: Edit::Number {
+                field: Field::X,
+                value: 5.0,
+                relative: true,
+            },
+            phase: EditPhase::Commit,
+            ids: Some(ids),
+        });
+    }
+    assert_eq!(document_steps(&core), steps);
+    core.take_events();
+    core.command(Command::EditSelection {
+        edit: Edit::ClipContent { value: true },
+        phase: EditPhase::Commit,
+        ids: Some(vec![a.clone(); 1001]),
+    });
+    assert!(!errors(&core.take_events()).is_empty());
+    assert_eq!(document_steps(&core), steps);
 }

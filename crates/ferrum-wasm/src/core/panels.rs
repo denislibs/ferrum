@@ -275,9 +275,20 @@ impl Core {
                     self.editor.set_flags(&ids, visible, locked);
                 }
             }
-            Command::EditSelection { edit, phase: p } => match panel_edit(&edit) {
-                Ok(e) => self.editor.edit_selection(&e, phase(p)),
-                Err(m) => {
+            Command::EditSelection {
+                edit,
+                phase: p,
+                ids,
+            } => match (panel_edit(&edit), ids.as_deref().map(|l| self.nodes(l))) {
+                (Ok(e), None) => self.editor.edit_selection(&e, phase(p)),
+                (Ok(e), Some(Some(ids))) => self.editor.edit_nodes(&e, phase(p), &ids),
+                (Ok(_), Some(None)) => {
+                    // Ошибку об идентификаторах уже выдал `nodes`; жест не висит.
+                    if p != EditPhase::Preview {
+                        self.editor.cancel_gesture();
+                    }
+                }
+                (Err(m), _) => {
                     // Жест не должен остаться висеть из-за неверного шага.
                     if p != EditPhase::Preview {
                         self.editor.cancel_gesture();

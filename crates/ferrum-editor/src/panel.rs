@@ -423,6 +423,21 @@ impl Editor {
     /// Правка выделения из панели свойств (см. описание модуля). Жест холста,
     /// если он идёт, отменяется.
     pub fn edit_selection(&mut self, edit: &PanelEdit, phase: Phase) {
+        self.edit_targets(edit, phase, None);
+    }
+
+    /// То же для заданных узлов, а не текущего выделения: поле правило их, пока
+    /// выделение успело смениться (щелчок по холсту, строка слоёв). Мёртвые узлы
+    /// отбрасываются.
+    pub fn edit_nodes(&mut self, edit: &PanelEdit, phase: Phase, ids: &[NodeId]) {
+        self.edit_targets(edit, phase, Some(ids));
+    }
+
+    fn edit_targets(&mut self, edit: &PanelEdit, phase: Phase, ids: Option<&[NodeId]>) {
+        let targets = |me: &Self| match ids {
+            Some(ids) => me.alive(ids),
+            None => me.selection.to_vec(),
+        };
         match phase {
             Phase::Cancel => self.cancel_panel(),
             Phase::Preview => {
@@ -434,7 +449,7 @@ impl Editor {
                 }
                 if self.panel.is_none() {
                     self.cancel_gesture();
-                    self.panel = Some(capture(&self.scene, &self.selection, deep));
+                    self.panel = Some(capture(&self.scene, &targets(self), deep));
                 }
                 let p = patches(self.panel.as_ref().expect("задан выше"), edit);
                 self.scene.set_preview(&p);
@@ -446,7 +461,7 @@ impl Editor {
                     _ => {
                         self.cancel_gesture();
                         self.scene.clear_preview();
-                        capture(&self.scene, &self.selection, deep)
+                        capture(&self.scene, &targets(self), deep)
                     }
                 };
                 let p = patches(&g, edit);

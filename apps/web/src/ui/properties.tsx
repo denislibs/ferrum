@@ -14,8 +14,14 @@ import { Menu, type MenuItem } from './menu';
 import { NumberField } from './number-field';
 import type { FieldInput } from './number';
 
-export function sendEdit(send: (c: { type: 'editSelection'; edit: Edit; phase: EditPhase }) => void, edit: Edit, phase: EditPhase) {
-  send({ type: 'editSelection', edit, phase });
+/** Правка; `ids` — узлы, которые правятся с начала жеста (без них — текущее выделение). */
+export function sendEdit(
+  send: (c: { type: 'editSelection'; edit: Edit; phase: EditPhase; ids: string[] | undefined }) => void,
+  edit: Edit,
+  phase: EditPhase,
+  ids?: string[],
+) {
+  send({ type: 'editSelection', edit, phase, ids });
 }
 
 /** Правка числового поля командой (значение или прибавка к каждому). */
@@ -29,8 +35,8 @@ export function PropertiesPanel() {
   const ed = useEditor();
   const s = () => ed.store.state.summary;
   const count = () => s()?.count ?? 0;
-  const edit = (field: Field) => (input: FieldInput, phase: EditPhase) =>
-    sendEdit(ed.send, numberEdit(field, input), phase);
+  const edit = (field: Field) => (input: FieldInput, phase: EditPhase, ids: string[]) =>
+    sendEdit(ed.send, numberEdit(field, input), phase, ids);
   // Один узел во время жеста холста — живые значения из общей памяти.
   const live = () => ed.store.state.live;
   const liveOne = () => live().busy && live().count === 1 && count() === 1;
@@ -49,7 +55,7 @@ export function PropertiesPanel() {
 }
 
 function PositionSection(props: {
-  edit: (f: Field) => (i: FieldInput, p: EditPhase) => void;
+  edit: (f: Field) => (i: FieldInput, p: EditPhase, ids: string[]) => void;
   val: (n: Num | undefined, live: number) => { value: number; mixed: boolean };
 }) {
   const ed = useEditor();
@@ -146,7 +152,7 @@ function PositionSection(props: {
   );
 }
 
-function AppearanceSection(props: { edit: (f: Field) => (i: FieldInput, p: EditPhase) => void }) {
+function AppearanceSection(props: { edit: (f: Field) => (i: FieldInput, p: EditPhase, ids: string[]) => void }) {
   const ed = useEditor();
   const s = () => ed.store.state.summary!;
   return (

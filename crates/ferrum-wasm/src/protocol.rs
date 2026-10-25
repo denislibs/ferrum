@@ -256,10 +256,12 @@ pub enum Command {
         visible: Option<bool>,
         locked: Option<bool>,
     },
-    /// Правка выделения из панели свойств.
+    /// Правка из панели свойств. `ids` — узлы, которые правились с начала
+    /// жеста (поле могло потерять выделение); без них — текущее выделение.
     EditSelection {
         edit: Edit,
         phase: EditPhase,
+        ids: Option<Vec<String>>,
     },
     /// Новая страница; она становится текущей.
     AddPage,

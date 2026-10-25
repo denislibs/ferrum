@@ -138,7 +138,7 @@ test('набранное в поле не затирается событиям�
   const send = (f: string, value: number) =>
     page.evaluate(
       ([field, value]) =>
-        window.__ferrum!.core.send({ type: 'editSelection', edit: { type: 'number', field, value, relative: false } as never, phase: 'commit' }),
+        window.__ferrum!.core.send({ type: 'editSelection', edit: { type: 'number', field, value, relative: false } as never, phase: 'commit', ids: undefined }),
       [f, value] as const,
     );
   await expect(x).toHaveValue('14400');
@@ -230,4 +230,176 @@ test('подпись захватывает указатель: жест идё�
   await page.mouse.move(box.x + 45, box.y + 5, { steps: 4 });
   await page.mouse.up();
   await expect.poll(async () => (await summary(page)).x.value).toBe(14440);
+});
+
+// ---- Раунд 1: адресат правки, «Смешанные», мелочи поля ----
+
+const coreSend = (page: Page, cmd: unknown) => page.evaluate((c) => window.__ferrum!.core.send(c as never), cmd);
+const rowsTop = (page: Page) => page.getByRole('tree', { name: 'Слои' }).evaluate((el) => (el.scrollTop = 0));
+const xOf = async (page: Page, name: string) => {
+  await rowsTop(page);
+  await selectRow(page, name);
+  await expect.poll(async () => (await summary(page)).name).toBe(name);
+  return (await summary(page)).x.value;
+};
+
+test('набранное применяется к тем, кого правили: щелчок по холсту на другой объект', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  const x = field(page, 'X');
+  const before = await live(page);
+  await x.click();
+  await x.press('ControlOrMeta+a');
+  await x.pressSequentially('777');
+  await coreSend(page, { type: 'execute', command: 'view.fit_all' });
+  const l = await liveWhen(page, 'l.frames > 0');
+  await page.waitForTimeout(300);
+  const at = await appScreen(page, await live(page), 13500, 512);
+  void l;
+  await page.mouse.click(at.x, at.y);
+  await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  await page.waitForTimeout(300);
+  expect((await live(page)).steps).toBe(before.steps + 1);
+  expect(await xOf(page, 'Экран 9')).toBe(777);
+  expect(await xOf(page, 'Экран 8')).toBe(12800);
+});
+
+test('набранное применяется к тем, кого правили: смена выделения через слои и без потери фокуса', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  const x = field(page, 'X');
+  const before = await live(page);
+  await x.click();
+  await x.press('ControlOrMeta+a');
+  await x.pressSequentially('555');
+  // Строка слоёв: выделение сменилось, и поле уходит из фокуса.
+  await selectRow(page, 'Экран 8');
+  await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  expect(await xOf(page, 'Экран 9')).toBe(555);
+  expect(await xOf(page, 'Экран 8')).toBe(12800);
+  // Выделение сменилось, а поле осталось в фокусе: набранное применяется сразу.
+  await selectRow(page, 'Экран 9');
+  await x.click();
+  await x.press('ControlOrMeta+a');
+  await x.pressSequentially('600');
+  const ids = await page.evaluate(() => window.__ferrum!.ui!.selectionIds.slice());
+  expect(ids.length).toBe(1);
+  await coreSend(page, { type: 'layersWindow', start: 0, count: 40 });
+  const other = await page.evaluate(
+    (id) => (window.__ferrum!.ui!.layers.rows.find((r) => r.id !== id) ?? { id: '' }).id,
+    ids[0],
+  );
+  await coreSend(page, { type: 'select', ids: [other], mode: 'replace' });
+  await liveWhen(page, `l.steps === ${before.steps + 2}`);
+  await page.waitForTimeout(200);
+  expect((await live(page)).steps).toBe(before.steps + 2);
+  expect(await xOf(page, 'Экран 9')).toBe(600);
+});
+
+test('«Смешанные»: *2, /2 и % не ставят всем одно значение', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  await selectRow(page, 'Экран 8', ['Shift']);
+  const x = field(page, 'X');
+  const before = await live(page);
+  await expect(x).toHaveAttribute('placeholder', 'Смешанные');
+  for (const bad of ['*2', '/2', '50%']) {
+    await x.fill(bad);
+    await x.press('Enter');
+    await expect(x).toHaveValue('');
+    await expect(x).toHaveAttribute('placeholder', 'Смешанные');
+  }
+  await page.waitForTimeout(200);
+  expect((await live(page)).steps).toBe(before.steps);
+  // Прозрачность: проценты от 100 от узла не зависят и работают.
+  const o = field(page, 'Прозрачность');
+  await o.fill('50%');
+  await o.press('Enter');
+  await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  await expect(o).toHaveValue('50%');
+});
+
+test('Enter при вводе через IME не применяет; другое поле с набранным применяется до жеста', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  const x = field(page, 'X');
+  const y = field(page, 'Y');
+  const before = await live(page);
+  await x.click();
+  await x.press('ControlOrMeta+a');
+  await x.pressSequentially('321');
+  await x.evaluate((el) => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })));
+  await page.waitForTimeout(200);
+  expect((await live(page)).steps).toBe(before.steps);
+  await expect(x).toHaveValue('321');
+  await x.press('Enter');
+  await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  // Набрано в Y, затем потянули подпись X: Y применяется первым.
+  await y.click();
+  await y.press('ControlOrMeta+a');
+  await y.pressSequentially('55');
+  const box = (await page.getByRole('tabpanel').locator('.fe-field__label', { hasText: /^X$/ }).boundingBox())!;
+  await page.mouse.move(box.x + 5, box.y + 5);
+  await page.mouse.down();
+  await liveWhen(page, `l.steps === ${before.steps + 2}`);
+  await page.mouse.move(box.x + 15, box.y + 5, { steps: 3 });
+  await page.mouse.up();
+  await liveWhen(page, `l.steps === ${before.steps + 3}`);
+  expect((await summary(page)).y.value).toBe(55);
+  expect((await summary(page)).x.value).toBe(331);
+});
+
+test('превью подписи — не чаще кадра и без повторов; размонтирование отменяет жест', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  await page.evaluate(() => {
+    const core = window.__ferrum!.core as unknown as { send(c: { type: string; phase?: string; edit?: { value: number } }): void };
+    const send = core.send.bind(core);
+    const w = window as unknown as { __prev: number[]; __cancels: number };
+    w.__prev = [];
+    w.__cancels = 0;
+    core.send = (c) => {
+      if (c.type === 'editSelection' && c.phase === 'preview') w.__prev.push(c.edit!.value);
+      if (c.type === 'editSelection' && c.phase === 'cancel') w.__cancels++;
+      send(c);
+    };
+  });
+  const before = await live(page);
+  const box = (await page.getByRole('tabpanel').locator('.fe-field__label', { hasText: /^X$/ }).boundingBox())!;
+  await page.mouse.move(box.x + 5, box.y + 5);
+  await page.mouse.down();
+  // 40 движений в одной задаче: до кадра превью уходит не больше одного.
+  await page.getByRole('tabpanel').locator('.fe-field__label', { hasText: /^X$/ }).evaluate((el, x0) => {
+    for (let i = 1; i <= 40; i++) {
+      el.dispatchEvent(new PointerEvent('pointermove', { clientX: x0 + i, clientY: 10, bubbles: true, pointerId: 1 }));
+    }
+  }, box.x + 5);
+  await page.waitForTimeout(100);
+  const prev = await page.evaluate(() => (window as unknown as { __prev: number[] }).__prev);
+  expect(prev.length).toBeGreaterThan(0);
+  expect(prev.length).toBeLessThanOrEqual(2);
+  expect(prev.every((v, i) => i === 0 || v !== prev[i - 1])).toBe(true);
+  expect(prev.at(-1)).toBe(14440);
+  // Панель размонтирована (выделения нет) посреди жеста: превью снято.
+  await coreSend(page, { type: 'select', ids: [], mode: 'replace' });
+  await expect(field(page, 'X')).toHaveCount(0);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => (window as unknown as { __cancels: number }).__cancels)).toBeGreaterThan(0);
+  expect((await live(page)).steps).toBe(before.steps);
+  expect(await xOf(page, 'Экран 9')).toBe(14400);
+});
+
+test('поворот: ввод, равный показанному, — не правка', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  const r = field(page, 'Поворот');
+  const before = await live(page);
+  await coreSend(page, { type: 'editSelection', edit: { type: 'number', field: 'rotation', value: 30.004, relative: false }, phase: 'commit', ids: undefined });
+  await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  await expect(r).toHaveValue('30°');
+  await r.fill('30');
+  await r.press('Enter');
+  await page.waitForTimeout(200);
+  expect((await live(page)).steps).toBe(before.steps + 1);
 });

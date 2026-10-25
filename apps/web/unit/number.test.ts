@@ -64,3 +64,26 @@ test('формат числа', () => {
   expect(formatNumber(1440, 0)).toBe('1440');
   expect(formatNumber(NaN)).toBe('');
 });
+
+test('у «Смешанных» выражение от текущего значения отклоняется: у каждого узла своё', () => {
+  const m = (t: string, percentOf?: number) => parseFieldInput(t, { current: 5, mixed: true, percentOf });
+  // *N, /N и % считались бы от первого узла и ставили всем одно значение.
+  expect(m('*2')).toBeNull();
+  expect(m('/2')).toBeNull();
+  expect(m('50%')).toBeNull();
+  expect(m('+10%')).toBeNull();
+  // Прозрачность: % от фиксированных 100, от узла не зависит.
+  expect(m('50%', 100)).toEqual(set(50));
+  // Без зависимости от текущего — как раньше.
+  expect(m('+10')).toEqual({ kind: 'add', delta: 10 });
+  expect(m('2*3')).toEqual(set(6));
+  // У одного узла то же самое работает.
+  expect(parseFieldInput('*2', { current: 5 })).toEqual(set(10));
+});
+
+test('длинный ввод и глубокие скобки не бросают исключений', () => {
+  expect(parseFieldInput('1+'.repeat(200) + '1', { current: 1 })).toBeNull();
+  expect(parseFieldInput('9'.repeat(257), { current: 1 })).toBeNull();
+  expect(parseFieldInput('('.repeat(300), { current: 1 })).toBeNull();
+  expect(parseFieldInput('('.repeat(120) + '1' + ')'.repeat(120), { current: 1 })).toEqual(set(1));
+});

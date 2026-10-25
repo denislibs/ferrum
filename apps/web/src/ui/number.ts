@@ -100,16 +100,35 @@ export interface ParseOptions {
  * вдвое); у «Смешанных» `+N` и `-N` с пробелом нет — это прибавка к каждому узлу.
  * `null` — не число. */
 export function parseFieldInput(text: string, opts: ParseOptions): FieldInput | null {
+  try {
+    return parseUnsafe(text, opts);
+  } catch {
+    return null;
+  }
+}
+
+/** Длиннее выражение не бывает: поле ограничено тем же числом, разбор — тоже. */
+export const MAX_INPUT = 256;
+
+function parseUnsafe(text: string, opts: ParseOptions): FieldInput | null {
   const trimmed = text.trim();
-  if (!trimmed) return null;
+  if (!trimmed || trimmed.length > MAX_INPUT) return null;
   const tokens = tokenize(trimmed);
   if (!tokens || tokens.length === 0) return null;
   const percentOf = opts.percentOf ?? opts.current;
   const first = tokens[0];
   const continues = first.t === 'op' && (first.v === '*' || first.v === '/' || first.v === '+');
-  if (opts.mixed && first.t === 'op' && (first.v === '+' || first.v === '-')) {
-    const delta = parse(tokens, percentOf);
-    return delta === null ? null : { kind: 'add', delta };
+  if (opts.mixed) {
+    // У «Смешанных» результат, зависящий от текущего значения (`*2`, `/2`, `50%`),
+    // считался бы от первого узла и ставил всем одно число: отклоняем. «+N» и «-N» —
+    // прибавка к каждому; проценты от заданной базы (прозрачность) от узла не зависят.
+    const fromCurrent = (first.t === 'op' && (first.v === '*' || first.v === '/')) ||
+      (opts.percentOf === undefined && tokens.some((t) => t.t === 'op' && t.v === '%'));
+    if (fromCurrent) return null;
+    if (first.t === 'op' && (first.v === '+' || first.v === '-')) {
+      const delta = parse(tokens, percentOf);
+      return delta === null ? null : { kind: 'add', delta };
+    }
   }
   const value = parse(continues ? [{ t: 'num', v: opts.current }, ...tokens] : tokens, percentOf);
   return value === null ? null : { kind: 'set', value };

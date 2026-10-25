@@ -231,6 +231,7 @@ fn panel_commands_parse_and_none_becomes_undefined() {
                 relative: false
             },
             phase: EditPhase::Commit,
+            ids: None,
         })
     );
     // `ids` пропущено или `null` — текущее выделение.

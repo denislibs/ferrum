@@ -26,6 +26,8 @@ export interface UiState {
   ready: boolean;
   tool: Tool;
   selectionCount: number;
+  /** Идентификаторы выделенных (не больше, чем в событии ядра): адресат правок панели. */
+  selectionIds: string[];
   canUndo: boolean;
   canRedo: boolean;
   documentName: string;
@@ -48,6 +50,7 @@ const initial: UiState = {
   ready: false,
   tool: 'move',
   selectionCount: 0,
+  selectionIds: [],
   canUndo: false,
   canRedo: false,
   documentName: '',
@@ -94,7 +97,7 @@ export function createUiStore() {
         setState('tool', e.tool);
         break;
       case 'selection':
-        setState('selectionCount', e.count);
+        setState({ selectionCount: e.count, selectionIds: e.ids });
         break;
       case 'document':
         setState({ canUndo: e.canUndo, canRedo: e.canRedo });
