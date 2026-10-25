@@ -19,5 +19,6 @@ pub mod layout;
 pub mod live;
 pub mod present;
 pub mod protocol;
+pub mod summary;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
