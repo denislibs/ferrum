@@ -95,7 +95,10 @@ export function TooltipLayer() {
           style={{
             left: `${t().x}px`,
             top: `${t().y}px`,
-            transform: `translate(-50%, ${t().above ? '-100%' : '0'})`,
+            // Отдельное свойство `translate`, не `transform`: анимация появления
+            // (fe-pop) двигает `transform`, и на первом кадре затирала бы сдвиг —
+            // подсказка «прилетала» сбоку, а не появлялась на месте.
+            translate: `-50% ${t().above ? '-100%' : '0'}`,
           }}
         >
           {/* «Название  Клавиша»: два пробела — часть текста (white-space: pre). */}
