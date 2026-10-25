@@ -7,7 +7,7 @@ import { expect, test } from '@playwright/test';
 import * as enc from '../src/core/input';
 import { Ctrl, CTRL_BYTES, Kind, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET, SAB_BYTES } from '../src/core/layout.gen';
 import { commandSizeError, MAX_COMMAND_BYTES, prepareCommand, type FromWorker, type ToWorker } from '../src/core/messages';
-import { addSaturating, drainRing, LIVE_READ_RETRIES, LiveReader, writeLive } from '../src/core/shared';
+import { addSaturating, drainRing, holdInput, LIVE_READ_RETRIES, LiveReader, writeLive, type Held } from '../src/core/shared';
 import { MessageTransport, SabTransport } from '../src/core/transport';
 
 const MiB = 1024 * 1024;
@@ -215,7 +215,7 @@ test.describe('предел размера команд', () => {
   test('Open, Paste и PlaceImage больше предела отклоняются по-русски', () => {
     for (const type of ['open', 'paste', 'placeImage'] as const) {
       const err = commandSizeError({ type, bytes: big(MAX_COMMAND_BYTES[type] + 1) });
-      expect(err, type).toMatch(/^Слишком большой объём данных: \d+ МБ, предел для этой команды — \d+ МБ\.$/);
+      expect(err, type).toMatch(/^Слишком большой объём данных: \d+ МБ, предел — \d+ МБ$/);
       expect(commandSizeError({ type, bytes: big(MAX_COMMAND_BYTES[type]) }), type).toBeNull();
     }
     expect(commandSizeError({ type: 'save' })).toBeNull();
@@ -224,7 +224,7 @@ test.describe('предел размера команд', () => {
 
   test('размер в сообщении округляется вверх, а не вниз', () => {
     const err = commandSizeError({ type: 'paste', bytes: big(MAX_COMMAND_BYTES.paste + 1) })!;
-    expect(err).toContain('65 МБ, предел для этой команды — 64 МБ');
+    expect(err).toContain('65 МБ, предел — 64 МБ');
   });
 
   test('байты в общей памяти отклоняются, часть буфера копируется перед передачей', () => {
@@ -449,5 +449,48 @@ test.describe('сообщения worker\'а', () => {
     const t = new SabTransport(w as unknown as Worker);
     send(w, { t: 'live', live: new Float64Array(LIVE_SLOTS) });
     expect(t.malformed()).toBe(1);
+  });
+});
+
+test.describe('очередь ввода на время перекодировки картинки', () => {
+  const rec = (kind: number, tag: number) => {
+    const r = new Uint8Array(RECORD_SIZE);
+    r[0] = kind;
+    r[RECORD_SIZE - 1] = tag;
+    return r;
+  };
+  const cat = (...rs: Uint8Array[]) => {
+    const out = new Uint8Array(rs.length * RECORD_SIZE);
+    rs.forEach((r, i) => out.set(r, i * RECORD_SIZE));
+    return out;
+  };
+  /** Порядок очереди: сообщения — `m<тег>`, записи — `<вид>:<тег>`. */
+  const order = (q: Held<number>[]) =>
+    q.flatMap((h) =>
+      'msg' in h
+        ? [`m${h.msg}`]
+        : Array.from({ length: h.input.length / RECORD_SIZE }, (_, i) => `${h.input[i * RECORD_SIZE]}:${h.input[(i + 1) * RECORD_SIZE - 1]}`),
+    );
+
+  test('записи и сообщения — в порядке прихода, записи копируются', () => {
+    const q: Held<number>[] = [{ msg: 1 }];
+    const buf = cat(rec(Kind.KEY_DOWN, 1), rec(Kind.POINTER_MOVE, 2));
+    expect(holdInput(q, buf, 16)).toBe(0);
+    buf.fill(0);
+    q.push({ msg: 2 });
+    holdInput(q, cat(rec(Kind.KEY_UP, 3)), 16);
+    expect(order(q)).toEqual([`m1`, `${Kind.KEY_DOWN}:1`, `${Kind.POINTER_MOVE}:2`, `m2`, `${Kind.KEY_UP}:3`]);
+  });
+
+  test('сверх предела теряются только движение и колесо, нажатия и клавиши — никогда', () => {
+    const q: Held<number>[] = [];
+    holdInput(q, cat(rec(Kind.POINTER_MOVE, 1), rec(Kind.KEY_DOWN, 2), rec(Kind.WHEEL, 3)), 3);
+    // Полна: новая теряемая — теряется; нетеряемая вытесняет самую старую теряемую.
+    expect(holdInput(q, cat(rec(Kind.POINTER_MOVE, 4), rec(Kind.KEY_UP, 5)), 3)).toBe(2);
+    expect(order(q)).toEqual([`${Kind.KEY_DOWN}:2`, `${Kind.WHEEL}:3`, `${Kind.KEY_UP}:5`]);
+    expect(holdInput(q, cat(rec(Kind.POINTER_DOWN, 6)), 3)).toBe(1);
+    // Теряемых нет — нетеряемые идут сверх предела.
+    expect(holdInput(q, cat(rec(Kind.POINTER_UP, 7), rec(Kind.KEY_DOWN, 8)), 3)).toBe(0);
+    expect(order(q)).toEqual([`${Kind.KEY_DOWN}:2`, `${Kind.KEY_UP}:5`, `${Kind.POINTER_DOWN}:6`, `${Kind.POINTER_UP}:7`, `${Kind.KEY_DOWN}:8`]);
   });
 });

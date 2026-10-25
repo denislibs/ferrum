@@ -448,9 +448,16 @@ impl PageDoc {
         Ok(self.props(id)?.kind)
     }
 
+    /// Правка, которая ничего не меняет (те же значения), не пишется и не
+    /// записывает обратную операцию: транзакция без изменений шага не создаёт.
     pub(crate) fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
         let tid = self.tid(id)?;
         let before = self.props(id)?;
+        let mut after = before.clone();
+        patch.apply_to(&mut after);
+        if after == before {
+            return Ok(());
+        }
         codec::write_patch(&self.tree.get_meta(tid)?, patch)?;
         if let Some(props) = self.state.borrow_mut().props.get_mut(&id) {
             patch.apply_to(props);

@@ -612,8 +612,10 @@ fn opacity_and_clip_bump_subtree_version_of_node_and_ancestors_only() {
             opacity: Some(0.5),
             ..Default::default()
         },
+        // У прямоугольника обрезка по умолчанию выключена: правка — включить
+        // (то же значение изменением не считается и в сцену не приходит).
         PropsPatch {
-            clip_content: Some(false),
+            clip_content: Some(true),
             ..Default::default()
         },
     ];

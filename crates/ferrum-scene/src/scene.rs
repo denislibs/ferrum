@@ -167,6 +167,13 @@ pub struct Scene {
     /// Растёт при каждом изменении сцены (`apply`, превью): холст по нему понимает,
     /// что нужен новый кадр, не сравнивая сцены.
     changes: u64,
+    /// Метка состава и имён: растёт на 1 при каждом `apply` и при превью имени.
+    /// Превью геометрии и черновики её не меняют — по ней панель слоёв понимает,
+    /// что кэш строк устарел.
+    structure: u64,
+    /// Номер этого экземпляра сцены (из `fresh_version`): новая сцена, в том числе
+    /// пересобранная внутри `apply`, получает новый.
+    generation: u64,
     /// Черновики жеста в порядке `set_drafts` и их слоты (в том же порядке).
     drafts: Vec<Draft>,
     draft_slots: Vec<Slot>,
@@ -177,7 +184,33 @@ pub struct Scene {
 
 impl Scene {
     pub fn new() -> Scene {
-        Scene::default()
+        Scene {
+            generation: fresh_version(),
+            ..Scene::default()
+        }
+    }
+
+    /// Метка состава и имён узлов внутри одного экземпляра сцены: растёт на 1 при
+    /// каждом `apply` и при превью имени, не меняется от превью геометрии и
+    /// черновиков жеста. Сравнивать имеет смысл вместе с `generation`.
+    pub fn structure_stamp(&self) -> u64 {
+        self.structure
+    }
+
+    /// Номер экземпляра сцены; не повторяется между сценами процесса.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Узел по индексу, если он жив: без паники на освобождённых и чужих индексах.
+    pub fn node_at(&self, slot: Slot) -> Option<&SceneNode> {
+        let s = slot as usize;
+        self.nodes.chunks.get(s / CHUNK)?.get(s % CHUNK)?.as_ref()
+    }
+
+    /// Слот занят черновиком жеста (за O(1), без поиска по идентификатору).
+    pub fn is_draft_slot(&self, slot: Slot) -> bool {
+        self.draft_set.contains(&slot)
     }
 
     /// Сцена по строкам кэша сцены — до загрузки Loro. Строки идут в порядке обхода,
@@ -579,6 +612,7 @@ impl Scene {
         }
         // Пересборка целиком создаёт новую сцену: счётчик не должен откатиться.
         self.changes = counter;
+        self.structure += 1;
     }
 
     fn try_apply(&mut self, changes: &Changes, page: &PageDoc) -> Option<()> {
@@ -752,6 +786,11 @@ impl Scene {
     /// Каждый вызов заменяет превью целиком: узлы, которых нет в новом списке,
     /// возвращаются к свойствам документа. Неизвестные узлы пропускаются.
     pub fn set_preview(&mut self, patches: &[(NodeId, PropsPatch)]) {
+        if patches.iter().any(|(_, p)| p.name.is_some())
+            || self.preview.values().any(|(_, p)| p.name.is_some())
+        {
+            self.structure += 1;
+        }
         let mut dirty = Vec::new();
         let new: HashSet<Slot> = patches
             .iter()

@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use ferrum_doc::{DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
+use ferrum_doc::{Changes, DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
 use ferrum_render::{Camera, Overlay, OverlayTheme};
 use ferrum_scene::Scene;
 use kurbo::{Point, Size, Vec2};
@@ -19,6 +19,7 @@ use kurbo::{Point, Size, Vec2};
 use crate::commands::CommandId;
 use crate::input::{Input, KeyEvent, Platform, PointerButton, PointerEvent, WheelEvent};
 use crate::keymap::Keymap;
+use crate::panel::PanelGesture;
 use crate::tools::{
     sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, Tool,
     ToolKind, ToolOverlay,
@@ -136,6 +137,8 @@ pub struct Editor {
     pub(crate) out: Outbox,
     last_pointer: Option<PointerEvent>,
     seen: Seen,
+    /// Жест панели свойств (перетаскивание поля, палитра): свойства на начало.
+    pub(crate) panel: Option<PanelGesture>,
 }
 
 impl Editor {
@@ -191,6 +194,7 @@ impl Editor {
             out: Outbox::default(),
             last_pointer: None,
             seen,
+            panel: None,
         })
     }
 
@@ -262,6 +266,14 @@ impl Editor {
     /// Шагов истории, созданных редактором (жесты и команды с изменениями).
     pub fn step_count(&self) -> u64 {
         self.out.steps
+    }
+
+    /// Непустые изменения, применённые к сцене текущей страницы с прошлого вызова,
+    /// по порядку (правка, отмена и повтор, вставка, правка из панели). Новая сцена
+    /// (другая страница, пересборка) сюда не попадает: у неё другой
+    /// `Scene::generation`. Не больше `tools::MAX_APPLIED` последних.
+    pub fn take_applied(&mut self) -> Vec<Changes> {
+        std::mem::take(&mut self.out.applied)
     }
 
     /// Идёт ли жест (кнопка нажата).
@@ -355,6 +367,14 @@ impl Editor {
                 self.cancel_gesture();
             }
             return;
+        }
+        // Нажатие, клавиша или потеря фокуса на холсте во время жеста панели —
+        // жест панели отменяется: его превью и жест холста не живут вместе.
+        if !matches!(
+            input,
+            Input::PointerMove(_) | Input::Wheel(_) | Input::Pinch { .. }
+        ) {
+            self.cancel_panel();
         }
         match input {
             Input::PointerDown(e) => self.pointer_down(e),
@@ -503,8 +523,10 @@ impl Editor {
         }
     }
 
-    /// Отменяет жест: превью убирается, документ и история не меняются.
+    /// Отменяет жест (холста или панели): превью убирается, документ и история
+    /// не меняются.
     pub fn cancel_gesture(&mut self) {
+        self.cancel_panel();
         if let Some(mut hand) = self.pan.take() {
             hand.cancel(&mut self.ctx());
         }
@@ -557,6 +579,9 @@ impl Editor {
     /// Выполняет команду (меню, палитра, горячая клавиша). Во время жеста
     /// выполняется только Esc — он отменяет жест.
     pub fn execute(&mut self, cmd: CommandId) {
+        // Жест панели (поле, палитра) держит узлы на начало жеста: команда могла бы
+        // их удалить или сдвинуть, поэтому он отменяется.
+        self.cancel_panel();
         if self.is_busy() {
             if cmd == CommandId::Escape {
                 self.cancel_gesture();

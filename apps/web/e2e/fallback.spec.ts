@@ -14,7 +14,7 @@
 // «неверное сообщение»).
 
 import { expect, test, type Page } from '@playwright/test';
-import { drag, expectPixel, live, liveWhen, open, screen } from './helpers';
+import { drag, expectPixel, gotoDebug, live, liveWhen, open, screen } from './helpers';
 
 interface Opt {
   /** `getContext('webgl2')` на пробном холсте 1×1 даёт `null`. */
@@ -148,7 +148,7 @@ async function stubWorker(page: Page, opt: Opt): Promise<void> {
 
 async function fault(page: Page, name: string): Promise<void> {
   await page.evaluate((name) => {
-    (window.__ferrum!.core as unknown as { worker: Worker }).worker.postMessage({ t: '__fault', name });
+    (window.__ferrum!.core! as unknown as { worker: Worker }).worker.postMessage({ t: '__fault', name });
   }, name);
 }
 
@@ -160,7 +160,7 @@ function errors(page: Page): Promise<string[]> {
 }
 
 async function info(page: Page): Promise<{ backend: string | null; fallbacks: string[] }> {
-  return page.evaluate(() => ({ backend: window.__ferrum!.core.backend, fallbacks: window.__ferrum!.core.fallbacks }));
+  return page.evaluate(() => ({ backend: window.__ferrum!.core!.backend, fallbacks: window.__ferrum!.core!.fallbacks }));
 }
 
 /** Кадр на экране непустой: «Слой 1» первого фрейма синий, фон тёмный. */
@@ -168,7 +168,8 @@ async function expectDrawn(page: Page): Promise<void> {
   const l = await live(page);
   const at = screen(l, 200, 40);
   await expectPixel(page, at.x, at.y, [1, 120, 200]);
-  await expectPixel(page, 600, l.viewportH - 10, [36, 35, 34]);
+  // Пустой холст — токен `canvas` дизайн-системы (#1a1918).
+  await expectPixel(page, 600, l.viewportH - 10, [26, 25, 24]);
 }
 
 /** Просит ещё кадр: ввод, после которого редактор перерисовывается. */
@@ -240,7 +241,7 @@ test('много запусков и остановок ядра: контекс
   await open(page, '&backend=webgl');
   // Каждое ядро берёт пробный контекст и настоящий; после остановки оба свободны.
   const results = await page.evaluate(async () => {
-    const Core = window.__ferrum!.core.constructor as typeof import('../src/core/core').Core;
+    const Core = window.__ferrum!.core!.constructor as typeof import('../src/core/core').Core;
     const out: { backend: string | null; fallbacks: string[] }[] = [];
     for (let i = 0; i < 24; i++) {
       const canvas = document.createElement('canvas');
@@ -261,7 +262,7 @@ test('много запусков и остановок ядра: контекс
 // --- 3. Холст больше предела устройства ------------------------------------
 
 test('холст больше MAX_TEXTURE_SIZE при создании: WebGL2 отклонён, рисует CPU', async ({ page }) => {
-  await page.goto('/?nodes=10');
+  await gotoDebug(page, '/debug.html?nodes=10');
   const width = await pastWebglLimit(page);
   await page.setViewportSize({ width, height: 200 });
   await open(page, '&backend=webgl');
@@ -332,7 +333,7 @@ async function expectDead(page: Page, text: RegExp): Promise<void> {
   await page.waitForTimeout(500);
   expect((await live(page)).frames).toBe(frames);
   expect(await errors(page)).toHaveLength(1);
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'readPixels', reference: false }));
   await expect.poll(async () => (await errors(page)).length).toBe(2);
   expect((await errors(page))[1]).toBe('Пиксели не прочитать: поверхность не рисует');
   expect(await page.evaluate(() => window.__ferrum!.events.filter((e) => e.type === 'pixels').length)).toBe(0);
@@ -355,7 +356,7 @@ test('ошибка показа кадра на WebGL2: одно сообщен�
   await page.evaluate(() => (window.__ferrum!.events.length = 0));
   await fault(page, 'readPixels');
   // Чтение пикселей — единственная часть показа WebGL2, которая может вернуть ошибку.
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'readPixels', reference: false }));
   // Запрос пикселей не обслужен: он возвращается в очередь и получает отказ —
   // это второе (и последнее) событие.
   await expect.poll(async () => (await errors(page)).length).toBe(2);
@@ -387,7 +388,7 @@ test('окно выросло больше предела WebGL2: одно со�
   expect((await live(page)).frames).toBe(frames);
   // Чтение пикселей, пока кадр не показать, отвечает ошибкой, а не перерисовкой
   // каждый кадр (запрос не возвращается в очередь).
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'readPixels', reference: false }));
   await expect.poll(async () => (await errors(page)).length).toBe(2);
   expect((await errors(page))[1]).toBe('Пиксели не прочитать: кадр не показан');
   const paused = (await live(page)).frames;
@@ -398,7 +399,7 @@ test('окно выросло больше предела WebGL2: одно со�
   await liveWhen(page, `l.viewportW === 1280 && l.frames > ${paused}`);
   const l = await live(page);
   const at = screen(l, 200, 40);
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'readPixels', reference: false }));
   await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'pixels'));
   expect(await pixelsAt(page, at)).toEqual(['webgl', 1, 120, 200]);
   expect(await errors(page)).toHaveLength(2);
@@ -428,7 +429,7 @@ test('ошибка проверки WebGPU вне вызовов: сообщен
   // страницы в headless может не показать, поэтому читаем из GPU).
   const l = await live(page);
   const at = screen(l, 200, 40);
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'readPixels', reference: false }));
   await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'pixels'));
   expect(await pixelsAt(page, at)).toEqual(['webgpu', 1, 120, 200]);
   expect(await errors(page)).toHaveLength(1);
@@ -468,7 +469,7 @@ test('исключение в worker\'е после запуска: одно с�
   expect(await errors(page)).toEqual(['Ядро остановлено: внедрённый сбой: throw']);
   await expect(page.locator('#hud')).toContainText('внедрённый сбой: throw');
   // Команда остановленному ядру не теряется молча.
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'save' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'save' }));
   await expect.poll(async () => (await errors(page)).length).toBe(2);
   expect((await errors(page))[1]).toBe('Ядро остановлено, команда не выполнена');
   expect(await page.evaluate(() => window.__ferrum!.events.some((e) => e.type === 'saved'))).toBe(false);
@@ -478,7 +479,7 @@ test('worker не ответил на запуск: start отклоняется
   await stubWorker(page, { stallInit: true });
   let closed = false;
   page.on('worker', (w) => w.on('close', () => (closed = true)));
-  await page.goto('/?nodes=10');
+  await gotoDebug(page, '/debug.html?nodes=10');
   await expect(page.locator('#hud')).toHaveText('Ядро не запустилось: истекло время ожидания', { timeout: 40_000 });
   await expect.poll(() => closed).toBe(true);
   expect(await page.evaluate(() => window.__ferrum === undefined)).toBe(true);

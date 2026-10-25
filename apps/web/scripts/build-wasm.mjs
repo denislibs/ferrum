@@ -21,7 +21,9 @@ if (version !== `wasm-bindgen ${WASM_BINDGEN}`) {
 // но заданный RUSTFLAGS (или CARGO_ENCODED_RUSTFLAGS) cargo берёт вместо него — даже
 // пустой, — и ядро молча собралось бы без SIMD. Флаг дописывается к заданным.
 const SIMD = ['-C', 'target-feature=+simd128'];
-const env = { ...process.env };
+// Каталог сборки — уже абсолютный: cargo считает относительный CARGO_TARGET_DIR от
+// корня репозитория (cwd ниже), а этот скрипт — от текущего каталога.
+const env = { ...process.env, CARGO_TARGET_DIR: target };
 for (const [name, sep] of [['CARGO_ENCODED_RUSTFLAGS', '\x1f'], ['RUSTFLAGS', ' ']]) {
   const value = env[name];
   if (value === undefined || value.includes('+simd128')) continue;

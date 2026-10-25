@@ -1,0 +1,263 @@
+/* Панель свойств: секции, поля чисел (NumberField), переключатели. */
+
+.fe-props:focus {
+  outline: none;
+}
+.fe-props {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.fe-grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+}
+.fe-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.fe-row__grow {
+  flex: 1;
+}
+
+.fe-field__label {
+  width: 24px;
+  height: 100%;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--ink-muted);
+  font-size: 11px;
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+.fe-num input {
+  padding-left: 0;
+}
+.fe-num--mixed {
+  color: var(--ink-muted) !important;
+  font-family: var(--font-sans) !important;
+}
+.fe-field--disabled {
+  opacity: 0.5;
+}
+.fe-field--disabled .fe-field__label {
+  cursor: default;
+}
+
+/* Выпадающий выбор (пресеты размера, выравнивание обводки). */
+.fe-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  color: var(--ink);
+  cursor: pointer;
+  min-width: 0;
+}
+.fe-select:hover {
+  box-shadow: inset 0 0 0 1px var(--line-control);
+}
+
+.fe-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+  cursor: pointer;
+}
+.fe-check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--select);
+}
+
+.fe-segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+}
+.fe-segmented__item {
+  height: 24px;
+  min-width: 32px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.fe-segmented__item[aria-checked='true'] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--line);
+}
+.fe-format {
+  color: var(--ink-muted);
+}
+.fe-btn--wide {
+  width: 100%;
+  justify-content: center;
+}
+.fe-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Заливки и обводки (свотч — цвет пользователя, не токен). */
+.fe-paint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.fe-paint--hidden .fe-field,
+.fe-paint--hidden .fe-swatch {
+  opacity: 0.45;
+}
+.fe-paint__opacity {
+  width: 56px;
+  flex: none;
+}
+.fe-paint__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fe-paint__mixed {
+  margin: 0;
+  color: var(--ink-muted);
+}
+.fe-stroke {
+  display: grid;
+  gap: var(--space-2);
+}
+.fe-swatch {
+  width: var(--row-height);
+  height: var(--row-height);
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(var(--swatch), var(--swatch)),
+    repeating-conic-gradient(#c8c8c8 0 25%, #ffffff 0 50%) 0 0 / 8px 8px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: pointer;
+}
+.fe-swatch--image {
+  display: grid;
+  place-items: center;
+  background: var(--surface-hover);
+  color: var(--ink-muted);
+  cursor: default;
+}
+.fe-native-select {
+  width: 100%;
+  height: 100%;
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 400 12px/16px var(--font-sans);
+  outline: none;
+}
+
+/* Палитра цвета — всплывающее, shadow-popover. */
+.fe-picker {
+  position: fixed;
+  z-index: 45;
+  width: 240px;
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  animation: fe-pop 120ms ease-out;
+}
+.fe-picker__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.fe-picker__sb {
+  position: relative;
+  height: 160px;
+  border-radius: var(--radius-sm);
+  cursor: crosshair;
+  touch-action: none;
+}
+.fe-picker__sb::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(to top, #000, transparent),
+    linear-gradient(to right, #fff, transparent);
+}
+.fe-picker__thumb {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.fe-picker__sliders {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.fe-picker__bars {
+  flex: 1;
+  display: grid;
+  gap: var(--space-2);
+}
+.fe-picker__bar {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  touch-action: none;
+}
+.fe-picker__hue {
+  background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+}
+.fe-picker__alpha {
+  background:
+    linear-gradient(to right, transparent, var(--picker-color)),
+    repeating-conic-gradient(#c8c8c8 0 25%, #ffffff 0 50%) 0 0 / 8px 8px;
+}
+.fe-picker__knob {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.fe-picker__opacity {
+  width: 64px;
+  flex: none;
+}
+.fe-picker .fe-field__label {
+  cursor: default;
+}

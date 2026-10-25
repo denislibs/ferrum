@@ -4,14 +4,34 @@
 import { expect, type Page } from '@playwright/test';
 import type { LiveState } from '../src/core/core';
 
+/** Заголовок страницы стенда: по нему видно, что открыт именно debug.html, а не
+ * index.html, поданный запасным маршрутом сервера на отсутствующий адрес. */
+export const DEBUG_TITLE = 'Ferrum — стенд ядра';
+
+/** Открывает стенд и проверяет, что это он: заголовок и плашка `#hud` есть только у него. */
+export async function gotoDebug(page: Page, url: string): Promise<void> {
+  await page.goto(url);
+  await expect(page).toHaveTitle(DEBUG_TITLE);
+  await expect(page.locator('#hud')).toHaveCount(1);
+}
+
+/** Ядро раскрыто в `window.__ferrum` (тестовый режим, стенд или `__ferrumPerf`):
+ * дальше тесты пишут `window.__ferrum!.core!` — здесь это проверено, а не принято
+ * на веру. */
+export async function expectCore(page: Page): Promise<void> {
+  const kind = await page.evaluate(() => typeof window.__ferrum?.core?.send);
+  expect(kind, 'window.__ferrum.core нет: страница не в тестовом режиме').toBe('function');
+}
+
 export async function open(page: Page, query = '', origin = ''): Promise<void> {
-  await page.goto(`${origin}/?nodes=1000${query}`);
+  await gotoDebug(page, `${origin}/debug.html?nodes=1000${query}`);
   await page.waitForFunction(() => window.__ferrum?.ready === true, null, { timeout: 90_000 });
-  await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0);
+  await expectCore(page);
+  await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0);
 }
 
 export function live(page: Page): Promise<LiveState> {
-  return page.evaluate(() => window.__ferrum!.core.live!);
+  return page.evaluate(() => window.__ferrum!.core!.live!);
 }
 
 /** Ждёт, пока живое состояние не удовлетворит условию (возвращает его). */
@@ -72,4 +92,23 @@ export async function drag(page: Page, from: { x: number; y: number }, dx: numbe
   await page.mouse.down();
   await page.mouse.move(from.x + dx, from.y + dy, { steps });
   await page.mouse.up();
+}
+
+/** Редактор (index.html) со страницей-примером из `nodes` узлов. */
+export async function openApp(page: Page, nodes = 1000, query = ''): Promise<void> {
+  // Тестовый режим интерфейса: журнал событий (без байтов) и защита чтений layout.
+  await page.addInitScript(() => ((window as { __ferrumTest?: boolean }).__ferrumTest = true));
+  await page.goto(`/?nodes=${nodes}${query}`);
+  await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true, null, {
+    timeout: 90_000,
+  });
+  await expectCore(page);
+  await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0);
+}
+
+/** Точка мира на экране редактора: холст между панелями, его угол — со страницы. */
+export async function appScreen(page: Page, l: LiveState, x: number, y: number): Promise<{ x: number; y: number }> {
+  const box = (await page.locator('canvas').boundingBox())!;
+  const p = screen(l, x, y);
+  return { x: box.x + p.x, y: box.y + p.y };
 }

@@ -1,0 +1,266 @@
+/* Основа интерфейса: типографика дизайн-системы, кнопки, инструменты, поля,
+   состояния (наведение, нажатие, выбор, отключение, фокус с клавиатуры),
+   всплывающие подсказки и уведомления. Классы компонентов — из
+   components/bundle.css дизайн-системы (префикс fe-). */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* Типографика (tokens.json → type). */
+.t-label {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.t-strong {
+  font-weight: 600;
+}
+.t-menu {
+  font-size: 13px;
+  line-height: 20px;
+}
+.t-heading {
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+}
+.t-num {
+  font: 400 11px/16px var(--font-mono);
+}
+.t-muted {
+  color: var(--ink-muted);
+}
+
+/* Фокус с клавиатуры: кольцо 2px select с отступом 1px; мышью не показываем. */
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+}
+
+.fe-ico {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* Lucide нарисован в сетке 24 px: толщина линии 1.5 px на экране при любом размере. */
+.fe-ico * {
+  vector-effect: non-scaling-stroke;
+}
+
+/* Button */
+.fe-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--row-height);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  font: 500 12px/16px var(--font-sans);
+  cursor: pointer;
+  background: transparent;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.fe-btn:hover {
+  background: var(--surface-hover);
+}
+.fe-btn:active {
+  background: var(--line);
+}
+.fe-btn--primary {
+  background: var(--oxide);
+  color: var(--on-oxide);
+}
+.fe-btn--primary:hover {
+  background: var(--oxide);
+  filter: brightness(1.08);
+}
+.fe-btn--secondary {
+  box-shadow: inset 0 0 0 1px var(--line-control);
+}
+.fe-btn--danger {
+  color: var(--danger);
+}
+.fe-btn:disabled {
+  color: var(--ink-faint);
+  background: transparent;
+  box-shadow: none;
+  cursor: default;
+  filter: none;
+}
+
+/* Квадратная кнопка-иконка (тулбар, шапки, строки). */
+.fe-tool {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  flex: none;
+}
+.fe-tool:hover {
+  background: var(--surface-hover);
+}
+.fe-tool:active {
+  background: var(--line);
+}
+.fe-tool[aria-pressed='true'] {
+  background: var(--oxide-soft);
+}
+.fe-tool:disabled {
+  color: var(--ink-faint);
+  background: transparent;
+  cursor: default;
+}
+.fe-tool--small {
+  width: 24px;
+  height: 24px;
+}
+.fe-tool--muted {
+  color: var(--ink-muted);
+}
+.fe-tool__caret {
+  width: 8px;
+  height: 8px;
+  color: var(--ink-muted);
+}
+
+/* Поле ввода. */
+.fe-field {
+  display: flex;
+  align-items: center;
+  height: var(--row-height);
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  box-shadow: inset 0 0 0 1px transparent;
+  min-width: 0;
+}
+.fe-field:hover {
+  box-shadow: inset 0 0 0 1px var(--line-control);
+}
+.fe-field:focus-within {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+}
+.fe-field input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 400 11px/16px var(--font-mono);
+  padding: 0 var(--space-2);
+  outline: none;
+}
+.fe-field input::placeholder {
+  color: var(--ink-faint);
+}
+.fe-field--text input {
+  font: 400 12px/16px var(--font-sans);
+}
+
+/* Подсказка «Название  Клавиша»: всплывающее, surface-raised, 120 мс. */
+.fe-tooltip {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  white-space: pre;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 16px;
+  pointer-events: none;
+  animation: fe-pop 120ms ease-out;
+}
+.fe-tooltip__key {
+  color: var(--ink-muted);
+}
+
+/* Уведомления: ошибка — со словом и иконкой, не только цветом. */
+.fe-toasts {
+  position: fixed;
+  z-index: 60;
+  left: 50%;
+  bottom: calc(var(--toolbar-height) + var(--space-8));
+  transform: translateX(-50%);
+  display: grid;
+  gap: var(--space-2);
+  justify-items: center;
+  pointer-events: none;
+}
+.fe-toast {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 560px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  pointer-events: auto;
+  animation: fe-pop 120ms ease-out;
+}
+.fe-toast--error .fe-ico {
+  color: var(--danger);
+}
+
+@keyframes fe-pop {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

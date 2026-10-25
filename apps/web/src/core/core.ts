@@ -21,6 +21,19 @@ export interface CoreOptions {
   platform?: Platform;
   /** Тесты: атлас изображений GPU из одной страницы этой стороны (вытеснение). */
   atlasSide?: number;
+  /** Асинхронный Clipboard API не умеет свой формат: worker сам кодирует байты
+   * буфера обмена текстом с меткой (событие `clipboard` несёт `text`). */
+  clipboardText?: boolean;
+  /** Пересылать ли клавишу редактору. По умолчанию — все, кроме сочетаний браузера;
+   * интерфейс оставляет себе клавиши полей ввода, меню и диалогов и сочетания
+   * буфера обмена (их ведут события `copy`/`cut`/`paste`). */
+  keyFilter?: (e: KeyboardEvent) => boolean;
+  /** Подписка до запуска: события, пришедшие вместе с `ready` (раскладка, пресеты),
+   * иначе прошли бы раньше, чем вызывающий успеет вызвать `on`. */
+  onEvent?: (e: CoreEvent) => void;
+  /** Куда отдать чтение layout, которое Core делает после запуска (ResizeObserver,
+   * смена плотности): планировщик интерфейса выполнит его в фазе measure. */
+  measure?: (read: () => void) => void;
 }
 
 /** Сколько ждать события `ready` после запуска worker'а. */
@@ -89,8 +102,15 @@ export class Core {
   private maxCost = 0;
   private disposers: (() => void)[] = [];
   private failed: ((e: Error) => void) | null = null;
+  private readonly frameHooks = new Set<() => void>();
+  private keyFilter: (e: KeyboardEvent) => boolean = () => true;
+  private measure: (read: () => void) => void = (read) => read();
+  /** Ошибки обработчиков кадра, о которых уже сообщили (одно сообщение — один раз). */
+  private readonly hookErrors = new Set<string>();
   /** Ядро остановлено (сбой worker'а): сообщение было, кадров и ввода больше нет. */
   private stopped = false;
+  /** Ожидающие ответа `encodeClipboard` — по порядку запросов. */
+  private readonly encodes: ((text: string | null) => void)[] = [];
 
   private constructor(
     private readonly worker: Worker,
@@ -106,6 +126,9 @@ export class Core {
     const worker = new Worker(new URL('../worker/core.worker.ts', import.meta.url), { type: 'module' });
     const transport = createTransport(worker, opts.transport);
     const core = new Core(worker, transport, canvas);
+    if (opts.keyFilter) core.keyFilter = opts.keyFilter;
+    if (opts.measure) core.measure = opts.measure;
+    if (opts.onEvent) core.on(opts.onEvent);
     let timer = 0;
     const ready = new Promise<void>((resolve, reject) => {
       core.failed = reject;
@@ -142,6 +165,7 @@ export class Core {
         dpr: devicePixelRatio,
         backend: opts.backend ?? null,
         atlas: opts.atlasSide ?? null,
+        clipboardText: opts.clipboardText ?? false,
       },
       [offscreen],
     );
@@ -167,6 +191,8 @@ export class Core {
       }
     } else if (m.t === 'fatal') {
       this.fail(m.message);
+    } else if (m.t === 'clipboardText') {
+      this.encodes.shift()?.(typeof m.text === 'string' ? m.text : null);
     }
   }
 
@@ -191,6 +217,30 @@ export class Core {
     if (error) this.emit({ type: 'error', message: error });
   }
 
+  /** Вставка текста с меткой из буфера обмена: текст уходит worker'у как есть, base64
+   * декодирует он (предел длины — до отправки и ещё раз в worker'е). */
+  pasteText(text: string): void {
+    if (this.stopped) {
+      this.emit({ type: 'error', message: 'Ядро остановлено, команда не выполнена' });
+      return;
+    }
+    const error = this.transport.post({ t: 'pasteText', text });
+    if (error) this.emit({ type: 'error', message: error });
+  }
+
+  /** Текст с меткой для байтов буфера обмена — кодирует worker (base64 десятков
+   * мегабайт в основном потоке был бы длинной задачей). `null` — отказ (больше
+   * предела — ошибка придёт событием) или ядро остановлено. Байты передаются. */
+  encodeClipboard(bytes: Uint8Array): Promise<string | null> {
+    if (this.stopped) return Promise.resolve(null);
+    const own = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+    return new Promise((resolve) => {
+      const error = this.transport.post({ t: 'encodeClipboard', bytes: own }, [own.buffer as ArrayBuffer]);
+      if (error) resolve(null);
+      else this.encodes.push(resolve);
+    });
+  }
+
   private emit(e: CoreEvent): void {
     for (const l of this.listeners) l(e);
   }
@@ -201,6 +251,7 @@ export class Core {
   private fail(message: string): void {
     if (this.stopped) return;
     this.stopped = true;
+    for (const r of this.encodes.splice(0)) r(null);
     this.stop();
     if (this.failed) this.failed(new Error(`${NOT_STARTED}: ${message}`));
     else this.emit({ type: 'error', message: `Ядро остановлено: ${message}` });
@@ -227,6 +278,19 @@ export class Core {
   /** Отброшено событий ввода (очередь основного потока переполнилась). */
   droppedInput(): number {
     return this.transport.dropped();
+  }
+
+  /** Вызов в каждом кадре после тика транспорта и чтения живого состояния — внутри
+   * замера бюджета (планировщик интерфейса). Возвращает отписку. */
+  onFrame(hook: () => void): () => void {
+    this.frameHooks.add(hook);
+    return () => this.frameHooks.delete(hook);
+  }
+
+  /** Обработчик интерфейса с учётом его времени в бюджет кадра (прокрутка панелей,
+   * перетаскивание полей). */
+  costed<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void {
+    return this.timed(fn);
   }
 
   /** Обработчик с учётом времени в бюджет кадра. */
@@ -302,11 +366,14 @@ export class Core {
       this.disposers.push(() => c.removeEventListener(type, h));
     }
     this.add(window, 'keydown', (e) => {
-      if (browserKey(e)) return;
+      // Клавишу, которую уже обработал элемент интерфейса (preventDefault), ядру не отдаём.
+      if (e.defaultPrevented || browserKey(e) || !this.keyFilter(e)) return;
       e.preventDefault();
       enc.key(sink, Kind.KEY_DOWN, e);
     });
     this.add(window, 'keyup', (e) => {
+      // Отпускание — всегда: удержание (Space — рука) не должно залипнуть, если
+      // фокус ушёл в поле, пока клавиша была нажата.
       if (!browserKey(e)) enc.key(sink, Kind.KEY_UP, e);
     });
     this.add(window, 'blur', () => enc.simple(sink, Kind.BLUR));
@@ -316,7 +383,8 @@ export class Core {
       this.rect = { left: r.left, top: r.top, width: r.width, height: r.height };
       enc.resize(sink, Math.max(1, r.width), Math.max(1, r.height), devicePixelRatio);
     };
-    const ro = new ResizeObserver(this.timed(resize));
+    // Чтение размера — через measure (если задан): до записи в DOM, без принудительной раскладки.
+    const ro = new ResizeObserver(this.timed(() => this.measure(resize)));
     ro.observe(c);
     this.disposers.push(() => ro.disconnect());
     let mq: MediaQueryList | null = null;
@@ -326,7 +394,7 @@ export class Core {
       mq.addEventListener('change', onDpr);
     };
     const onDpr = this.timed(() => {
-      resize();
+      this.measure(resize);
       watchDpr();
     });
     watchDpr();
@@ -343,6 +411,18 @@ export class Core {
         const obj = {} as LiveState;
         LIVE_NAMES.forEach((n, i) => (obj[n] = live[i]));
         this.live = obj;
+      }
+      for (const hook of this.frameHooks) {
+        try {
+          hook();
+        } catch (e) {
+          // Сбой интерфейса не должен остановить кадры ядра: сообщаем один раз.
+          const message = `Ошибка интерфейса: ${e instanceof Error ? e.message : String(e)}`;
+          if (!this.hookErrors.has(message)) {
+            this.hookErrors.add(message);
+            this.emit({ type: 'error', message });
+          }
+        }
       }
       this.frameCost += performance.now() - t;
       // Окно последних 10 000 кадров (около трёх минут при 60 Гц).
@@ -362,6 +442,7 @@ export class Core {
 
   dispose(): void {
     this.stopped = true;
+    for (const r of this.encodes.splice(0)) r(null);
     this.stop();
     this.worker.terminate();
   }

@@ -1,0 +1,480 @@
+/* Панели, шапки, вкладки, тулбар, меню, края панелей (компоненты PanelHeader,
+   Toolbar, Button дизайн-системы). */
+
+.fe-side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+  color: var(--ink);
+}
+.fe-side--left {
+  grid-column: 1;
+  grid-row: 1;
+  border-right: 1px solid var(--line);
+}
+.fe-side--right {
+  grid-column: 3;
+  grid-row: 1;
+  border-left: 1px solid var(--line);
+}
+.fe-app--bare .fe-side,
+.fe-app--bare .fe-toolbar {
+  display: none;
+}
+
+/* Шапка панели. */
+.fe-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--toolbar-height);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.fe-panel-head__mark {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--oxide);
+  flex: none;
+}
+.fe-panel-head__file {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+}
+.fe-panel-head__name {
+  /* Кнопка (переименование с клавиатуры), но выглядит как подпись. */
+  justify-self: start;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+.fe-panel-head__project {
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+.fe-panel-head__spacer {
+  flex: 1;
+}
+.fe-rename {
+  width: 100%;
+  height: 20px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  outline: 2px solid var(--select);
+  font-weight: 600;
+}
+
+/* Зум в шапке: число в num и стрелка. */
+.fe-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.fe-zoom:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+/* Вкладки «Дизайн» / «Прототип». */
+.fe-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.fe-tab {
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font: 500 12px/16px var(--font-sans);
+  cursor: pointer;
+}
+.fe-tab[aria-selected='true'] {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.fe-tab[aria-disabled='true'],
+.fe-tool[aria-disabled='true'],
+.fe-btn[aria-disabled='true'] {
+  color: var(--ink-faint);
+  background: transparent;
+  box-shadow: none;
+  cursor: default;
+  filter: none;
+}
+
+/* Тулбар — плавающий, внизу по центру холста. */
+.fe-toolbar {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-4);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--toolbar-height);
+  padding: 0 var(--space-1);
+  background: var(--surface-raised);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+}
+.fe-toolbar__sep {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+  margin: 0 var(--space-1);
+}
+.fe-tool-split {
+  display: inline-flex;
+  align-items: center;
+}
+.fe-tool--caret {
+  width: 14px;
+  margin-left: -2px;
+}
+
+/* Меню. */
+.fe-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 200px;
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  padding: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 20px;
+  animation: fe-pop 120ms ease-out;
+}
+.fe-menu__item {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--row-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: default;
+  white-space: nowrap;
+}
+.fe-menu__item:hover,
+.fe-menu__item:focus {
+  background: var(--surface-hover);
+}
+.fe-menu__item:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.fe-menu__item[aria-disabled='true'] {
+  color: var(--ink-faint);
+  background: transparent;
+}
+.fe-menu__key {
+  color: var(--ink-muted);
+  font-size: 12px;
+  padding-left: var(--space-4);
+}
+.fe-menu__item[aria-disabled='true'] .fe-menu__key {
+  color: var(--ink-faint);
+}
+.fe-menu__sep {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--line);
+}
+.fe-menu__heading {
+  padding: var(--space-1) var(--space-2) 0 calc(16px + var(--space-4));
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* Край панели. */
+.fe-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 5;
+  cursor: ew-resize;
+}
+.fe-resize--left {
+  right: -3px;
+}
+.fe-resize--right {
+  left: -3px;
+}
+.fe-resize:hover,
+.fe-resize:focus-visible {
+  background: linear-gradient(var(--select), var(--select)) center / 2px 100% no-repeat;
+  outline: none;
+}
+
+/* Секция панели свойств и слоёв (PropertySection). */
+.fe-section {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: var(--space-2);
+}
+.fe-section__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+}
+.fe-section__title {
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.fe-section__actions {
+  display: flex;
+  gap: 2px;
+}
+
+/* Диалог подтверждения. */
+.fe-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--canvas) 60%, transparent);
+}
+.fe-dialog {
+  width: min(400px, calc(100vw - 32px));
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-dialog);
+  color: var(--ink);
+  animation: fe-pop 120ms ease-out;
+}
+.fe-dialog__title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+.fe-dialog__text {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+.fe-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* Диалог (настройки): shadow-dialog, radius-lg, отступы space-6. */
+.fe-dialog.fe-dialog--settings {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+.fe-dialog:focus {
+  outline: none;
+}
+.fe-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-6) var(--space-2);
+}
+.fe-dialog__head h1 {
+  margin: 0;
+}
+.fe-dialog--settings .fe-tabs {
+  padding: 0 var(--space-6) var(--space-2);
+}
+.fe-dialog__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4) var(--space-6) var(--space-6);
+}
+.fe-dialog__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+  margin-top: var(--space-4);
+}
+.fe-hint {
+  display: block;
+  font-size: 12px;
+  line-height: 16px;
+}
+.fe-check--block {
+  align-items: flex-start;
+}
+.fe-check--block input {
+  margin-top: 3px;
+}
+
+.fe-radio {
+  display: flex;
+  gap: var(--space-2);
+}
+.fe-radio__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: pointer;
+}
+.fe-radio__item input {
+  margin: 0;
+  accent-color: var(--select);
+}
+.fe-radio__item--on {
+  background: var(--select-soft);
+  box-shadow: inset 0 0 0 1px var(--select);
+}
+.fe-radio__item:has(input:focus-visible) {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+}
+
+/* Таблица горячих клавиш. */
+.fe-keymap {
+  display: grid;
+  gap: var(--space-3);
+}
+.fe-keymap__group {
+  display: grid;
+}
+.fe-keymap__group h2 {
+  padding: var(--space-3) 0 var(--space-1);
+}
+.fe-keyrow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: var(--row-height);
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line);
+}
+.fe-keyrow__name {
+  flex: 1;
+  min-width: 0;
+  padding-top: 4px;
+}
+.fe-keyrow__keys {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 60%;
+}
+.fe-key {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+  padding: 0 2px 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+}
+.fe-key--warn {
+  box-shadow: inset 0 0 0 1px var(--warning);
+}
+.fe-key--recording {
+  padding: 0 var(--space-2);
+  box-shadow: inset 0 0 0 1px var(--select);
+  color: var(--ink-muted);
+}
+.fe-key__remove {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.fe-key__remove:hover {
+  background: var(--line);
+}
+.fe-key__note {
+  flex-basis: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-bottom: 2px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 14px;
+}
+.fe-key__note .fe-ico {
+  color: var(--warning);
+}
+.fe-btn--small {
+  height: 24px;
+  padding: 0 var(--space-2);
+}
+.fe-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--warning);
+}
+.fe-confirm > .fe-ico {
+  color: var(--warning);
+}

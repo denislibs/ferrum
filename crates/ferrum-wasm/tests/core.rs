@@ -71,7 +71,8 @@ fn demo_page_is_drawn_once_and_shows_the_document() {
         ev.contains(&CoreEvent::Opened {
             pages: 1,
             nodes: 1000,
-            warnings: vec![]
+            warnings: vec![],
+            name: "Без названия".into(),
         }),
         "{ev:?}"
     );
@@ -220,7 +221,8 @@ fn save_and_open_round_trip() {
     assert!(other.take_events().contains(&CoreEvent::Opened {
         pages: 1,
         nodes: 300,
-        warnings: vec![]
+        warnings: vec![],
+        name: "Без названия".into(),
     }));
 }
 
@@ -423,7 +425,7 @@ fn selection_event_ids_are_capped_but_count_is_exact() {
         command: "edit.select_all".into(),
     });
     let ev = core.take_events();
-    let Some(CoreEvent::Selection { count, ids }) = ev
+    let Some(CoreEvent::Selection { count, ids, .. }) = ev
         .into_iter()
         .find(|e| matches!(e, CoreEvent::Selection { .. }))
     else {

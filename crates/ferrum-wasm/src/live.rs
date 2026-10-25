@@ -70,8 +70,8 @@ live_fields! {
     /// Активный бэкенд рендера (`layout::BACKENDS`).
     backend => BACKEND, "backend";
     /// Выделение: число узлов и значения панели «Положение» — у одного узла его
-    /// x, y (у родителя), ширина, высота и поворот; у нескольких — общая рамка
-    /// в мире.
+    /// x, y (у родителя), ширина, высота и поворот, как в панели (у группы — рамка
+    /// детей, поворот в `(-180, 180]`); у нескольких — общая рамка в мире.
     selection_count => SELECTION_COUNT, "selectionCount";
     selection_x => SELECTION_X, "selectionX";
     selection_y => SELECTION_Y, "selectionY";

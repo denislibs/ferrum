@@ -5,7 +5,7 @@
 
 import { Ctrl, CTRL_BYTES, Field, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET, SAB_BYTES } from './layout.gen';
 import type { Sink } from './input';
-import { commandSizeError, type FromWorker, type ToWorker } from './messages';
+import { commandSizeError, pasteTextError, type FromWorker, type ToWorker } from './messages';
 import { addSaturating, evictOldestDroppable, isDroppableKind, LiveReader } from './shared';
 
 export type TransportMode = 'sab' | 'message';
@@ -34,7 +34,7 @@ export interface Transport {
 /** Сколько записей ждать в очереди основного потока, пока кольцо полно. */
 const PENDING_MAX = 4 * RING_CAPACITY;
 
-const KNOWN_MESSAGES = new Set(['started', 'events', 'live', 'fatal']);
+const KNOWN_MESSAGES = new Set(['started', 'events', 'live', 'fatal', 'clipboardText']);
 
 /** Проверка сообщения worker'а: известный вид и, для живого состояния, форма. */
 function wellFormed(m: unknown): m is FromWorker {
@@ -160,7 +160,7 @@ export class SabTransport implements Transport {
   }
 
   post(msg: ToWorker, transfer: Transferable[] = []): string | null {
-    const error = msg.t === 'cmd' ? commandSizeError(msg.cmd) : null;
+    const error = msg.t === 'cmd' ? commandSizeError(msg.cmd) : msg.t === 'pasteText' ? pasteTextError(msg.text) : null;
     if (error) return error;
     this.worker.postMessage(msg, transfer);
     return null;
@@ -251,7 +251,7 @@ export class MessageTransport implements Transport {
   }
 
   post(msg: ToWorker, transfer: Transferable[] = []): string | null {
-    const error = msg.t === 'cmd' ? commandSizeError(msg.cmd) : null;
+    const error = msg.t === 'cmd' ? commandSizeError(msg.cmd) : msg.t === 'pasteText' ? pasteTextError(msg.text) : null;
     if (error) return error;
     this.worker.postMessage(msg, transfer);
     return null;

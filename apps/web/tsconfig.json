@@ -8,8 +8,10 @@
     "noEmit": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": []
+    "types": [],
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js"
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["src/worker/**"]
 }

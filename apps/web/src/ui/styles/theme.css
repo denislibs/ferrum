@@ -1,0 +1,72 @@
+/* Токены дизайн-системы Ferrum (tokens.json, версия 1). Тёмная тема — основная,
+   светлая — равноправная; тему ставит интерфейс атрибутом data-theme на <html>
+   (выбор «системная» превращается в dark или light по prefers-color-scheme). */
+
+:root {
+  --font-sans: 'Onest Variable', Onest, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --row-height: 28px;
+  --toolbar-height: 44px;
+  --panel-width: 248px;
+  --handle-size: 8px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+}
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --canvas: #1a1918;
+  --surface: #232120;
+  --surface-raised: #2c2a28;
+  --surface-hover: #353230;
+  --line: #3b3835;
+  --line-control: #827c74;
+  --ink: #edebe8;
+  --ink-muted: #a9a39c;
+  --ink-faint: #77716b;
+  --oxide: #f2814a;
+  --on-oxide: #1a1918;
+  --oxide-soft: #4a2718;
+  --select: #4aa3ff;
+  --on-select: #1a1918;
+  --select-soft: #1b3350;
+  --component: #b49cff;
+  --success: #5cc98a;
+  --warning: #f2c14e;
+  --danger: #ff7a7a;
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px #3b3835;
+  --shadow-dialog: 0 24px 64px rgba(0, 0, 0, 0.55), 0 0 0 1px #3b3835;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --canvas: #e9e7e4;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-hover: #f2f0ed;
+  --line: #e4e1dd;
+  --line-control: #8f8881;
+  --ink: #1c1b1a;
+  --ink-muted: #655f58;
+  --ink-faint: #a19a93;
+  --oxide: #b4461a;
+  --on-oxide: #ffffff;
+  --oxide-soft: #fbe7dc;
+  --select: #1769e0;
+  --on-select: #ffffff;
+  --select-soft: #e3eefd;
+  --component: #6d44d9;
+  --success: #1d7a46;
+  --warning: #8a5a00;
+  --danger: #c22c2c;
+  --shadow-popover: 0 8px 24px rgba(28, 27, 26, 0.12), 0 0 0 1px #e4e1dd;
+  --shadow-dialog: 0 24px 64px rgba(28, 27, 26, 0.18), 0 0 0 1px #e4e1dd;
+}
