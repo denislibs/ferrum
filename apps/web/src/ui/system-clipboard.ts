@@ -18,10 +18,11 @@ import {
 import { fileBytes, IMAGE_FILE, pickFile } from './files';
 import { editableTarget, modalOpen } from './keys';
 
-/** Событие из поля ввода или при открытом модальном диалоге — это обычный текст
- * браузера, не документ на холсте. */
+/** Событие из поля ввода, из диалога (и немодального — палитры), из меню или при
+ * открытом модальном диалоге — это обычный текст браузера, не документ на холсте. */
 function textTarget(t: EventTarget | null): boolean {
-  return modalOpen() || editableTarget(t);
+  if (modalOpen() || editableTarget(t)) return true;
+  return t instanceof Element && !!t.closest('[role="dialog"], [role="alertdialog"], [role="menu"]');
 }
 
 /** Отказ записи; вырезанное уже удалено из документа — подсказка, как вернуть. */

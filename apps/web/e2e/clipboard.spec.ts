@@ -591,3 +591,31 @@ test('свой формат отклонён браузером: текст с �
   expect(await errors(page)).toEqual([]);
 });
 
+// ——— Итоговая волна исправлений ———
+
+test('копирование и вырезание из палитры и меню — текст браузера, не документ', async ({ page }) => {
+  await openApp(page);
+  await selectShape(page);
+  const before = await live(page);
+  const cutAt = async (selector: string) => {
+    await page.evaluate((sel) => {
+      const el = document.querySelector<HTMLElement>(sel)!;
+      el.focus();
+      for (const type of ['cut', 'copy']) el.dispatchEvent(new ClipboardEvent(type, { bubbles: true, cancelable: true }));
+    }, selector);
+    await page.waitForTimeout(300);
+    const now = await live(page);
+    expect([now.nodes, now.steps, now.selectionCount], selector).toEqual([before.nodes, before.steps, 1]);
+    expect(await events(page, 'clipboard'), selector).toBe(0);
+  };
+  // Немодальная палитра цвета заливки (role=dialog без aria-modal).
+  await page.locator('#panel-design').getByRole('button', { name: 'Цвет заливки' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Цвет заливки' })).toBeVisible();
+  await cutAt('.fe-picker button');
+  await page.keyboard.press('Escape');
+  // Меню файла.
+  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await expect(page.getByRole('menu', { name: 'Меню файла' })).toBeVisible();
+  await cutAt('[role="menu"] [role="menuitem"]');
+  await page.keyboard.press('Escape');
+});
