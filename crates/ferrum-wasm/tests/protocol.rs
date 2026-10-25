@@ -72,6 +72,7 @@ fn commands() -> Vec<Command> {
             },
             phase: EditPhase::Preview,
             ids: None,
+            selection_version: None,
         },
         Command::EditSelection {
             edit: Edit::Fills {
@@ -86,6 +87,7 @@ fn commands() -> Vec<Command> {
             },
             phase: EditPhase::Commit,
             ids: None,
+            selection_version: None,
         },
         Command::EditSelection {
             edit: Edit::Strokes {
@@ -97,16 +99,19 @@ fn commands() -> Vec<Command> {
             },
             phase: EditPhase::Cancel,
             ids: None,
+            selection_version: None,
         },
         Command::EditSelection {
             edit: Edit::ClipContent { value: false },
             phase: EditPhase::Commit,
             ids: None,
+            selection_version: None,
         },
         Command::EditSelection {
             edit: Edit::Size { w: 393.0, h: 852.0 },
             phase: EditPhase::Commit,
             ids: None,
+            selection_version: None,
         },
         Command::AddPage,
         Command::RenamePage {
@@ -158,6 +163,7 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::Selection {
             count: 2,
             ids: vec!["1@2".into(), "3@4".into()],
+            version: 7.0,
         },
         CoreEvent::Tool { tool: Tool::Hand },
         CoreEvent::Cursor {
@@ -302,9 +308,10 @@ fn field_names_match_typescript() {
             },
             phase: EditPhase::Preview,
             ids: None,
+            selection_version: None,
         })
         .unwrap(),
-        json!({"type": "editSelection", "edit": {"type": "number", "field": "cornerRadius", "value": 4.0, "relative": true}, "phase": "preview", "ids": null})
+        json!({"type": "editSelection", "edit": {"type": "number", "field": "cornerRadius", "value": 4.0, "relative": true}, "phase": "preview", "ids": null, "selectionVersion": null})
     );
     assert_eq!(
         serde_json::to_value(Command::MoveLayers {

@@ -18,6 +18,14 @@ import {
   type FieldInput,
 } from './number';
 
+/** Кому адресована правка: выделенные на начало жеста. Выделение больше предела id
+ * (`ids` неполон) — без списка, но с версией выделения: ядро применит правку ко всем
+ * выделенным, если оно не менялось, и отклонит иначе. */
+export interface EditTarget {
+  ids: string[] | undefined;
+  selectionVersion: number | undefined;
+}
+
 export interface NumberFieldProps {
   /** Подпись (1–2 символа) или иконка. */
   label: JSX.Element;
@@ -36,8 +44,8 @@ export interface NumberFieldProps {
   percentOf?: number;
   disabled?: boolean;
   /** Правка: значение в единицах поля (`set`) или прибавка к каждому (`add`). */
-  /** `ids` — узлы, которые правятся с начала жеста: выделение могло смениться. */
-  onEdit: (input: FieldInput, phase: EditPhase, ids: string[]) => void;
+  /** `target` — кого правят с начала жеста: выделение могло смениться. */
+  onEdit: (input: FieldInput, phase: EditPhase, target: EditTarget) => void;
   class?: string;
 }
 
@@ -63,19 +71,32 @@ export function NumberField(props: NumberFieldProps) {
   // успевает смениться до того, как набранное применится. Здесь же — значение поля
   // на тот момент, от которого считаются `*2` и `%`.
   interface Session {
-    ids: string[];
+    target: EditTarget;
+    /** Выделено больше, чем id в событии: списка нет, действует версия. */
+    capped: boolean;
     raw: number;
     current: number;
     mixed: boolean;
   }
   let session: Session | null = null;
-  const begin = (): Session =>
-    (session ??= untrack(() => ({
-      ids: [...ed.store.state.selectionIds],
-      raw: props.value,
-      current: props.value * scale(),
-      mixed: !!props.mixed,
-    })));
+  const snapshot = (): Session =>
+    untrack(() => {
+      const st = ed.store.state;
+      const capped = st.selectionCount > st.selectionIds.length;
+      return {
+        target: capped
+          ? { ids: undefined, selectionVersion: st.selectionVersion }
+          : { ids: [...st.selectionIds], selectionVersion: undefined },
+        capped,
+        raw: props.value,
+        current: props.value * scale(),
+        mixed: !!props.mixed,
+      };
+    });
+  const begin = (): Session => (session ??= snapshot());
+  // Выделение больше предела id сменилось: правка без списка попала бы в новое.
+  const stale = (s: Session) =>
+    s.capped && untrack(() => ed.store.state.selectionVersion) !== s.target.selectionVersion;
 
   let scrub: { x: number; start: number; moved: boolean; s: Session } | null = null;
   let pending: FieldInput | null = null;
@@ -84,8 +105,8 @@ export function NumberField(props: NumberFieldProps) {
 
   const toField = (v: number) => clamp(v, props.min, props.max) / scale();
   const emit = (inp: FieldInput, phase: EditPhase, s: Session) => {
-    if (inp.kind === 'set') props.onEdit({ kind: 'set', value: toField(inp.value) }, phase, s.ids);
-    else props.onEdit({ kind: 'add', delta: inp.delta / scale() }, phase, s.ids);
+    if (inp.kind === 'set') props.onEdit({ kind: 'set', value: toField(inp.value) }, phase, s.target);
+    else props.onEdit({ kind: 'add', delta: inp.delta / scale() }, phase, s.target);
   };
 
   // Правка без изменений шага не создаёт: то же значение — прежнее, ограниченное
@@ -115,7 +136,8 @@ export function NumberField(props: NumberFieldProps) {
     setDirty(false);
     session = null;
     // Не число или то же значение — без правки, поле показывает прежнее.
-    if (parsed) apply(parsed, s);
+    // Выделение больше предела id сменилось — набранное откатывается, не применяется.
+    if (parsed && !stale(s)) apply(parsed, s);
     input.value = focused() && props.mixed ? '' : shown();
   };
 
@@ -126,7 +148,10 @@ export function NumberField(props: NumberFieldProps) {
       () => ed.store.state.selectionIds,
       (ids) => {
         if (!dirty() || !session) return;
-        const same = ids.length === session.ids.length && ids.every((id, i) => id === session!.ids[i]);
+        const s = session;
+        const same = s.capped
+          ? !stale(s)
+          : ids.length === s.target.ids!.length && ids.every((id, i) => id === s.target.ids![i]);
         if (!same) commitText();
       },
       { defer: true },
@@ -155,7 +180,7 @@ export function NumberField(props: NumberFieldProps) {
 
   const cancelScrub = () => {
     dropPreview();
-    if (scrub?.moved) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', scrub.s.ids);
+    if (scrub?.moved) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', scrub.s.target);
     scrub = null;
   };
   // Esc во время перетаскивания подписи — отмена жеста без следа в истории.
@@ -179,12 +204,7 @@ export function NumberField(props: NumberFieldProps) {
     const a = document.activeElement;
     if (a instanceof HTMLInputElement && a.closest('.fe-num')) a.blur();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    const s = untrack(() => ({
-      ids: [...ed.store.state.selectionIds],
-      raw: props.value,
-      current: props.value * scale(),
-      mixed: !!props.mixed,
-    }));
+    const s = snapshot();
     scrub = { x: e.clientX, start: props.mixed ? 0 : props.value * scale(), moved: false, s };
     lastPreview = '';
     window.addEventListener('keydown', onEscape, true);
@@ -206,7 +226,7 @@ export function NumberField(props: NumberFieldProps) {
     if (!sc?.moved) return;
     const inp = scrubInput(scrubValue(sc.start, e.clientX - sc.x, props.step ?? 1, { shift: e.shiftKey, alt: e.altKey }), sc.s);
     // Вернули на исходное значение — жест отменяется (превью уже менял документ).
-    if (unchanged(inp, sc.s)) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', sc.s.ids);
+    if (unchanged(inp, sc.s)) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', sc.s.target);
     else emit(inp, 'commit', sc.s);
   };
 

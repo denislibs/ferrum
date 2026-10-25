@@ -279,7 +279,18 @@ impl Core {
                 edit,
                 phase: p,
                 ids,
+                selection_version,
             } => match (panel_edit(&edit), ids.as_deref().map(|l| self.nodes(l))) {
+                // Правка без id (выделение больше предела id) — только если выделение то же.
+                (Ok(_), None)
+                    if selection_version
+                        .is_some_and(|v| v != self.editor.selection_version() as f64) =>
+                {
+                    self.editor.cancel_gesture();
+                    if p != EditPhase::Preview {
+                        self.error("Выделение изменилось — правка не применена");
+                    }
+                }
                 (Ok(e), None) => self.editor.edit_selection(&e, phase(p)),
                 (Ok(e), Some(Some(ids))) => self.editor.edit_nodes(&e, phase(p), &ids),
                 (Ok(_), Some(None)) => {

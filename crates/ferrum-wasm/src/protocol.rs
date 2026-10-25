@@ -262,6 +262,9 @@ pub enum Command {
         edit: Edit,
         phase: EditPhase,
         ids: Option<Vec<String>>,
+        /// Без `ids` (выделение больше предела id): версия выделения из события
+        /// `selection` на начало жеста; если выделение с тех пор сменилось — правки нет.
+        selection_version: Option<f64>,
     },
     /// Новая страница; она становится текущей.
     AddPage,
@@ -391,6 +394,8 @@ pub enum CoreEvent {
     Selection {
         count: u32,
         ids: Vec<String>,
+        /// Версия выделения редактора: растёт при каждом изменении.
+        version: f64,
     },
     Tool {
         tool: Tool,

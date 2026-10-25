@@ -459,7 +459,10 @@ impl Editor {
                 let g = match self.panel.take() {
                     Some(g) if g.deep || !deep => g,
                     _ => {
-                        self.cancel_gesture();
+                        // Адресат задан ids — жест холста, начавшийся позже, не трогаем.
+                        if ids.is_none() {
+                            self.cancel_gesture();
+                        }
                         self.scene.clear_preview();
                         capture(&self.scene, &targets(self), deep)
                     }

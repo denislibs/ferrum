@@ -425,7 +425,7 @@ fn selection_event_ids_are_capped_but_count_is_exact() {
         command: "edit.select_all".into(),
     });
     let ev = core.take_events();
-    let Some(CoreEvent::Selection { count, ids }) = ev
+    let Some(CoreEvent::Selection { count, ids, .. }) = ev
         .into_iter()
         .find(|e| matches!(e, CoreEvent::Selection { .. }))
     else {

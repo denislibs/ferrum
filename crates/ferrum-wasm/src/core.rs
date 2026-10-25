@@ -127,10 +127,11 @@ fn cursor(c: Cursor) -> (CursorKind, f64) {
 
 /// Событие выделения: точное число и не больше `SELECTION_IDS_MAX` идентификаторов
 /// (лишние отбрасывает и сама функция, чтобы предел не зависел от вызывающего).
-fn selection_event(count: usize, ids: impl Iterator<Item = String>) -> CoreEvent {
+fn selection_event(count: usize, ids: impl Iterator<Item = String>, version: u64) -> CoreEvent {
     CoreEvent::Selection {
         count: count as u32,
         ids: ids.take(SELECTION_IDS_MAX).collect(),
+        version: version as f64,
     }
 }
 
@@ -252,6 +253,7 @@ impl Core {
         self.events.push(CoreEvent::Selection {
             count: 0,
             ids: vec![],
+            version: self.editor.selection_version() as f64,
         });
         self.events.push(CoreEvent::Tool {
             tool: tool(self.editor.tool_kind()),
@@ -448,6 +450,7 @@ impl Core {
             self.events.push(selection_event(
                 ids.len(),
                 ids.iter().take(SELECTION_IDS_MAX).map(NodeId::to_string),
+                self.editor.selection_version(),
             ));
             self.selected = ids.iter().copied().collect();
             // Выделение с холста: раскрыть предков и прокрутить панель к строке.
@@ -688,7 +691,7 @@ mod tests {
     #[test]
     fn selection_event_caps_ids_but_keeps_count() {
         let ids = (0..1001).map(|i| i.to_string());
-        let CoreEvent::Selection { count, ids } = selection_event(1001, ids) else {
+        let CoreEvent::Selection { count, ids, .. } = selection_event(1001, ids, 3) else {
             panic!()
         };
         assert_eq!((count, ids.len()), (1001, SELECTION_IDS_MAX));

@@ -138,7 +138,7 @@ test('набранное в поле не затирается событиям�
   const send = (f: string, value: number) =>
     page.evaluate(
       ([field, value]) =>
-        window.__ferrum!.core.send({ type: 'editSelection', edit: { type: 'number', field, value, relative: false } as never, phase: 'commit', ids: undefined }),
+        window.__ferrum!.core.send({ type: 'editSelection', edit: { type: 'number', field, value, relative: false } as never, phase: 'commit', ids: undefined, selectionVersion: undefined }),
       [f, value] as const,
     );
   await expect(x).toHaveValue('14400');
@@ -395,11 +395,45 @@ test('поворот: ввод, равный показанному, — не п
   await selectRow(page, 'Экран 9');
   const r = field(page, 'Поворот');
   const before = await live(page);
-  await coreSend(page, { type: 'editSelection', edit: { type: 'number', field: 'rotation', value: 30.004, relative: false }, phase: 'commit', ids: undefined });
+  await coreSend(page, { type: 'editSelection', edit: { type: 'number', field: 'rotation', value: 30.004, relative: false }, phase: 'commit', ids: undefined, selectionVersion: undefined });
   await liveWhen(page, `l.steps === ${before.steps + 1}`);
   await expect(r).toHaveValue('30°');
   await r.fill('30');
   await r.press('Enter');
   await page.waitForTimeout(200);
   expect((await live(page)).steps).toBe(before.steps + 1);
+});
+
+// ---- Раунд 2: выделение больше предела id ----
+
+test('выделение больше 1000: правка идёт ко всем; смена выделения откатывает набранное', async ({ page }) => {
+  test.setTimeout(240_000);
+  await openApp(page, 110_000);
+  await page.locator('canvas').focus();
+  await page.keyboard.press('ControlOrMeta+a');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.selectionCount)).toBeGreaterThan(1000);
+  const cap = await page.evaluate(() => [window.__ferrum!.ui!.selectionCount, window.__ferrum!.ui!.selectionIds.length]);
+  expect(cap[1]).toBeLessThan(cap[0]);
+  const x = field(page, 'X');
+  await expect(x).toHaveAttribute('placeholder', 'Смешанные');
+  const before = await live(page);
+  await x.click();
+  await x.pressSequentially('77');
+  await x.press('Enter');
+  await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  // Сводка — по всему выделению: не «Смешанные», а 77 у всех (в том числе после 1000-го).
+  await expect.poll(async () => (await summary(page)).x.mixed).toBe(false);
+  const s = await summary(page);
+  expect([s.x.value, s.count]).toEqual([77, cap[0]]);
+  // Выделение сменилось, пока набирали: набранное откатывается, шага нет.
+  await x.click();
+  await x.press('ControlOrMeta+a');
+  await x.pressSequentially('5');
+  const one = await page.evaluate(() => window.__ferrum!.ui!.selectionIds[0]);
+  await coreSend(page, { type: 'select', ids: [one], mode: 'replace' });
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.selectionCount)).toBe(1);
+  await page.waitForTimeout(300);
+  expect((await live(page)).steps).toBe(before.steps + 1);
+  await expect(x).toHaveValue('77');
+  expect((await summary(page)).x.value).toBe(77);
 });

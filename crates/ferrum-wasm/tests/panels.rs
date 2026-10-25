@@ -177,6 +177,7 @@ fn edit_selection_is_one_step_and_updates_summary() {
             },
             phase: EditPhase::Preview,
             ids: None,
+            selection_version: None,
         });
     }
     assert_eq!(document_steps(&core), steps, "превью — без шагов");
@@ -188,6 +189,7 @@ fn edit_selection_is_one_step_and_updates_summary() {
         },
         phase: EditPhase::Commit,
         ids: None,
+        selection_version: None,
     });
     assert_eq!(document_steps(&core), steps + 1.0);
     let s = summary(&core.take_events()).expect("сводка обновилась");
@@ -226,6 +228,7 @@ fn fills_from_panel_are_validated() {
         },
         phase: EditPhase::Commit,
         ids: None,
+        selection_version: None,
     });
     let s = summary(&core.take_events()).unwrap();
     assert_eq!(s.fills.unwrap().list[0].color, "#ff0000ff");
@@ -248,6 +251,7 @@ fn fills_from_panel_are_validated() {
             edit: Edit::Fills { fills: vec![bad] },
             phase: EditPhase::Commit,
             ids: None,
+            selection_version: None,
         });
         assert_eq!(errors(&core.take_events()).len(), 1);
     }
@@ -257,6 +261,7 @@ fn fills_from_panel_are_validated() {
         },
         phase: EditPhase::Commit,
         ids: None,
+        selection_version: None,
     });
     assert_eq!(errors(&core.take_events()).len(), 1, "предел заливок");
     assert_eq!(document_steps(&core), steps + 1.0, "неверное не правит");
@@ -513,6 +518,7 @@ fn malformed_panel_commands_are_errors() {
             },
             phase: EditPhase::Commit,
             ids: None,
+            selection_version: None,
         },
         Command::SetPageBackground {
             color: Some("#12".into()),
@@ -666,6 +672,7 @@ fn search_name_cache_stays_warm_across_every_kind_of_edit() {
         },
         phase: EditPhase::Commit,
         ids: None,
+        selection_version: None,
     });
     // Жест холста (перенос «Слой 1» в «Экран 0»): правка приходит из ввода.
     drag(&mut core, (140.0, 64.0), (160.0, 64.0), 1000.0);
@@ -890,6 +897,7 @@ fn panel_command_and_event_caps() {
             },
             phase: EditPhase::Commit,
             ids: None,
+            selection_version: None,
         },
         Command::EditSelection {
             edit: Edit::Strokes {
@@ -900,6 +908,7 @@ fn panel_command_and_event_caps() {
             },
             phase: EditPhase::Commit,
             ids: None,
+            selection_version: None,
         },
         Command::EditSelection {
             edit: Edit::Size {
@@ -908,6 +917,7 @@ fn panel_command_and_event_caps() {
             },
             phase: EditPhase::Preview,
             ids: None,
+            selection_version: None,
         },
         Command::SetDocumentName {
             name: "я".repeat(3000),
@@ -988,6 +998,7 @@ fn edit_with_explicit_ids_applies_to_them_not_to_selection() {
             },
             phase,
             ids: Some(vec![a.clone()]),
+            selection_version: None,
         });
     }
     assert_eq!(document_steps(&core), steps + 1.0);
@@ -1005,6 +1016,7 @@ fn edit_with_explicit_ids_applies_to_them_not_to_selection() {
             },
             phase: EditPhase::Commit,
             ids: Some(ids),
+            selection_version: None,
         });
     }
     assert_eq!(document_steps(&core), steps);
@@ -1013,7 +1025,50 @@ fn edit_with_explicit_ids_applies_to_them_not_to_selection() {
         edit: Edit::ClipContent { value: true },
         phase: EditPhase::Commit,
         ids: Some(vec![a.clone(); 1001]),
+        selection_version: None,
     });
     assert!(!errors(&core.take_events()).is_empty());
     assert_eq!(document_steps(&core), steps);
+}
+
+// 1100 фреймов верхнего уровня — это ~110 тыс. узлов: в отладочной сборке долго.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn edit_of_selection_beyond_id_cap_is_guarded_by_selection_version() {
+    let mut core = demo(110_000);
+    core.take_events();
+    core.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    let (count, version) = core
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Selection { count, version, .. } => Some((count, version)),
+            _ => None,
+        })
+        .expect("событие Selection");
+    assert!(count > ferrum_wasm::protocol::SELECTION_IDS_MAX as u32);
+    let edit = |version| Command::EditSelection {
+        edit: Edit::Number {
+            field: Field::X,
+            value: 77.0,
+            relative: false,
+        },
+        phase: EditPhase::Commit,
+        ids: None,
+        selection_version: version,
+    };
+    // Устаревшая версия: правки нет, шага нет, одна ошибка по-русски.
+    let steps = document_steps(&core);
+    core.command(edit(Some(version - 1.0)));
+    assert_eq!(document_steps(&core), steps);
+    let errs = errors(&core.take_events());
+    assert_eq!(errs.len(), 1);
+    assert!(errs[0].contains("Выделение изменилось"), "{errs:?}");
+    // Версия совпала (и версии нет): правятся все, а не первые 1000.
+    core.command(edit(Some(version)));
+    assert_eq!(document_steps(&core), steps + 1.0);
+    let s = summary(&core.take_events()).expect("сводка");
+    assert_eq!((s.count, s.x.value, s.x.mixed), (count, 77.0, false));
 }

@@ -28,6 +28,8 @@ export interface UiState {
   selectionCount: number;
   /** Идентификаторы выделенных (не больше, чем в событии ядра): адресат правок панели. */
   selectionIds: string[];
+  /** Версия выделения ядра: правка без id (выделение больше предела id) действует, только пока она та же. */
+  selectionVersion: number;
   canUndo: boolean;
   canRedo: boolean;
   documentName: string;
@@ -51,6 +53,7 @@ const initial: UiState = {
   tool: 'move',
   selectionCount: 0,
   selectionIds: [],
+  selectionVersion: 0,
   canUndo: false,
   canRedo: false,
   documentName: '',
@@ -97,7 +100,7 @@ export function createUiStore() {
         setState('tool', e.tool);
         break;
       case 'selection':
-        setState({ selectionCount: e.count, selectionIds: e.ids });
+        setState({ selectionCount: e.count, selectionIds: e.ids, selectionVersion: e.version });
         break;
       case 'document':
         setState({ canUndo: e.canUndo, canRedo: e.canRedo });

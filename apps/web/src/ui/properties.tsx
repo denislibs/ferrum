@@ -11,17 +11,23 @@ import { Section } from './chrome';
 import { useEditor } from './context';
 import { Caret, Icon } from './icons';
 import { Menu, type MenuItem } from './menu';
-import { NumberField } from './number-field';
+import { NumberField, type EditTarget } from './number-field';
 import type { FieldInput } from './number';
 
-/** Правка; `ids` — узлы, которые правятся с начала жеста (без них — текущее выделение). */
+/** Правка; `target` — кого правят с начала жеста (без него — текущее выделение). */
 export function sendEdit(
-  send: (c: { type: 'editSelection'; edit: Edit; phase: EditPhase; ids: string[] | undefined }) => void,
+  send: (c: {
+    type: 'editSelection';
+    edit: Edit;
+    phase: EditPhase;
+    ids: string[] | undefined;
+    selectionVersion: number | undefined;
+  }) => void,
   edit: Edit,
   phase: EditPhase,
-  ids?: string[],
+  target?: EditTarget,
 ) {
-  send({ type: 'editSelection', edit, phase, ids });
+  send({ type: 'editSelection', edit, phase, ids: target?.ids, selectionVersion: target?.selectionVersion });
 }
 
 /** Правка числового поля командой (значение или прибавка к каждому). */
@@ -35,8 +41,8 @@ export function PropertiesPanel() {
   const ed = useEditor();
   const s = () => ed.store.state.summary;
   const count = () => s()?.count ?? 0;
-  const edit = (field: Field) => (input: FieldInput, phase: EditPhase, ids: string[]) =>
-    sendEdit(ed.send, numberEdit(field, input), phase, ids);
+  const edit = (field: Field) => (input: FieldInput, phase: EditPhase, target: EditTarget) =>
+    sendEdit(ed.send, numberEdit(field, input), phase, target);
   // Один узел во время жеста холста — живые значения из общей памяти.
   const live = () => ed.store.state.live;
   const liveOne = () => live().busy && live().count === 1 && count() === 1;
@@ -55,7 +61,7 @@ export function PropertiesPanel() {
 }
 
 function PositionSection(props: {
-  edit: (f: Field) => (i: FieldInput, p: EditPhase, ids: string[]) => void;
+  edit: (f: Field) => (i: FieldInput, p: EditPhase, t: EditTarget) => void;
   val: (n: Num | undefined, live: number) => { value: number; mixed: boolean };
 }) {
   const ed = useEditor();
@@ -152,7 +158,7 @@ function PositionSection(props: {
   );
 }
 
-function AppearanceSection(props: { edit: (f: Field) => (i: FieldInput, p: EditPhase, ids: string[]) => void }) {
+function AppearanceSection(props: { edit: (f: Field) => (i: FieldInput, p: EditPhase, t: EditTarget) => void }) {
   const ed = useEditor();
   const s = () => ed.store.state.summary!;
   return (
