@@ -813,6 +813,7 @@ dependencies = [
  "ferrum-doc",
  "ferrum-editor",
  "ferrum-render",
+ "ferrum-scene",
  "js-sys",
  "kurbo",
  "proptest",

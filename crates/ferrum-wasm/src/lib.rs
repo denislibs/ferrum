@@ -14,6 +14,7 @@
 pub mod core;
 pub mod images;
 pub mod input;
+pub mod layers;
 pub mod layout;
 pub mod live;
 pub mod present;

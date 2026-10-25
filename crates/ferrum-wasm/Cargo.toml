@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 ferrum-doc = { path = "../ferrum-doc" }
 ferrum-editor = { path = "../ferrum-editor" }
 ferrum-render = { path = "../ferrum-render" }
+ferrum-scene = { path = "../ferrum-scene" }
 kurbo.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
