@@ -80,7 +80,7 @@ pub struct Core {
     /// Фон страницы во время жеста палитры: в кадре, но ещё не в документе.
     background_preview: Option<Option<ferrum_doc::Color>>,
     /// Документ изменён с открытия, создания или сохранения (событие `Modified`)
-    /// и что о нём сообщено последним (`None` — ещё ничего: сообщить).
+    /// и что о нём сообщено последним (`None` — документ заменён: сообщить).
     modified: bool,
     modified_sent: Option<bool>,
 }
@@ -187,8 +187,10 @@ impl Core {
             reveal: None,
             summary: None,
             background_preview: None,
+            // Пустой документ до первого открытия не изменён, и интерфейс так и думает:
+            // сообщать нечего. Замена документа сбрасывает это (`None`) — сообщить.
             modified: false,
-            modified_sent: None,
+            modified_sent: Some(false),
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
