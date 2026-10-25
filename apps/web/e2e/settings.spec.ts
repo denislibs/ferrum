@@ -31,6 +31,9 @@ test('переназначить сочетание и пользоваться 
   const confirm = dialog.getByRole('alertdialog', { name: 'Сочетание занято' });
   await expect(confirm).toContainText('R уже у команды «Прямоугольник»');
   await confirm.getByRole('button', { name: 'Заменить' }).click();
+  // Первый Esc очищает поиск, второй закрывает диалог.
+  await page.keyboard.press('Escape');
+  await expect(dialog.getByRole('searchbox', { name: 'Поиск команд' })).toHaveValue('');
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
   await page.locator('canvas').focus();
@@ -301,6 +304,8 @@ test('запись сочетания: все клавиши — записи, �
   await expect(dialog.getByRole('alertdialog')).toHaveCount(0);
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
+  await expect(dialog.getByRole('searchbox', { name: 'Поиск команд' })).toHaveValue('');
+  await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
   // Запись прервана щелчком в сторону: не висит вечно.
   const again = await openSettings(page);
@@ -383,9 +388,7 @@ test('хранилище: мусор и отказ доступа — умолч
   await expect(blocked.getByRole('alert')).toHaveCount(0);
 });
 
-test('сохранённая раскладка применяется при запуске молча; испорченная — одна ошибка и сброс', async ({ page }) => {
-  const mod = 'Ctrl';
-  void mod;
+test('сохранённая раскладка применяется при запуске молча; испорченная — одна ошибка и сброс', async ({ page, browser }) => {
   await page.addInitScript(() =>
     localStorage.setItem(
       'ferrum.settings.v1',
@@ -399,7 +402,8 @@ test('сохранённая раскладка применяется при з
   await page.keyboard.press('KeyQ');
   await expect.poll(() => tool(page)).toBe('rect');
 
-  const bad = await page.context().newPage();
+  // Свой контекст: хранилище первой страницы (её отложенная запись) не должно подменить значение.
+  const bad = await (await browser.newContext({ baseURL: 'http://localhost:4173', viewport: { width: 1280, height: 720 } })).newPage();
   await bad.addInitScript(() => localStorage.setItem('ferrum.settings.v1', JSON.stringify({ keymap: '{"format":"чужой"}', theme: 'light' })));
   await openApp(bad);
   await expect(bad.getByRole('status').filter({ hasText: 'Не удалось импортировать раскладку' })).toHaveCount(1);
@@ -418,8 +422,13 @@ test('импорт: слишком большой файл, не JSON и чте�
   await expect(page.getByRole('status').filter({ hasText: 'Файл раскладки слишком большой' })).toBeVisible();
   await input.setInputFiles({ name: 'photo.json', mimeType: 'application/json', buffer: Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x81]) });
   await expect(page.getByRole('status').filter({ hasText: 'Не удалось импортировать раскладку' })).toBeVisible();
+  const errors = () => page.evaluate(() => window.__ferrum!.uiEvents!.filter((e) => e.type === 'error').length);
+  const e0 = await errors();
   await input.setInputFiles({ name: 'empty.json', mimeType: 'application/json', buffer: Buffer.alloc(0) });
+  // Пустой файл — ровно одна ошибка ядра, раскладка не тронута.
+  await expect.poll(errors).toBe(e0 + 1);
   await input.setInputFiles({ name: 'array.json', mimeType: 'application/json', buffer: Buffer.from('[1,2,3]') });
+  await expect.poll(errors).toBe(e0 + 2);
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('row').filter({ hasText: 'Прямоугольник' })).toContainText('R');
   // Экспорт без отличий — всё равно верный файл раскладки.
@@ -427,4 +436,129 @@ test('импорт: слишком большой файл, не JSON и чте�
   await dialog.getByRole('button', { name: 'Экспорт' }).click();
   const text = Buffer.concat(await (await (await download).createReadStream()).toArray()).toString();
   expect(JSON.parse(text)).toMatchObject({ format: 'ferrum-keymap', version: 1 });
+});
+
+test('экспорт и импорт обратно — раскладка та же', async ({ page }) => {
+  await openApp(page);
+  const dialog = await openSettings(page);
+  await dialog.getByRole('searchbox', { name: 'Поиск команд' }).fill('Прямоугольник');
+  await dialog.getByRole('button', { name: 'Добавить сочетание для «Прямоугольник»' }).click();
+  await page.keyboard.press('KeyQ');
+  const keys = () => page.evaluate(() => window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.rect')!.bindings);
+  await expect.poll(keys).toEqual(['KeyR', 'KeyQ']);
+  const download = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: 'Экспорт' }).click();
+  const bytes = Buffer.concat(await (await (await download).createReadStream()).toArray());
+  await dialog.getByRole('button', { name: 'Сбросить все' }).click();
+  await expect.poll(keys).toEqual(['KeyR']);
+  await dialog.locator('input[type=file]').setInputFiles({ name: 'ferrum-keymap.json', mimeType: 'application/json', buffer: bytes });
+  await expect.poll(keys).toEqual(['KeyR', 'KeyQ']);
+  await expect(page.getByRole('status').filter({ hasText: 'Раскладка импортирована' })).toBeVisible();
+});
+
+const active = (page: Page) =>
+  page.evaluate(() => {
+    const a = document.activeElement as HTMLElement | null;
+    return {
+      inDialog: !!a?.closest('[role="dialog"]'),
+      label: a?.getAttribute('aria-label') ?? a?.tagName ?? '',
+    };
+  });
+
+test('фокус остаётся на строке после записи, удаления сочетания и сброса', async ({ page }) => {
+  await openApp(page);
+  const dialog = await openSettings(page);
+  await dialog.getByRole('searchbox', { name: 'Поиск команд' }).fill('Прямоугольник');
+  const add = dialog.getByRole('button', { name: 'Добавить сочетание для «Прямоугольник»' });
+  await add.click();
+  await page.keyboard.press('KeyQ');
+  await expect(dialog.getByRole('row').filter({ hasText: 'Прямоугольник' })).toContainText('Q');
+  await dialog.getByRole('button', { name: 'Сбросить', exact: true }).waitFor();
+  // Событие раскладки пришло — «+» не пересоздан и в фокусе.
+  await expect(add).toBeFocused();
+  // × у Q: фокус на соседнем сочетании (R), затем «+».
+  await dialog.getByRole('button', { name: /Убрать Q у команды «Прямоугольник»/ }).click();
+  await expect(dialog.getByRole('button', { name: /Убрать Q /})).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: /Убрать R у команды «Прямоугольник»/ })).toBeFocused();
+  // Сбросить: «Сбросить» исчезает, фокус — на «+».
+  await add.click();
+  await page.keyboard.press('KeyQ');
+  await dialog.getByRole('button', { name: 'Сбросить', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Сбросить', exact: true })).toHaveCount(0);
+  await expect(add).toBeFocused();
+  // Убрать единственное сочетание — фокус на «+», а не на body.
+  await dialog.getByRole('button', { name: /Убрать R у команды «Прямоугольник»/ }).click();
+  await expect(add).toBeFocused();
+  expect((await active(page)).inDialog).toBe(true);
+});
+
+test('«Отмена» (Esc): сочетание Escape убрать нельзя', async ({ page }) => {
+  await openApp(page);
+  const dialog = await openSettings(page);
+  await dialog.getByRole('searchbox', { name: 'Поиск команд' }).fill('Отмена');
+  const row = dialog.getByRole('row').filter({ hasText: 'Отмена' }).first();
+  await expect(row).toContainText('Esc');
+  await expect(row.getByRole('button', { name: /Убрать/ })).toHaveCount(0);
+});
+
+test('запись: Tab и буфер обмена отклоняются, подсказка о браузере, Esc очищает поиск', async ({ page }) => {
+  await openApp(page);
+  const dialog = await openSettings(page);
+  const search = dialog.getByRole('searchbox', { name: 'Поиск команд' });
+  await search.fill('Эллипс');
+  await dialog.getByRole('button', { name: 'Добавить сочетание для «Эллипс»' }).click();
+  await expect(dialog.getByText('Некоторые сочетания перехватывает браузер')).toBeVisible();
+  const status = dialog.getByRole('status');
+  for (const combo of ['Tab', 'Shift+Tab', 'ControlOrMeta+KeyC', 'ControlOrMeta+KeyV']) {
+    await page.keyboard.press(combo);
+    await expect(status).toContainText('не сработает');
+  }
+  // Запись всё ещё идёт; нормальное сочетание принимается.
+  await page.keyboard.press('KeyO');
+  await expect(dialog.getByRole('row').filter({ hasText: 'Эллипс' })).toContainText('O');
+  // Esc в непустом поиске очищает его и оставляет диалог и фокус.
+  await search.focus();
+  await page.keyboard.press('Escape');
+  await expect(search).toHaveValue('');
+  await expect(search).toBeFocused();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+});
+
+test('тема из хранилища ставится до загрузки приложения (без вспышки)', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('ferrum.settings.v1', JSON.stringify({ theme: 'light' })));
+  // Приложение не грузится вовсе: тему мог поставить только встроенный скрипт.
+  await page.route('**/assets/main-*.js', (r) => r.abort());
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  // «Как в системе» — по prefers-color-scheme.
+  await page.addInitScript(() => localStorage.setItem('ferrum.settings.v1', JSON.stringify({ theme: 'system' })));
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
+test('частично верная сохранённая раскладка: предупреждение один раз, в хранилище — очищенная', async ({ page }) => {
+  await page.addInitScript(() => {
+    if (!localStorage.getItem('ferrum.settings.v1'))
+      localStorage.setItem(
+        'ferrum.settings.v1',
+        JSON.stringify({
+          keymap: JSON.stringify({ format: 'ferrum-keymap', version: 1, overrides: { 'tool.rect': ['KeyQ'], 'нет.такой': ['KeyZ'] } }),
+        }),
+      );
+  });
+  await openApp(page);
+  await expect(page.getByRole('status').filter({ hasText: 'Сохранённая раскладка: пропущено' })).toHaveCount(1);
+  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('ferrum.settings.v1')!).keymap as string);
+  await expect.poll(stored).not.toContain('нет.такой');
+  expect(await stored()).toContain('KeyQ');
+  await page.reload();
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true);
+  await expect(page.getByRole('status').filter({ hasText: 'Сохранённая раскладка' })).toHaveCount(0);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.rect')!.bindings)).toEqual(['KeyQ']);
 });

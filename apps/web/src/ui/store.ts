@@ -80,7 +80,7 @@ export function createUiStore() {
   const [state, setState] = createStore<UiState>(structuredClone(initial));
   let toastId = 0;
   /** Сохранённая раскладка при запуске: ждём её ответа (`keymapImported` или `error`). */
-  let quiet: { onFail?: () => void } | null = null;
+  let quiet: { onDone?: () => void; onFail?: () => void } | null = null;
 
   function toast(text: string, kind: Toast['kind'] = 'info'): void {
     // То же сообщение подряд — одно уведомление, а не стопка.
@@ -123,12 +123,10 @@ export function createUiStore() {
         setState('pages', { list: e.pages, current: e.current, background: e.background ?? null });
         break;
       case 'keymap':
-        setState('keymap', {
-          commands: e.commands,
-          conflicts: e.conflicts,
-          reserved: e.reserved,
-          overrides: e.overrides,
-        });
+        // Команды сверяются по ключу: объект строки сохраняется, и таблица настроек не
+        // пересоздаёт строки (фокус на кнопке строки не теряется при каждой правке).
+        setState('keymap', 'commands', reconcile(e.commands, { key: 'key' }));
+        setState('keymap', { conflicts: e.conflicts, reserved: e.reserved, overrides: e.overrides });
         break;
       case 'presets':
         setState('presets', e.presets);
@@ -139,8 +137,10 @@ export function createUiStore() {
       case 'keymapImported': {
         // Сохранённая раскладка при запуске — молча; пропущенное — одним уведомлением.
         const silent = quiet !== null;
+        const done = quiet?.onDone;
         quiet = null;
         if (silent) {
+          done?.();
           if (e.warnings.length) toast(`Сохранённая раскладка: пропущено ${e.warnings.length}`, 'error');
           break;
         }
@@ -156,7 +156,7 @@ export function createUiStore() {
         break;
       case 'error':
         // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.
-        if (quiet) {
+        if (quiet && e.message.startsWith('Не удалось импортировать раскладку')) {
           const { onFail } = quiet;
           quiet = null;
           onFail?.();
@@ -187,10 +187,10 @@ export function createUiStore() {
     });
   }
 
-  /** Следующий импорт раскладки — сохранённая при запуске: без уведомления; `onFail`
-   * вызывается, если ядро её не приняло. */
-  function quietKeymapImport(onFail?: () => void): void {
-    quiet = { onFail };
+  /** Следующий импорт раскладки — сохранённая при запуске: без уведомления; `onDone` — ядро
+   * приняло (событие раскладки с очищенным набором придёт следом), `onFail` — не приняло. */
+  function quietKeymapImport(onDone?: () => void, onFail?: () => void): void {
+    quiet = { onDone, onFail };
   }
 
   return { state, setState, apply, applyLive, toast, quietKeymapImport };

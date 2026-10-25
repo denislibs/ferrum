@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import type { KeymapEntry } from '../src/wasm/ferrum_wasm';
+import { createUiStore } from '../src/ui/store';
 import { shortcutLabel } from '../src/ui/shortcuts';
 import { conflictsOf, filterGroups, groupCommands, recordKey, reservedOf } from '../src/ui/keymap-ui';
 import { DEFAULT_SETTINGS, loadSettings, resolveTheme, saveSettings, SETTINGS_KEY, THEME_CANVAS } from '../src/ui/settings';
@@ -112,8 +113,38 @@ test('запись сочетания: AltGr на Windows/Linux отклоняе
   expect(recordKey(altGr(true), 'mac')).toEqual({ kind: 'shortcut', shortcut: 'Ctrl+Alt+KeyQ' });
   // Настоящее Ctrl+Alt без AltGr — обычное сочетание.
   expect(recordKey(altGr(false), 'windows')).toEqual({ kind: 'shortcut', shortcut: 'Ctrl+Alt+KeyQ' });
-  // Alt один (без Ctrl) с AltGraph — не AltGr-подмена: записывается.
-  expect(recordKey({ ...altGr(true), ctrlKey: false }, 'windows')).toEqual({ kind: 'shortcut', shortcut: 'Alt+KeyQ' });
+  // Linux/Windows: AltGraph при любых флагах Ctrl/Alt — тоже AltGr.
+  expect(recordKey({ ...altGr(true), ctrlKey: false, altKey: false }, 'linux')).toEqual({ kind: 'altgr' });
+  expect(recordKey({ ...altGr(true), ctrlKey: false }, 'windows')).toEqual({ kind: 'altgr' });
+  expect(recordKey({ ...altGr(true), ctrlKey: false, altKey: false }, 'mac')).toEqual({ kind: 'shortcut', shortcut: 'KeyQ' });
+});
+
+test('запись сочетания: Tab и буфер обмена не сработают никогда', () => {
+  const k = (code: string, mods: object = {}) => ({ code, key: '', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });
+  expect(recordKey(k('Tab'), 'windows')).toEqual({ kind: 'never' });
+  expect(recordKey(k('Tab', { shiftKey: true }), 'mac')).toEqual({ kind: 'never' });
+  expect(recordKey(k('KeyC', { ctrlKey: true }), 'windows')).toEqual({ kind: 'never' });
+  expect(recordKey(k('KeyX', { metaKey: true }), 'mac')).toEqual({ kind: 'never' });
+  expect(recordKey(k('KeyV', { metaKey: true }), 'mac')).toEqual({ kind: 'never' });
+  // На macOS Ctrl+C — обычное сочетание, на Windows Meta+C — тоже.
+  expect(recordKey(k('KeyC', { ctrlKey: true }), 'mac')).toEqual({ kind: 'shortcut', shortcut: 'Ctrl+KeyC' });
+  expect(recordKey(k('KeyC', { metaKey: true }), 'windows')).toEqual({ kind: 'shortcut', shortcut: 'Meta+KeyC' });
+});
+
+test('сохранённая раскладка при запуске: чужая ошибка её не стирает, отказ ядра — стирает', () => {
+  const store = createUiStore();
+  let failed = 0;
+  store.quietKeymapImport(undefined, () => failed++);
+  store.apply({ type: 'error', message: 'Что-то другое пошло не так' });
+  expect(failed).toBe(0);
+  store.apply({ type: 'error', message: 'Не удалось импортировать раскладку: это не файл' });
+  expect(failed).toBe(1);
+  // Успех — тихий (без уведомления), флаг снят.
+  store.quietKeymapImport();
+  store.apply({ type: 'keymapImported', warnings: [] });
+  expect(store.state.toasts.filter((t) => t.text.includes('Раскладка импортирована'))).toHaveLength(0);
+  store.apply({ type: 'keymapImported', warnings: [] });
+  expect(store.state.toasts.some((t) => t.text === 'Раскладка импортирована')).toBe(true);
 });
 
 test('русская раскладка: поиск и подписи идут по раскладке, запись — по физической клавише', () => {

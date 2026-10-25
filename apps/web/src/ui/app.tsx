@@ -2,7 +2,7 @@
 // Настройки пользователя (тема, привязка к пикселям, раскладка клавиш, ширина
 // панелей) читаются при запуске и сохраняются при каждом изменении.
 
-import { createEffect, createMemo, createSignal, ErrorBoundary, on, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { boot } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { ConfirmDialog } from './dialog';
@@ -42,20 +42,16 @@ export function App() {
   document.documentElement.dataset.theme = theme();
   let canvas!: HTMLCanvasElement;
 
-  // Первая раскладка от ядра — умолчания: пока не пришла сохранённая, её не пишем
-  // поверх (иначе неудачный импорт стёр бы настройки пользователя).
-  let keymapSeen = saved.keymap ? 0 : 1;
+  // Раскладка в хранилище — отличия, как их отдаёт ядро. Пока сохранённая не
+  // принята (или её нет), умолчания ядра поверх неё не пишем: иначе неудачный
+  // импорт стёр бы настройки пользователя. Принята — пишем очищенный набор ядра
+  // (пропущенное в нём уже отброшено, предупреждение не повторится при запуске).
   const [keymap, setKeymap] = createSignal(saved.keymap);
-  createEffect(
-    on(
-      () => store.state.keymap.overrides,
-      (o) => {
-        if (!o) return;
-        keymapSeen += 1;
-        if (keymapSeen > 1) setKeymap(o);
-      },
-    ),
-  );
+  const [restored, setRestored] = createSignal(!saved.keymap);
+  createEffect(() => {
+    const o = store.state.keymap.overrides;
+    if (restored() && o && store.state.keymap.commands.length > 0) setKeymap(o);
+  });
 
   // Тема интерфейса и оверлеев ядра одна: смена доходит и до worker'а (цвет холста).
   createEffect(() => {
@@ -97,7 +93,13 @@ export function App() {
         ed.send({ type: 'setTheme', theme: theme() });
         ed.send({ type: 'setSettings', pixelSnap: pixelSnap() });
         if (saved.keymap) {
-          store.quietKeymapImport(() => setKeymap(''));
+          store.quietKeymapImport(
+            () => setRestored(true),
+            () => {
+              setKeymap('');
+              setRestored(true);
+            },
+          );
           ed.send({ type: 'importKeymap', json: saved.keymap });
         }
       },

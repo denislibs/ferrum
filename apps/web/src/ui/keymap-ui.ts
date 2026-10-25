@@ -5,7 +5,7 @@
 
 import type { ConflictInfo, KeymapEntry } from '../wasm/ferrum_wasm';
 import type { Platform } from '../core/core';
-import { eventShortcut, shortcutLabel, type LayoutMap } from './shortcuts';
+import { clipboardAction, eventShortcut, shortcutLabel, type LayoutMap } from './shortcuts';
 
 /** Предел файла раскладки — как у ядра (64 КБ). */
 export const MAX_KEYMAP_FILE = 64 * 1024;
@@ -69,8 +69,10 @@ export function conflictsOf(entry: KeymapEntry, shortcut: string, conflicts: rea
 export type RecordResult =
   | { kind: 'cancel' }
   | { kind: 'wait' }
-  /** AltGr на Windows/Linux — это Ctrl+Alt: редактор такие сочетания не принимает. */
+  /** AltGr на Windows/Linux: редактор такие сочетания не принимает. */
   | { kind: 'altgr' }
+  /** Сочетание, которое не сработает никогда: Tab у браузера, буфер обмена — события copy/cut/paste. */
+  | { kind: 'never' }
   | { kind: 'shortcut'; shortcut: string };
 
 type RecordEvent = Pick<KeyboardEvent, 'code' | 'key' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'> &
@@ -81,8 +83,11 @@ export function recordKey(e: RecordEvent, platform: Platform = 'windows'): Recor
   if (e.code === 'Escape' && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) return { kind: 'cancel' };
   const s = eventShortcut(e);
   if (!s) return { kind: 'wait' };
-  // Договор с редактором (`KeyEvent::alt_graph`): с настоящим AltGr сочетания с
-  // Ctrl+Alt не срабатывают, на macOS AltGraph игнорируется (так приходит Option).
-  if (platform !== 'mac' && e.ctrlKey && e.altKey && e.getModifierState?.('AltGraph')) return { kind: 'altgr' };
+  // Договор с редактором (`KeyEvent::alt_graph`): с настоящим AltGr сочетания не
+  // срабатывают (на Linux AltGr приходит и без флагов Ctrl/Alt); на macOS AltGraph
+  // игнорируется (так приходит Option).
+  if (platform !== 'mac' && e.getModifierState?.('AltGraph')) return { kind: 'altgr' };
+  // Tab всегда у браузера (keys.ts), Ctrl/Cmd+C, X, V идут событиями буфера обмена.
+  if (e.code === 'Tab' || clipboardAction(s, platform)) return { kind: 'never' };
   return { kind: 'shortcut', shortcut: s };
 }

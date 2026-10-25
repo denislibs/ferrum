@@ -5,7 +5,7 @@
 // Диалог модальный: пока он открыт, клавиши холсту не пересылаются (keys.ts), фокус
 // не уходит из него, а щелчок по пустому месту оставляет фокус на самом диалоге.
 
-import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js';
+import { createMemo, createSignal, For, Index, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import type { KeymapEntry } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
@@ -214,7 +214,11 @@ function KeymapTab() {
     const r = recordKey(e, ed.platform);
     if (r.kind === 'wait') return;
     if (r.kind === 'altgr') {
-      setNote('AltGr — это Ctrl+Alt, такое сочетание не сработает. Нажмите другое');
+      setNote('Сочетания с AltGr не сработают. Нажмите другое');
+      return;
+    }
+    if (r.kind === 'never') {
+      setNote('Это сочетание не сработает: его забирает браузер. Нажмите другое');
       return;
     }
     stopRecording(command);
@@ -254,6 +258,18 @@ function KeymapTab() {
     ed.send({ type: 'importKeymap', json });
   };
 
+  const focusAdd = (command: string) =>
+    root.querySelector<HTMLElement>(`[data-add="${CSS.escape(command)}"]`)?.focus();
+  // Убранное сочетание уносит кнопку с фокусом: фокус — соседнему сочетанию или на «+».
+  const removeBinding = (c: KeymapEntry, b: string) => {
+    const i = c.bindings.indexOf(b);
+    const next = c.bindings[i + 1] ?? c.bindings[i - 1];
+    const target = next && root.querySelector<HTMLElement>(`[data-remove="${CSS.escape(`${c.key}|${next}`)}"]`);
+    if (target) target.focus();
+    else focusAdd(c.key);
+    ed.send({ type: 'unbind', command: c.key, shortcut: b });
+  };
+
   const row = (c: KeymapEntry) => (
     <div class="fe-keyrow" role="row">
       <span class="fe-keyrow__name" role="cell">
@@ -267,13 +283,17 @@ function KeymapTab() {
             return (
               <span class="fe-key" classList={{ 'fe-key--warn': reserved() || others().length > 0 }}>
                 <span class="t-num">{label(b)}</span>
-                <button
-                  class="fe-key__remove"
-                  aria-label={`Убрать ${label(b)} у команды «${c.name}»`}
-                  onClick={() => ed.send({ type: 'unbind', command: c.key, shortcut: b })}
-                >
-                  <Icon name="close" size={12} />
-                </button>
+                {/* Отмена по Esc: единственный выход из выделения, случайно её не убрать. */}
+                <Show when={!(c.key === 'edit.escape' && b === 'Escape')}>
+                  <button
+                    class="fe-key__remove"
+                    aria-label={`Убрать ${label(b)} у команды «${c.name}»`}
+                    data-remove={`${c.key}|${b}`}
+                    onClick={() => removeBinding(c, b)}
+                  >
+                    <Icon name="close" size={12} />
+                  </button>
+                </Show>
                 <Show when={reserved()}>
                   <span class="fe-key__note">
                     <Icon name="warning" size={12} /> Перехватывает браузер
@@ -316,7 +336,14 @@ function KeymapTab() {
           </span>
         </Show>
         <Show when={c.overridden}>
-          <button class="fe-btn fe-btn--small" onClick={() => ed.send({ type: 'resetKeymap', command: c.key })}>
+          <button
+            class="fe-btn fe-btn--small"
+            onClick={() => {
+              // «Сбросить» исчезнет вместе с отличием: фокус — на «+» строки.
+              focusAdd(c.key);
+              ed.send({ type: 'resetKeymap', command: c.key });
+            }}
+          >
             Сбросить
           </button>
         </Show>
@@ -335,6 +362,13 @@ function KeymapTab() {
           aria-label="Поиск команд"
           value={query()}
           onInput={(e) => setQuery(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            // Esc в непустом поиске очищает его; закрывает диалог уже следующий Esc.
+            if (e.key === 'Escape' && query()) {
+              e.preventDefault();
+              setQuery('');
+            }
+          }}
         />
       </label>
       <Show when={conflict()}>
@@ -360,17 +394,21 @@ function KeymapTab() {
           </div>
         )}
       </Show>
+      <Show when={recording()}>
+        <p class="t-muted fe-hint">Некоторые сочетания перехватывает браузер</p>
+      </Show>
       <div class="fe-keymap__table" role="table" aria-label="Горячие клавиши">
-        <For each={groups()}>
+        {/* По позиции: группы пересобираются при каждом событии, строки внутри — по ключу команды. */}
+        <Index each={groups()}>
           {(g) => (
             <div class="fe-keymap__group">
-              <h2 class="fe-section__title t-muted">{g.title}</h2>
-              <div role="rowgroup" aria-label={g.title}>
-                <For each={g.commands}>{row}</For>
+              <h2 class="fe-section__title t-muted">{g().title}</h2>
+              <div role="rowgroup" aria-label={g().title}>
+                <For each={g().commands}>{row}</For>
               </div>
             </div>
           )}
-        </For>
+        </Index>
       </div>
       <div class="fe-dialog__foot">
         <button class="fe-btn fe-btn--danger" onClick={() => ed.send({ type: 'resetKeymap', command: undefined })}>
