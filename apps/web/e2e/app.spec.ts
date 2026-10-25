@@ -187,3 +187,15 @@ test('экран запуска без анимаций при prefers-reduced-m
   const fill = await page.evaluate(() => getComputedStyle(document.querySelector('.fe-splash__fill')!).opacity);
   expect(fill).toBe('1');
 });
+
+test('заставка держится минимум MIN_SPLASH_MS, даже если ядро готово раньше', async ({ page }) => {
+  // Обычный режим (без __ferrumTest): анимация успевает доиграть.
+  await page.goto('/?nodes=10');
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 90_000 });
+  const t = await page.evaluate(() => performance.now());
+  const splash = page.locator('#fe-splash');
+  if (t < 1800) await expect(splash).toBeVisible();
+  await expect(splash).toHaveCount(0, { timeout: 5_000 });
+  const gone = await page.evaluate(() => performance.now());
+  expect(gone).toBeGreaterThanOrEqual(2000);
+});

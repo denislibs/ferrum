@@ -24,11 +24,26 @@ import { Toasts } from './toasts';
 import { Toolbar } from './toolbar';
 import { TooltipLayer } from './tooltip';
 
+/** Сколько заставка держится с открытия страницы, даже если ядро готово раньше:
+ *  за это время рамка успевает нарисоваться, получить ручки и залиться цветом. */
+export const MIN_SPLASH_MS = 2000;
+
 /** Убирает экран запуска из index.html: плавно гасит и удаляет из DOM. Безопасно
- *  вызывать много раз и без экрана (стенд, тесты). */
-function dismissSplash() {
+ *  вызывать много раз и без экрана (стенд, тесты). Ошибку показываем сразу; без
+ *  анимации (prefers-reduced-motion) и в автотестах ждать нечего. */
+function dismissSplash(immediate = false) {
   const el = document.getElementById('fe-splash');
-  if (!el || el.classList.contains('fe-splash--done')) return;
+  if (!el || el.dataset.leaving) return;
+  el.dataset.leaving = '1';
+  const quick =
+    immediate ||
+    (window as { __ferrumTest?: boolean }).__ferrumTest === true ||
+    matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const wait = quick ? 0 : Math.max(0, MIN_SPLASH_MS - performance.now());
+  setTimeout(() => leave(el), wait);
+}
+
+function leave(el: HTMLElement) {
   el.classList.add('fe-splash--done');
   el.removeAttribute('role');
   const remove = () => el.remove();
@@ -67,7 +82,8 @@ export function App() {
   // (пропущенное в нём уже отброшено, предупреждение не повторится при запуске).
   // Экран запуска уходит, когда ядро готово или запуск не удался (тогда видна ошибка).
   createEffect(() => {
-    if (store.state.ready || failure() || store.state.stopped) dismissSplash();
+    if (failure() || store.state.stopped) dismissSplash(true);
+    else if (store.state.ready) dismissSplash();
   });
 
   const [keymap, setKeymap] = createSignal(saved.keymap);
@@ -198,7 +214,7 @@ export function App() {
 
   return (
     <ErrorBoundary
-      fallback={(err: unknown) => (dismissSplash(),
+      fallback={(err: unknown) => (dismissSplash(true),
         <div class="fe-boot fe-boot--error" role="alert">
           Ошибка интерфейса: {err instanceof Error ? err.message : String(err)}. Перезагрузите страницу
         </div>
