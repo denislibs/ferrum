@@ -19,6 +19,7 @@ import { formatNumber } from './number';
 import { captureEdit, NumberField, type EditCapture } from './number-field';
 import { ColorPicker } from './picker';
 import { sendEdit } from './properties';
+import { THEME_CANVAS } from './settings';
 
 /** Цвет новой заливки (как у новой фигуры) и обводки. */
 const NEW_FILL: FillDto = { kind: 'solid', color: '#d9d9d9ff', opacity: 1, visible: true, imageHash: undefined, scaleMode: undefined };
@@ -361,9 +362,6 @@ export function StrokesSection() {
     </Show>
   );
 }
-
-/** Холст темы, если у страницы свой фон не задан (токен `canvas`). */
-export const THEME_CANVAS = { dark: '#1a1918ff', light: '#e9e7e4ff' } as const;
 
 /** У фона страницы выделения нет: правка не адресована никому. */
 const NO_SELECTION = { capped: false, changed: () => false };

@@ -30,6 +30,8 @@ export function ConfirmDialog(props: {
           class="fe-dialog"
           role="dialog"
           aria-modal="true"
+          // Щелчок по пустому месту диалога оставляет фокус в нём, а не роняет на body.
+          tabindex="-1"
           aria-labelledby="fe-dialog-title"
           aria-describedby="fe-dialog-text"
           onKeyDown={(e) => {

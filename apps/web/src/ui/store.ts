@@ -46,6 +46,8 @@ export interface UiState {
   /** Сколько раз открывали документ (сброс поиска и прокрутки панели слоёв). */
   docSeq: number;
   toasts: Toast[];
+  /** Сочетание занято другими командами: настройки предлагают заменить. */
+  bindConflict: { command: string; shortcut: string; commands: string[] } | null;
 }
 
 const initial: UiState = {
@@ -67,6 +69,7 @@ const initial: UiState = {
   uiHidden: false,
   docSeq: 0,
   toasts: [],
+  bindConflict: null,
 };
 
 /** Сколько уведомлений видно одновременно и сколько секунд живёт каждое. */
@@ -76,6 +79,8 @@ export const TOAST_MS = 6000;
 export function createUiStore() {
   const [state, setState] = createStore<UiState>(structuredClone(initial));
   let toastId = 0;
+  /** Сохранённая раскладка при запуске: ждём её ответа (`keymapImported` или `error`). */
+  let quiet: { onFail?: () => void } | null = null;
 
   function toast(text: string, kind: Toast['kind'] = 'info'): void {
     // То же сообщение подряд — одно уведомление, а не стопка.
@@ -128,10 +133,34 @@ export function createUiStore() {
       case 'presets':
         setState('presets', e.presets);
         break;
+      case 'bindConflict':
+        setState('bindConflict', { command: e.command, shortcut: e.shortcut, commands: e.commands });
+        break;
+      case 'keymapImported': {
+        // Сохранённая раскладка при запуске — молча; пропущенное — одним уведомлением.
+        const silent = quiet !== null;
+        quiet = null;
+        if (silent) {
+          if (e.warnings.length) toast(`Сохранённая раскладка: пропущено ${e.warnings.length}`, 'error');
+          break;
+        }
+        toast(
+          e.warnings.length
+            ? `Раскладка импортирована, пропущено: ${e.warnings.length} (${e.warnings.slice(0, 2).join('; ')})`
+            : 'Раскладка импортирована',
+        );
+        break;
+      }
       case 'toggleUi':
         setState('uiHidden', (h) => !h);
         break;
       case 'error':
+        // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.
+        if (quiet) {
+          const { onFail } = quiet;
+          quiet = null;
+          onFail?.();
+        }
         // «Ядро остановлено: …» — одно сообщение навсегда, а не уведомление.
         // Любое сообщение об остановке («…: причина», «…, команда не выполнена»)
         // уже показано плашкой: повторных уведомлений на каждую команду нет.
@@ -158,7 +187,13 @@ export function createUiStore() {
     });
   }
 
-  return { state, setState, apply, applyLive, toast };
+  /** Следующий импорт раскладки — сохранённая при запуске: без уведомления; `onFail`
+   * вызывается, если ядро её не приняло. */
+  function quietKeymapImport(onFail?: () => void): void {
+    quiet = { onFail };
+  }
+
+  return { state, setState, apply, applyLive, toast, quietKeymapImport };
 }
 
 export type UiStore = ReturnType<typeof createUiStore>;

@@ -1,0 +1,141 @@
+
+// Настройки и таблица раскладки: чтение с умолчаниями при мусоре и отказе
+// хранилища, тема по системе, группы и поиск команд, браузерные сочетания,
+// конфликты, запись сочетания.
+
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import type { KeymapEntry } from '../src/wasm/ferrum_wasm';
+import { shortcutLabel } from '../src/ui/shortcuts';
+import { conflictsOf, filterGroups, groupCommands, recordKey, reservedOf } from '../src/ui/keymap-ui';
+import { DEFAULT_SETTINGS, loadSettings, resolveTheme, saveSettings, SETTINGS_KEY, THEME_CANVAS } from '../src/ui/settings';
+
+function memory(): Storage {
+  const m = new Map<string, string>();
+  return {
+    getItem: (k) => m.get(k) ?? null,
+    setItem: (k, v) => void m.set(k, v),
+    removeItem: (k) => void m.delete(k),
+    clear: () => m.clear(),
+    key: () => null,
+    length: 0,
+  };
+}
+
+test('настройки: запись и чтение, мусор и отказ хранилища', () => {
+  const s = memory();
+  expect(loadSettings(s)).toEqual(DEFAULT_SETTINGS);
+  const mine = { ...DEFAULT_SETTINGS, theme: 'light' as const, pixelSnap: false, keymap: '{"x":1}', leftWidth: 300 };
+  expect(saveSettings(s, mine)).toBe(true);
+  expect(loadSettings(s)).toEqual(mine);
+  s.setItem(SETTINGS_KEY, '{не json');
+  expect(loadSettings(s)).toEqual(DEFAULT_SETTINGS);
+  s.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'синяя', pixelSnap: 'да', leftWidth: 1e9, pagesOpen: false }));
+  expect(loadSettings(s)).toEqual({ ...DEFAULT_SETTINGS, pagesOpen: false });
+  const broken = {
+    getItem: () => {
+      throw new Error('SecurityError');
+    },
+    setItem: () => {
+      throw new Error('QuotaExceededError');
+    },
+  };
+  expect(loadSettings(broken)).toEqual(DEFAULT_SETTINGS);
+  expect(saveSettings(broken, mine)).toBe(false);
+  expect(loadSettings(null)).toEqual(DEFAULT_SETTINGS);
+});
+
+test('тема «системная» — по prefers-color-scheme', () => {
+  expect(resolveTheme('system', true)).toBe('dark');
+  expect(resolveTheme('system', false)).toBe('light');
+  expect(resolveTheme('light', true)).toBe('light');
+});
+
+const entry = (key: string, name: string, bindings: string[]): KeymapEntry => ({
+  key,
+  name,
+  group: key.split('.')[0],
+  bindings,
+  labels: [],
+  defaults: bindings,
+  overridden: false,
+});
+
+test('группы, поиск, браузерные сочетания и конфликты', () => {
+  const commands = [
+    entry('view.zoom_in', 'Приблизить', ['Equal']),
+    entry('tool.rect', 'Прямоугольник', ['KeyR']),
+    entry('tool.ellipse', 'Эллипс', ['KeyR', 'KeyO']),
+    entry('edit.duplicate', 'Дублировать', ['Ctrl+KeyD', 'Ctrl+KeyW']),
+    entry('plugin.run', 'Плагин', []),
+  ];
+  const groups = groupCommands(commands);
+  expect(groups.map((g) => g.title)).toEqual(['Инструменты', 'Правка', 'Вид', 'plugin']);
+  expect(filterGroups(groups, 'ЭЛЛ', 'windows')[0].commands.map((c) => c.key)).toEqual(['tool.ellipse']);
+  expect(filterGroups(groups, 'r', 'windows')[0].commands.map((c) => c.key)).toEqual(['tool.rect', 'tool.ellipse']);
+  expect(filterGroups(groups, 'ctrl+d', 'windows').map((g) => g.id)).toEqual(['edit']);
+  expect(reservedOf(commands[3], ['Ctrl+KeyW', 'Ctrl+KeyT'])).toEqual(['Ctrl+KeyW']);
+  const conflicts = [{ shortcut: 'KeyR', label: 'R', commands: ['tool.rect', 'tool.ellipse'] }];
+  expect(conflictsOf(commands[1], 'KeyR', conflicts)).toEqual(['tool.ellipse']);
+  expect(conflictsOf(commands[1], 'KeyO', conflicts)).toEqual([]);
+});
+
+test('запись сочетания: Esc — отмена, модификатор — ждать, клавиша — сочетание', () => {
+  const k = (code: string, mods: Partial<Record<'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey', boolean>> = {}) => ({
+    code,
+    key: '',
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    metaKey: false,
+    ...mods,
+  });
+  expect(recordKey(k('Escape'))).toEqual({ kind: 'cancel' });
+  expect(recordKey(k('Escape', { shiftKey: true }))).toEqual({ kind: 'shortcut', shortcut: 'Shift+Escape' });
+  expect(recordKey(k('ShiftLeft', { shiftKey: true }))).toEqual({ kind: 'wait' });
+  // Русская раскладка: «й» — физическая KeyQ.
+  expect(recordKey({ ...k('KeyQ', { ctrlKey: true }), key: 'й' })).toEqual({ kind: 'shortcut', shortcut: 'Ctrl+KeyQ' });
+});
+
+test('запись сочетания: AltGr на Windows/Linux отклоняется, на macOS игнорируется', () => {
+  const altGr = (on: boolean) => ({
+    code: 'KeyQ',
+    key: '@',
+    ctrlKey: true,
+    altKey: true,
+    shiftKey: false,
+    metaKey: false,
+    getModifierState: (m: string) => on && m === 'AltGraph',
+  });
+  expect(recordKey(altGr(true), 'windows')).toEqual({ kind: 'altgr' });
+  expect(recordKey(altGr(true), 'linux')).toEqual({ kind: 'altgr' });
+  expect(recordKey(altGr(true), 'mac')).toEqual({ kind: 'shortcut', shortcut: 'Ctrl+Alt+KeyQ' });
+  // Настоящее Ctrl+Alt без AltGr — обычное сочетание.
+  expect(recordKey(altGr(false), 'windows')).toEqual({ kind: 'shortcut', shortcut: 'Ctrl+Alt+KeyQ' });
+  // Alt один (без Ctrl) с AltGraph — не AltGr-подмена: записывается.
+  expect(recordKey({ ...altGr(true), ctrlKey: false }, 'windows')).toEqual({ kind: 'shortcut', shortcut: 'Alt+KeyQ' });
+});
+
+test('русская раскладка: поиск и подписи идут по раскладке, запись — по физической клавише', () => {
+  const ru = new Map([
+    ['KeyR', 'к'],
+    ['KeyQ', 'й'],
+  ]);
+  const commands = [entry('tool.rect', 'Прямоугольник', ['KeyR']), entry('tool.move', 'Перемещение', ['KeyV'])];
+  const groups = groupCommands(commands);
+  expect(filterGroups(groups, 'к', 'windows', ru)[0].commands.map((c) => c.key)).toEqual(['tool.rect']);
+  expect(filterGroups(groups, 'r', 'windows', ru)).toEqual([]);
+  expect(shortcutLabel('KeyQ', 'windows', ru)).toBe('Й');
+});
+
+test('холст темы: одно значение в интерфейсе, токенах и ядре', () => {
+  const css = readFileSync(new URL('../src/ui/styles/theme.css', import.meta.url), 'utf8');
+  const rs = readFileSync(new URL('../../../crates/ferrum-wasm/src/core.rs', import.meta.url), 'utf8');
+  const hex = (r: number, g: number, b: number) => `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}ff`;
+  for (const theme of ['dark', 'light'] as const) {
+    const block = css.slice(css.indexOf(theme === 'dark' ? ":root[data-theme='dark']" : ":root[data-theme='light']"));
+    expect(block.match(/--canvas:\s*(#[0-9a-f]{6});/)![1] + 'ff').toBe(THEME_CANVAS[theme]);
+    const m = new RegExp(`CANVAS_${theme.toUpperCase()}: Rgba = Rgba::new\\(\\[(\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, 1\\.0\\]\\)`).exec(rs)!;
+    expect(hex(+m[1], +m[2], +m[3])).toBe(THEME_CANVAS[theme]);
+  }
+});

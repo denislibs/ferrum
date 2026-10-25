@@ -22,6 +22,8 @@ const ARROW_ROLES =
 /** Пересылать ли клавишу редактору. */
 export function forwardKey(e: KeyboardEvent, isClipboardKey: (e: KeyboardEvent) => boolean): boolean {
   if (ownsKeys(e.target)) return false;
+  // Открыт модальный диалог: холст клавиш не получает, даже если фокус потерялся.
+  if (document.querySelector('[role="dialog"][aria-modal="true"]')) return false;
   // Tab всегда у браузера: фокус ходит по интерфейсу.
   if (e.code === 'Tab') return false;
   const el = e.target instanceof Element ? e.target : null;

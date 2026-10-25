@@ -115,7 +115,7 @@ export function Menu(props: MenuProps): JSX.Element {
   const key = (command?: string) => {
     if (!command) return '';
     const c = ed.store.state.keymap.commands.find((x) => x.key === command);
-    return c?.bindings[0] ? shortcutLabel(c.bindings[0], ed.platform) : '';
+    return c?.bindings[0] ? shortcutLabel(c.bindings[0], ed.platform, ed.layout()) : '';
   };
 
   return (

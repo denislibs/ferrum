@@ -5,7 +5,7 @@
 
 import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { useEditor } from './context';
-import { shortcutLabel, tipText, type LayoutMap } from './shortcuts';
+import { shortcutLabel, tipText } from './shortcuts';
 
 /** Задержка перед показом, как у системных подсказок. */
 export const TOOLTIP_DELAY_MS = 500;
@@ -18,7 +18,7 @@ interface Tip {
   above: boolean;
 }
 
-export function TooltipLayer(props: { layout?: LayoutMap }) {
+export function TooltipLayer() {
   const ed = useEditor();
   const [tip, setTip] = createSignal<Tip | null>(null);
   let timer = 0;
@@ -29,7 +29,7 @@ export function TooltipLayer(props: { layout?: LayoutMap }) {
     if (!command) return '';
     const c = ed.store.state.keymap.commands.find((x) => x.key === command);
     const first = c?.bindings[0];
-    return first ? shortcutLabel(first, ed.platform, props.layout) : '';
+    return first ? shortcutLabel(first, ed.platform, ed.layout()) : '';
   };
 
   const hide = () => {

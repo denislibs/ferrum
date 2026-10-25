@@ -2,13 +2,14 @@
 // документ. Параметры адреса: `nodes` — страница-пример из N узлов (по умолчанию
 // пустой документ), `backend`, `transport` — как у стенда (тесты).
 
-import { batch } from 'solid-js';
+import { batch, createSignal } from 'solid-js';
 import type { Backend, CoreEvent } from '../wasm/ferrum_wasm';
 import { Core, detectPlatform } from '../core/core';
 import type { TransportMode } from '../core/transport';
 import type { Editor } from './context';
 import { forwardKey } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
+import { loadLayoutMap, type LayoutMap } from './shortcuts';
 import type { UiStore } from './store';
 
 /** Журнал событий для тестов — последние записи, не больше этого числа. */
@@ -35,6 +36,8 @@ function choice<T extends string>(params: URLSearchParams, name: string, allowed
 export interface BootOptions {
   /** Клавиша — сочетание буфера обмена, которое ведут события copy/cut/paste. */
   isClipboardKey?: (e: KeyboardEvent) => boolean;
+  /** Перед документом: настройки пользователя (тема, раскладка, привязка) — до первого кадра. */
+  beforeDocument?: (editor: Editor) => void;
 }
 
 export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: BootOptions = {}): Promise<Editor> {
@@ -90,6 +93,11 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   });
   window.__ferrum = { core, events: [], uiEvents: test ? uiEvents : undefined, ready: false, ui: store.state };
   (window.__ferrum as unknown as { scheduler: typeof scheduler }).scheduler = scheduler;
+  // Раскладка клавиатуры для подписей: приходит позже запуска и может смениться.
+  const [layout, setLayout] = createSignal<LayoutMap>();
+  const refreshLayout = () => void loadLayoutMap().then((m) => setLayout(() => m));
+  refreshLayout();
+  (navigator as Navigator & { keyboard?: EventTarget }).keyboard?.addEventListener?.('layoutchange', refreshLayout);
   const editor: Editor = {
     core,
     store,
@@ -97,7 +105,9 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     platform,
     send: (cmd) => core.send(cmd),
     run: (command) => core.send({ type: 'execute', command }),
+    layout,
   };
+  opts.beforeDocument?.(editor);
   core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 0) });
   return editor;
 }
