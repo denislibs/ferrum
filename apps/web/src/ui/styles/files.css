@@ -67,7 +67,7 @@
   align-items: center;
   gap: var(--space-2);
   min-height: var(--toolbar-height);
-  padding: var(--space-2) var(--space-6);
+  padding: var(--space-2) var(--space-8);
   border-bottom: 1px solid var(--line);
   flex: none;
 }
@@ -90,7 +90,7 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: var(--space-6);
+  padding: var(--space-8);
 }
 .fe-files__list {
   position: relative;
@@ -115,7 +115,7 @@
   top: 0;
   left: 0;
   box-sizing: border-box;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   cursor: pointer;
   user-select: none;
 }
@@ -123,7 +123,7 @@
   display: grid;
   place-items: center;
   height: var(--thumb-h);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--canvas);
   box-shadow: inset 0 0 0 1px var(--line);
   overflow: hidden;
@@ -174,7 +174,7 @@
 .fe-card[aria-selected='true'] .fe-card__more,
 .fe-file-row:hover .fe-card__more,
 .fe-file-row[aria-selected='true'] .fe-card__more,
-.fe-card__more[aria-expanded='true'] {
+.fe-card__more:hover {
   opacity: 1;
 }
 .fe-card .fe-rename,

@@ -11,7 +11,7 @@ import { MAX_WINDOW } from '../core/file-list';
 import { filesLayout, filesWindow, GRID_GAP } from './files-layout';
 import { dismissSplash } from './boot';
 import { ConfirmDialog } from './dialog';
-import { downloadBytes, fileName, formatSize, relativeTime } from './files';
+import { downloadBlob, fileName, formatSize, relativeTime } from './files';
 import { importFromDisk, type FileMeta, type FileStore, type Section } from './file-store';
 import { Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
@@ -20,6 +20,9 @@ import type { Route } from './router';
 import { loadSettings, resolveTheme, storage, updateSettings, type FilesView } from './settings';
 import { createUiStore } from './store';
 import { Toasts } from './toasts';
+
+/** Задержка открытия по щелчку на имени: успеть распознать двойной щелчок. */
+const NAME_CLICK_MS = 250;
 
 const SECTIONS: { id: Section; title: string; icon: IconName }[] = [
   { id: 'recent', title: 'Недавние', icon: 'clock' },
@@ -151,6 +154,14 @@ export function FilesScreen(props: FilesScreenProps) {
     }
   };
 
+  // Ctrl/Cmd+S здесь сохранять нечего: только не дать браузеру открыть диалог
+  // сохранения страницы.
+  const onSaveKey = (e: KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'KeyS') e.preventDefault();
+  };
+  window.addEventListener('keydown', onSaveKey);
+  onCleanup(() => window.removeEventListener('keydown', onSaveKey));
+
   onMount(() => {
     dismissSplash(true);
     // Размеры — из ResizeObserver (без чтения layout в обработчиках): ширина
@@ -195,9 +206,9 @@ export function FilesScreen(props: FilesScreenProps) {
   const act = (what: string, p: Promise<unknown>) => p.catch((e: unknown) => ui.toast(errorText(what, e), 'error'));
   const download = async (f: FileMeta) => {
     try {
-      const { bytes } = await props.files.read(f.id);
-      if (!bytes) return;
-      downloadBytes(fileName(f.name, '.ferrum'), new Uint8Array(bytes), 'application/octet-stream');
+      // Blob собирает worker: основной поток байты не копирует.
+      const blob = await props.files.blob(f.id);
+      if (blob) downloadBlob(fileName(f.name, '.ferrum'), blob);
     } catch (e) {
       ui.toast(errorText('Не удалось скачать копию', e), 'error');
     }
@@ -248,9 +259,11 @@ export function FilesScreen(props: FilesScreenProps) {
       () => rows.list,
       () => {
         if (pendingFocus === null) return;
-        const el = itemAt(pendingFocus);
+        const at = Math.min(pendingFocus, total() - 1);
+        const el = at >= 0 ? itemAt(at) : null;
         if (el) {
           pendingFocus = null;
+          setFocused(at);
           el.focus({ preventScroll: true });
         }
       },
@@ -291,7 +304,11 @@ export function FilesScreen(props: FilesScreenProps) {
         if (f && props.section !== 'trash') setRenaming(f.id);
         break;
       case 'Delete':
-        if (f && props.section !== 'trash') void act('Не удалось удалить файл', props.files.trash(f.id));
+        if (f && props.section !== 'trash') {
+          // Карточка уйдёт из списка: фокус — на ту, что встанет на её место.
+          pendingFocus = at;
+          void act('Не удалось удалить файл', props.files.trash(f.id));
+        }
         break;
       case 'ContextMenu':
         if (f) setMenu({ file: f, anchor: e.target as HTMLElement });
@@ -350,6 +367,8 @@ export function FilesScreen(props: FilesScreenProps) {
     </div>
   );
 
+  let nameClick = 0;
+  onCleanup(() => clearTimeout(nameClick));
   const Name = (p: { file: FileMeta }): JSX.Element => (
     <Show
       when={renaming() === p.file.id}
@@ -357,9 +376,17 @@ export function FilesScreen(props: FilesScreenProps) {
         <span
           class="fe-card__name t-strong"
           title={p.file.name}
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            // Щелчок по имени тоже открывает, но чуть позже: второй щелчок того же
+            // двойного — переименование, а не открытие.
+            e.stopPropagation();
+            if (props.section === 'trash') return;
+            clearTimeout(nameClick);
+            nameClick = window.setTimeout(() => open(p.file), NAME_CLICK_MS);
+          }}
           onDblClick={(e) => {
             e.stopPropagation();
+            clearTimeout(nameClick);
             if (props.section !== 'trash') setRenaming(p.file.id);
           }}
         >
@@ -515,6 +542,8 @@ export function FilesScreen(props: FilesScreenProps) {
                     role="option"
                     data-index={index()}
                     aria-label={f().name}
+                    aria-setsize={total()}
+                    aria-posinset={index() + 1}
                     aria-selected={focused() === index()}
                     tabindex={tabStop() === index() ? 0 : -1}
                     style={{
@@ -538,11 +567,12 @@ export function FilesScreen(props: FilesScreenProps) {
                         <span class="fe-file-row__size t-muted t-num">{formatSize(f().size)}</span>
                       </Show>
                     </div>
-                    <button
+                    {/* Кнопка «…» — для мыши; с клавиатуры то же меню — ContextMenu и
+                        Shift+F10 на карточке (внутри option нет вложенных элементов управления). */}
+                    <span
                       class="fe-tool fe-tool--small fe-card__more"
-                      tabindex="-1"
-                      aria-label="Действия с файлом"
-                      aria-haspopup="menu"
+                      aria-hidden="true"
+                      title="Действия с файлом"
                       onClick={(e) => {
                         e.stopPropagation();
                         setFocused(index());
@@ -550,7 +580,7 @@ export function FilesScreen(props: FilesScreenProps) {
                       }}
                     >
                       <Icon name="more" />
-                    </button>
+                    </span>
                   </div>
                 );
               }}
