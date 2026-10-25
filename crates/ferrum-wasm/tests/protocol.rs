@@ -129,6 +129,7 @@ fn commands() -> Vec<Command> {
         },
         Command::SetDocumentName {
             name: "Лендинг".into(),
+            quiet: None,
         },
         Command::AddFramePreset { index: 3 },
         Command::SetZoom { zoom: 2.0 },
@@ -190,12 +191,14 @@ fn events() -> Vec<CoreEvent> {
             name: "План".into(),
             bytes: bytes(b"f"),
             thumbnail: Some(bytes(b"t")),
+            keep_thumbnail: false,
         },
         CoreEvent::Snapshot {
             revision: 3.0,
             name: "".into(),
             bytes: bytes(b"f"),
             thumbnail: None,
+            keep_thumbnail: true,
         },
         CoreEvent::SaveRequested,
         CoreEvent::Pixels {

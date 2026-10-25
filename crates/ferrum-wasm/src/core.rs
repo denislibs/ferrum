@@ -269,26 +269,33 @@ impl Core {
         let bytes = match container::encode(self.editor.document()) {
             Ok(b) => b,
             Err(e) => {
-                self.error(format!("Не удалось сохранить: {e}"));
+                // Свой текст: интерфейс отличает отказ снимка от отказа копии на диск.
+                self.error(format!("Не удалось сохранить файл: {e}"));
                 return;
             }
         };
-        let thumbnail = if thumbnail { self.thumbnail() } else { None };
+        let (thumbnail, keep) = match thumbnail.then(|| self.thumbnail()) {
+            None => (None, true),
+            Some(Ok(png)) => (png, false),
+            Some(Err(())) => (None, true),
+        };
         self.events.push(CoreEvent::Snapshot {
             revision: self.revision as f64,
             name: panels::event_name(&self.editor.document().name()),
             bytes: ByteBuf::from(bytes),
             thumbnail: thumbnail.map(ByteBuf::from),
+            keep_thumbnail: keep,
         });
     }
 
     /// PNG превью первой страницы (`THUMB_WIDTH`×`THUMB_HEIGHT`) на её фоне. Сцена —
     /// текущая, если открыта первая страница; иначе из уже загруженной страницы или
-    /// кэша сцены файла (Loro ради превью не раскодируется). Ошибка превью — не
-    /// ошибка сохранения: файл записывается без него.
-    fn thumbnail(&mut self) -> Option<Vec<u8>> {
+    /// кэша сцены файла (Loro ради превью не раскодируется). `Ok(None)` — показать
+    /// нечего (страница пуста); `Err` — превью не построить (нет сцены, сбой
+    /// рендера): файл записывается, а прежнее превью остаётся.
+    fn thumbnail(&mut self) -> Result<Option<Vec<u8>>, ()> {
         let doc = self.editor.document();
-        let first = doc.pages().first()?.0;
+        let first = doc.pages().first().ok_or(())?.0;
         let built;
         let scene = if first == self.editor.page() {
             self.editor.scene()
@@ -296,7 +303,7 @@ impl Core {
             built = Scene::from_page(page);
             &built
         } else {
-            built = Scene::from_rows(doc.cached_scene(first)?);
+            built = Scene::from_rows(doc.cached_scene(first).ok_or(())?);
             &built
         };
         let background = doc.page_background(first).map(|c| {
@@ -306,8 +313,7 @@ impl Core {
         let provider = self.images.export_provider(&doc.images);
         self.renderer
             .thumbnail_png(scene, THUMB_WIDTH, THUMB_HEIGHT, background, &provider)
-            .ok()
-            .flatten()
+            .map_err(|_| ())
     }
 
     fn push_opened(&mut self, warnings: Vec<String>) {
@@ -371,7 +377,7 @@ impl Core {
         match container::decode(bytes) {
             Ok(opened) => match self.replace_document(opened.document) {
                 Ok(()) => self.push_opened(opened.warnings),
-                Err(e) => self.error(e),
+                Err(e) => self.error(format!("Не удалось открыть файл: {e}")),
             },
             Err(e) => self.error(format!("Не удалось открыть файл: {e}")),
         }

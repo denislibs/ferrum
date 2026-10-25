@@ -307,6 +307,10 @@ pub enum Command {
     },
     SetDocumentName {
         name: String,
+        /// Имя из хранилища при открытии: не правка пользователя — документ не
+        /// становится изменённым (файл не пересохраняется только из-за открытия).
+        #[serde(default)]
+        quiet: Option<bool>,
     },
     /// Фрейм из пресета (номер в списке события `Presets`).
     AddFramePreset {
@@ -462,6 +466,9 @@ pub enum CoreEvent {
         bytes: ByteBuf,
         #[tsify(type = "Uint8Array | undefined")]
         thumbnail: Option<ByteBuf>,
+        /// Превью не строили или не смогли построить: прежнее в хранилище оставить
+        /// (без превью и без этого признака — страница пуста, превью убрать).
+        keep_thumbnail: bool,
     },
     /// Команда «Сохранить» (Ctrl/Cmd+S): записать файл в хранилище.
     SaveRequested,

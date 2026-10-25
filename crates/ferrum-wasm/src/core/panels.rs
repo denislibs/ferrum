@@ -395,12 +395,12 @@ impl Core {
                     }
                 }
             }
-            Command::SetDocumentName { name } => {
+            Command::SetDocumentName { name, quiet } => {
                 if self.text(&name) {
                     let before = self.editor.document().name();
                     match self.editor.set_document_name(&name) {
                         Ok(name) => {
-                            if name != before {
+                            if name != before && quiet != Some(true) {
                                 self.touch();
                             }
                             self.events.push(CoreEvent::DocumentName {

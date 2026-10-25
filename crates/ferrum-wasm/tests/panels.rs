@@ -789,6 +789,7 @@ fn page_and_document_names_are_cleaned_and_capped() {
     assert_eq!(name_of(&ev), "я".repeat(256), "имя прежнее");
     core.command(Command::SetDocumentName {
         name: "\u{7}Лендинг\r\n".into(),
+        quiet: None,
     });
     assert!(core.take_events().contains(&CoreEvent::DocumentName {
         name: "Лендинг".into()
@@ -924,6 +925,7 @@ fn panel_command_and_event_caps() {
         },
         Command::SetDocumentName {
             name: "я".repeat(3000),
+            quiet: None,
         },
         Command::Unbind {
             command: "tool.rect".into(),
@@ -1236,6 +1238,7 @@ fn modified_tracks_changes_outside_history_and_clears_on_open_new_save() {
         }),
         Box::new(|_| Command::SetDocumentName {
             name: "План".into(),
+            quiet: None,
         }),
         Box::new(|_| Command::Execute {
             command: "edit.select_all".into(),
@@ -1266,7 +1269,10 @@ fn modified_tracks_changes_outside_history_and_clears_on_open_new_save() {
         color: None,
         phase: EditPhase::Cancel,
     });
-    core.command(Command::SetDocumentName { name: "  ".into() });
+    core.command(Command::SetDocumentName {
+        name: "  ".into(),
+        quiet: None,
+    });
     assert_eq!(modified(&core.take_events()), None);
     // Правка из истории (на первой странице: «Добавить страницу» перешла на новую,
     // пустую). Переход между страницами — не изменение.
@@ -1324,6 +1330,49 @@ fn mark_saved_clears_modified_only_for_the_latest_revision() {
     }
     save(&mut core);
     assert_eq!(modified(&core.take_events()), Some(false));
+}
+
+/// Имя из хранилища при открытии (`quiet`) документ изменённым не делает.
+#[test]
+fn quiet_document_name_does_not_mark_modified() {
+    let mut core = demo(10);
+    core.take_events();
+    core.command(Command::SetDocumentName {
+        name: "Из хранилища".into(),
+        quiet: Some(true),
+    });
+    let ev = core.take_events();
+    assert!(ev.contains(&CoreEvent::DocumentName {
+        name: "Из хранилища".into()
+    }));
+    assert_eq!(modified(&ev), None);
+    assert_eq!(core.editor().document().name(), "Из хранилища");
+    core.command(Command::SetDocumentName {
+        name: "Правка".into(),
+        quiet: Some(false),
+    });
+    assert_eq!(modified(&core.take_events()), Some(true));
+}
+
+/// Превью не просили — прежнее оставить; пустая страница — убрать.
+#[test]
+fn snapshot_says_whether_to_keep_the_old_thumbnail() {
+    let keep = |core: &mut Core, thumbnail| {
+        core.command(Command::Snapshot { thumbnail });
+        core.take_events().into_iter().find_map(|e| match e {
+            CoreEvent::Snapshot {
+                keep_thumbnail,
+                thumbnail,
+                ..
+            } => Some((keep_thumbnail, thumbnail.is_some())),
+            _ => None,
+        })
+    };
+    let mut empty = demo(0);
+    assert_eq!(keep(&mut empty, true), Some((false, false)));
+    assert_eq!(keep(&mut empty, false), Some((true, false)));
+    let mut full = demo(10);
+    assert_eq!(keep(&mut full, true), Some((false, true)));
 }
 
 fn thumbnail_of(core: &mut Core) -> Option<Vec<u8>> {
