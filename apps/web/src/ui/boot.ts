@@ -14,11 +14,27 @@ import { createScheduler, guardLayout } from './scheduler';
 import { loadLayoutMap, type LayoutMap } from './shortcuts';
 import type { UiStore } from './store';
 
+/** Сколько заставка держится с открытия страницы, даже если ядро готово раньше:
+ *  за это время рамка успевает нарисоваться, получить ручки и залиться цветом. */
+export const MIN_SPLASH_MS = 2000;
+
 /** Убирает экран запуска из index.html: плавно гасит и удаляет из DOM. Безопасно
- *  вызывать много раз и без экрана (стенд, тесты). */
-export function dismissSplash() {
+ *  вызывать много раз и без экрана (стенд, тесты). Ошибку показываем сразу; без
+ *  анимации (prefers-reduced-motion) и в автотестах ждать нечего. Экран файлов
+ *  тоже убирает её сразу: он не ждёт ядра, первый показ — быстрый. */
+export function dismissSplash(immediate = false) {
   const el = document.getElementById('fe-splash');
-  if (!el || el.classList.contains('fe-splash--done')) return;
+  if (!el || el.dataset.leaving) return;
+  el.dataset.leaving = '1';
+  const quick =
+    immediate ||
+    (window as { __ferrumTest?: boolean }).__ferrumTest === true ||
+    matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const wait = quick ? 0 : Math.max(0, MIN_SPLASH_MS - performance.now());
+  setTimeout(() => leave(el), wait);
+}
+
+function leave(el: HTMLElement) {
   el.classList.add('fe-splash--done');
   el.removeAttribute('role');
   const remove = () => el.remove();

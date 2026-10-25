@@ -152,7 +152,7 @@ export function FilesScreen(props: FilesScreenProps) {
   };
 
   onMount(() => {
-    dismissSplash();
+    dismissSplash(true);
     // Размеры — из ResizeObserver (без чтения layout в обработчиках): ширина
     // списка задаёт столбцы, высота видимой области — окно записей.
     const ro = new ResizeObserver((entries) => {

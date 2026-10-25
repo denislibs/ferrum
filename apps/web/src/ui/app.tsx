@@ -67,7 +67,8 @@ export function App(props: AppProps) {
   // (пропущенное в нём уже отброшено, предупреждение не повторится при запуске).
   // Экран запуска уходит, когда ядро готово или запуск не удался (тогда видна ошибка).
   createEffect(() => {
-    if (store.state.ready || failure() || store.state.stopped) dismissSplash();
+    if (failure() || store.state.stopped) dismissSplash(true);
+    else if (store.state.ready) dismissSplash();
   });
 
   const [keymap, setKeymap] = createSignal(saved.keymap);
@@ -218,7 +219,7 @@ export function App(props: AppProps) {
 
   return (
     <ErrorBoundary
-      fallback={(err: unknown) => (dismissSplash(),
+      fallback={(err: unknown) => (dismissSplash(true),
         <div class="fe-boot fe-boot--error" role="alert">
           Ошибка интерфейса: {err instanceof Error ? err.message : String(err)}. Перезагрузите страницу
         </div>
