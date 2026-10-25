@@ -8,6 +8,8 @@ import { EditorContext, type Editor } from './context';
 import { Menu, type MenuItem } from './menu';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
+import { PropertiesPanel } from './properties';
+import { downloadBytes } from './files';
 import { createUiStore } from './store';
 import { Toasts } from './toasts';
 import { Toolbar } from './toolbar';
@@ -28,6 +30,12 @@ export function App() {
       .then((ed) => {
         setEditor(ed);
         canvas.focus();
+        ed.core.on((e) => {
+          if (e.type === 'exported') {
+            downloadBytes(e.name, e.bytes, 'image/png');
+            store.toast(`Экспортировано: ${e.name}`);
+          }
+        });
       })
       // Отказ `Core.start` уже начинается с «Ядро не запустилось: …».
       .catch((e: unknown) => setFailure(e instanceof Error ? e.message : `Ядро не запустилось: ${String(e)}`));
@@ -101,6 +109,7 @@ export function App() {
             </aside>
             <aside class="fe-side fe-side--right" aria-label="Свойства">
               <DesignHeader />
+              <PropertiesPanel />
               <ResizeEdge side="right" width={right()} onWidth={setRight} />
             </aside>
             <TooltipLayer />
