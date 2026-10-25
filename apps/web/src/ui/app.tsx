@@ -3,6 +3,7 @@
 import { createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { boot } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
+import { ConfirmDialog } from './dialog';
 import { EditorContext, type Editor } from './context';
 import { Menu, type MenuItem } from './menu';
 import { createUiStore } from './store';
@@ -30,8 +31,17 @@ export function App() {
   });
   onCleanup(() => editor()?.core.dispose());
 
+  // «Создать» заменяет документ: пока автосохранения нет, при правках — с вопросом.
+  const [confirmNew, setConfirmNew] = createSignal(false);
   const fileItems = (ed: Editor): MenuItem[] => [
-    { label: 'Создать', onSelect: () => ed.send({ type: 'demo', nodes: 0 }) },
+    {
+      label: 'Создать',
+      onSelect: () => {
+        const s = store.state;
+        if (s.canUndo || s.canRedo) setConfirmNew(true);
+        else ed.send({ type: 'demo', nodes: 0 });
+      },
+    },
   ];
 
   return (
@@ -89,6 +99,19 @@ export function App() {
               <ResizeEdge side="right" width={right()} onWidth={setRight} />
             </aside>
             <TooltipLayer />
+            <Show when={confirmNew()}>
+              <ConfirmDialog
+                title="Создать новый файл?"
+                text="Несохранённые изменения будут потеряны."
+                confirm="Создать"
+                cancel="Отмена"
+                onCancel={() => setConfirmNew(false)}
+                onConfirm={() => {
+                  setConfirmNew(false);
+                  ed().send({ type: 'demo', nodes: 0 });
+                }}
+              />
+            </Show>
             <Show when={context()}>
               {(at) => (
                 <Menu

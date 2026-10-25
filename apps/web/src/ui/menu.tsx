@@ -4,7 +4,7 @@
 // пункта — из действующей раскладки. Положение считается в фазе measure: меню
 // сначала появляется невидимым, затем встаёт у якоря в пределах окна.
 
-import { For, onCleanup, onMount, Show, type JSX } from 'solid-js';
+import { Index, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { useEditor } from './context';
 import { Icon } from './icons';
@@ -121,36 +121,45 @@ export function Menu(props: MenuProps): JSX.Element {
   return (
     <Portal>
       <div ref={el} class="fe-menu" role="menu" aria-label={props.label} style={{ visibility: 'hidden' }} onKeyDown={onKey}>
-        <For each={props.items}>
-          {(item) => {
-            if ('separator' in item) return <div class="fe-menu__sep" role="separator" />;
-            if ('heading' in item) return <div class="fe-menu__heading">{item.heading}</div>;
-            return (
-              <div
-                class="fe-menu__item"
-                role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
-                aria-checked={item.checked === undefined ? undefined : item.checked}
-                aria-disabled={item.disabled ? 'true' : undefined}
-                tabindex="-1"
-                onClick={() => select(item)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    select(item);
-                  }
-                }}
-              >
-                <span class="fe-menu__check">
-                  <Show when={item.checked}>
-                    <Icon name="check" />
-                  </Show>
-                </span>
-                <span class="fe-menu__label">{item.label}</span>
-                <span class="fe-menu__key">{item.hint ?? key(item.command)}</span>
-              </div>
-            );
-          }}
-        </For>
+        {/* Index, не For: при перестройке пунктов (зум изменился) узлы остаются, фокус не теряется. */}
+        <Index each={props.items}>
+          {(item) => (
+            <Switch>
+              <Match when={'separator' in item() && item()}>
+                <div class="fe-menu__sep" role="separator" />
+              </Match>
+              <Match when={'heading' in item() && (item() as { heading: string })}>
+                {(h) => <div class="fe-menu__heading">{h().heading}</div>}
+              </Match>
+              <Match when={'label' in item() && (item() as Extract<MenuItem, { label: string }>)}>
+                {(it) => (
+                  <div
+                    class="fe-menu__item"
+                    role={it().checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+                    aria-checked={it().checked === undefined ? undefined : it().checked}
+                    aria-disabled={it().disabled ? 'true' : undefined}
+                    tabindex="-1"
+                    onClick={() => select(it())}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        select(it());
+                      }
+                    }}
+                  >
+                    <span class="fe-menu__check">
+                      <Show when={it().checked}>
+                        <Icon name="check" />
+                      </Show>
+                    </span>
+                    <span class="fe-menu__label">{it().label}</span>
+                    <span class="fe-menu__key">{it().hint ?? key(it().command)}</span>
+                  </div>
+                )}
+              </Match>
+            </Switch>
+          )}
+        </Index>
       </div>
     </Portal>
   );

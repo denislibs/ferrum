@@ -257,3 +257,41 @@
   display: flex;
   gap: 2px;
 }
+
+/* Диалог подтверждения. */
+.fe-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--canvas) 60%, transparent);
+}
+.fe-dialog {
+  width: min(400px, calc(100vw - 32px));
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-dialog);
+  color: var(--ink);
+  animation: fe-pop 120ms ease-out;
+}
+.fe-dialog__title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+.fe-dialog__text {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+.fe-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}

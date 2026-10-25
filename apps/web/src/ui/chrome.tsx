@@ -1,10 +1,11 @@
 // Шапки панелей (PanelHeader), меню файла, зум, «Поделиться», вкладки, края
 // панелей для изменения ширины и контекстное меню холста.
 
-import { createSignal, Show, type JSX } from 'solid-js';
+import { createSignal, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { useEditor } from './context';
 import { Caret, Icon } from './icons';
 import { Menu, type MenuItem } from './menu';
+import { roving } from './roving';
 
 /** Пределы ширины боковых панелей. */
 export const PANEL_MIN = 200;
@@ -77,6 +78,8 @@ const ZOOMS = [0.5, 1, 2];
 
 export function DesignHeader() {
   const ed = useEditor();
+  let tabs!: HTMLDivElement;
+  onMount(() => onCleanup(roving(tabs, '[role="tab"]')));
   const [menu, setMenu] = createSignal<HTMLElement | null>(null);
   const zoomItems = (): MenuItem[] => [
     { label: 'Приблизить', command: 'view.zoom_in' },
@@ -118,8 +121,8 @@ export function DesignHeader() {
           {(a) => <Menu label="Масштаб" items={zoomItems()} anchor={a()} onClose={() => setMenu(null)} />}
         </Show>
       </div>
-      <div class="fe-tabs" role="tablist" aria-label="Режим панели">
-        <button class="fe-tab" role="tab" aria-selected="true" id="tab-design" aria-controls="panel-design">
+      <div ref={tabs} class="fe-tabs" role="tablist" aria-label="Режим панели">
+        <button class="fe-tab" role="tab" aria-selected="true" id="tab-design">
           Дизайн
         </button>
         <button class="fe-tab" role="tab" aria-selected="false" aria-disabled="true" data-tip="Прототипы появятся в подсистеме 6">
@@ -151,6 +154,7 @@ export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWid
       aria-valuenow={props.width}
       tabindex="0"
       onPointerDown={(e) => {
+        if (e.button !== 0 || !e.isPrimary) return;
         start = e.clientX;
         base = props.width;
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -161,10 +165,12 @@ export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWid
       onKeyDown={(e) => {
         const grow = props.side === 'left' ? 'ArrowRight' : 'ArrowLeft';
         const shrink = props.side === 'left' ? 'ArrowLeft' : 'ArrowRight';
-        if (e.key === grow) props.onWidth(clampPanel(props.width + 8));
-        else if (e.key === shrink) props.onWidth(clampPanel(props.width - 8));
+        let w: number;
+        if (e.key === grow) w = clampPanel(props.width + 8);
+        else if (e.key === shrink) w = clampPanel(props.width - 8);
         else return;
         e.preventDefault();
+        ed.scheduler.mutate(() => props.onWidth(w));
       }}
     />
   );

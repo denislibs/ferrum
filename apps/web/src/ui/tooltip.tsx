@@ -12,7 +12,7 @@ export const TOOLTIP_DELAY_MS = 500;
 
 interface Tip {
   text: string;
-  key: string;
+  command: string;
   x: number;
   y: number;
   above: boolean;
@@ -24,6 +24,7 @@ export function TooltipLayer(props: { layout?: LayoutMap }) {
   let timer = 0;
   let target: HTMLElement | null = null;
 
+  // Читается из состояния в разметке: открытая подсказка следует за раскладкой.
   const keyOf = (command: string | undefined): string => {
     if (!command) return '';
     const c = ed.store.state.keymap.commands.find((x) => x.key === command);
@@ -47,8 +48,8 @@ export function TooltipLayer(props: { layout?: LayoutMap }) {
         const above = el.dataset.tipSide === 'top' || r.bottom + 40 > innerHeight;
         const x = Math.min(Math.max(r.left + r.width / 2, 80), innerWidth - 80);
         const text = el.dataset.tip ?? '';
-        const key = keyOf(el.dataset.command);
-        ed.scheduler.mutate(() => setTip({ text, key, x, y: above ? r.top - 6 : r.bottom + 6, above }));
+        const command = el.dataset.command ?? '';
+        ed.scheduler.mutate(() => setTip({ text, command, x, y: above ? r.top - 6 : r.bottom + 6, above }));
       });
     }, delay);
   };
@@ -95,8 +96,8 @@ export function TooltipLayer(props: { layout?: LayoutMap }) {
         >
           {/* «Название  Клавиша»: два пробела — часть текста (white-space: pre). */}
           <span>{t().text}</span>
-          <Show when={t().key}>
-            <span class="fe-tooltip__key">{tipText('', t().key)}</span>
+          <Show when={keyOf(t().command)}>
+            <span class="fe-tooltip__key">{tipText('', keyOf(t().command))}</span>
           </Show>
         </div>
       )}

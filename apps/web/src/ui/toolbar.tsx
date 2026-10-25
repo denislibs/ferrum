@@ -3,11 +3,12 @@
 // комментарии — с подсказкой, когда они появятся. Рука (H, удержание Space)
 // работает с клавиатуры и в тулбар не выносится.
 
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import type { Tool } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { Caret, Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
+import { roving } from './roving';
 
 type Shape = 'rect' | 'ellipse' | 'line' | 'image';
 
@@ -28,6 +29,8 @@ export function Toolbar() {
   const ed = useEditor();
   const [shape, setShape] = createSignal<Shape>('rect');
   const [menu, setMenu] = createSignal<{ kind: 'frame' | 'shapes'; anchor: HTMLElement } | null>(null);
+  let bar!: HTMLDivElement;
+  onMount(() => onCleanup(roving(bar, 'button')));
   const tool = () => ed.store.state.tool;
   const current = createMemo(() => SHAPES.find((s) => s.tool === shape())!);
   // Фигура, выбранная клавишей, становится и фигурой кнопки.
@@ -67,7 +70,7 @@ export function Toolbar() {
     }));
 
   return (
-    <div class="fe-toolbar" role="toolbar" aria-label="Инструменты">
+    <div ref={bar} class="fe-toolbar" role="toolbar" aria-label="Инструменты">
       <button
         class="fe-tool"
         aria-pressed={tool() === 'move'}

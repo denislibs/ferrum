@@ -45,20 +45,36 @@ test('Ctrl+\\ скрывает и показывает интерфейс', asyn
 
 test('подсказка «Название  Клавиша» — из действующей раскладки', async ({ page }) => {
   await openApp(page);
-  await page.getByRole('button', { name: 'Перемещение' }).hover();
+  const move = page.getByRole('button', { name: 'Перемещение' });
+  await move.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
   await page.getByRole('button', { name: 'Перо — подсистема 3' }).hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перо  P — подсистема 3');
-  // Переназначили — подсказка другая.
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'bind', command: 'tool.move', shortcut: 'KeyQ', replace: true }));
+  // Открытая подсказка следует за раскладкой: V снят, Q назначен — текст меняется на месте.
+  await move.hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
+  await page.evaluate(() => {
+    window.__ferrum!.core.send({ type: 'unbind', command: 'tool.move', shortcut: 'KeyV' });
+    window.__ferrum!.core.send({ type: 'bind', command: 'tool.move', shortcut: 'KeyQ', replace: false });
+  });
+  await ui(page, (s) => s.keymap.commands.length);
+  await page.waitForFunction(() => window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.move')?.bindings[0] === 'KeyQ');
+  await expect(page.getByRole('tooltip')).toHaveText('Перемещение  Q');
+  // Закрытая — тоже.
   await page.mouse.move(5, 300);
   await expect(page.getByRole('tooltip')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Перемещение' }).hover();
-  await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'unbind', command: 'tool.move', shortcut: 'KeyV' }));
-  await page.mouse.move(5, 300);
-  await page.getByRole('button', { name: 'Перемещение' }).hover();
+  await move.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  Q');
+  // Клавиша переходит от одной команды к другой: у прямоугольника R уходит.
+  const rect = page.getByRole('button', { name: 'Прямоугольник', exact: true });
+  await rect.hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Прямоугольник  R');
+  await page.evaluate(() => window.__ferrum!.core.send({ type: 'bind', command: 'tool.move', shortcut: 'KeyR', replace: true }));
+  await page.waitForFunction(() => !window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.rect')?.bindings.includes('KeyR'));
+  // Открытая подсказка прямоугольника потеряла «R» (клавиша ушла к «Перемещению»).
+  await expect(page.getByRole('tooltip')).toHaveText('Прямоугольник');
+  const moveKeys = await page.evaluate(() => [...window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.move')!.bindings]);
+  expect(moveKeys).toEqual(['KeyQ', 'KeyR']);
 });
 
 test('подписи сочетаний в интерфейсе совпадают с подписями ядра', async ({ page }) => {
@@ -199,4 +215,125 @@ test('ширина панели зажата в пределах 200–480 px', 
   await expect(edge).toHaveAttribute('aria-valuenow', '480');
   // Чтений layout вне фазы measure не было.
   expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
+});
+
+test('стрелки на крае панели и на кнопке тулбара не двигают выделение', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  const node = await appScreen(page, l, 200, 40);
+  await page.mouse.click(node.x, node.y);
+  const sel = await liveWhen(page, 'l.selectionCount === 1');
+  const edge = page.getByRole('separator', { name: 'Ширина левой панели' });
+  await edge.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(edge).toHaveAttribute('aria-valuenow', '256');
+  await page.waitForTimeout(200);
+  let now = await live(page);
+  expect([now.selectionX, now.selectionY, now.steps]).toEqual([sel.selectionX, sel.selectionY, sel.steps]);
+  await page.getByRole('button', { name: 'Перемещение' }).focus();
+  for (const k of ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp']) await page.keyboard.press(k);
+  await page.waitForTimeout(200);
+  now = await live(page);
+  expect([now.selectionX, now.selectionY, now.steps]).toEqual([sel.selectionX, sel.selectionY, sel.steps]);
+});
+
+test('тулбар и вкладки: одна точка Tab, стрелки и Home/End', async ({ page }) => {
+  await openApp(page);
+  const tools = page.getByRole('toolbar', { name: 'Инструменты' }).getByRole('button');
+  expect(await tools.evaluateAll((els) => els.filter((e) => e.getAttribute('tabindex') === '0').length)).toBe(1);
+  await page.locator('canvas').focus();
+  await page.keyboard.press('Shift+Tab');
+  // Фокус вошёл в тулбар (тулбар в DOM раньше панелей, холст — перед ним).
+  await page.getByRole('button', { name: 'Перемещение' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('button', { name: 'Фрейм', exact: true })).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(page.getByRole('button', { name: /Комментарии/ })).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('button', { name: 'Перемещение' })).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.getByRole('button', { name: /Комментарии/ })).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(page.getByRole('button', { name: 'Перемещение' })).toBeFocused();
+  // Tab уходит из тулбара одним нажатием (внутри остальные кнопки вне порядка Tab).
+  await page.keyboard.press('Tab');
+  expect(await page.evaluate(() => !!document.activeElement!.closest('[role="toolbar"]'))).toBe(false);
+  // Вкладки.
+  const tabs = page.getByRole('tablist').getByRole('tab');
+  expect(await tabs.evaluateAll((els) => els.filter((e) => e.getAttribute('tabindex') === '0').length)).toBe(1);
+  await page.getByRole('tab', { name: 'Дизайн' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Прототип' })).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Дизайн' })).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(page.getByRole('tab', { name: 'Прототип' })).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(page.getByRole('tab', { name: 'Дизайн' })).toBeFocused();
+  // Нет висячего aria-controls.
+  const ctl = await page.getByRole('tab', { name: 'Дизайн' }).getAttribute('aria-controls');
+  if (ctl) expect(await page.locator(`#${ctl}`).count()).toBe(1);
+});
+
+test('«Создать» просит подтверждения, пока в документе есть правки', async ({ page }) => {
+  await openApp(page);
+  const create = async () => {
+    await page.getByRole('button', { name: 'Меню файла' }).click();
+    await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Создать' }).click();
+  };
+  // Правка: дублирование выделенного.
+  const l = await live(page);
+  const node = await appScreen(page, l, 200, 40);
+  await page.mouse.click(node.x, node.y);
+  await liveWhen(page, 'l.selectionCount === 1');
+  await page.keyboard.press('ControlOrMeta+KeyD');
+  await liveWhen(page, `l.steps === ${l.steps + 1}`);
+  const total = (await live(page)).nodes;
+  await create();
+  const dialog = page.getByRole('dialog', { name: 'Создать новый файл?' });
+  await expect(dialog).toContainText('Несохранённые изменения будут потеряны');
+  await expect(dialog.getByRole('button', { name: 'Отмена' })).toBeFocused();
+  await dialog.getByRole('button', { name: 'Отмена' }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.waitForTimeout(300);
+  expect((await live(page)).nodes).toBe(total);
+  await create();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  expect((await live(page)).nodes).toBe(total);
+  await create();
+  await dialog.getByRole('button', { name: 'Создать' }).click();
+  await liveWhen(page, 'l.nodes < 5');
+  // Пустой документ без правок — без вопросов.
+  await create();
+  await expect(dialog).toHaveCount(0);
+});
+
+test('фокус пункта меню не теряется, когда пункты перестраиваются', async ({ page }) => {
+  await openApp(page);
+  const zoom = page.getByRole('button', { name: 'Масштаб', exact: true });
+  await zoom.focus();
+  await page.keyboard.press('Enter');
+  const menu = page.getByRole('menu', { name: 'Масштаб' });
+  await expect(menu.getByRole('menuitem', { name: /Приблизить/ })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  const fit = menu.getByRole('menuitem', { name: /Показать всё/ });
+  await expect(fit).toBeFocused();
+  await page.evaluate(() => window.__ferrum!.core.send({ type: 'setZoom', zoom: 2 }));
+  await liveWhen(page, 'l.zoom === 2');
+  await expect(menu.getByRole('menuitemcheckbox', { name: /Масштаб 200%/ })).toHaveAttribute('aria-checked', 'true');
+  await expect(fit).toBeFocused();
+});
+
+test('край панели: правая кнопка мыши не начинает перетаскивание', async ({ page }) => {
+  await openApp(page);
+  const edge = page.getByRole('separator', { name: 'Ширина левой панели' });
+  const box = (await edge.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, 400);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(box.x + 100, 400, { steps: 5 });
+  await page.mouse.up({ button: 'right' });
+  await page.keyboard.press('Escape');
+  await expect(edge).toHaveAttribute('aria-valuenow', '248');
 });

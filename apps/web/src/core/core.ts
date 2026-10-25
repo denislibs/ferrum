@@ -333,7 +333,8 @@ export class Core {
       this.disposers.push(() => c.removeEventListener(type, h));
     }
     this.add(window, 'keydown', (e) => {
-      if (browserKey(e) || !this.keyFilter(e)) return;
+      // Клавишу, которую уже обработал элемент интерфейса (preventDefault), ядру не отдаём.
+      if (e.defaultPrevented || browserKey(e) || !this.keyFilter(e)) return;
       e.preventDefault();
       enc.key(sink, Kind.KEY_DOWN, e);
     });
