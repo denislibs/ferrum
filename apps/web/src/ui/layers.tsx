@@ -7,6 +7,7 @@
 
 import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import type { DropPosition, LayerRow, NodeType } from '../wasm/ferrum_wasm';
+import { MAX_NAME_CHARS } from '../core/limits';
 import { useEditor } from './context';
 import { Icon, type IconName } from './icons';
 
@@ -16,8 +17,6 @@ export const ROW = 28;
 export const OVERSCAN = 10;
 /** Сдвиг указателя, после которого нажатие на строке становится перетаскиванием. */
 const DRAG_START_PX = 4;
-/** Предел длины имени (как в ядре, `MAX_NAME_CHARS`). */
-export const MAX_NAME_CHARS = 256;
 
 const KIND_ICON: Record<NodeType, IconName> = {
   frame: 'frame',

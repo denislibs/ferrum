@@ -215,7 +215,7 @@ test.describe('предел размера команд', () => {
   test('Open, Paste и PlaceImage больше предела отклоняются по-русски', () => {
     for (const type of ['open', 'paste', 'placeImage'] as const) {
       const err = commandSizeError({ type, bytes: big(MAX_COMMAND_BYTES[type] + 1) });
-      expect(err, type).toMatch(/^Слишком большой объём данных: \d+ МБ, предел для этой команды — \d+ МБ\.$/);
+      expect(err, type).toMatch(/^Слишком большой объём данных: \d+ МБ, предел — \d+ МБ$/);
       expect(commandSizeError({ type, bytes: big(MAX_COMMAND_BYTES[type]) }), type).toBeNull();
     }
     expect(commandSizeError({ type: 'save' })).toBeNull();
@@ -224,7 +224,7 @@ test.describe('предел размера команд', () => {
 
   test('размер в сообщении округляется вверх, а не вниз', () => {
     const err = commandSizeError({ type: 'paste', bytes: big(MAX_COMMAND_BYTES.paste + 1) })!;
-    expect(err).toContain('65 МБ, предел для этой команды — 64 МБ');
+    expect(err).toContain('65 МБ, предел — 64 МБ');
   });
 
   test('байты в общей памяти отклоняются, часть буфера копируется перед передачей', () => {

@@ -266,7 +266,7 @@ test('диалог подтверждения тоже модальный: ще�
   await page.getByRole('menuitem', { name: 'Создать' }).click();
   const confirm = page.getByRole('dialog', { name: 'Создать новый файл?' });
   await expect(confirm).toBeVisible();
-  await confirm.getByText('Несохранённые изменения будут потеряны.').click();
+  await confirm.getByText('Несохранённые изменения будут потеряны').click();
   await expect(confirm).toBeFocused();
   const steps = (await live(page)).steps;
   await page.keyboard.press('ControlOrMeta+KeyZ');

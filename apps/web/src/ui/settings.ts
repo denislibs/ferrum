@@ -16,9 +16,17 @@ export interface Settings {
   pagesOpen: boolean;
 }
 
+import { MAX_KEYMAP_BYTES, MAX_SETTINGS_BYTES } from '../core/limits';
+
 export const SETTINGS_KEY = 'ferrum.settings.v1';
-/** Предел размера записи: раскладка ядра — до 64 КБ, остальное — мелочь. */
-const MAX_BYTES = 80 * 1024;
+
+/** Пределы ширины боковых панелей. */
+export const PANEL_MIN = 200;
+export const PANEL_MAX = 480;
+
+export function clampPanel(w: number): number {
+  return Math.round(Math.min(PANEL_MAX, Math.max(PANEL_MIN, w)));
+}
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'dark',
@@ -38,14 +46,14 @@ export function storage(): Storage | null {
   }
 }
 
-const isWidth = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 120 && v <= 800;
+const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 /** Читает настройки; неверные поля заменяются умолчаниями поодиночке. */
 export function loadSettings(store: Pick<Storage, 'getItem'> | null): Settings {
   let raw: unknown = null;
   try {
     const text = store?.getItem(SETTINGS_KEY);
-    if (text && text.length <= MAX_BYTES) raw = JSON.parse(text);
+    if (text && text.length <= MAX_SETTINGS_BYTES) raw = JSON.parse(text);
   } catch {
     raw = null;
   }
@@ -53,9 +61,10 @@ export function loadSettings(store: Pick<Storage, 'getItem'> | null): Settings {
   return {
     theme: o.theme === 'light' || o.theme === 'system' || o.theme === 'dark' ? o.theme : DEFAULT_SETTINGS.theme,
     pixelSnap: typeof o.pixelSnap === 'boolean' ? o.pixelSnap : DEFAULT_SETTINGS.pixelSnap,
-    keymap: typeof o.keymap === 'string' && o.keymap.length <= 64 * 1024 ? o.keymap : DEFAULT_SETTINGS.keymap,
-    leftWidth: isWidth(o.leftWidth) ? o.leftWidth : DEFAULT_SETTINGS.leftWidth,
-    rightWidth: isWidth(o.rightWidth) ? o.rightWidth : DEFAULT_SETTINGS.rightWidth,
+    keymap: typeof o.keymap === 'string' && o.keymap.length <= MAX_KEYMAP_BYTES ? o.keymap : DEFAULT_SETTINGS.keymap,
+    // Ширина из хранилища — в пределах края панели (как при перетаскивании).
+    leftWidth: isNumber(o.leftWidth) ? clampPanel(o.leftWidth) : DEFAULT_SETTINGS.leftWidth,
+    rightWidth: isNumber(o.rightWidth) ? clampPanel(o.rightWidth) : DEFAULT_SETTINGS.rightWidth,
     pagesOpen: typeof o.pagesOpen === 'boolean' ? o.pagesOpen : DEFAULT_SETTINGS.pagesOpen,
   };
 }

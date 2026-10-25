@@ -219,7 +219,7 @@ test('не доверенный текст: огромный текст с ме�
     dt.setData('text/plain', 'ferrum-clipboard:v1:' + 'A'.repeat(90_000_000));
     document.querySelector('canvas')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
   });
-  await expect(page.getByRole('status').filter({ hasText: 'Слишком большой объём данных в буфере обмена' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Слишком большой объём данных: предел — 64 МБ' })).toBeVisible();
   // До worker'а текст не дошёл: ни ошибки ядра, ни правки.
   expect(await errors(page)).toEqual([]);
   const after = await live(page);
@@ -365,10 +365,10 @@ test('картинка больше 64 МБ отклоняется до копи
     dt.items.add(new File([new Uint8Array(65 * 1024 * 1024)], 'big.png', { type: 'image/png' }));
     document.querySelector('canvas')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
   });
-  await expect(page.getByRole('status').filter({ hasText: 'Изображение слишком большое для вставки' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Слишком большой объём данных: 65 МБ, предел — 64 МБ' })).toBeVisible();
   // Команда в обход интерфейса — отказ предела команды (до передачи worker'у).
   await page.evaluate(() => window.__ferrum!.core.send({ type: 'pasteImage', bytes: new Uint8Array(65 * 1024 * 1024) }));
-  await expect.poll(() => errors(page)).toEqual(['Слишком большой объём данных: 65 МБ, предел для этой команды — 64 МБ.']);
+  await expect.poll(() => errors(page)).toEqual(['Слишком большой объём данных: 65 МБ, предел — 64 МБ']);
   expect((await live(page)).nodes).toBe(before.nodes);
 });
 
@@ -590,3 +590,4 @@ test('свой формат отклонён браузером: текст с �
   expect((await page.evaluate(() => navigator.clipboard.readText())).startsWith('ferrum-clipboard:v1:')).toBe(true);
   expect(await errors(page)).toEqual([]);
 });
+

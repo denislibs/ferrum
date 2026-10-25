@@ -3,6 +3,7 @@
 // `requestImage`. Разбор форматов — в clipboard.ts, байты и текст с меткой
 // разбирает worker: основной поток только переносит их.
 
+import { tooLarge } from '../core/limits';
 import type { ClipboardExtra } from '../core/messages';
 import type { Editor } from './context';
 import {
@@ -106,14 +107,14 @@ export function installClipboard(ed: Editor): () => void {
         ed.core.pasteText(data.text);
         return;
       case 'tooBig':
-        toast('Слишком большой объём данных в буфере обмена: предел — 64 МБ');
+        toast(tooLarge(MAX_CLIPBOARD_BYTES));
         return;
       case 'image':
         break;
     }
     // Размер — до чтения: байты не копируются в память ради отказа.
     if (data.blob.size > MAX_CLIPBOARD_BYTES) {
-      toast('Изображение слишком большое для вставки (больше 64 МБ)');
+      toast(tooLarge(MAX_CLIPBOARD_BYTES, data.blob.size));
       return;
     }
     try {
@@ -156,7 +157,7 @@ export function installClipboard(ed: Editor): () => void {
         .then(async (f) => {
           if (!f) return;
           if (f.size > MAX_CLIPBOARD_BYTES) {
-            toast('Изображение слишком большое (больше 64 МБ)');
+            toast(tooLarge(MAX_CLIPBOARD_BYTES, f.size));
             return;
           }
           ed.send({ type: 'placeImage', bytes: await fileBytes(f) });

@@ -6,14 +6,9 @@ import { useEditor } from './context';
 import { Caret, Icon } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { roving } from './roving';
+import { clampPanel, PANEL_MAX, PANEL_MIN } from './settings';
 
-/** Пределы ширины боковых панелей. */
-export const PANEL_MIN = 200;
-export const PANEL_MAX = 480;
-
-export function clampPanel(w: number): number {
-  return Math.round(Math.min(PANEL_MAX, Math.max(PANEL_MIN, w)));
-}
+export { clampPanel, PANEL_MAX, PANEL_MIN };
 
 /** Пункты меню файла: другие части интерфейса добавляют свои (открыть, сохранить,
  * настройки). */

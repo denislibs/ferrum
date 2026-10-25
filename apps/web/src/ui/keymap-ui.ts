@@ -5,10 +5,11 @@
 
 import type { ConflictInfo, KeymapEntry } from '../wasm/ferrum_wasm';
 import type { Platform } from '../core/core';
+import { MAX_KEYMAP_BYTES } from '../core/limits';
 import { clipboardAction, eventShortcut, shortcutLabel, type LayoutMap } from './shortcuts';
 
-/** Предел файла раскладки — как у ядра (64 КБ). */
-export const MAX_KEYMAP_FILE = 64 * 1024;
+/** Предел файла раскладки — как у ядра (`MAX_KEYMAP_JSON`). */
+export const MAX_KEYMAP_FILE = MAX_KEYMAP_BYTES;
 
 export interface KeymapGroup {
   id: string;

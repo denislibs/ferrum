@@ -8,6 +8,7 @@
 import { createMemo, createSignal, For, Index, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import type { KeymapEntry } from '../wasm/ferrum_wasm';
+import { kb } from '../core/limits';
 import { useEditor } from './context';
 import { downloadBytes } from './files';
 import { Icon, type IconName } from './icons';
@@ -245,7 +246,7 @@ function KeymapTab() {
   const importFile = async (file: File | undefined) => {
     if (!file) return;
     if (file.size > MAX_KEYMAP_FILE) {
-      ed.store.toast('Файл раскладки слишком большой (больше 64 КБ)', 'error');
+      ed.store.toast(`Файл раскладки слишком большой: больше ${kb(MAX_KEYMAP_FILE)} КБ`, 'error');
       return;
     }
     let json: string;

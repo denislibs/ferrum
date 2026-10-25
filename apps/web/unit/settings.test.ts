@@ -9,7 +9,16 @@ import type { KeymapEntry } from '../src/wasm/ferrum_wasm';
 import { createUiStore } from '../src/ui/store';
 import { shortcutLabel } from '../src/ui/shortcuts';
 import { conflictsOf, filterGroups, groupCommands, recordKey, reservedOf } from '../src/ui/keymap-ui';
-import { DEFAULT_SETTINGS, loadSettings, resolveTheme, saveSettings, SETTINGS_KEY, THEME_CANVAS } from '../src/ui/settings';
+import {
+  DEFAULT_SETTINGS,
+  loadSettings,
+  PANEL_MAX,
+  PANEL_MIN,
+  resolveTheme,
+  saveSettings,
+  SETTINGS_KEY,
+  THEME_CANVAS,
+} from '../src/ui/settings';
 
 function memory(): Storage {
   const m = new Map<string, string>();
@@ -31,7 +40,7 @@ test('настройки: запись и чтение, мусор и отказ
   expect(loadSettings(s)).toEqual(mine);
   s.setItem(SETTINGS_KEY, '{не json');
   expect(loadSettings(s)).toEqual(DEFAULT_SETTINGS);
-  s.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'синяя', pixelSnap: 'да', leftWidth: 1e9, pagesOpen: false }));
+  s.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'синяя', pixelSnap: 'да', leftWidth: 'широко', pagesOpen: false }));
   expect(loadSettings(s)).toEqual({ ...DEFAULT_SETTINGS, pagesOpen: false });
   const broken = {
     getItem: () => {
@@ -168,5 +177,20 @@ test('холст темы: одно значение в интерфейсе, т
     expect(block.match(/--canvas:\s*(#[0-9a-f]{6});/)![1] + 'ff').toBe(THEME_CANVAS[theme]);
     const m = new RegExp(`CANVAS_${theme.toUpperCase()}: Rgba = Rgba::new\\(\\[(\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, 1\\.0\\]\\)`).exec(rs)!;
     expect(hex(+m[1], +m[2], +m[3])).toBe(THEME_CANVAS[theme]);
+  }
+});
+
+test('ширина панелей из хранилища зажата в пределах края панели', () => {
+  const s = memory();
+  for (const [stored, loaded] of [
+    [120, PANEL_MIN],
+    [199.6, PANEL_MIN],
+    [700, PANEL_MAX],
+    [1e9, PANEL_MAX],
+    [301.4, 301],
+  ] as const) {
+    s.setItem(SETTINGS_KEY, JSON.stringify({ leftWidth: stored, rightWidth: stored }));
+    const got = loadSettings(s);
+    expect([got.leftWidth, got.rightWidth], String(stored)).toEqual([loaded, loaded]);
   }
 });

@@ -6,9 +6,11 @@ import init, { WasmCore } from '../wasm/ferrum_wasm.js';
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import { Ctrl, CTRL_BYTES, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET } from '../core/layout.gen';
 import { decodeText, encodeText, MAX_CLIPBOARD_BYTES } from '../core/clipboard-text';
+import { MAX_IMAGE_SIDE } from '../core/limits';
 import {
   clipboardBytesError,
   commandSizeError,
+  copyTooLarge,
   isToWorker,
   pasteTextError,
   type ClipboardExtra,
@@ -50,8 +52,6 @@ function postError(message: string): void {
   post({ t: 'events', events: [{ type: 'error', message }] });
 }
 
-/** Наибольшая сторона картинки, как у `decode_png` в ядре. */
-const MAX_IMAGE_SIDE = 8192;
 
 /** Картинка не PNG (JPEG, WebP из буфера обмена или файла) — перекодируется в
  * PNG здесь, в worker'е: ядро читает только PNG, а основной поток пиксели не трогает.
@@ -122,15 +122,7 @@ function run(cmd: ToWorker & { t: 'cmd' }): void {
  * (вставка такого всё равно была бы отклонена); иначе — признак вырезания (в той же
  * пачке изменился документ) и, для запасного пути, готовый текст с меткой. */
 function clipboardEvent(e: CoreEvent & { type: 'clipboard' }, cut: boolean): CoreEvent {
-  if (e.bytes.length > MAX_CLIPBOARD_BYTES) {
-    const mb = Math.ceil(e.bytes.length / (1024 * 1024));
-    return {
-      type: 'error',
-      message: cut
-        ? `Не удалось вырезать в буфер обмена: выделение ${mb} МБ, предел — 64 МБ. Отмена вернёт вырезанные объекты`
-        : `Не удалось скопировать: выделение ${mb} МБ, предел — 64 МБ`,
-    };
-  }
+  if (e.bytes.length > MAX_CLIPBOARD_BYTES) return { type: 'error', message: copyTooLarge(e.bytes.length, cut) };
   const x = e as typeof e & ClipboardExtra;
   x.cut = cut;
   if (clipboardText) x.text = encodeText(e.bytes);

@@ -4,6 +4,7 @@
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { detectPlatform } from '../core/core';
+import { mb } from '../core/limits';
 import { MAX_COMMAND_BYTES } from '../core/messages';
 import { boot } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
@@ -149,7 +150,7 @@ export function App() {
       if (!f) return;
       // Размер — до чтения: файл больше предела не копируется в память ради отказа.
       if (f.size > MAX_COMMAND_BYTES.open) {
-        store.toast(`Не удалось открыть файл: больше ${MAX_COMMAND_BYTES.open / (1024 * 1024)} МБ`, 'error');
+        store.toast(`Не удалось открыть файл: больше ${mb(MAX_COMMAND_BYTES.open)} МБ`, 'error');
         return;
       }
       ed.send({ type: 'open', bytes: await fileBytes(f) });
@@ -240,7 +241,7 @@ export function App() {
               {(kind) => (
                 <ConfirmDialog
                   title={REPLACE[kind()].title}
-                  text="Несохранённые изменения будут потеряны."
+                  text="Несохранённые изменения будут потеряны"
                   confirm={REPLACE[kind()].confirm}
                   cancel="Отмена"
                   onCancel={() => setConfirmReplace(null)}

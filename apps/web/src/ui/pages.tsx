@@ -7,7 +7,7 @@ import type { PageInfo } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { ConfirmDialog } from './dialog';
 import { Icon } from './icons';
-import { MAX_NAME_CHARS } from './layers';
+import { MAX_NAME_CHARS } from '../core/limits';
 
 export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => void }) {
   const ed = useEditor();
@@ -119,7 +119,7 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
         {(p) => (
           <ConfirmDialog
             title="Удалить страницу?"
-            text={`Страница «${p().name}» будет удалена вместе со всем, что на ней. Отменить это нельзя.`}
+            text={`Страница «${p().name}» будет удалена вместе со всем, что на ней. Отменить это нельзя`}
             confirm="Удалить"
             cancel="Отмена"
             onCancel={() => setDeleting(null)}
