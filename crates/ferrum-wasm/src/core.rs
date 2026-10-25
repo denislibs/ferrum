@@ -79,6 +79,10 @@ pub struct Core {
     summary: Option<Summary>,
     /// Фон страницы во время жеста палитры: в кадре, но ещё не в документе.
     background_preview: Option<Option<ferrum_doc::Color>>,
+    /// Документ изменён с открытия, создания или сохранения (событие `Modified`)
+    /// и что о нём сообщено последним (`None` — ещё ничего: сообщить).
+    modified: bool,
+    modified_sent: Option<bool>,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -183,6 +187,8 @@ impl Core {
             reveal: None,
             summary: None,
             background_preview: None,
+            modified: false,
+            modified_sent: None,
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -235,6 +241,10 @@ impl Core {
         self.layers.reset();
         self.selected.clear();
         self.summary = None;
+        // Превью фона принадлежало прошлому документу.
+        self.background_preview = None;
+        self.modified = false;
+        self.modified_sent = None;
         self.dirty = true;
         Ok(())
     }
@@ -264,6 +274,20 @@ impl Core {
             pages: true,
         };
         self.flush_ui();
+        self.push_modified();
+    }
+
+    /// Событие `Modified`, если признак сменился с прошлого сообщения.
+    fn push_modified(&mut self) {
+        if self.modified_sent == Some(self.modified) {
+            return;
+        }
+        self.modified_sent = Some(self.modified);
+        self.events
+            .retain(|e| !matches!(e, CoreEvent::Modified { .. }));
+        self.events.push(CoreEvent::Modified {
+            modified: self.modified,
+        });
     }
 
     fn push_document(&mut self) {
@@ -368,9 +392,12 @@ impl Core {
             }
             Command::PlaceImage { bytes } => self.place_image(bytes.into_vec()),
             Command::Save => match container::encode(self.editor.document()) {
-                Ok(bytes) => self.events.push(CoreEvent::Saved {
-                    bytes: ByteBuf::from(bytes),
-                }),
+                Ok(bytes) => {
+                    self.events.push(CoreEvent::Saved {
+                        bytes: ByteBuf::from(bytes),
+                    });
+                    self.modified = false;
+                }
                 Err(e) => self.error(format!("Не удалось сохранить: {e}")),
             },
             Command::ReadPixels { reference } => {
@@ -414,6 +441,7 @@ impl Core {
                 EditorEvent::NeedsRedraw => self.dirty = true,
                 EditorEvent::DocumentChanged => {
                     document = true;
+                    self.modified = true;
                     self.ui.layers = true;
                     self.ui.properties = true;
                 }
@@ -466,6 +494,7 @@ impl Core {
             self.push_document();
         }
         self.flush_ui();
+        self.push_modified();
     }
 
     fn copy_png(&mut self, ids: &[NodeId]) {

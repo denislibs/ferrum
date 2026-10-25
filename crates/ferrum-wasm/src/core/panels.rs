@@ -22,6 +22,8 @@ use crate::summary::{summarize, MAX_PAINTS};
 
 /// Наибольший размер картинки из буфера обмена (`PasteImage`).
 pub const MAX_PASTE_BYTES: usize = 64 << 20;
+/// Правка или перенос по версии выделения, а выделение с начала жеста сменилось.
+pub const STALE_SELECTION: &str = "Выделение изменилось — правка не применена";
 
 /// Имя для события: имя страницы или документа из файла может быть любой длины.
 pub(super) fn event_name(name: &str) -> String {
@@ -248,7 +250,19 @@ impl Core {
                 ids,
                 target,
                 position,
+                selection_version,
             } => {
+                // Без id (выделение больше предела id) — только если выделение то же,
+                // что в начале перетаскивания.
+                if ids.is_none()
+                    && selection_version
+                        .is_some_and(|v| v != self.editor.selection_version() as f64)
+                {
+                    self.error(STALE_SELECTION);
+                    self.layers.resend();
+                    self.ui.layers = true;
+                    return;
+                }
                 let ids = match ids {
                     Some(list) => self.nodes(&list),
                     None => Some(self.editor.selection().to_vec()),
@@ -289,7 +303,7 @@ impl Core {
                     self.editor.cancel_gesture();
                     // Ошибка — только о записи: превью и отмена жеста молчат.
                     if p == EditPhase::Commit {
-                        self.error("Выделение изменилось — правка не применена");
+                        self.error(STALE_SELECTION);
                     }
                 }
                 (Ok(e), None) => self.editor.edit_selection(&e, phase(p)),
@@ -309,16 +323,19 @@ impl Core {
                 }
             },
             Command::AddPage => {
-                if let Err(e) = self.editor.create_page() {
-                    self.error(e.to_string());
+                match self.editor.create_page() {
+                    Ok(_) => self.modified = true,
+                    Err(e) => self.error(e.to_string()),
                 }
                 self.ui.pages = true;
             }
             Command::RenamePage { id, name } => {
                 if self.text(&name) {
                     if let Some(id) = self.page_id(&id) {
-                        if let Err(e) = self.editor.rename_page(id, &name) {
-                            self.error(e.to_string());
+                        let before = self.editor.document().pages();
+                        match self.editor.rename_page(id, &name) {
+                            Ok(()) => self.modified |= self.editor.document().pages() != before,
+                            Err(e) => self.error(e.to_string()),
                         }
                     }
                 }
@@ -326,8 +343,9 @@ impl Core {
             }
             Command::DeletePage { id } => {
                 if let Some(id) = self.page_id(&id) {
-                    if let Err(e) = self.editor.delete_page(id) {
-                        self.error(e.to_string());
+                    match self.editor.delete_page(id) {
+                        Ok(()) => self.modified = true,
+                        Err(e) => self.error(e.to_string()),
                     }
                 }
                 self.ui.pages = true;
@@ -360,8 +378,10 @@ impl Core {
                     EditPhase::Commit => {
                         self.background_preview = None;
                         let page = self.editor.page();
-                        if let Err(e) = self.editor.set_page_background(page, parsed) {
-                            self.error(e.to_string());
+                        let before = self.editor.page_background();
+                        match self.editor.set_page_background(page, parsed) {
+                            Ok(()) => self.modified |= self.editor.page_background() != before,
+                            Err(e) => self.error(e.to_string()),
                         }
                         self.ui.pages = true;
                     }
@@ -369,10 +389,14 @@ impl Core {
             }
             Command::SetDocumentName { name } => {
                 if self.text(&name) {
+                    let before = self.editor.document().name();
                     match self.editor.set_document_name(&name) {
-                        Ok(name) => self.events.push(CoreEvent::DocumentName {
-                            name: event_name(&name),
-                        }),
+                        Ok(name) => {
+                            self.modified |= name != before;
+                            self.events.push(CoreEvent::DocumentName {
+                                name: event_name(&name),
+                            });
+                        }
                         Err(e) => self.error(e.to_string()),
                     }
                 }
@@ -429,8 +453,19 @@ impl Core {
                 s.pixel_snap = pixel_snap;
                 self.editor.set_settings(s);
             }
-            // Команды этапа 4 разбирает `Core::command`.
-            _ => {}
+            // Команды этапа 4 разбирает `Core::command`. Список полный, без `_`:
+            // новая команда без ветки здесь — ошибка сборки, а не молчаливый пропуск.
+            Command::Open { .. }
+            | Command::Demo { .. }
+            | Command::Execute { .. }
+            | Command::SetTool { .. }
+            | Command::SetTheme { .. }
+            | Command::Paste { .. }
+            | Command::PlaceImage { .. }
+            | Command::Save
+            | Command::ReadPixels { .. } => {
+                debug_assert!(false, "команда этапа 4 — в `Core::command`");
+            }
         }
     }
 

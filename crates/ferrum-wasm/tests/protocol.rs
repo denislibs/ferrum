@@ -58,6 +58,7 @@ fn commands() -> Vec<Command> {
             ids: None,
             target: "3@4".into(),
             position: DropPosition::Into,
+            selection_version: Some(7.0),
         },
         Command::SetLayerFlags {
             ids: vec!["1@2".into()],
@@ -262,6 +263,7 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::DocumentName {
             name: "Лендинг".into(),
         },
+        CoreEvent::Modified { modified: true },
     ]
 }
 
@@ -296,6 +298,10 @@ fn field_names_match_typescript() {
         json!("clipboardPng")
     );
     assert_eq!(
+        serde_json::to_value(CoreEvent::Modified { modified: false }).unwrap(),
+        json!({"type": "modified", "modified": false})
+    );
+    assert_eq!(
         serde_json::to_value(Command::Save).unwrap(),
         json!({"type": "save"})
     );
@@ -317,10 +323,11 @@ fn field_names_match_typescript() {
         serde_json::to_value(Command::MoveLayers {
             ids: None,
             target: "1@2".into(),
-            position: DropPosition::Above
+            position: DropPosition::Above,
+            selection_version: None,
         })
         .unwrap(),
-        json!({"type": "moveLayers", "ids": null, "target": "1@2", "position": "above"})
+        json!({"type": "moveLayers", "ids": null, "target": "1@2", "position": "above", "selectionVersion": null})
     );
     let row = &serde_json::to_value(
         events()

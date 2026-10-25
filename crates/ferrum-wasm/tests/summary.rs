@@ -208,20 +208,6 @@ fn paint_lists_are_capped() {
     assert!(f.mixed && f.list.is_empty() && st.mixed && st.list.is_empty());
 }
 
-#[test]
-fn cache_recomputes_only_on_change() {
-    use ferrum_wasm::summary::SummaryCache;
-    let mut p = Page::new();
-    let a = p.add(None, NodeKind::Rect, at(1.0, 2.0, 3.0, 4.0));
-    let scene = p.scene();
-    let mut c = SummaryCache::new();
-    assert_eq!(c.get(&scene, &[a], 1).x, same(1.0));
-    // Тот же ключ: подменённый id той же длины не читается — берётся кэш.
-    let ghost: NodeId = "7@7".parse().unwrap();
-    assert_eq!(c.get(&scene, &[ghost], 1).count, 1, "кэш по ключу");
-    assert_eq!(c.get(&scene, &[], 2).count, 0, "версия выделения сменилась");
-}
-
 // ---- Fix round 1 ----
 
 fn two(a: PropsPatch, b: PropsPatch) -> ferrum_wasm::summary::Summary {
@@ -432,12 +418,11 @@ fn image_fill_empty_list_and_paint_limit_boundary() {
     );
 }
 
-// ---- Кэш и круговая правка через редактор ----
+// ---- Сводка и круговая правка через редактор ----
 
 mod live {
     use super::*;
     use ferrum_editor::{Editor, NumField, PanelEdit, Phase, Platform};
-    use ferrum_wasm::summary::SummaryCache;
     use kurbo::Size;
 
     fn editor() -> (Editor, NodeId) {
@@ -469,53 +454,17 @@ mod live {
     }
 
     #[test]
-    fn preview_and_commit_change_the_cached_summary() {
+    fn preview_and_commit_change_the_summary() {
         let (mut ed, id) = editor();
-        let mut c = SummaryCache::new();
         let sel = ed.selection().to_vec();
-        let v = ed.selection_version();
-        assert_eq!(c.get(ed.scene(), &sel, v).x, same(10.0));
+        assert_eq!(summarize(ed.scene(), &sel).x, same(10.0));
         ed.edit_selection(&x(55.0), Phase::Preview);
-        assert_eq!(c.get(ed.scene(), &sel, v).x, same(55.0), "превью видно");
+        assert_eq!(summarize(ed.scene(), &sel).x, same(55.0), "превью видно");
         ed.edit_selection(&x(0.0), Phase::Cancel);
-        assert_eq!(c.get(ed.scene(), &sel, v).x, same(10.0), "отмена жеста");
+        assert_eq!(summarize(ed.scene(), &sel).x, same(10.0), "отмена жеста");
         ed.edit_selection(&x(70.0), Phase::Commit);
-        assert_eq!(c.get(ed.scene(), &sel, v).x, same(70.0), "запись");
+        assert_eq!(summarize(ed.scene(), &sel).x, same(70.0), "запись");
         let _ = id;
-    }
-
-    #[test]
-    fn new_scene_instance_invalidates_the_cache() {
-        let mut p1 = Page::new();
-        let a = p1.add(None, NodeKind::Rect, at(1.0, 0.0, 1.0, 1.0));
-        let s1 = p1.scene();
-        let mut c = SummaryCache::new();
-        assert_eq!(c.get(&s1, &[a], 1).x, same(1.0));
-        // Тот же документ, новая сцена: счётчики могли совпасть, экземпляр — нет.
-        let s2 = p1.scene();
-        assert_eq!(
-            (s1.change_counter(), s1.structure_stamp()),
-            (s2.change_counter(), s2.structure_stamp())
-        );
-        p1.doc
-            .transact(p1.doc.pages()[0].0, vec![], |tx| {
-                tx.set_props(a, &at(9.0, 0.0, 1.0, 1.0))?;
-                Ok(vec![])
-            })
-            .unwrap();
-        let s3 = p1.scene();
-        assert_eq!(c.get(&s3, &[a], 1).x, same(9.0));
-    }
-
-    #[test]
-    fn ids_length_guards_the_cache() {
-        let mut p = Page::new();
-        let a = p.add(None, NodeKind::Rect, at(1.0, 0.0, 1.0, 1.0));
-        let b = p.add(None, NodeKind::Rect, at(2.0, 0.0, 1.0, 1.0));
-        let s = p.scene();
-        let mut c = SummaryCache::new();
-        assert_eq!(c.get(&s, &[a], 1).count, 1);
-        assert_eq!(c.get(&s, &[a, b], 1).count, 2);
     }
 
     #[test]

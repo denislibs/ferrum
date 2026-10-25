@@ -293,6 +293,7 @@ fn rename_move_and_flags_from_layers() {
         ids: Some(vec![top.clone()]),
         target: bottom.clone(),
         position: DropPosition::Below,
+        selection_version: None,
     });
     let (_, _, rows, _) = layers(&core.take_events()).unwrap();
     assert_eq!(
@@ -310,6 +311,7 @@ fn rename_move_and_flags_from_layers() {
         ids: None,
         target: top.clone(),
         position: DropPosition::Into,
+        selection_version: None,
     });
     assert!(
         errors(&core.take_events()).is_empty(),
@@ -887,6 +889,7 @@ fn panel_command_and_event_caps() {
             ids: Some(many),
             target: "1@1".into(),
             position: DropPosition::Into,
+            selection_version: None,
         },
         Command::HoverLayer {
             id: Some("x".repeat(100)),
@@ -1111,4 +1114,170 @@ fn edit_of_selection_beyond_id_cap_is_guarded_by_selection_version() {
     assert_eq!(document_steps(&core), steps + 1.0);
     let s = summary(&core.take_events()).expect("сводка");
     assert_eq!((s.count, s.x.value, s.x.mixed), (count, 77.0, false));
+}
+
+// ---- Итоговая волна исправлений ----
+
+fn selection_version(ev: &[CoreEvent]) -> f64 {
+    ev.iter()
+        .rev()
+        .find_map(|e| match e {
+            CoreEvent::Selection { version, .. } => Some(*version),
+            _ => None,
+        })
+        .expect("событие Selection")
+}
+
+/// Перенос без `ids` (выделение больше предела id) — по версии выделения на
+/// начало жеста: выделение сменилось — переноса и шага нет, одна ошибка.
+#[test]
+fn move_layers_with_stale_selection_version_is_rejected() {
+    let mut core = demo(300);
+    core.command(Command::LayersWindow {
+        start: 0,
+        count: 40,
+    });
+    let (_, _, rows, _) = layers(&core.take_events()).unwrap();
+    let (a, b, c) = (rows[0].id.clone(), rows[1].id.clone(), rows[2].id.clone());
+    core.command(Command::Select {
+        ids: vec![a.clone()],
+        mode: SelectMode::Replace,
+    });
+    let version = selection_version(&core.take_events());
+    // Выделение сменилось после начала жеста.
+    core.command(Command::Select {
+        ids: vec![b.clone()],
+        mode: SelectMode::Replace,
+    });
+    core.take_events();
+    let steps = document_steps(&core);
+    core.command(Command::MoveLayers {
+        ids: None,
+        target: c.clone(),
+        position: DropPosition::Below,
+        selection_version: Some(version),
+    });
+    let ev = core.take_events();
+    assert_eq!(errors(&ev), ["Выделение изменилось — правка не применена"]);
+    assert_eq!(document_steps(&core), steps, "шага нет");
+    let (_, _, rows, _) = layers(&ev).expect("строки вернулись как были");
+    assert_eq!(
+        (
+            rows[0].id.as_str(),
+            rows[1].id.as_str(),
+            rows[2].id.as_str()
+        ),
+        (a.as_str(), b.as_str(), c.as_str())
+    );
+    // Версия та же — переносится текущее выделение, одним шагом.
+    core.command(Command::Select {
+        ids: vec![a.clone()],
+        mode: SelectMode::Replace,
+    });
+    let version = selection_version(&core.take_events());
+    core.command(Command::MoveLayers {
+        ids: None,
+        target: c.clone(),
+        position: DropPosition::Below,
+        selection_version: Some(version),
+    });
+    let ev = core.take_events();
+    assert!(errors(&ev).is_empty(), "{:?}", errors(&ev));
+    assert_eq!(document_steps(&core), steps + 1.0);
+    let (_, _, rows, _) = layers(&ev).unwrap();
+    assert_eq!(
+        (
+            rows[0].id.as_str(),
+            rows[1].id.as_str(),
+            rows[2].id.as_str()
+        ),
+        (b.as_str(), c.as_str(), a.as_str())
+    );
+}
+
+fn modified(ev: &[CoreEvent]) -> Option<bool> {
+    ev.iter().rev().find_map(|e| match e {
+        CoreEvent::Modified { modified } => Some(*modified),
+        _ => None,
+    })
+}
+
+/// «Документ изменён» — и правками вне истории (страницы, фон, имя файла);
+/// новый документ, открытие и сохранение снимают признак.
+#[test]
+fn modified_tracks_changes_outside_history_and_clears_on_open_new_save() {
+    let mut core = demo(10);
+    assert_eq!(modified(&core.take_events()), Some(false), "новый документ");
+    let page = |core: &Core| core.editor().document().pages()[0].0.to_string();
+    type Change = Box<dyn Fn(&Core) -> Command>;
+    let changes: Vec<Change> = vec![
+        Box::new(|_| Command::AddPage),
+        Box::new(move |c| Command::RenamePage {
+            id: page(c),
+            name: "Черновик".into(),
+        }),
+        Box::new(|_| Command::SetPageBackground {
+            color: Some("#102030".into()),
+            phase: EditPhase::Commit,
+        }),
+        Box::new(|_| Command::SetDocumentName {
+            name: "План".into(),
+        }),
+        Box::new(|_| Command::Execute {
+            command: "edit.select_all".into(),
+        }),
+    ];
+    for (i, change) in changes.iter().enumerate() {
+        core.command(Command::Save);
+        assert_eq!(modified(&core.take_events()), None, "{i}: уже сохранён");
+        let cmd = change(&core);
+        let select = matches!(cmd, Command::Execute { .. });
+        core.command(cmd);
+        let ev = core.take_events();
+        if select {
+            // Выделение — не правка документа.
+            assert_eq!(modified(&ev), None, "{i}: выделение");
+            continue;
+        }
+        assert_eq!(modified(&ev), Some(true), "{i}");
+        core.command(Command::Save);
+        assert_eq!(modified(&core.take_events()), Some(false), "{i}: сохранён");
+    }
+    // Превью фона и пустое имя — не изменения.
+    core.command(Command::SetPageBackground {
+        color: Some("#ffffff".into()),
+        phase: EditPhase::Preview,
+    });
+    core.command(Command::SetPageBackground {
+        color: None,
+        phase: EditPhase::Cancel,
+    });
+    core.command(Command::SetDocumentName { name: "  ".into() });
+    assert_eq!(modified(&core.take_events()), None);
+    // Правка из истории (на первой странице: «Добавить страницу» перешла на новую,
+    // пустую). Переход между страницами — не изменение.
+    core.command(Command::SetPage { id: page(&core) });
+    core.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    assert_eq!(modified(&core.take_events()), None);
+    core.command(Command::Execute {
+        command: "edit.delete".into(),
+    });
+    assert_eq!(modified(&core.take_events()), Some(true));
+    core.command(Command::Demo { nodes: 0 });
+    assert_eq!(modified(&core.take_events()), Some(false), "«Создать»");
+}
+
+/// Превью фона страницы не переживает замену документа.
+#[test]
+fn background_preview_is_dropped_with_the_document() {
+    let mut core = demo(10);
+    core.command(Command::SetPageBackground {
+        color: Some("#102030".into()),
+        phase: EditPhase::Preview,
+    });
+    assert_eq!(core.background().to_rgba8().r, 0x10);
+    core.command(Command::Demo { nodes: 0 });
+    assert_eq!(core.background(), ferrum_wasm::core::CANVAS_DARK);
 }
