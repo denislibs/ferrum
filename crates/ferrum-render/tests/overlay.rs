@@ -248,3 +248,54 @@ fn hover_outline_is_not_drawn_for_hidden_nodes() {
         );
     }
 }
+
+#[test]
+fn measurement_badge_sits_on_visible_part_of_long_line() {
+    // Большой зум: линия до дальнего края фрейма уходит за экран на тысячи пикселей.
+    // Плашка — посередине видимой части (и целиком на экране), а не посередине всей
+    // линии далеко за краем; сама линия видна от края до края.
+    use ferrum_render::{Measure, MeasureKind};
+    let scene = Page::new().scene();
+    let cam = camera(240.0, 160.0);
+    let bg = ferrum_render::Rgba::from_rgba8(0x1e, 0x1e, 0x1e, 255);
+    let measure = [0xff, 0x7a, 0x7a];
+    let draw = |a: (f64, f64), b: (f64, f64)| {
+        let overlay = Overlay {
+            measurements: vec![Measure {
+                line: kurbo::Line::new(a, b),
+                value: 14000.0,
+                kind: MeasureKind::Distance,
+            }],
+            frame_labels: false,
+            pixel_grid: false,
+            ..Default::default()
+        };
+        render_overlay(&scene, &cam, &overlay, bg)
+    };
+    let is_measure = |img: &ferrum_render::Pixmap, x: u16, y: u16| {
+        let p = px(img, x, y);
+        (0..3).all(|i| p[i].abs_diff(measure[i]) <= 12)
+    };
+    // Видимая часть горизонтали — весь экран 0..240: плашка по центру, x ≈ 120.
+    let img = draw((-9000.0, 40.0), (5000.0, 40.0));
+    assert!(
+        is_measure(&img, 2, 40) && is_measure(&img, 237, 40),
+        "линия от края до края"
+    );
+    let plate: Vec<u16> = (0..240u16)
+        .filter(|&x| (33..48u16).filter(|&y| is_measure(&img, x, y)).count() >= 8)
+        .collect();
+    assert!(plate.len() >= 14, "столбцов плашки: {}", plate.len());
+    let c = (f64::from(plate[0]) + f64::from(*plate.last().unwrap())) / 2.0;
+    assert!((c - 120.0).abs() <= 2.0, "центр плашки {c}");
+    // Видимая часть — 0..30 у левого края: плашка не вылезает за экран.
+    let img = draw((-9000.0, 80.0), (30.0, 80.0));
+    let cols: Vec<u16> = (0..240u16)
+        .filter(|&x| (73..88u16).filter(|&y| is_measure(&img, x, y)).count() >= 8)
+        .collect();
+    assert!(cols.len() >= 14, "столбцов плашки: {}", cols.len());
+    assert_eq!(cols[0], 0, "плашка прижата к левому краю: {cols:?}");
+    // Линия целиком за экраном — ни линии, ни плашки.
+    let img = draw((-9000.0, 400.0), (5000.0, 400.0));
+    assert!(img.data().iter().all(|c| c.r == 0x1e));
+}

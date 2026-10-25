@@ -556,19 +556,25 @@ fn measurements(
     let theme = &overlay.theme;
     let hairline = Stroke::new(dpr);
     let (w, h) = backend.size();
-    let clip = Rect::new(0.0, 0.0, w as f64, h as f64).inflate(8.0 * dpr, 8.0 * dpr);
+    let screen = Rect::new(0.0, 0.0, w as f64, h as f64);
+    let clip = screen.inflate(8.0 * dpr, 8.0 * dpr);
     backend.set_transform(Affine::IDENTITY);
     backend.set_color(theme.measure);
     // Сначала все линии, потом плашки: плашка не перекрывается чужой линией.
     for m in &overlay.measurements {
         let (a, b) = device_segment(view, m.line, dpr);
         let path = match m.kind {
-            MeasureKind::Distance => {
-                let mut p = BezPath::new();
-                p.move_to(a);
-                p.line_to(b);
-                p
-            }
+            // Сплошная линия — только видимая часть: при большом зуме линия до
+            // дальнего края фрейма уходит за экран на тысячи пикселей.
+            MeasureKind::Distance => match visible(a, b, clip) {
+                Some((p, q)) => {
+                    let mut path = BezPath::new();
+                    path.move_to(p);
+                    path.line_to(q);
+                    path
+                }
+                None => continue,
+            },
             MeasureKind::Guide => dashes(a, b, dpr, clip),
         };
         backend.stroke_path(&path, &hairline);
@@ -577,21 +583,52 @@ fn measurements(
         if m.kind != MeasureKind::Distance {
             continue;
         }
+        let (a, b) = device_segment(view, m.line, dpr);
+        // Плашка — посередине видимой части линии и целиком на экране.
+        let Some((p, q)) = visible(a, b, screen) else {
+            continue;
+        };
         let Some(label) = text.label(&format_size(m.value), LABEL_SIZE * dpr, 500, f64::MAX) else {
             continue;
         };
-        let (a, b) = device_segment(view, m.line, dpr);
-        let mid = a.midpoint(b);
+        let (half_w, half_h) = (
+            label.width / 2.0 + 4.0 * dpr,
+            badge_height(&label, dpr) / 2.0,
+        );
+        let keep = |v: f64, half: f64, side: f64| {
+            if side >= 2.0 * half {
+                v.clamp(half, side - half)
+            } else {
+                v
+            }
+        };
+        let mid = p.midpoint(q);
+        let (cx, cy) = (
+            keep(mid.x, half_w, screen.x1),
+            keep(mid.y, half_h, screen.y1),
+        );
         badge(
             backend,
             &label,
             dpr,
-            mid.x,
-            mid.y - badge_height(&label, dpr) / 2.0,
+            cx,
+            cy - half_h,
             theme.measure,
             theme.on_select,
         );
     }
+}
+
+/// Видимая в `clip` часть отрезка `a → b` (пиксели устройства).
+fn visible(a: Point, b: Point, clip: Rect) -> Option<(Point, Point)> {
+    let v = b - a;
+    let len = v.hypot();
+    if !len.is_finite() || len <= 0.0 {
+        return None;
+    }
+    let dir = v / len;
+    let (t0, t1) = clip_span(a, dir, len, clip)?;
+    Some((a + dir * t0, a + dir * t1))
 }
 
 #[cfg(test)]
