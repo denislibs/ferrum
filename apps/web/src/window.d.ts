@@ -9,6 +9,8 @@ declare global {
     __ferrum?: {
       core: Core;
       events: CoreEvent[];
+      /** Редактор, тестовый режим: тип, размер байтов и текст ошибки каждого события. */
+      uiEvents?: { type: string; size?: number; message?: string }[];
       /** Документ открыт (событие `opened`). */
       ready: boolean;
       /** Редактор: состояние интерфейса (только чтение в тестах). */

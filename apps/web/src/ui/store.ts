@@ -123,8 +123,11 @@ export function createUiStore() {
         break;
       case 'error':
         // «Ядро остановлено: …» — одно сообщение навсегда, а не уведомление.
-        if (e.message.startsWith('Ядро остановлено:')) setState('stopped', e.message);
-        else toast(e.message, 'error');
+        // Любое сообщение об остановке («…: причина», «…, команда не выполнена»)
+        // уже показано плашкой: повторных уведомлений на каждую команду нет.
+        if (e.message.startsWith('Ядро остановлено')) {
+          if (state.stopped === null && e.message.startsWith('Ядро остановлено:')) setState('stopped', e.message);
+        } else toast(e.message, 'error');
         break;
       default:
         break;

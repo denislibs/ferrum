@@ -38,7 +38,12 @@ export interface SchedulerOptions {
   batch: (fn: () => void) => void;
   /** Ошибка подписчика не останавливает кадр: она уходит сюда. */
   onError?: (e: unknown) => void;
+  /** Режим разработки: превышение предела повторных чтений за кадр — в onError. */
+  dev?: boolean;
 }
+
+/** Сколько раз за кадр чтение может просить новое чтение; остаток — в следующий кадр. */
+export const MAX_MEASURE_ROUNDS = 8;
 
 export function createScheduler(opts: SchedulerOptions): Scheduler {
   let phase: Phase = 'idle';
@@ -70,34 +75,46 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     },
     phase: () => phase,
     frame() {
-      phase = 'measure';
-      const writes: (() => void)[] = [];
-      for (const r of readers) {
-        run(() => {
-          const w = r();
-          if (w) writes.push(w);
-        });
+      try {
+        phase = 'measure';
+        const writes: (() => void)[] = [];
+        for (const r of readers) {
+          run(() => {
+            const w = r();
+            if (w) writes.push(w);
+          });
+        }
+        // Чтения, запрошенные из чтений, — в этом же кадре, но не бесконечно.
+        for (let round = 0; measures.length; round++) {
+          if (round === MAX_MEASURE_ROUNDS) {
+            if (opts.dev) onError(new Error('Чтения бесконечно просят новые чтения: остаток отложен на следующий кадр'));
+            break;
+          }
+          const batch = measures;
+          measures = [];
+          batch.forEach(run);
+        }
+        phase = 'mutate';
+        const evs = events;
+        events = [];
+        const muts = mutates;
+        mutates = [];
+        // Ошибка эффекта Solid не должна вылетать в кадр ядра и останавливать его.
+        run(() =>
+          opts.batch(() => {
+            evs.forEach(run);
+            writes.forEach(run);
+            muts.forEach(run);
+          }),
+        );
+      } finally {
+        phase = 'idle';
       }
-      // Чтения, запрошенные из чтений, — в этом же кадре.
-      while (measures.length) {
-        const batch = measures;
-        measures = [];
-        batch.forEach(run);
-      }
-      phase = 'mutate';
-      const evs = events;
-      events = [];
-      const muts = mutates;
-      mutates = [];
-      opts.batch(() => {
-        evs.forEach(run);
-        writes.forEach(run);
-        muts.forEach(run);
-      });
-      phase = 'idle';
     },
   };
 }
+
+const KEY = Symbol.for('ferrum.layoutGuard');
 
 /** Чтения layout, о которых предупреждает `guardLayout`. */
 export const LAYOUT_READS = [
@@ -123,6 +140,9 @@ export function guardLayout(
   scheduler: Pick<Scheduler, 'phase'>,
   warn: (message: string) => void = (m) => console.warn(m),
 ): () => void {
+  // Повторная установка (горячая замена модулей) сначала снимает прежние обёртки.
+  const g = globalThis as { [KEY]?: () => void };
+  g[KEY]?.();
   const warned = new Set<string>();
   const restore: (() => void)[] = [];
   const check = (name: string) => {
@@ -159,5 +179,10 @@ export function guardLayout(
       restore.push(() => Object.defineProperty(proto, name, d));
     }
   }
-  return () => restore.forEach((r) => r());
+  const off = () => {
+    restore.splice(0).reverse().forEach((r) => r());
+    if (g[KEY] === off) delete g[KEY];
+  };
+  g[KEY] = off;
+  return off;
 }

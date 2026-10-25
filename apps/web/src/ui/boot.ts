@@ -11,8 +11,21 @@ import { forwardKey } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
 import type { UiStore } from './store';
 
-/** Журнал событий для тестов — последние события, не больше этого числа. */
+/** Журнал событий для тестов — последние записи, не больше этого числа. */
 const EVENT_LOG = 2000;
+
+/** Тестовый режим: E2E ставит `window.__ferrumTest` до загрузки или адрес с `?debug`. */
+function testMode(params: URLSearchParams): boolean {
+  return params.has('debug') || (window as { __ferrumTest?: boolean }).__ferrumTest === true;
+}
+
+/** Запись журнала: тип и размер, но не сами данные (картинки и буфер обмена — до 64 МБ). */
+function note(e: CoreEvent): { type: string; size?: number; message?: string } {
+  const n: { type: string; size?: number; message?: string } = { type: e.type };
+  if ('bytes' in e && e.bytes instanceof Uint8Array) n.size = e.bytes.length;
+  if (e.type === 'error') n.message = e.message;
+  return n;
+}
 
 function choice<T extends string>(params: URLSearchParams, name: string, allowed: readonly T[]): T | undefined {
   const v = params.get(name);
@@ -27,18 +40,34 @@ export interface BootOptions {
 export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: BootOptions = {}): Promise<Editor> {
   const params = new URLSearchParams(location.search);
   const platform = detectPlatform();
-  const scheduler = createScheduler({ batch });
-  if (import.meta.env.DEV) guardLayout([Element.prototype, HTMLElement.prototype], scheduler);
-  const events: CoreEvent[] = [];
+  const test = testMode(params);
+  const reported = new Set<string>();
+  const scheduler = createScheduler({
+    batch,
+    dev: import.meta.env.DEV || test,
+    // Ошибка интерфейса в кадре: одно уведомление на каждое сообщение, не в цикле.
+    onError: (e) => {
+      console.error(e);
+      const message = `Ошибка интерфейса: ${e instanceof Error ? e.message : String(e)}`;
+      if (reported.has(message)) return;
+      reported.add(message);
+      store.toast(message, 'error');
+    },
+  });
+  const uiEvents: { type: string; size?: number; message?: string }[] = [];
   const isClipboardKey = opts.isClipboardKey ?? (() => false);
   const core = await Core.start(canvas, {
     platform,
     backend: choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
     transport: choice<TransportMode>(params, 'transport', ['sab', 'message']),
     keyFilter: (e) => forwardKey(e, isClipboardKey),
+    // Чтения layout самого Core — в фазе measure планировщика.
+    measure: (read) => scheduler.measure(read),
     onEvent: (e) => {
-      events.push(e);
-      if (events.length > EVENT_LOG) events.splice(0, EVENT_LOG / 2);
+      if (test) {
+        uiEvents.push(note(e));
+        if (uiEvents.length > EVENT_LOG) uiEvents.splice(0, EVENT_LOG / 2);
+      }
       if (e.type === 'opened' && window.__ferrum) window.__ferrum.ready = true;
       // Ошибка — сразу, мимо планировщика: при остановке ядра кадров больше нет, и
       // из очереди сообщение не дошло бы до пользователя никогда.
@@ -46,12 +75,21 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
       else scheduler.enqueue(() => store.apply(e));
     },
   });
+  // Защита ставится после запуска: стартовые чтения Core — не нарушение. Предупреждения
+  // в тестовом режиме копятся в `window.__ferrumWarnings`.
+  if (import.meta.env.DEV || test) {
+    guardLayout([Element.prototype, HTMLElement.prototype], scheduler, (m) => {
+      console.warn(m);
+      ((window as { __ferrumWarnings?: string[] }).__ferrumWarnings ??= []).push(m);
+    });
+  }
   core.onFrame(() => scheduler.frame());
   scheduler.everyFrame(() => {
     const l = core.live;
     if (l) return () => store.applyLive(l);
   });
-  window.__ferrum = { core, events, ready: false, ui: store.state };
+  window.__ferrum = { core, events: [], uiEvents: test ? uiEvents : undefined, ready: false, ui: store.state };
+  (window.__ferrum as unknown as { scheduler: typeof scheduler }).scheduler = scheduler;
   const editor: Editor = {
     core,
     store,

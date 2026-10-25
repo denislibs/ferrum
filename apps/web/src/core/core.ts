@@ -28,6 +28,9 @@ export interface CoreOptions {
   /** Подписка до запуска: события, пришедшие вместе с `ready` (раскладка, пресеты),
    * иначе прошли бы раньше, чем вызывающий успеет вызвать `on`. */
   onEvent?: (e: CoreEvent) => void;
+  /** Куда отдать чтение layout, которое Core делает после запуска (ResizeObserver,
+   * смена плотности): планировщик интерфейса выполнит его в фазе measure. */
+  measure?: (read: () => void) => void;
 }
 
 /** Сколько ждать события `ready` после запуска worker'а. */
@@ -98,6 +101,9 @@ export class Core {
   private failed: ((e: Error) => void) | null = null;
   private readonly frameHooks = new Set<() => void>();
   private keyFilter: (e: KeyboardEvent) => boolean = () => true;
+  private measure: (read: () => void) => void = (read) => read();
+  /** Ошибки обработчиков кадра, о которых уже сообщили (одно сообщение — один раз). */
+  private readonly hookErrors = new Set<string>();
   /** Ядро остановлено (сбой worker'а): сообщение было, кадров и ввода больше нет. */
   private stopped = false;
 
@@ -116,6 +122,7 @@ export class Core {
     const transport = createTransport(worker, opts.transport);
     const core = new Core(worker, transport, canvas);
     if (opts.keyFilter) core.keyFilter = opts.keyFilter;
+    if (opts.measure) core.measure = opts.measure;
     if (opts.onEvent) core.on(opts.onEvent);
     let timer = 0;
     const ready = new Promise<void>((resolve, reject) => {
@@ -342,7 +349,8 @@ export class Core {
       this.rect = { left: r.left, top: r.top, width: r.width, height: r.height };
       enc.resize(sink, Math.max(1, r.width), Math.max(1, r.height), devicePixelRatio);
     };
-    const ro = new ResizeObserver(this.timed(resize));
+    // Чтение размера — через measure (если задан): до записи в DOM, без принудительной раскладки.
+    const ro = new ResizeObserver(this.timed(() => this.measure(resize)));
     ro.observe(c);
     this.disposers.push(() => ro.disconnect());
     let mq: MediaQueryList | null = null;
@@ -352,7 +360,7 @@ export class Core {
       mq.addEventListener('change', onDpr);
     };
     const onDpr = this.timed(() => {
-      resize();
+      this.measure(resize);
       watchDpr();
     });
     watchDpr();
@@ -370,7 +378,18 @@ export class Core {
         LIVE_NAMES.forEach((n, i) => (obj[n] = live[i]));
         this.live = obj;
       }
-      for (const hook of this.frameHooks) hook();
+      for (const hook of this.frameHooks) {
+        try {
+          hook();
+        } catch (e) {
+          // Сбой интерфейса не должен остановить кадры ядра: сообщаем один раз.
+          const message = `Ошибка интерфейса: ${e instanceof Error ? e.message : String(e)}`;
+          if (!this.hookErrors.has(message)) {
+            this.hookErrors.add(message);
+            this.emit({ type: 'error', message });
+          }
+        }
+      }
       this.frameCost += performance.now() - t;
       // Окно последних 10 000 кадров (около трёх минут при 60 Гц).
       if (this.costs.length === 10_000) this.costs.splice(0, 1000);

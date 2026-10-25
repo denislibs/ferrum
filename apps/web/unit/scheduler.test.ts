@@ -106,3 +106,93 @@ test('чтение layout вне measure предупреждает один р�
   expect(warnings).toHaveLength(2);
   expect(el.getBoundingClientRect()).toEqual({ width: 10 });
 });
+
+test('ошибка в batch (эффект Solid) не срывает следующий кадр и доходит до onError', () => {
+  const errors: unknown[] = [];
+  let fail = true;
+  const s = createScheduler({
+    batch: (fn) => {
+      fn();
+      if (fail) throw new Error('эффект');
+    },
+    onError: (e) => errors.push(e),
+  });
+  const done: string[] = [];
+  s.enqueue(() => done.push('1'));
+  expect(() => s.frame()).not.toThrow();
+  expect(errors).toHaveLength(1);
+  expect(s.phase()).toBe('idle');
+  fail = false;
+  s.enqueue(() => done.push('2'));
+  s.frame();
+  expect(done).toEqual(['1', '2']);
+  expect(errors).toHaveLength(1);
+});
+
+test('запись из записи откладывается на следующий кадр', () => {
+  const { s, log } = setup();
+  s.mutate(() => {
+    log.push('a');
+    s.mutate(() => log.push('b'));
+  });
+  s.frame();
+  expect(log.filter((l) => l === 'a' || l === 'b')).toEqual(['a']);
+  s.frame();
+  expect(log.filter((l) => l === 'a' || l === 'b')).toEqual(['a', 'b']);
+});
+
+test('ошибки в подписчиках, чтениях и записях не мешают остальным', () => {
+  const errors: unknown[] = [];
+  const s = createScheduler({ batch: (fn) => fn(), onError: (e) => errors.push(e) });
+  const done: string[] = [];
+  s.everyFrame(() => {
+    throw new Error('читатель');
+  });
+  s.everyFrame(() => () => {
+    throw new Error('запись читателя');
+  });
+  s.everyFrame(() => () => done.push('запись'));
+  s.measure(() => {
+    throw new Error('чтение');
+  });
+  s.measure(() => done.push('чтение'));
+  s.mutate(() => {
+    throw new Error('запись');
+  });
+  s.mutate(() => done.push('мутация'));
+  s.frame();
+  expect(done).toEqual(['чтение', 'запись', 'мутация']);
+  expect(errors).toHaveLength(4);
+  expect(s.phase()).toBe('idle');
+});
+
+test('чтение, снова просящее чтение, ограничено: остаток — в следующий кадр', () => {
+  const errors: unknown[] = [];
+  const s = createScheduler({ batch: (fn) => fn(), onError: (e) => errors.push(e), dev: true });
+  let n = 0;
+  const again = (): void => {
+    n++;
+    s.measure(again);
+  };
+  s.measure(again);
+  s.frame();
+  expect(n).toBe(8);
+  expect(errors).toHaveLength(1);
+  expect(s.phase()).toBe('idle');
+  // Остаток продолжился в следующем кадре (и снова упёрся в предел).
+  s.frame();
+  expect(n).toBe(16);
+});
+
+test('guardLayout повторно (HMR) не оборачивает дважды, снятие возвращает оригинал', () => {
+  const { s } = setup();
+  const getter = { getBoundingClientRect: () => 1 };
+  const original = getter.getBoundingClientRect;
+  const warnings: string[] = [];
+  guardLayout([getter], s, (m) => warnings.push(m));
+  const restore = guardLayout([getter], s, (m) => warnings.push(m));
+  getter.getBoundingClientRect();
+  expect(warnings).toHaveLength(1);
+  restore();
+  expect(getter.getBoundingClientRect).toBe(original);
+});

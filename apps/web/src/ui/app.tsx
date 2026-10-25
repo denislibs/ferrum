@@ -1,6 +1,6 @@
 // Редактор: холст под управлением worker'а и панели вокруг него.
 
-import { createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { boot } from './boot';
 import { EditorContext, type Editor } from './context';
 import { createUiStore } from './store';
@@ -24,6 +24,13 @@ export function App() {
   onCleanup(() => editor()?.core.dispose());
 
   return (
+    <ErrorBoundary
+      fallback={(err: unknown) => (
+        <div class="fe-boot fe-boot--error" role="alert">
+          Ошибка интерфейса: {err instanceof Error ? err.message : String(err)}. Перезагрузите страницу
+        </div>
+      )}
+    >
     <div class="fe-app" classList={{ 'fe-app--bare': store.state.uiHidden }}>
       <main class="fe-stage">
         <canvas ref={canvas} class="fe-canvas" tabindex="0" aria-label="Холст" />
@@ -43,5 +50,6 @@ export function App() {
       <Show when={editor()}>{(ed) => <EditorContext.Provider value={ed()}>{null}</EditorContext.Provider>}</Show>
       <Toasts store={store} />
     </div>
+    </ErrorBoundary>
   );
 }

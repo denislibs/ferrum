@@ -87,6 +87,8 @@ export async function drag(page: Page, from: { x: number; y: number }, dx: numbe
 
 /** Редактор (index.html) со страницей-примером из `nodes` узлов. */
 export async function openApp(page: Page, nodes = 1000, query = ''): Promise<void> {
+  // Тестовый режим интерфейса: журнал событий (без байтов) и защита чтений layout.
+  await page.addInitScript(() => ((window as { __ferrumTest?: boolean }).__ferrumTest = true));
   await page.goto(`/?nodes=${nodes}${query}`);
   await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true, null, {
     timeout: 90_000,
