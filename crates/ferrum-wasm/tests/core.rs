@@ -71,7 +71,8 @@ fn demo_page_is_drawn_once_and_shows_the_document() {
         ev.contains(&CoreEvent::Opened {
             pages: 1,
             nodes: 1000,
-            warnings: vec![]
+            warnings: vec![],
+            name: "Без названия".into(),
         }),
         "{ev:?}"
     );
@@ -220,7 +221,8 @@ fn save_and_open_round_trip() {
     assert!(other.take_events().contains(&CoreEvent::Opened {
         pages: 1,
         nodes: 300,
-        warnings: vec![]
+        warnings: vec![],
+        name: "Без названия".into(),
     }));
 }
 

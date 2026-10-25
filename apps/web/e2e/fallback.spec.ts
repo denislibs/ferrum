@@ -168,7 +168,8 @@ async function expectDrawn(page: Page): Promise<void> {
   const l = await live(page);
   const at = screen(l, 200, 40);
   await expectPixel(page, at.x, at.y, [1, 120, 200]);
-  await expectPixel(page, 600, l.viewportH - 10, [36, 35, 34]);
+  // Пустой холст — токен `canvas` дизайн-системы (#1a1918).
+  await expectPixel(page, 600, l.viewportH - 10, [26, 25, 24]);
 }
 
 /** Просит ещё кадр: ввод, после которого редактор перерисовывается. */
@@ -261,7 +262,7 @@ test('много запусков и остановок ядра: контекс
 // --- 3. Холст больше предела устройства ------------------------------------
 
 test('холст больше MAX_TEXTURE_SIZE при создании: WebGL2 отклонён, рисует CPU', async ({ page }) => {
-  await page.goto('/?nodes=10');
+  await page.goto('/debug.html?nodes=10');
   const width = await pastWebglLimit(page);
   await page.setViewportSize({ width, height: 200 });
   await open(page, '&backend=webgl');
@@ -478,7 +479,7 @@ test('worker не ответил на запуск: start отклоняется
   await stubWorker(page, { stallInit: true });
   let closed = false;
   page.on('worker', (w) => w.on('close', () => (closed = true)));
-  await page.goto('/?nodes=10');
+  await page.goto('/debug.html?nodes=10');
   await expect(page.locator('#hud')).toHaveText('Ядро не запустилось: истекло время ожидания', { timeout: 40_000 });
   await expect.poll(() => closed).toBe(true);
   expect(await page.evaluate(() => window.__ferrum === undefined)).toBe(true);

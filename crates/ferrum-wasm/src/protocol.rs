@@ -11,11 +11,21 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use tsify::Tsify;
 
+pub use crate::layers::{LayerRow, NodeType};
+pub use crate::summary::{
+    Align, FillDto, Flag, Num, PaintKind, Paints, ScaleModeDto, StrokeDto, Summary,
+};
+
 /// Наибольшая страница-пример: столько узлов генерирует `Demo`.
 pub const MAX_DEMO_NODES: u32 = 500_000;
 /// Сколько идентификаторов выделения уходит в событии `Selection`: панели
 /// получают из worker'а готовые срезы, полный список в основной поток не нужен.
 pub const SELECTION_IDS_MAX: usize = 1000;
+/// Предел байтов строки в команде (имя, запрос поиска, сочетание): имена режутся
+/// до 256 символов, но строка из основного потока может быть любой длины.
+pub const MAX_TEXT_BYTES: usize = 4096;
+/// Масштабы экспорта PNG (раздел 8.7 спеки).
+pub const EXPORT_SCALES: [f64; 3] = [1.0, 2.0, 3.0];
 
 /// Инструмент.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
@@ -88,6 +98,77 @@ impl Backend {
     }
 }
 
+/// Как выделять из панели слоёв: заменить, добавить или убрать (Ctrl/Cmd),
+/// диапазон от прошлого щелчка (Shift).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectMode {
+    Replace,
+    Toggle,
+    Range,
+}
+
+/// Куда бросили слои относительно строки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum DropPosition {
+    Above,
+    Below,
+    Into,
+}
+
+/// Числовое поле панели свойств.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum Field {
+    X,
+    Y,
+    W,
+    H,
+    Rotation,
+    Opacity,
+    CornerRadius,
+    StrokeWidth,
+}
+
+/// Фаза правки из панели: превью жеста, запись одним шагом, отмена жеста.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum EditPhase {
+    Preview,
+    Commit,
+    Cancel,
+}
+
+/// Правка выделения из панели свойств.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum Edit {
+    Number {
+        field: Field,
+        value: f64,
+        relative: bool,
+    },
+    Fills {
+        fills: Vec<FillDto>,
+    },
+    Strokes {
+        strokes: Vec<StrokeDto>,
+    },
+    ClipContent {
+        value: bool,
+    },
+    Size {
+        w: f64,
+        h: f64,
+    },
+}
+
 /// Команда основного потока worker'у.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(
@@ -133,6 +214,152 @@ pub enum Command {
     ReadPixels {
         reference: bool,
     },
+    // ——— Этап 5: панели ———
+    /// Окно строк панели слоёв, которое сейчас видно (с запасом).
+    LayersWindow {
+        start: u32,
+        count: u32,
+    },
+    ExpandLayer {
+        id: String,
+        expanded: bool,
+    },
+    /// Поиск по слоям; пустая строка — без поиска.
+    FilterLayers {
+        query: String,
+    },
+    /// Выделение из панели слоёв (не больше `SELECTION_IDS_MAX` идентификаторов).
+    Select {
+        ids: Vec<String>,
+        mode: SelectMode,
+    },
+    /// Наведение на строку слоя — подсветка узла на холсте.
+    HoverLayer {
+        id: Option<String>,
+    },
+    RenameLayer {
+        id: String,
+        name: String,
+    },
+    /// Перенос слоёв к строке `target`. Без `ids` — текущее выделение целиком
+    /// (оно может быть больше того, что видит панель).
+    MoveLayers {
+        ids: Option<Vec<String>>,
+        target: String,
+        position: DropPosition,
+    },
+    /// Скрыть или заблокировать (кнопки строки слоя).
+    SetLayerFlags {
+        ids: Vec<String>,
+        visible: Option<bool>,
+        locked: Option<bool>,
+    },
+    /// Правка выделения из панели свойств.
+    EditSelection {
+        edit: Edit,
+        phase: EditPhase,
+    },
+    /// Новая страница; она становится текущей.
+    AddPage,
+    RenamePage {
+        id: String,
+        name: String,
+    },
+    DeletePage {
+        id: String,
+    },
+    SetPage {
+        id: String,
+    },
+    /// Фон текущей страницы (`#rrggbb[aa]`); без цвета — как у холста в теме.
+    /// Жест палитры — превью только в кадре (`preview`), в документ — при
+    /// отпускании (`commit`), `cancel` возвращает фон документа.
+    SetPageBackground {
+        color: Option<String>,
+        phase: EditPhase,
+    },
+    SetDocumentName {
+        name: String,
+    },
+    /// Фрейм из пресета (номер в списке события `Presets`).
+    AddFramePreset {
+        index: u32,
+    },
+    /// Зум к центру холста (1 — 100 %).
+    SetZoom {
+        zoom: f64,
+    },
+    /// Экспорт PNG выделения (без выделения — всей страницы): ответ — `Exported`.
+    Export {
+        scale: f64,
+    },
+    /// Изображение из системного буфера: встаёт в центр видимой части.
+    PasteImage {
+        #[tsify(type = "Uint8Array")]
+        bytes: ByteBuf,
+    },
+    /// Назначить сочетание. Занято другими и `replace: false` — ответ `BindConflict`.
+    Bind {
+        command: String,
+        shortcut: String,
+        replace: bool,
+    },
+    Unbind {
+        command: String,
+        shortcut: String,
+    },
+    /// Сбросить сочетания команды; без команды — всех.
+    ResetKeymap {
+        command: Option<String>,
+    },
+    /// Отличия раскладки в JSON (`ferrum-keymap`) — из настроек или из файла.
+    ImportKeymap {
+        json: String,
+    },
+    SetSettings {
+        pixel_snap: bool,
+    },
+}
+
+/// Страница в списке.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    pub id: String,
+    pub name: String,
+}
+
+/// Команда в таблице раскладки: ключ, название, группа (`tool`, `edit`…),
+/// действующие сочетания (каноническая запись и подпись US) и умолчания.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct KeymapEntry {
+    pub key: String,
+    pub name: String,
+    pub group: String,
+    pub bindings: Vec<String>,
+    pub labels: Vec<String>,
+    pub defaults: Vec<String>,
+    pub overridden: bool,
+}
+
+/// Сочетание, занятое несколькими командами (ключи команд).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictInfo {
+    pub shortcut: String,
+    pub label: String,
+    pub commands: Vec<String>,
+}
+
+/// Пресет фрейма.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetInfo {
+    pub group: String,
+    pub name: String,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// Событие worker'а основному потоку.
@@ -153,6 +380,8 @@ pub enum CoreEvent {
         pages: u32,
         nodes: u32,
         warnings: Vec<String>,
+        /// Имя документа (для шапки и «Сохранить как…»).
+        name: String,
     },
     /// Выделение: число узлов и первые `SELECTION_IDS_MAX` идентификаторов.
     Selection {
@@ -206,5 +435,55 @@ pub enum CoreEvent {
     /// Сообщение об ошибке для пользователя.
     Error {
         message: String,
+    },
+    // ——— Этап 5: панели ———
+    /// Окно строк панели слоёв. `reveal` — строка первого выделенного, если
+    /// выделение пришло с холста (панель прокручивает к ней).
+    Layers {
+        start: u32,
+        total: u32,
+        rows: Vec<LayerRow>,
+        reveal: Option<u32>,
+    },
+    /// Сводка выделения для панели свойств.
+    Properties {
+        summary: Summary,
+    },
+    /// Страницы, текущая и её фон (нет — как у холста в теме).
+    Pages {
+        pages: Vec<PageInfo>,
+        current: String,
+        background: Option<String>,
+    },
+    /// Раскладка: все команды, конфликты, сочетания браузера и отличия от
+    /// умолчаний в JSON (их интерфейс хранит в настройках).
+    Keymap {
+        commands: Vec<KeymapEntry>,
+        conflicts: Vec<ConflictInfo>,
+        reserved: Vec<String>,
+        overrides: String,
+    },
+    /// Сочетание занято: интерфейс предлагает заменить (`Bind` с `replace`).
+    BindConflict {
+        command: String,
+        shortcut: String,
+        commands: Vec<String>,
+    },
+    /// Раскладка импортирована; предупреждения — о пропущенном.
+    KeymapImported {
+        warnings: Vec<String>,
+    },
+    Presets {
+        presets: Vec<PresetInfo>,
+    },
+    /// PNG экспорта и имя файла.
+    Exported {
+        name: String,
+        #[tsify(type = "Uint8Array")]
+        bytes: ByteBuf,
+    },
+    /// Имя документа изменилось.
+    DocumentName {
+        name: String,
     },
 }

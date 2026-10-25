@@ -33,6 +33,107 @@ fn commands() -> Vec<Command> {
         },
         Command::Save,
         Command::ReadPixels { reference: true },
+        Command::LayersWindow {
+            start: 10,
+            count: 40,
+        },
+        Command::ExpandLayer {
+            id: "1@2".into(),
+            expanded: true,
+        },
+        Command::FilterLayers {
+            query: "кнопка".into(),
+        },
+        Command::Select {
+            ids: vec!["1@2".into()],
+            mode: SelectMode::Range,
+        },
+        Command::HoverLayer { id: None },
+        Command::RenameLayer {
+            id: "1@2".into(),
+            name: "Фон".into(),
+        },
+        Command::MoveLayers {
+            ids: None,
+            target: "3@4".into(),
+            position: DropPosition::Into,
+        },
+        Command::SetLayerFlags {
+            ids: vec!["1@2".into()],
+            visible: Some(false),
+            locked: None,
+        },
+        Command::EditSelection {
+            edit: Edit::Number {
+                field: Field::CornerRadius,
+                value: 4.0,
+                relative: false,
+            },
+            phase: EditPhase::Preview,
+        },
+        Command::EditSelection {
+            edit: Edit::Fills {
+                fills: vec![FillDto {
+                    kind: PaintKind::Solid,
+                    color: "#ff0000ff".into(),
+                    opacity: 1.0,
+                    visible: true,
+                    image_hash: None,
+                    scale_mode: None,
+                }],
+            },
+            phase: EditPhase::Commit,
+        },
+        Command::EditSelection {
+            edit: Edit::Strokes {
+                strokes: vec![StrokeDto {
+                    color: "#000000ff".into(),
+                    width: 1.0,
+                    align: Align::Inside,
+                }],
+            },
+            phase: EditPhase::Cancel,
+        },
+        Command::EditSelection {
+            edit: Edit::ClipContent { value: false },
+            phase: EditPhase::Commit,
+        },
+        Command::EditSelection {
+            edit: Edit::Size { w: 393.0, h: 852.0 },
+            phase: EditPhase::Commit,
+        },
+        Command::AddPage,
+        Command::RenamePage {
+            id: "5@6".into(),
+            name: "Главная".into(),
+        },
+        Command::DeletePage { id: "5@6".into() },
+        Command::SetPage { id: "5@6".into() },
+        Command::SetPageBackground {
+            color: Some("#ffffff".into()),
+            phase: EditPhase::Commit,
+        },
+        Command::SetDocumentName {
+            name: "Лендинг".into(),
+        },
+        Command::AddFramePreset { index: 3 },
+        Command::SetZoom { zoom: 2.0 },
+        Command::Export { scale: 3.0 },
+        Command::PasteImage {
+            bytes: bytes(&[0x89]),
+        },
+        Command::Bind {
+            command: "tool.rect".into(),
+            shortcut: "KeyQ".into(),
+            replace: false,
+        },
+        Command::Unbind {
+            command: "tool.rect".into(),
+            shortcut: "KeyR".into(),
+        },
+        Command::ResetKeymap { command: None },
+        Command::ImportKeymap { json: "{}".into() },
+        Command::SetSettings { pixel_snap: false },
     ]
 }
 
@@ -46,6 +147,7 @@ fn events() -> Vec<CoreEvent> {
             pages: 2,
             nodes: 10,
             warnings: vec![],
+            name: "Лендинг".into(),
         },
         CoreEvent::Selection {
             count: 2,
@@ -76,6 +178,77 @@ fn events() -> Vec<CoreEvent> {
         },
         CoreEvent::Error {
             message: "ой".into(),
+        },
+        CoreEvent::Layers {
+            start: 0,
+            total: 1,
+            rows: vec![LayerRow {
+                id: "1@2".into(),
+                name: "Фон".into(),
+                kind: NodeType::Rect,
+                depth: 1,
+                has_children: false,
+                expanded: false,
+                selected: true,
+                parent_selected: false,
+                visible: true,
+                locked: false,
+                ancestor_hidden: false,
+                ancestor_locked: true,
+            }],
+            reveal: Some(0),
+        },
+        CoreEvent::Properties {
+            summary: Summary::empty(),
+        },
+        CoreEvent::Pages {
+            pages: vec![PageInfo {
+                id: "5@6".into(),
+                name: "Страница 1".into(),
+            }],
+            current: "5@6".into(),
+            background: None,
+        },
+        CoreEvent::Keymap {
+            commands: vec![KeymapEntry {
+                key: "tool.rect".into(),
+                name: "Прямоугольник".into(),
+                group: "tool".into(),
+                bindings: vec!["KeyR".into()],
+                labels: vec!["R".into()],
+                defaults: vec!["KeyR".into()],
+                overridden: false,
+            }],
+            conflicts: vec![ConflictInfo {
+                shortcut: "KeyR".into(),
+                label: "R".into(),
+                commands: vec![],
+            }],
+            reserved: vec!["Ctrl+KeyW".into()],
+            overrides: "{}".into(),
+        },
+        CoreEvent::BindConflict {
+            command: "a".into(),
+            shortcut: "KeyR".into(),
+            commands: vec!["b".into()],
+        },
+        CoreEvent::KeymapImported {
+            warnings: vec!["пропущено".into()],
+        },
+        CoreEvent::Presets {
+            presets: vec![PresetInfo {
+                group: "Телефоны".into(),
+                name: "iPhone 16".into(),
+                width: 393.0,
+                height: 852.0,
+            }],
+        },
+        CoreEvent::Exported {
+            name: "Фон@2x.png".into(),
+            bytes: bytes(b"png"),
+        },
+        CoreEvent::DocumentName {
+            name: "Лендинг".into(),
         },
     ]
 }
@@ -114,6 +287,39 @@ fn field_names_match_typescript() {
         serde_json::to_value(Command::Save).unwrap(),
         json!({"type": "save"})
     );
+    assert_eq!(
+        serde_json::to_value(Command::EditSelection {
+            edit: Edit::Number {
+                field: Field::CornerRadius,
+                value: 4.0,
+                relative: true
+            },
+            phase: EditPhase::Preview,
+        })
+        .unwrap(),
+        json!({"type": "editSelection", "edit": {"type": "number", "field": "cornerRadius", "value": 4.0, "relative": true}, "phase": "preview"})
+    );
+    assert_eq!(
+        serde_json::to_value(Command::MoveLayers {
+            ids: None,
+            target: "1@2".into(),
+            position: DropPosition::Above
+        })
+        .unwrap(),
+        json!({"type": "moveLayers", "ids": null, "target": "1@2", "position": "above"})
+    );
+    let row = &serde_json::to_value(
+        events()
+            .iter()
+            .find(|e| matches!(e, CoreEvent::Layers { .. }))
+            .unwrap(),
+    )
+    .unwrap()["rows"][0];
+    assert_eq!(row["hasChildren"], json!(false));
+    assert_eq!(row["ancestorLocked"], json!(true));
+    let s = serde_json::to_value(Summary::empty()).unwrap();
+    assert_eq!(s["cornerRadius"], json!(null));
+    assert_eq!(s["opacity"], json!({"value": 1.0, "mixed": false}));
 }
 
 #[test]
@@ -174,6 +380,24 @@ fn malformed_commands_never_panic() {
         // deny_unknown_fields к unit-вариантам внутренне тегированного enum, лишнее
         // поле там молча отбрасывается. Безвредно: команда ничего не читает.)
         json!({"type": "setTool", "tool": "rect", "x": 1}),
+        // Команды этапа 5: неверные значения перечислений, вложенные поля, типы.
+        json!({"type": "select", "ids": ["1@2"], "mode": "all"}),
+        json!({"type": "select", "ids": "1@2", "mode": "replace"}),
+        json!({"type": "layersWindow", "start": -1, "count": 10}),
+        json!({"type": "moveLayers", "ids": null, "target": "1@2", "position": "inside"}),
+        json!({"type": "editSelection", "edit": {"type": "number", "field": "z", "value": 1, "relative": false}, "phase": "commit"}),
+        json!({"type": "editSelection", "edit": {"type": "number", "field": "x", "value": "1", "relative": false}, "phase": "commit"}),
+        json!({"type": "editSelection", "edit": {"type": "number", "field": "x", "value": 1, "relative": false, "y": 2}, "phase": "commit"}),
+        json!({"type": "editSelection", "edit": {"type": "fills", "fills": [{"kind": "solid", "color": "#fff"}]}, "phase": "commit"}),
+        json!({"type": "editSelection", "edit": {"type": "fills", "fills": [{"kind": "gradient", "color": "#ffffff", "opacity": 1, "visible": true}]}, "phase": "commit"}),
+        json!({"type": "editSelection", "edit": {"type": "clipContent", "value": true}, "phase": "later"}),
+        json!({"type": "editSelection", "edit": {"type": "size", "w": 1}, "phase": "commit"}),
+        json!({"type": "setLayerFlags", "ids": ["1@2"], "visible": "no", "locked": null}),
+        json!({"type": "bind", "command": "tool.rect", "shortcut": "KeyQ"}),
+        json!({"type": "export", "scale": "2"}),
+        json!({"type": "addFramePreset", "index": -3}),
+        json!({"type": "setSettings", "pixelSnap": 1}),
+        json!({"type": "setSettings", "pixel_snap": true}),
         // Не объекты.
         json!([]),
         json!([{"type": "save"}]),

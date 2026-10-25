@@ -9,7 +9,9 @@
 //! (`FrameStats::needs_another_frame`: растры фреймов не догнали, картинки ещё
 //! декодируются).
 
-use std::collections::VecDeque;
+mod panels;
+
+use std::collections::{HashSet, VecDeque};
 
 use ferrum_doc::{container, fixture, Document, NodeId};
 use ferrum_editor::geometry::SelectionBox;
@@ -20,16 +22,19 @@ use serde_bytes::ByteBuf;
 
 use crate::images::DocImages;
 use crate::input::{decode_all, Record};
+use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
     Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, SELECTION_IDS_MAX,
 };
+use crate::summary::Summary;
 
 /// Сколько последних кадров учитывают медиана и 95-й процентиль времени кадра.
 pub const FRAME_WINDOW: usize = 120;
-/// Фон холста (до цвета фона страницы в документе): тёмная и светлая темы.
-pub const CANVAS_DARK: Rgba = Rgba::new([0.141, 0.137, 0.133, 1.0]);
-pub const CANVAS_LIGHT: Rgba = Rgba::new([0.949, 0.941, 0.929, 1.0]);
+/// Фон холста, если у страницы свой не задан: токен `canvas` дизайн-системы
+/// (#1a1918 в тёмной теме, #e9e7e4 в светлой).
+pub const CANVAS_DARK: Rgba = Rgba::new([26.0 / 255.0, 25.0 / 255.0, 24.0 / 255.0, 1.0]);
+pub const CANVAS_LIGHT: Rgba = Rgba::new([233.0 / 255.0, 231.0 / 255.0, 228.0 / 255.0, 1.0]);
 /// Масштаб «Скопировать как PNG».
 pub const COPY_PNG_SCALE: f64 = 1.0;
 
@@ -64,6 +69,24 @@ pub struct Core {
     stamps: VecDeque<f64>,
     selection: Option<SelectionInfo>,
     atlas: (usize, u64),
+    /// Панели (этап 5): дерево слоёв, выделенные для строк, что пересчитать.
+    layers: Layers,
+    selected: HashSet<NodeId>,
+    ui: UiDirty,
+    /// Выделение меняет панель слоёв: предков не раскрывать, к строке не прокручивать.
+    from_panel: bool,
+    reveal: Option<u32>,
+    summary: Option<Summary>,
+    /// Фон страницы во время жеста палитры: в кадре, но ещё не в документе.
+    background_preview: Option<Option<ferrum_doc::Color>>,
+}
+
+/// Что из панелей пересчитать после пачки событий редактора.
+#[derive(Debug, Default, Clone, Copy)]
+struct UiDirty {
+    layers: bool,
+    properties: bool,
+    pages: bool,
 }
 
 fn tool_kind(t: Tool) -> ToolKind {
@@ -134,7 +157,7 @@ impl Core {
     pub fn new(platform: Platform, viewport: Size, dpr: f64, backend: Backend) -> Core {
         let editor = Editor::new(Document::new(), None, viewport, dpr, platform)
             .expect("в новом документе есть страница");
-        Core {
+        let mut core = Core {
             editor,
             renderer: Renderer::new(),
             images: DocImages::default(),
@@ -152,7 +175,18 @@ impl Core {
             stamps: VecDeque::new(),
             selection: None,
             atlas: (0, 0),
-        }
+            layers: Layers::new(),
+            selected: HashSet::new(),
+            ui: UiDirty::default(),
+            from_panel: false,
+            reveal: None,
+            summary: None,
+            background_preview: None,
+        };
+        // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
+        core.push_keymap();
+        core.push_presets();
+        core
     }
 
     pub fn editor(&self) -> &Editor {
@@ -178,17 +212,23 @@ impl Core {
         self.editor.camera().device_size()
     }
 
-    /// Заменяет документ: новый редактор с тем же холстом и темой.
+    /// Заменяет документ: новый редактор с тем же холстом, темой, раскладкой клавиш
+    /// и настройками — они принадлежат пользователю, а не документу.
     fn replace_document(&mut self, doc: Document) -> Result<(), String> {
         let cam = self.editor.camera();
         let (viewport, dpr) = (cam.viewport(), cam.dpr());
         let mut editor =
             Editor::new(doc, None, viewport, dpr, self.platform).map_err(|e| e.to_string())?;
         editor.set_theme(overlay_theme(self.theme));
+        editor.set_settings(self.editor.settings().clone());
+        *editor.keymap_mut() = self.editor.keymap().clone();
         editor.take_events();
         self.editor = editor;
         self.images = DocImages::default();
         self.selection = None;
+        self.layers.reset();
+        self.selected.clear();
+        self.summary = None;
         self.dirty = true;
         Ok(())
     }
@@ -196,10 +236,12 @@ impl Core {
     fn push_opened(&mut self, warnings: Vec<String>) {
         let pages = self.editor.document().pages().len() as u32;
         let nodes = self.editor.scene().len() as u32;
+        let name = self.editor.document().name();
         self.events.push(CoreEvent::Opened {
             pages,
             nodes,
             warnings,
+            name,
         });
         self.push_document();
         self.events.push(CoreEvent::Selection {
@@ -209,6 +251,12 @@ impl Core {
         self.events.push(CoreEvent::Tool {
             tool: tool(self.editor.tool_kind()),
         });
+        self.ui = UiDirty {
+            layers: true,
+            properties: true,
+            pages: true,
+        };
+        self.flush_ui();
     }
 
     fn push_document(&mut self) {
@@ -322,6 +370,7 @@ impl Core {
                 self.pixels = Some(reference);
                 self.dirty = true;
             }
+            other => self.panel_command(other),
         }
         self.drain_editor();
     }
@@ -351,7 +400,12 @@ impl Core {
         for e in self.editor.take_events() {
             match e {
                 EditorEvent::NeedsRedraw => self.dirty = true,
-                EditorEvent::DocumentChanged => document = true,
+                EditorEvent::DocumentChanged => {
+                    document = true;
+                    self.layers.invalidate();
+                    self.ui.layers = true;
+                    self.ui.properties = true;
+                }
                 EditorEvent::SelectionChanged(ids) => selection = Some(ids),
                 EditorEvent::ToolChanged(k) => self.events.push(CoreEvent::Tool { tool: tool(k) }),
                 EditorEvent::CursorChanged(c) => {
@@ -362,7 +416,12 @@ impl Core {
                     self.events.push(CoreEvent::Cursor { cursor, angle });
                 }
                 EditorEvent::PageChanged(p) => {
-                    self.events.push(CoreEvent::Page { id: p.to_string() })
+                    self.events.push(CoreEvent::Page { id: p.to_string() });
+                    self.background_preview = None;
+                    self.layers.reset();
+                    self.ui.layers = true;
+                    self.ui.pages = true;
+                    self.dirty = true;
                 }
                 EditorEvent::Clipboard(bytes) => self.events.push(CoreEvent::Clipboard {
                     bytes: ByteBuf::from(bytes),
@@ -381,12 +440,20 @@ impl Core {
                 ids.len(),
                 ids.iter().take(SELECTION_IDS_MAX).map(NodeId::to_string),
             ));
+            self.selected = ids.iter().copied().collect();
+            // Выделение с холста: раскрыть предков и прокрутить панель к строке.
+            if !self.from_panel && !ids.is_empty() {
+                self.reveal = self.layers.reveal(self.editor.scene(), &ids);
+            }
+            self.ui.layers = true;
+            self.ui.properties = true;
         }
         if document {
             self.events
                 .retain(|e| !matches!(e, CoreEvent::Document { .. }));
             self.push_document();
         }
+        self.flush_ui();
     }
 
     fn copy_png(&mut self, ids: &[NodeId]) {
@@ -427,7 +494,16 @@ impl Core {
         self.dirty
     }
 
+    /// Фон кадра: цвет фона страницы, если задан, иначе холст темы.
     pub fn background(&self) -> Rgba {
+        let page = match self.background_preview {
+            Some(preview) => preview,
+            None => self.editor.page_background(),
+        };
+        if let Some(c) = page {
+            let k = |v: u8| v as f32 / 255.0;
+            return Rgba::new([k(c.r), k(c.g), k(c.b), k(c.a)]);
+        }
         match self.theme {
             Theme::Dark => CANVAS_DARK,
             Theme::Light => CANVAS_LIGHT,
@@ -500,12 +576,11 @@ impl Core {
             rotation: 0.0,
         };
         if let [one] = ids {
-            if let Some(n) = scene.node(*one) {
-                info.x = n.props.x;
-                info.y = n.props.y;
-                info.w = n.props.w;
-                info.h = n.props.h;
-                info.rotation = n.props.rotation;
+            // Те же значения, что в сводке панели (у группы — рамка детей, поворот
+            // как в Figma): во время жеста панель читает их отсюда.
+            if let Some(slot) = scene.slot(*one) {
+                let p = ferrum_editor::panel_pose(scene, slot);
+                (info.x, info.y, info.w, info.h, info.rotation) = (p.x, p.y, p.w, p.h, p.rotation);
             }
         } else if let Some(b) = SelectionBox::of(scene, ids) {
             let r = b.to_world.transform_rect_bbox(b.rect);

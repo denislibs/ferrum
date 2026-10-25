@@ -207,3 +207,50 @@ fn rejected_command_is_clipped_in_error_event() {
     };
     assert!(message.chars().count() < 120, "{}", message.chars().count());
 }
+
+#[wasm_bindgen_test]
+fn panel_commands_parse_and_none_becomes_undefined() {
+    use ferrum_wasm::protocol::{Edit, EditPhase, Field};
+    let edit = obj(&[
+        ("type", "number".into()),
+        ("field", "x".into()),
+        ("value", 12.5.into()),
+        ("relative", false.into()),
+    ]);
+    let cmd = obj(&[
+        ("type", "editSelection".into()),
+        ("edit", edit),
+        ("phase", "commit".into()),
+    ]);
+    assert_eq!(
+        parse_command(cmd),
+        Ok(Command::EditSelection {
+            edit: Edit::Number {
+                field: Field::X,
+                value: 12.5,
+                relative: false
+            },
+            phase: EditPhase::Commit,
+        })
+    );
+    // `ids` пропущено или `null` — текущее выделение.
+    let mv = obj(&[
+        ("type", "moveLayers".into()),
+        ("target", "1@2".into()),
+        ("position", "into".into()),
+    ]);
+    assert!(matches!(
+        parse_command(mv),
+        Ok(Command::MoveLayers { ids: None, .. })
+    ));
+    // `None` в событии — `undefined`, как в типах tsify (`T | undefined`).
+    let js = events_to_js(&[CoreEvent::Pages {
+        pages: vec![],
+        current: "1@2".into(),
+        background: None,
+    }]);
+    let arr: js_sys::Array = js.dyn_into().unwrap();
+    assert!(Reflect::get(&arr.get(0), &"background".into())
+        .unwrap()
+        .is_undefined());
+}

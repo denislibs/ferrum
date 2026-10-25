@@ -5,7 +5,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { drag, events, expectPixel, live, liveWhen, open, screen } from './helpers';
 
-const CANVAS_DARK = [36, 35, 34];
+// Токен `canvas` дизайн-системы в тёмной теме (#1a1918).
+const CANVAS_DARK = [26, 25, 24];
 
 async function dragMovesAndUndoReturns(page: Page): Promise<void> {
   const l = await live(page);
