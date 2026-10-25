@@ -17,22 +17,39 @@ type View =
   | { kind: 'files'; section: Section; notice: { text: string; seq: number } | null }
   | { kind: 'editor'; file: FileMeta };
 
+/** Сколько ждать блокировку файла, прежде чем сказать «открыт в другой вкладке»:
+ * своя прежняя блокировка (F5, файлы → тот же файл) снимается не мгновенно. */
+export const LOCK_WAIT_MS = 1000;
+const LOCK_RETRY_MS = 100;
+
+type Lock = { release: () => void } | { busy: true } | { error: string };
+
 /** Блокировка файла на время редактирования (Web Locks): вторая вкладка с тем же
  * файлом получает отказ. Без Web Locks — без блокировки (запись всё равно
- * проверяет поколение). Возвращает снятие или `null`, если файл занят. */
-function lockFile(id: string): Promise<(() => void) | null> {
+ * проверяет поколение). Занят — несколько попыток в пределах `LOCK_WAIT_MS`;
+ * отказ самого API — ошибка, а не вечное ожидание. */
+async function lockFile(id: string): Promise<Lock> {
   const locks = (navigator as Navigator & { locks?: LockManager }).locks;
-  if (!locks) return Promise.resolve(() => {});
-  return new Promise((resolve) => {
-    void locks.request(`ferrum-file:${id}`, { ifAvailable: true }, (lock) => {
-      if (!lock) {
-        resolve(null);
-        return;
-      }
-      // Блокировка держится, пока не вызвано снятие.
-      return new Promise<void>((release) => resolve(() => release()));
+  if (!locks) return { release: () => {} };
+  const once = () =>
+    new Promise<Lock>((resolve) => {
+      locks
+        .request(`ferrum-file:${id}`, { ifAvailable: true }, (lock) => {
+          if (!lock) {
+            resolve({ busy: true });
+            return;
+          }
+          // Блокировка держится, пока не вызвано снятие.
+          return new Promise<void>((release) => resolve({ release: () => release() }));
+        })
+        .catch((e: unknown) => resolve({ error: e instanceof Error ? e.message : String(e) }));
     });
-  });
+  const until = performance.now() + LOCK_WAIT_MS;
+  for (;;) {
+    const r = await once();
+    if (!('busy' in r) || performance.now() >= until) return r;
+    await new Promise((t) => setTimeout(t, LOCK_RETRY_MS));
+  }
 }
 
 export function Root() {
@@ -49,6 +66,10 @@ export function Root() {
   let index = historyIndex(history.state) ?? 0;
   history.replaceState({ ferrumIndex: index }, '', location.href);
   let restoring = false;
+  /** Куда пришли «назад»/«вперёд» (`null` — запись не наша); `undefined` — не ходили. */
+  let popped: number | null | undefined;
+  let leaving = false;
+  let wanted: { route: Route; push: boolean; pop: boolean } | null = null;
   const replace = (r: Route) => history.replaceState({ ferrumIndex: index }, '', routeUrl(r));
   const release = () => {
     unlock?.();
@@ -70,16 +91,20 @@ export function Root() {
 
   /** Открыть файл в редакторе: занят другой вкладкой — к экрану файлов. */
   async function edit(file: FileMeta, my: number): Promise<void> {
-    const un = await lockFile(file.id);
+    const lock = await lockFile(file.id);
     if (my !== seq) {
-      un?.();
+      if ('release' in lock) lock.release();
       return;
     }
-    if (!un) {
+    if ('busy' in lock) {
       toFiles('Файл открыт в другой вкладке');
       return;
     }
-    unlock = un;
+    if ('error' in lock) {
+      toFiles(`Не удалось открыть файл: блокировка недоступна (${lock.error})`);
+      return;
+    }
+    unlock = lock.release;
     current = { kind: 'file', id: file.id };
     replace(current);
     setView({ kind: 'editor', file });
@@ -88,31 +113,43 @@ export function Root() {
   /** Переход к маршруту. `push` — из интерфейса: новая запись истории, когда уход
    * удался; `pop` — пришли «назад» или «вперёд» (номер записи, куда пришли). */
   async function go(route: Route, push = false, pop?: { to: number | null }): Promise<void> {
-    const my = ++seq;
-    const from = index;
+    if (pop) popped = pop.to;
     if (leave) {
+      // Пока открыт вопрос об уходе, новые переходы («назад» ещё раз) только
+      // запоминаются: решает ответ, и переход — последний запрошенный.
+      wanted = { route, push, pop: pop !== undefined };
+      if (leaving) return;
+      leaving = true;
       const ok = await leave();
-      // Остались в редакторе: адрес — снова файла, история — без лишних записей.
+      leaving = false;
+      const w = wanted;
+      wanted = null;
       if (!ok) {
-        if (pop?.to != null && pop.to !== from) {
+        // Остались в редакторе: назад к своей записи истории одним ходом (сколько
+        // бы раз ни нажали «назад»), без новых записей.
+        if (popped != null && popped !== index) {
           restoring = true;
-          if (pop.to < from) history.forward();
-          else history.back();
+          history.go(index - popped);
         } else if (current) replace(current);
+        popped = undefined;
         return;
       }
       leave = null;
       release();
+      route = w!.route;
+      push = w!.push;
+      if (!w!.pop) popped = undefined;
     }
-    if (my !== seq) return;
+    const my = ++seq;
     if (push && location.hash !== routeHash(route)) {
       index += 1;
       history.pushState({ ferrumIndex: index }, '', routeUrl(route));
-    } else if (pop) {
+    } else if (popped !== undefined) {
       // Запись истории без нашего номера (адрес набрали вручную) — новая.
-      index = pop.to ?? index + 1;
-      if (pop.to == null) replace(route);
+      index = popped ?? index + 1;
+      if (popped == null) replace(route);
     }
+    popped = undefined;
     try {
       if (route.kind === 'files') {
         current = route;
