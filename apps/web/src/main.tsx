@@ -8,6 +8,7 @@ import './ui/styles/theme.css';
 import './ui/styles/base.css';
 import './ui/styles/app.css';
 import './ui/styles/chrome.css';
+import './ui/styles/layers.css';
 import { render } from 'solid-js/web';
 import { App } from './ui/app';
 

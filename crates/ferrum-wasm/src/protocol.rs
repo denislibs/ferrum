@@ -228,6 +228,8 @@ pub enum Command {
     FilterLayers {
         query: String,
     },
+    /// Построить кэш имён для поиска заранее (поле поиска получило фокус).
+    PrepareSearch,
     /// Выделение из панели слоёв (не больше `SELECTION_IDS_MAX` идентификаторов).
     Select {
         ids: Vec<String>,

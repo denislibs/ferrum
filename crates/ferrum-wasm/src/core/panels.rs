@@ -220,6 +220,7 @@ impl Core {
                     self.ui.layers = true;
                 }
             }
+            Command::PrepareSearch => self.layers.prepare_search(self.editor.scene()),
             Command::Select { ids, mode } => {
                 if let Some(ids) = self.nodes(&ids) {
                     self.select(ids, mode);

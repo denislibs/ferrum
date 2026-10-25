@@ -1,0 +1,202 @@
+/* Левая панель: страницы и дерево слоёв (компонент LayerRow). */
+
+.fe-pages {
+  flex: none;
+  max-height: 30%;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line);
+  padding: var(--space-2) 0;
+}
+.fe-pages__head {
+  padding: 0 var(--space-2) 0 var(--space-1);
+}
+.fe-pages__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 24px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+}
+.fe-pages__toggle:hover {
+  background: var(--surface-hover);
+}
+.fe-rot90 {
+  transform: rotate(90deg);
+}
+.fe-pages__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+}
+.fe-page {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--row-height);
+  padding: 0 var(--space-2) 0 var(--space-1);
+  cursor: default;
+}
+.fe-page:hover {
+  background: var(--surface-hover);
+}
+.fe-page:focus-visible {
+  outline-offset: -2px;
+}
+.fe-page[aria-selected='true'] .fe-page__name {
+  font-weight: 600;
+}
+.fe-page__check {
+  width: 20px;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.fe-page__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fe-page__delete {
+  visibility: hidden;
+}
+.fe-page:hover .fe-page__delete,
+.fe-page:focus-within .fe-page__delete {
+  visibility: visible;
+}
+
+.fe-layers-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--space-2);
+}
+.fe-layers-panel__head {
+  padding: 0 var(--space-3);
+}
+.fe-layers-panel__search {
+  margin: var(--space-1) var(--space-3) var(--space-2);
+  flex: none;
+}
+.fe-field__icon {
+  margin-left: var(--space-2);
+}
+.fe-layers-panel__search input {
+  padding-left: var(--space-1);
+}
+
+/* Виртуальный список: строки стоят абсолютно по своему номеру. */
+.fe-tree {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  contain: strict;
+}
+.fe-tree__spacer {
+  width: 1px;
+}
+.fe-layer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--row-height);
+  padding-right: var(--space-2);
+  color: var(--ink);
+  cursor: default;
+  user-select: none;
+}
+.fe-layer:hover {
+  background: var(--surface-hover);
+}
+.fe-layer[aria-selected='true'] {
+  background: var(--select-soft);
+}
+.fe-layer--child-of-selected {
+  background: color-mix(in srgb, var(--select-soft) 45%, transparent);
+}
+.fe-layer:focus-visible {
+  outline-offset: -2px;
+}
+.fe-layer__icon {
+  display: grid;
+  color: var(--ink-muted);
+}
+.fe-layer__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fe-layer[aria-selected='true'] .fe-layer__name {
+  font-weight: 600;
+}
+.fe-layer--hidden .fe-layer__name,
+.fe-layer--hidden .fe-layer__icon {
+  color: var(--ink-faint);
+}
+.fe-layer__caret {
+  width: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.fe-layer__toggle {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.fe-layer__toggle--open .fe-ico {
+  transform: rotate(90deg);
+}
+.fe-layer__rename {
+  flex: 1;
+  min-width: 0;
+}
+.fe-layer__actions {
+  display: flex;
+  gap: 2px;
+}
+.fe-layer__actions .fe-tool {
+  visibility: hidden;
+}
+.fe-layer:hover .fe-layer__actions .fe-tool,
+.fe-layer__actions .fe-layer__flag--on {
+  visibility: visible;
+}
+.fe-layer--drop-into {
+  box-shadow: inset 0 0 0 2px var(--select);
+}
+.fe-layer--drop-above::before,
+.fe-layer--drop-below::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--select);
+}
+.fe-layer--drop-above::before {
+  top: -1px;
+}
+.fe-layer--drop-below::after {
+  bottom: -1px;
+}

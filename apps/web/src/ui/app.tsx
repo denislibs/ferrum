@@ -6,6 +6,8 @@ import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { ConfirmDialog } from './dialog';
 import { EditorContext, type Editor } from './context';
 import { Menu, type MenuItem } from './menu';
+import { LayersPanel } from './layers';
+import { PagesPanel } from './pages';
 import { createUiStore } from './store';
 import { Toasts } from './toasts';
 import { Toolbar } from './toolbar';
@@ -18,6 +20,7 @@ export function App() {
   const [left, setLeft] = createSignal(248);
   const [right, setRight] = createSignal(248);
   const [context, setContext] = createSignal<{ x: number; y: number } | null>(null);
+  const [pagesOpen, setPagesOpen] = createSignal(true);
   let canvas!: HTMLCanvasElement;
 
   onMount(() => {
@@ -92,6 +95,8 @@ export function App() {
           <EditorContext.Provider value={ed()}>
             <aside class="fe-side fe-side--left" aria-label="Страницы и слои">
               <FileHeader items={() => fileItems(ed())} />
+              <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} />
+              <LayersPanel />
               <ResizeEdge side="left" width={left()} onWidth={setLeft} />
             </aside>
             <aside class="fe-side fe-side--right" aria-label="Свойства">

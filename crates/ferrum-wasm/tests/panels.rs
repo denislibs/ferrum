@@ -684,6 +684,27 @@ fn search_name_cache_stays_warm_across_every_kind_of_edit() {
     assert_eq!(core.layers().name_scans(), 2);
 }
 
+/// Команда `PrepareSearch` строит кэш имён заранее: первый поиск после неё
+/// обходить страницу не должен.
+#[test]
+fn prepare_search_warms_the_name_cache() {
+    let mut core = demo(1000);
+    core.command(Command::LayersWindow {
+        start: 0,
+        count: 40,
+    });
+    core.take_events();
+    core.command(Command::PrepareSearch);
+    core.take_events();
+    assert_eq!(core.layers().name_scans(), 1, "кэш построен заранее");
+    core.command(Command::FilterLayers {
+        query: "экран 1".into(),
+    });
+    let (_, total, _, _) = layers(&core.take_events()).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(core.layers().name_scans(), 1, "поиск обхода не потребовал");
+}
+
 /// Черновик жеста не попадает в строки, готовая фигура — попадает; отмена и
 /// другая страница пересобирают строки.
 #[test]

@@ -13,17 +13,20 @@ function ownsKeys(t: EventTarget | null): boolean {
 
 /** Клавиши кнопок и вкладок: активировать и переходить фокусом. */
 const WIDGET_KEYS = new Set(['Tab', 'Enter', 'Space', 'NumpadEnter']);
+/** Строки дерева слоёв: ещё F2 (переименовать); стрелки — ниже, у ARROW_ROLES. */
+const TREE_KEYS = new Set([...WIDGET_KEYS, 'F2']);
 
 const ARROW_ROLES =
-  '[role="tab"], [role="treeitem"], [role="menuitem"], [role="option"], [role="slider"], [role="separator"], [role="toolbar"], [role="tablist"]';
+  '[role="tab"], [role="tree"], [role="treeitem"], [role="menuitem"], [role="option"], [role="slider"], [role="separator"], [role="toolbar"], [role="tablist"]';
 
 /** Пересылать ли клавишу редактору. */
 export function forwardKey(e: KeyboardEvent, isClipboardKey: (e: KeyboardEvent) => boolean): boolean {
   if (ownsKeys(e.target)) return false;
   // Tab всегда у браузера: фокус ходит по интерфейсу.
   if (e.code === 'Tab') return false;
-  const onControl = e.target instanceof Element && !!e.target.closest('button, [role="tab"], [role="treeitem"], a');
-  if (onControl && WIDGET_KEYS.has(e.code)) return false;
+  const el = e.target instanceof Element ? e.target : null;
+  if (el?.closest('[role="treeitem"]') && TREE_KEYS.has(e.code)) return false;
+  if (el?.closest('button, [role="tab"], a') && WIDGET_KEYS.has(e.code)) return false;
   // Стрелки внутри вкладок, деревьев, меню, списков, ползунков, тулбара и краёв панелей — их навигация.
   if (e.code.startsWith('Arrow') && e.target instanceof Element && e.target.closest(ARROW_ROLES)) return false;
   // Ctrl/Cmd+C, X, V идут событиями copy/cut/paste (системный буфер), а не в ядро.

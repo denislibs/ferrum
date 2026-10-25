@@ -44,6 +44,7 @@ fn commands() -> Vec<Command> {
         Command::FilterLayers {
             query: "кнопка".into(),
         },
+        Command::PrepareSearch,
         Command::Select {
             ids: vec!["1@2".into()],
             mode: SelectMode::Range,
