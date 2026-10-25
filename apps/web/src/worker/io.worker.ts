@@ -19,6 +19,7 @@
 
 import {
   CONFLICT,
+  GONE,
   cleanName,
   requestError,
   sectionList,
@@ -158,7 +159,12 @@ function rw(d: IDBDatabase, stores: string[]): IDBTransaction {
 
 /** Правка одной записи: свежая запись читается в той же транзакции, `edit` даёт
  * новую (и может дописать в другие хранилища той же транзакции) или бросает. */
-async function update(id: string, stores: string[], edit: (m: FileMeta, tx: IDBTransaction) => FileMeta): Promise<FileMeta> {
+async function update(
+  id: string,
+  stores: string[],
+  edit: (m: FileMeta, tx: IDBTransaction) => FileMeta,
+  missing = 'Файл не найден',
+): Promise<FileMeta> {
   const d = await open();
   return new Promise<FileMeta>((resolve, reject) => {
     const tx = rw(d, ['meta', ...stores]);
@@ -168,7 +174,7 @@ async function update(id: string, stores: string[], edit: (m: FileMeta, tx: IDBT
     req.onsuccess = () => {
       const cur = validMeta(req.result);
       try {
-        if (!cur) throw new Error('Файл не найден');
+        if (!cur) throw new Error(missing);
         next = edit(cur, tx);
         tx.objectStore('meta').put(next);
       } catch (e) {
@@ -257,21 +263,27 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
     case 'write': {
       if (failWrites) throw new Error('недостаточно места в хранилище браузера');
       const { bytes, thumb, base } = r;
-      const next = await update(r.file, ['bytes', 'thumbs'], (m, tx) => {
-        if (m.version !== base) throw new Error(CONFLICT);
-        tx.objectStore('bytes').put(bytes, m.id);
-        if (thumb instanceof ArrayBuffer) tx.objectStore('thumbs').put(new Blob([thumb], { type: 'image/png' }), m.id);
-        else if (thumb === null) tx.objectStore('thumbs').delete(m.id);
-        return {
-          ...m,
-          name: cleanName(r.name),
-          editedAt: now,
-          size: bytes.byteLength,
-          version: m.version + 1,
-          // Прежнее превью оставлено — версия та же, адрес картинки в интерфейсе тоже.
-          thumbVersion: thumb === 'keep' ? m.thumbVersion : m.thumbVersion + 1,
-        };
-      });
+      // Имя записи здесь не меняется: оно — из хранилища (переименование — `rename`,
+      // в том числе из другой вкладки), снимок его не затирает.
+      const next = await update(
+        r.file,
+        ['bytes', 'thumbs'],
+        (m, tx) => {
+          if (m.version !== base) throw new Error(CONFLICT);
+          tx.objectStore('bytes').put(bytes, m.id);
+          if (thumb instanceof ArrayBuffer) tx.objectStore('thumbs').put(new Blob([thumb], { type: 'image/png' }), m.id);
+          else if (thumb === null) tx.objectStore('thumbs').delete(m.id);
+          return {
+            ...m,
+            editedAt: now,
+            size: bytes.byteLength,
+            version: m.version + 1,
+            // Прежнее превью оставлено — версия та же, адрес картинки в интерфейсе тоже.
+            thumbVersion: thumb === 'keep' ? m.thumbVersion : m.thumbVersion + 1,
+          };
+        },
+        GONE,
+      );
       changed();
       return { value: next };
     }

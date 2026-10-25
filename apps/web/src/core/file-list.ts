@@ -28,6 +28,8 @@ export interface FileMeta {
 
 /** Запись основана на устаревшем поколении: файл записали в другой вкладке. */
 export const CONFLICT = 'Файл изменён в другой вкладке — сохраните копию на диск или откройте файл заново';
+/** Записи нет: файл удалили навсегда (другая вкладка), пока он был открыт. */
+export const GONE = 'Файл удалён в другой вкладке — сохраните копию на диск';
 /** Наибольшая длина строки в запросе, байты UTF-8. */
 export const MAX_TEXT_BYTES = 4096;
 
@@ -91,7 +93,7 @@ export type IoOp =
   | { op: 'read'; file: string }
   /** `thumb`: PNG, `null` — убрать (страница пуста), `'keep'` — оставить прежнее.
    * `base` — поколение, на котором основана запись. */
-  | { op: 'write'; file: string; name: string; bytes: ArrayBuffer; thumb: ArrayBuffer | null | 'keep'; base: number }
+  | { op: 'write'; file: string; bytes: ArrayBuffer; thumb: ArrayBuffer | null | 'keep'; base: number }
   /** Байты файла `Blob`'ом, собранным в worker'е («Скачать копию»). */
   | { op: 'blob'; file: string }
   | { op: 'rename'; file: string; name: string }
@@ -187,7 +189,7 @@ export function requestError(r: unknown): string | null {
       if (!isName(m.name)) return BAD;
       return m.bytes === null ? null : bytesError(m.bytes, MAX_OPEN_BYTES);
     case 'write':
-      if (!isId(m.file) || !isName(m.name) || !isCount(m.base, Number.MAX_SAFE_INTEGER)) return BAD;
+      if (!isId(m.file) || !isCount(m.base, Number.MAX_SAFE_INTEGER)) return BAD;
       if (!(m.bytes instanceof ArrayBuffer)) return BAD;
       if (!(m.thumb === null || m.thumb === 'keep' || m.thumb instanceof ArrayBuffer)) return BAD;
       return bytesError(m.bytes, MAX_OPEN_BYTES) ?? (m.thumb instanceof ArrayBuffer ? bytesError(m.thumb, MAX_THUMB_BYTES) : null);
