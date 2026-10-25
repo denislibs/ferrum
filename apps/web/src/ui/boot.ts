@@ -22,16 +22,21 @@ export const MIN_SPLASH_MS = 2000;
  *  вызывать много раз и без экрана (стенд, тесты). Ошибку показываем сразу; без
  *  анимации (prefers-reduced-motion) и в автотестах ждать нечего. Экран файлов
  *  тоже убирает её сразу: он не ждёт ядра, первый показ — быстрый. */
+let splashTimer = 0;
+
 export function dismissSplash(immediate = false) {
   const el = document.getElementById('fe-splash');
-  if (!el || el.dataset.leaving) return;
-  el.dataset.leaving = '1';
+  if (!el || el.classList.contains('fe-splash--done')) return;
   const quick =
     immediate ||
     (window as { __ferrumTest?: boolean }).__ferrumTest === true ||
     matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Уже ждёт своих 2 с, а теперь — сразу (ошибка, уход на экран файлов): ускорить.
+  if (el.dataset.leaving && !quick) return;
+  el.dataset.leaving = '1';
+  clearTimeout(splashTimer);
   const wait = quick ? 0 : Math.max(0, MIN_SPLASH_MS - performance.now());
-  setTimeout(() => leave(el), wait);
+  splashTimer = window.setTimeout(() => leave(el), wait);
 }
 
 function leave(el: HTMLElement) {

@@ -552,9 +552,15 @@ export function FilesScreen(props: FilesScreenProps) {
                       '--thumb-h': `${layout().thumbH}px`,
                     }}
                     onFocus={() => setFocused(index())}
-                    onClick={() => (props.section === 'trash' ? setFocused(index()) : open(f()))}
+                    onClick={() => {
+                      // Отложенное открытие по имени другой карточки — отменить.
+                      clearTimeout(nameClick);
+                      if (props.section === 'trash') setFocused(index());
+                      else open(f());
+                    }}
                     onContextMenu={(e) => {
                       e.preventDefault();
+                      clearTimeout(nameClick);
                       setFocused(index());
                       setMenu({ file: f(), anchor: { x: e.clientX, y: e.clientY } });
                     }}
