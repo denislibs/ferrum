@@ -11,7 +11,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { expectCore, gotoDebug, live, liveWhen, screen } from './helpers';
+import { expectCore, gotoDebug, live, liveWhen, newFileUrl, screen } from './helpers';
 
 const NODES = 100_000;
 /** Бюджет основного потока на кадр (спека 4.2). */
@@ -223,7 +223,7 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
     });
     w.__longObs.observe({ type: 'longtask', buffered: true });
   });
-  await page.goto(`/?nodes=${NODES}`);
+  await page.goto(newFileUrl(NODES));
   await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 120_000 });
   await expectCore(page);
   const tree = page.getByRole('tree', { name: 'Слои' });

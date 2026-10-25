@@ -2,7 +2,7 @@
 // формат в асинхронном API и запасной путь — текст с меткой в событии), вырезать,
 // вставить картинку из другого приложения, копировать как PNG, обычное
 // копирование в полях ввода и при открытом диалоге, не доверенный текст из
-// буфера, отказ в доступе на чтение, «Сохранить как…» и «Открыть…», изображение
+// буфера, отказ в доступе на чтение, «Сохранить копию на диск…» и «Открыть…», изображение
 // из файла.
 
 import { expect, test, type Page } from '@playwright/test';
@@ -373,39 +373,40 @@ test('картинка больше 64 МБ отклоняется до копи
   expect((await live(page)).nodes).toBe(before.nodes);
 });
 
-test('«Сохранить как…» и «Открыть…»', async ({ page }) => {
+test('«Сохранить копию на диск…» и «Открыть…»', async ({ page }) => {
   await page.addInitScript(() => {
     delete (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker;
   });
   await openApp(page, 300);
   await page.getByRole('button', { name: 'Меню файла' }).click();
   const download = page.waitForEvent('download');
-  await page.getByRole('menuitem', { name: 'Сохранить как…' }).click();
+  await page.getByRole('menuitem', { name: 'Сохранить копию на диск…' }).click();
   const file = await download;
   expect(file.suggestedFilename()).toBe('Без названия.ferrum');
   const bytes = Buffer.concat(await (await file.createReadStream()).toArray());
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: 'Создать' }).click();
-  await expect.poll(async () => (await ui(page)).layers.total).toBe(0);
+  // «Открыть…» кладёт файл в хранилище новой записью и открывает её.
+  const first = page.url();
   await page.getByRole('button', { name: 'Меню файла' }).click();
   const chooser = page.waitForEvent('filechooser');
   await page.getByRole('menuitem', { name: 'Открыть…' }).click();
   await (await chooser).setFiles({ name: 'проект.ferrum', mimeType: 'application/octet-stream', buffer: bytes });
+  await expect.poll(() => page.url()).not.toBe(first);
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true && window.__ferrum.ui.documentName === 'проект');
   await expect.poll(async () => (await ui(page)).layers.total).toBe(3);
   await liveWhen(page, 'l.nodes === 300');
 });
 
-test('«Сохранить как…»: имя файла из имени документа очищается', async ({ page }) => {
+test('«Сохранить копию на диск…»: имя файла из имени документа очищается', async ({ page }) => {
   await openApp(page, 10);
   await page.evaluate(() => window.__ferrum!.core!.send({ type: 'setDocumentName', name: 'План: этаж 1/2' }));
   await expect.poll(async () => (await ui(page)).documentName).toBe('План: этаж 1/2');
   await page.getByRole('button', { name: 'Меню файла' }).click();
   const download = page.waitForEvent('download');
-  await page.getByRole('menuitem', { name: 'Сохранить как…' }).click();
+  await page.getByRole('menuitem', { name: 'Сохранить копию на диск…' }).click();
   expect((await download).suggestedFilename()).toBe('План_ этаж 1_2.ferrum');
 });
 
-test('«Открыть…» при правках спрашивает; отмена и испорченный файл оставляют документ', async ({ page }) => {
+test('«Открыть…» при правках не спрашивает: правки сохранены; испорченный файл — одна ошибка, экран файлов', async ({ page }) => {
   await page.addInitScript(() => {
     delete (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker;
   });
@@ -413,36 +414,27 @@ test('«Открыть…» при правках спрашивает; отме
   await selectShape(page);
   await page.keyboard.press('ControlOrMeta+KeyD');
   const edited = await liveWhen(page, 'l.steps === 1');
-  const open = async () => {
-    await page.getByRole('button', { name: 'Меню файла' }).click();
-    await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Открыть…' }).click();
-  };
-  let chooserShown = false;
-  page.on('filechooser', () => (chooserShown = true));
-  await open();
-  const dialog = page.getByRole('dialog', { name: 'Открыть другой файл?' });
-  await expect(dialog).toContainText('Несохранённые изменения будут потеряны');
-  await expect(dialog.getByRole('button', { name: 'Отмена' })).toBeFocused();
-  await dialog.getByRole('button', { name: 'Отмена' }).click();
-  await expect(dialog).toHaveCount(0);
-  await page.waitForTimeout(300);
-  expect(chooserShown).toBe(false);
-  expect((await live(page)).nodes).toBe(edited.nodes);
-  // Подтверждение → выбор файла → испорченный файл: одна ошибка, документ прежний.
-  await open();
+  const first = page.url();
+  await page.getByRole('button', { name: 'Меню файла' }).click();
   const chooser = page.waitForEvent('filechooser');
-  await dialog.getByRole('button', { name: 'Открыть' }).click();
+  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Открыть…' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await (await chooser).setFiles({ name: 'битый.ferrum', mimeType: 'application/octet-stream', buffer: Buffer.from('не ferrum') });
-  await expect.poll(async () => (await errors(page)).length).toBe(1);
+  // Файл не открылся: экран файлов, одно сообщение; запись в хранилище осталась.
+  const toast = page.locator('.fe-toast', { hasText: /Не удалось открыть файл: / });
+  await expect(toast).toHaveCount(1);
+  await expect(page).toHaveURL(/#\/$/);
+  const list = page.getByRole('main').getByRole('listbox');
+  await expect(list.getByRole('option', { name: 'битый', exact: true })).toBeVisible();
   await page.waitForTimeout(300);
-  const e = await errors(page);
-  expect(e.length).toBe(1);
-  expect(e[0]).toMatch(/^Не удалось открыть файл: /);
-  const after = await live(page);
-  expect([after.nodes, after.steps]).toEqual([edited.nodes, edited.steps]);
+  await expect(toast).toHaveCount(1);
+  // Прежний файл сохранён при уходе — с правкой.
+  await page.goto(first);
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true);
+  await liveWhen(page, `l.nodes === ${edited.nodes}`);
 });
 
-test('«Сохранить как…» на 100 000 узлах — без длинных задач основного потока @perf', async ({ page }, info) => {
+test('«Сохранить копию на диск…» на 100 000 узлах — без длинных задач основного потока @perf', async ({ page }, info) => {
   test.skip(info.project.name !== 'chromium', 'ворота длинных задач — в проекте chromium');
   await openApp(page, 100_000);
   await page.evaluate(() => {
@@ -455,7 +447,7 @@ test('«Сохранить как…» на 100 000 узлах — без дли
   await page.getByRole('button', { name: 'Меню файла' }).click();
   const download = page.waitForEvent('download');
   const t0 = await page.evaluate(() => performance.now());
-  await page.getByRole('menuitem', { name: 'Сохранить как…' }).click();
+  await page.getByRole('menuitem', { name: 'Сохранить копию на диск…' }).click();
   const file = await download;
   const size = (await (await file.createReadStream()).toArray()).reduce((n, b: Buffer) => n + b.length, 0);
   await page.waitForTimeout(500);

@@ -259,14 +259,17 @@ test('диалог модальный: щелчок по пустому мест
 test('диалог подтверждения тоже модальный: щелчок по тексту и Delete', async ({ page }) => {
   await openApp(page);
   const before = await selectShape(page);
-  // Правка есть — «Создать» спросит.
   await page.keyboard.press('Delete');
   await liveWhen(page, `l.steps === ${before.steps + 1}`);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: 'Создать' }).click();
-  const confirm = page.getByRole('dialog', { name: 'Создать новый файл?' });
+  // Подтверждение — удаление страницы (операции со страницами не отменяются).
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  await page.getByRole('button', { name: 'Добавить страницу' }).click();
+  await expect(pages.getByRole('option')).toHaveCount(2);
+  await pages.getByRole('option', { name: /Страница 2/ }).hover();
+  await pages.getByRole('button', { name: 'Удалить страницу «Страница 2»' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Удалить страницу?' });
   await expect(confirm).toBeVisible();
-  await confirm.getByText('Несохранённые изменения будут потеряны').click();
+  await confirm.getByText(/будет удалена вместе со всем/).click();
   await expect(confirm).toBeFocused();
   const steps = (await live(page)).steps;
   await page.keyboard.press('ControlOrMeta+KeyZ');

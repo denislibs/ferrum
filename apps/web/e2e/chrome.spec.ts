@@ -275,12 +275,8 @@ test('тулбар и вкладки: одна точка Tab, стрелки и
   if (ctl) expect(await page.locator(`#${ctl}`).count()).toBe(1);
 });
 
-test('«Создать» просит подтверждения, пока в документе есть правки', async ({ page }) => {
+test('«Новый файл» при правках не спрашивает: текущий сохраняется, открывается пустой', async ({ page }) => {
   await openApp(page);
-  const create = async () => {
-    await page.getByRole('button', { name: 'Меню файла' }).click();
-    await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Создать' }).click();
-  };
   // Правка: дублирование выделенного.
   const l = await live(page);
   const node = await appScreen(page, l, 200, 40);
@@ -289,24 +285,18 @@ test('«Создать» просит подтверждения, пока в д
   await page.keyboard.press('ControlOrMeta+KeyD');
   await liveWhen(page, `l.steps === ${l.steps + 1}`);
   const total = (await live(page)).nodes;
-  await create();
-  const dialog = page.getByRole('dialog', { name: 'Создать новый файл?' });
-  await expect(dialog).toContainText('Несохранённые изменения будут потеряны');
-  await expect(dialog.getByRole('button', { name: 'Отмена' })).toBeFocused();
-  await dialog.getByRole('button', { name: 'Отмена' }).click();
-  await expect(dialog).toHaveCount(0);
-  await page.waitForTimeout(300);
-  expect((await live(page)).nodes).toBe(total);
-  await create();
-  await page.keyboard.press('Escape');
-  await expect(dialog).toHaveCount(0);
-  expect((await live(page)).nodes).toBe(total);
-  await create();
-  await dialog.getByRole('button', { name: 'Создать' }).click();
-  await liveWhen(page, 'l.nodes < 5');
-  // Пустой документ без правок — без вопросов.
-  await create();
-  await expect(dialog).toHaveCount(0);
+  const first = page.url();
+  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Новый файл' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect.poll(() => page.url()).not.toBe(first);
+  await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true);
+  // Новый файл — пустой документ того же адреса `?nodes`: страница-пример.
+  await liveWhen(page, `l.nodes === ${total - 1}`);
+  // Прежний файл сохранён с правкой.
+  await page.goBack();
+  await page.waitForFunction((u) => location.href === u && window.__ferrum?.ui?.ready === true, first);
+  await liveWhen(page, `l.nodes === ${total}`);
 });
 
 test('фокус пункта меню не теряется, когда пункты перестраиваются', async ({ page }) => {
@@ -429,14 +419,14 @@ test('масштаб экспорта — группа переключател�
   await expect(radio('1×')).toHaveAttribute('aria-checked', 'true');
 });
 
-const fileMenu = async (page: Page, item: string) => {
+const fileMenu = async (page: Page, item: string | RegExp) => {
   await page.getByRole('button', { name: 'Меню файла' }).click();
   await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: item }).click();
 };
 
-test('«Создать» спрашивает и после правок вне истории; после «Сохранить как…» — нет', async ({ page }) => {
+test('правки вне истории (страница, имя файла) — «изменён» и запись в хранилище; копия на диск признак не снимает', async ({ page }) => {
   await openApp(page);
-  const total = (await live(page)).nodes;
+  const modified = () => page.evaluate(() => window.__ferrum!.ui!.modified);
   // Переименование страницы в историю отмены не попадает, но документ изменился.
   const pages = page.getByRole('listbox', { name: 'Страницы' });
   await pages.getByRole('option', { name: /Страница 1/ }).dblclick();
@@ -444,30 +434,26 @@ test('«Создать» спрашивает и после правок вне 
   await pages.getByRole('textbox', { name: 'Имя страницы' }).press('Enter');
   await expect(pages.getByRole('option', { name: /Черновик/ })).toBeVisible();
   expect((await live(page)).canUndo).toBe(0);
-  const dialog = page.getByRole('dialog', { name: 'Создать новый файл?' });
-  await fileMenu(page, 'Создать');
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole('button', { name: 'Отмена' }).click();
-  await expect(dialog).toHaveCount(0);
-  await page.waitForTimeout(300);
-  expect((await live(page)).nodes).toBe(total);
-  await expect(pages.getByRole('option', { name: /Черновик/ })).toBeVisible();
-  // Сохранено — вопроса нет, документ заменяется сразу.
+  await expect.poll(modified).toBe(true);
+  // «Сохранить копию на диск…» — скачивание, документ остаётся изменённым.
   const download = page.waitForEvent('download');
-  await fileMenu(page, 'Сохранить как…');
-  await download;
-  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
-  await fileMenu(page, 'Создать');
-  await liveWhen(page, 'l.nodes < 5');
-  await expect(dialog).toHaveCount(0);
-  // Имя документа — тоже правка вне истории.
+  await fileMenu(page, 'Сохранить копию на диск…');
+  expect((await download).suggestedFilename()).toBe('Без названия.ferrum');
+  await page.waitForTimeout(300);
+  expect(await modified()).toBe(true);
+  // «Сохранить» — запись в хранилище снимает признак.
+  await fileMenu(page, /^Сохранить(?! копию)/);
+  await expect.poll(modified).toBe(false);
+  // Имя документа — тоже правка вне истории; запись в хранилище — с новым именем.
   await page.locator('.fe-panel-head__name').dblclick();
   await page.getByRole('textbox', { name: 'Имя файла' }).fill('Новое имя');
   await page.getByRole('textbox', { name: 'Имя файла' }).press('Enter');
   await expect(page.locator('.fe-panel-head__name')).toHaveText('Новое имя');
-  await fileMenu(page, 'Создать');
-  await expect(dialog).toBeVisible();
-  await page.keyboard.press('Escape');
+  await expect.poll(modified).toBe(true);
+  const id = /#\/file\/([\w-]+)$/.exec(page.url())![1];
+  await expect.poll(() => page.evaluate((i) => window.__ferrumFiles!.store.get(i).then((m) => m?.name), id)).toBe('Новое имя');
+  // Отложенное сохранение снимает признак само.
+  await expect.poll(modified, { timeout: 10_000 }).toBe(false);
 });
 
 test('имя файла: Enter и F2 открывают поле, предел длины, фокус возвращается', async ({ page }) => {
