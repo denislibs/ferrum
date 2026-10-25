@@ -3,6 +3,7 @@
 // здесь — только конверт.
 
 import type { Command, CoreEvent } from '../wasm/ferrum_wasm';
+import { MAX_CLIPBOARD_TEXT } from './clipboard-text';
 
 export type ToWorker =
   | {
@@ -20,6 +21,9 @@ export type ToWorker =
       atlas: number | null;
     }
   | { t: 'cmd'; cmd: Command }
+  /** Вставка текста с меткой из буфера обмена: base64 декодирует worker (основной
+   * поток только переносит текст), затем — команда `paste`. */
+  | { t: 'pasteText'; text: string }
   /** Кадр в режиме postMessage: записи ввода с прошлого кадра. В режиме SAB — без
    * ввода, только если в worker'е нет `Atomics.waitAsync`. */
   | { t: 'tick'; input: ArrayBuffer | null };
@@ -30,6 +34,7 @@ export const MAX_COMMAND_BYTES = {
   open: 512 * 1024 * 1024,
   paste: 64 * 1024 * 1024,
   placeImage: 64 * 1024 * 1024,
+  pasteImage: 64 * 1024 * 1024,
 } as const;
 
 /** Размер в мегабайтах с округлением вверх: «предел 64 МБ, получено 64 МБ» сбивало бы с толку. */
@@ -41,7 +46,7 @@ const mb = (n: number) => Math.ceil(n / (1024 * 1024));
  * `null`: форму целиком проверяет разбор команды в ядре («Неверная команда»). */
 export function commandSizeError(cmd: Command): string | null {
   if (typeof cmd !== 'object' || cmd === null) return null;
-  if (cmd.type !== 'open' && cmd.type !== 'paste' && cmd.type !== 'placeImage') return null;
+  if (cmd.type !== 'open' && cmd.type !== 'paste' && cmd.type !== 'placeImage' && cmd.type !== 'pasteImage') return null;
   const bytes = (cmd as { bytes: unknown }).bytes;
   if (!(bytes instanceof Uint8Array)) return 'Неверная команда: байты должны быть Uint8Array.';
   if (typeof SharedArrayBuffer === 'function' && bytes.buffer instanceof SharedArrayBuffer) {
@@ -51,6 +56,14 @@ export function commandSizeError(cmd: Command): string | null {
   if (bytes.byteLength > max) {
     return `Слишком большой объём данных: ${mb(bytes.byteLength)} МБ, предел для этой команды — ${mb(max)} МБ.`;
   }
+  return null;
+}
+
+/** Текст ошибки, если текст вставки не годится (не строка или длиннее предела —
+ * до декодирования); `null` — можно слать. Проверяют обе стороны. */
+export function pasteTextError(text: string): string | null {
+  if (typeof text !== 'string') return 'Неверная команда: текст вставки должен быть строкой.';
+  if (text.length > MAX_CLIPBOARD_TEXT) return 'Слишком большой объём данных в буфере обмена: предел — 64 МБ.';
   return null;
 }
 
@@ -68,7 +81,7 @@ export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transfer
 }
 
 /** Виды сообщений worker'у: остальное — неверный конверт. */
-export const TO_WORKER_KINDS: ReadonlySet<string> = new Set(['init', 'cmd', 'tick']);
+export const TO_WORKER_KINDS: ReadonlySet<string> = new Set(['init', 'cmd', 'pasteText', 'tick']);
 
 /** Конверт сообщения worker'у: объект известного вида. Содержимое команды
  * проверяет ядро. */

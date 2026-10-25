@@ -5,7 +5,9 @@
 import init, { WasmCore } from '../wasm/ferrum_wasm.js';
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import { Ctrl, CTRL_BYTES, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET } from '../core/layout.gen';
-import { commandSizeError, isToWorker, type FromWorker, type ToWorker } from '../core/messages';
+import { decodeText } from '../core/clipboard-text';
+import { commandSizeError, isToWorker, pasteTextError, type FromWorker, type ToWorker } from '../core/messages';
+import { imageSize } from '../core/image-size';
 import { drainRing, writeLive as writeLiveSlots } from '../core/shared';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -35,6 +37,46 @@ function fatal(e: unknown): void {
 /** Ошибка для пользователя без остановки ядра (неверное сообщение). */
 function postError(message: string): void {
   post({ t: 'events', events: [{ type: 'error', message }] });
+}
+
+/** Наибольшая сторона картинки, как у `decode_png` в ядре. */
+const MAX_IMAGE_SIDE = 8192;
+
+/** Картинка не PNG (JPEG, WebP из буфера обмена или файла) — перекодируется в
+ * PNG здесь, в worker'е: ядро читает только PNG, а основной поток пиксели не трогает.
+ * Размер проверяется по заголовку до декодирования: крошечный файл может объявить
+ * гигапиксели. */
+async function toPng(bytes: Uint8Array): Promise<Uint8Array> {
+  const size = imageSize(bytes);
+  if (!size) throw new Error('нужен PNG, JPEG или WebP');
+  if (size.width > MAX_IMAGE_SIDE || size.height > MAX_IMAGE_SIDE) {
+    throw new Error(`изображение больше ${MAX_IMAGE_SIDE} px`);
+  }
+  const bmp = await createImageBitmap(new Blob([bytes as BlobPart]));
+  try {
+    const c = new OffscreenCanvas(bmp.width, bmp.height);
+    c.getContext('2d')!.drawImage(bmp, 0, 0);
+    return new Uint8Array(await (await c.convertToBlob({ type: 'image/png' })).arrayBuffer());
+  } finally {
+    bmp.close();
+  }
+}
+
+/** Пока картинка перекодируется, следующие команды ждут: порядок команд — порядок
+ * пользователя (вставка, затем отмена — отменяется вставка). */
+let converting = false;
+const waiting: ToWorker[] = [];
+
+/** Команда ядру после проверки предела; ответы — сразу, кадр нарисуется по тику. */
+function run(cmd: ToWorker & { t: 'cmd' }): void {
+  // Предел размера проверяем и здесь: основной поток не доверенный.
+  const error = commandSizeError(cmd.cmd);
+  if (error) {
+    postError(error);
+    return;
+  }
+  core!.command(cmd.cmd);
+  sendEvents();
 }
 
 /** Байты событий уходят без копии: их буферы передаются основному потоку. */
@@ -106,15 +148,53 @@ function handle(msg: ToWorker): void {
   try {
     switch (msg.t) {
       case 'cmd': {
-        // Предел размера проверяем и здесь: основной поток не доверенный.
-        const error = commandSizeError(msg.cmd);
+        if (converting) {
+          waiting.push(msg);
+          return;
+        }
+        const cmd = msg.cmd;
+        // Команда не доверенная: не объект — её отвергнет разбор в ядре.
+        const image = typeof cmd === 'object' && cmd !== null && (cmd.type === 'pasteImage' || cmd.type === 'placeImage');
+        if (image && !commandSizeError(cmd) && imageSize(cmd.bytes)?.type !== 'png') {
+          converting = true;
+          toPng(cmd.bytes)
+            .then(
+              (png) => {
+                if (!core) return;
+                core.command({ ...cmd, bytes: png });
+                sendEvents();
+              },
+              (e: unknown) => postError(`Не удалось прочитать изображение: ${e instanceof Error ? e.message : 'формат не поддерживается'}`),
+            )
+            .catch(fatal)
+            .finally(() => {
+              converting = false;
+              // Ждавшие команды — по порядку; новая перекодировка снова остановит очередь.
+              while (waiting.length && !converting) handle(waiting.shift()!);
+            });
+          return;
+        }
+        run(msg);
+        break;
+      }
+      case 'pasteText': {
+        if (converting) {
+          waiting.push(msg);
+          return;
+        }
+        // Текст из буфера не доверенный: предел — до декодирования, испорченный
+        // base64 — одна ошибка без правки.
+        const error = pasteTextError(msg.text);
         if (error) {
           postError(error);
           return;
         }
-        core.command(msg.cmd);
-        // Ответы на команды (сохранение, ошибки) — сразу, кадр нарисуется по тику.
-        sendEvents();
+        const bytes = decodeText(msg.text);
+        if (!bytes || bytes.length === 0) {
+          postError('Не удалось вставить: данные Ferrum в буфере обмена повреждены');
+          return;
+        }
+        run({ t: 'cmd', cmd: { type: 'paste', bytes } });
         break;
       }
       case 'tick':

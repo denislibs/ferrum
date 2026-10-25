@@ -1,12 +1,23 @@
 // Какие клавиши оставить интерфейсу, а какие переслать редактору (спека 7.6:
 // «если фокус в поле ввода панели, клавиши обрабатывает интерфейс»).
 
-/** Элемент, где клавиши — ввод текста или навигация по виджету. */
-function ownsKeys(t: EventTarget | null): boolean {
+/** Поле ввода текста: клавиши и события буфера обмена в нём — обычные, браузера. */
+export function editableTarget(t: EventTarget | null): boolean {
   if (!(t instanceof Element)) return false;
   // contenteditable без значения, «true» и «plaintext-only» — всё редактируемое.
   if (t.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return true;
-  if (t instanceof HTMLElement && t.isContentEditable) return true;
+  return t instanceof HTMLElement && t.isContentEditable;
+}
+
+/** Открыт модальный диалог: холст не получает ни клавиш, ни буфера обмена. */
+export function modalOpen(): boolean {
+  return !!document.querySelector('[role="dialog"][aria-modal="true"]');
+}
+
+/** Элемент, где клавиши — ввод текста или навигация по виджету. */
+function ownsKeys(t: EventTarget | null): boolean {
+  if (!(t instanceof Element)) return false;
+  if (editableTarget(t)) return true;
   // Меню, диалоги, списки: стрелки, Enter, Esc, Tab — их клавиатурная навигация.
   return !!t.closest('[role="menu"], [role="dialog"], [role="listbox"]');
 }
@@ -23,7 +34,7 @@ const ARROW_ROLES =
 export function forwardKey(e: KeyboardEvent, isClipboardKey: (e: KeyboardEvent) => boolean): boolean {
   if (ownsKeys(e.target)) return false;
   // Открыт модальный диалог: холст клавиш не получает, даже если фокус потерялся.
-  if (document.querySelector('[role="dialog"][aria-modal="true"]')) return false;
+  if (modalOpen()) return false;
   // Tab всегда у браузера: фокус ходит по интерфейсу.
   if (e.code === 'Tab') return false;
   const el = e.target instanceof Element ? e.target : null;

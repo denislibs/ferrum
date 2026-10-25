@@ -209,6 +209,17 @@ export class Core {
     if (error) this.emit({ type: 'error', message: error });
   }
 
+  /** Вставка текста с меткой из буфера обмена: текст уходит worker'у как есть, base64
+   * декодирует он (предел длины — до отправки и ещё раз в worker'е). */
+  pasteText(text: string): void {
+    if (this.stopped) {
+      this.emit({ type: 'error', message: 'Ядро остановлено, команда не выполнена' });
+      return;
+    }
+    const error = this.transport.post({ t: 'pasteText', text });
+    if (error) this.emit({ type: 'error', message: error });
+  }
+
   private emit(e: CoreEvent): void {
     for (const l of this.listeners) l(e);
   }

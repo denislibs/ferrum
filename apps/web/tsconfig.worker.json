@@ -3,6 +3,6 @@
   "compilerOptions": {
     "lib": ["ES2024", "WebWorker"]
   },
-  "include": ["src/worker/**/*.ts", "src/core/layout.gen.ts", "src/core/messages.ts"],
+  "include": ["src/worker/**/*.ts", "src/core/layout.gen.ts", "src/core/messages.ts", "src/core/image-size.ts", "src/core/clipboard-text.ts"],
   "exclude": []
 }
