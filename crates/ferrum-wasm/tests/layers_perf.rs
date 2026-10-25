@@ -1,11 +1,13 @@
 //! Стоимость дерева слоёв на странице в 100 000 узлов: окно — от окна и пути
-//! раскрытия, а не от документа; поиск по запросу не блокирует worker надолго.
-#![cfg(not(target_arch = "wasm32"))]
+//! раскрытия, а не от документа; поиск после первого запроса — от кэша имён и
+//! прошлых совпадений. Время меряется только в release: в debug (14 с, пороги
+//! бессмысленны) тест не запускается.
+#![cfg(all(not(target_arch = "wasm32"), not(debug_assertions)))]
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use ferrum_doc::{fixture, Document, NodeId};
+use ferrum_doc::{fixture, Document, NodeId, PropsPatch};
 use ferrum_scene::Scene;
 use ferrum_wasm::layers::Layers;
 
@@ -21,42 +23,85 @@ fn page(nodes: usize) -> (Scene, Vec<NodeId>) {
     (Scene::from_page(doc.page(p).unwrap()), ids)
 }
 
+fn timed(l: &mut Layers, scene: &Scene, q: &str) -> (Duration, u32) {
+    let sel = HashSet::new();
+    l.set_filter(q);
+    let t = Instant::now();
+    let total = l.total(scene);
+    let d = t.elapsed();
+    l.window(scene, &sel);
+    (d, total)
+}
+
 #[test]
-fn window_queries_reuse_cached_rows_and_search_is_bounded() {
-    let (scene, ids) = page(100_000);
+fn window_queries_reuse_cached_rows() {
+    let (mut scene, ids) = page(100_000);
     let sel = HashSet::new();
     let mut l = Layers::new();
     l.set_expanded(ids[0], true);
     l.set_window(0, 40);
-    let t = Instant::now();
     let w = l.window(&scene, &sel).unwrap();
-    let build = t.elapsed();
-    assert_eq!(w.total, 1000 + 99, "1000 фреймов и дети одного раскрытого");
-    // Прокрутка: список строк не пересобирается, окно стоит O(окно).
+    assert_eq!(w.total, 1000 + 99);
     let t = Instant::now();
     for i in 0..1000u32 {
         l.set_window(i % 1000, 40);
         l.window(&scene, &sel);
     }
-    let per_scroll = t.elapsed() / 1000;
-    eprintln!("build rows: {build:?}; per window query: {per_scroll:?}");
-    // Время меряется только в release: в debug пороги не имеют смысла.
-    assert!(
-        cfg!(debug_assertions) || per_scroll.as_micros() < 2000,
-        "окно: {per_scroll:?}"
-    );
-    // Поиск по 100 000 именам.
-    let mut worst = std::time::Duration::ZERO;
-    for q in ["слой 42", "экран 999", "нет такого", "с"] {
-        l.set_filter(q);
-        let t = Instant::now();
-        let w = l.window(&scene, &sel);
-        let d = t.elapsed();
-        eprintln!("search {q:?}: {d:?}, total={:?}", w.map(|w| w.total));
+    let per = t.elapsed() / 1000;
+    eprintln!("per window query: {per:?}");
+    assert!(per.as_micros() < 500, "окно: {per:?}");
+    // Кадр перетаскивания: превью геометрии не пересобирает строки.
+    let patch = PropsPatch {
+        x: Some(5.0),
+        ..Default::default()
+    };
+    let t = Instant::now();
+    for _ in 0..100 {
+        scene.set_preview(&[(ids[0], patch.clone())]);
+        l.window(&scene, &sel);
+    }
+    eprintln!("per preview frame: {:?}", t.elapsed() / 100);
+}
+
+#[test]
+fn search_is_cached_and_narrows() {
+    let (scene, _) = page(100_000);
+    let mut l = Layers::new();
+    l.set_window(0, 40);
+    // Холодный первый запрос: полный обход с построением кэша имён.
+    let (cold, _) = timed(&mut l, &scene, "слой 42");
+    eprintln!("cold first query: {cold:?}");
+    // Тёплый запрос, не продолжающий прошлый: полный обход по кэшу.
+    let (warm, n) = timed(&mut l, &scene, "экран 99");
+    eprintln!("warm full-pass query: {warm:?} ({n} rows)");
+    assert!(warm.as_millis() < 5, "тёплый запрос: {warm:?}");
+    // Набор по букве осмысленного запроса: каждый шаг сужает прошлые совпадения.
+    let mut typed = String::new();
+    for ch in "экран 99".chars() {
+        typed.push(ch);
+        let (d, n) = timed(&mut l, &scene, &typed);
+        eprintln!("typed {typed:?}: {d:?} ({n} rows)");
+        // Первая буква — полный просмотр кэша (запрос короче прошлого), дальше сужение.
+        let limit = if typed.chars().count() == 1 { 6 } else { 3 };
+        assert!(d.as_millis() < limit, "набор {typed:?}: {d:?}");
+    }
+    // Набор, где первые буквы совпадают со всеми 100 000 имён (худший случай:
+    // столько же строк на выходе).
+    let mut worst = Duration::ZERO;
+    typed.clear();
+    for ch in "слой ".chars() {
+        typed.push(ch);
+        let (d, n) = timed(&mut l, &scene, &typed);
+        eprintln!("typed {typed:?}: {d:?} ({n} rows)");
         worst = worst.max(d);
     }
-    assert!(
-        cfg!(debug_assertions) || worst.as_millis() < 50,
-        "поиск: {worst:?}"
-    );
+    assert!(worst.as_millis() < 8, "набор по букве: {worst:?}");
+    // Предварительный кэш: первый запрос после prepare_search тёплый.
+    let mut l2 = Layers::new();
+    let t = Instant::now();
+    l2.prepare_search(&scene);
+    eprintln!("prepare_search: {:?}", t.elapsed());
+    let (first, _) = timed(&mut l2, &scene, "слой 42");
+    eprintln!("first query after prepare: {first:?}");
+    assert!(first.as_millis() < 5, "после prepare: {first:?}");
 }
