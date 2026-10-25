@@ -153,15 +153,18 @@ export function FilesScreen(props: FilesScreenProps) {
 
   onMount(() => {
     dismissSplash();
-    // Размер области — из ResizeObserver (без чтения layout в обработчиках).
+    // Размеры — из ResizeObserver (без чтения layout в обработчиках): ширина
+    // списка задаёт столбцы, высота видимой области — окно записей.
     const ro = new ResizeObserver((entries) => {
-      const r = entries[entries.length - 1].contentRect;
       batch(() => {
-        setWidth(r.width);
-        setHeight(r.height);
+        for (const e of entries) {
+          if (e.target === list) setWidth(e.contentRect.width);
+          else setHeight(e.contentRect.height);
+        }
       });
     });
     ro.observe(list);
+    ro.observe(scroller);
     const clock = setInterval(() => setNow(Date.now()), 30_000);
     onCleanup(() => {
       ro.disconnect();
@@ -254,6 +257,9 @@ export function FilesScreen(props: FilesScreenProps) {
     ),
   );
   const fileAt = (i: number) => rows.list[i - rows.start];
+  /** Точка Tab: выбранная запись, если она в окне, иначе первая в окне — у списка
+   * всегда есть, куда прийти с клавиатуры. */
+  const tabStop = () => (fileAt(focused()) ? focused() : rows.start);
   const onListKey = (e: KeyboardEvent) => {
     if (e.target instanceof HTMLInputElement || e.altKey || e.ctrlKey || e.metaKey) return;
     const at = focused();
@@ -510,7 +516,7 @@ export function FilesScreen(props: FilesScreenProps) {
                     data-index={index()}
                     aria-label={f().name}
                     aria-selected={focused() === index()}
-                    tabindex={focused() === index() ? 0 : -1}
+                    tabindex={tabStop() === index() ? 0 : -1}
                     style={{
                       transform: `translate(${pos().x}px, ${pos().y}px)`,
                       width: `${layout().cardW}px`,

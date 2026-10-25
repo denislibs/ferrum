@@ -432,10 +432,11 @@ test('1000 записей: виртуальный список, без длин�
   }
   await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
   await expect(card(page, 'Без названия 1000')).toBeVisible();
-  // В DOM — только окно, а не тысяча карточек.
+  // В DOM — только видимые строки с запасом, а не тысяча карточек (окно 1280×720:
+  // 4 столбца, 3–4 строки видно).
   const inDom = await files(page).getByRole('option').count();
   expect(inDom).toBeGreaterThan(0);
-  expect(inDom).toBeLessThanOrEqual(200);
+  expect(inDom).toBeLessThanOrEqual(6 * 4);
   await page.getByRole('radiogroup', { name: 'Вид' }).getByRole('radio', { name: 'Список' }).click();
   await page.getByRole('searchbox', { name: 'Поиск' }).fill('99');
   await expect(card(page, 'Без названия 99')).toBeVisible();
