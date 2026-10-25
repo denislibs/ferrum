@@ -5,7 +5,7 @@
 // порядка и вложенности, кнопки «скрыть» и «заблокировать», наведение
 // подсвечивает узел на холсте, выделение синхронно в обе стороны.
 
-import { createEffect, createSignal, Index, on, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show } from 'solid-js';
 import type { DropPosition, LayerRow, NodeType } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { Icon, type IconName } from './icons';
@@ -16,6 +16,8 @@ export const ROW = 28;
 export const OVERSCAN = 10;
 /** Сдвиг указателя, после которого нажатие на строке становится перетаскиванием. */
 const DRAG_START_PX = 4;
+/** Предел длины имени (как в ядре, `MAX_NAME_CHARS`). */
+export const MAX_NAME_CHARS = 256;
 
 const KIND_ICON: Record<NodeType, IconName> = {
   frame: 'frame',
@@ -46,6 +48,10 @@ export function dropPosition(offset: number, row: Pick<LayerRow, 'kind'>): DropP
 
 interface Drag {
   id: string;
+  /** Номер строки и глубина в момент нажатия: цели внутри себя и потомки недопустимы. */
+  index: number;
+  depth: number;
+  /** Строка выделена (при перетаскивании невыделенной она выделяется сразу). */
   selected: boolean;
   y0: number;
   active: boolean;
@@ -55,7 +61,15 @@ interface Drag {
 export function LayersPanel() {
   const ed = useEditor();
   const layers = () => ed.store.state.layers;
-  const [renaming, setRenaming] = createSignal<string | null>(null);
+  /** Открытое переименование: слой и имя на момент начала (применяется по id). */
+  const [renaming, setRenaming] = createSignal<{ id: string; original: string } | null>(null);
+  const [denied, setDenied] = createSignal(false);
+  const [focusedSig, setFocusedSig] = createSignal<string | null>(null);
+  const [topRow, setTopRow] = createSignal(0);
+  /** Поле имени фокусируется только если переименование начал пользователь только что. */
+  let wantFocus = false;
+  let hovered = false;
+  let search!: HTMLInputElement;
   const [drop, setDrop] = createSignal<{ index: number; position: DropPosition } | null>(null);
   let tree!: HTMLDivElement;
   let asked = { start: -1, count: -1 };
@@ -65,9 +79,19 @@ export function LayersPanel() {
   let treeTop: number | null = null;
   /** Строка с фокусом клавиатуры: DOM-строки переиспользуются по месту, и после
    * прокрутки фокус возвращается к своему слою, а не к месту. */
-  let focusedId: string | null = null;
   /** Номер строки, куда перевести фокус, когда она придёт от worker'а. */
   let pendingFocus: number | null = null;
+
+  /** Единственная точка Tab: строка с фокусом, иначе первая выделенная в окне,
+   * иначе первая видимая (не запас). */
+  const tabStop = createMemo(() => {
+    const rows = layers().rows;
+    const f = focusedSig();
+    if (f && rows.some((r) => r.id === f)) return f;
+    const sel = rows.find((r) => r.selected);
+    if (sel) return sel.id;
+    return (rows[topRow() - layers().start] ?? rows[0])?.id;
+  });
 
   /** Чтение прокрутки — в фазе measure; запрос окна — только если оно сменилось. */
   let windowQueued = false;
@@ -78,6 +102,7 @@ export function LayersPanel() {
     ed.scheduler.measure(() => {
       windowQueued = false;
       scrollTop = tree.scrollTop;
+      setTopRow(Math.floor(tree.scrollTop / ROW));
       treeTop = tree.getBoundingClientRect().top;
       const w = windowFor(tree.scrollTop, tree.clientHeight);
       if (w.start !== asked.start || w.count !== asked.count) {
@@ -93,6 +118,23 @@ export function LayersPanel() {
     ro.observe(tree);
     onCleanup(() => ro.disconnect());
   });
+
+  // Другая страница или новый документ: worker сбросил поиск, поле и прокрутка — тоже.
+  createEffect(
+    on(
+      () => [ed.store.state.pages.current, ed.store.state.docSeq],
+      () => {
+        setRenaming(null);
+        setFocusedSig(null);
+        ed.scheduler.mutate(() => {
+          search.value = '';
+          tree.scrollTop = 0;
+          requestWindow();
+        });
+      },
+      { defer: true },
+    ),
+  );
 
   // Выделение пришло с холста: worker раскрыл предков и прислал строку — прокрутить
   // к ней, если её не видно.
@@ -122,6 +164,7 @@ export function LayersPanel() {
     on(
       () => [layers().start, layers().rows.map((r) => r.id).join()],
       () => {
+        if (pendingFocus != null && pendingFocus >= layers().total) pendingFocus = null;
         if (pendingFocus != null) {
           const el = tree.querySelector<HTMLElement>(`[data-index="${pendingFocus}"]`);
           if (el) {
@@ -131,10 +174,11 @@ export function LayersPanel() {
           return;
         }
         const active = document.activeElement as HTMLElement | null;
-        if (!focusedId || !active || !tree.contains(active) || active.dataset.id === focusedId) return;
-        const own = tree.querySelector<HTMLElement>(`[data-id="${CSS.escape(focusedId)}"]`);
-        if (own) own.focus();
-        else tree.focus();
+        const fid = focusedSig();
+        if (!fid || !active || !tree.contains(active) || active.dataset.id === fid) return;
+        const own = tree.querySelector<HTMLElement>(`[data-id="${CSS.escape(fid)}"]`);
+        if (own) own.focus({ preventScroll: true });
+        else tree.focus({ preventScroll: true });
       },
       { defer: true },
     ),
@@ -164,30 +208,63 @@ export function LayersPanel() {
     ed.send({ type: 'select', ids: [row.id], mode });
   };
 
-  const onPointerDown = (row: LayerRow, e: PointerEvent) => {
-    if (e.button !== 0 || renaming()) return;
+  const endDrag = () => {
+    drag = null;
+    setDrop(null);
+    setDenied(false);
+    window.removeEventListener('keydown', onDragKey, true);
+  };
+  /** Esc во время перетаскивания отменяет его: без переноса и шага, ядру не уходит. */
+  function onDragKey(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || !drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    endDrag();
+  }
+
+  const onPointerDown = (row: LayerRow, index: number, e: PointerEvent) => {
+    if (e.button !== 0 || renaming()?.id === row.id) return;
     const el = e.currentTarget as HTMLElement;
-    drag = { id: row.id, selected: row.selected, y0: e.clientY, active: false, target: null };
+    drag = { id: row.id, index, depth: row.depth, selected: row.selected, y0: e.clientY, active: false, target: null };
     el.setPointerCapture(e.pointerId);
     requestWindow();
+  };
+
+  /** Цель недопустима: сама строка, её потомки (идут следом и глубже), другая переносимая. */
+  const invalidTarget = (d: Drag, index: number, row: LayerRow): boolean => {
+    if (index === d.index || (d.selected && row.selected)) return true;
+    if (index < d.index) return false;
+    for (let k = Math.max(d.index + 1, layers().start); k <= index; k++) {
+      const r = layers().rows[k - layers().start];
+      if (!r || r.depth <= d.depth) return false;
+    }
+    return true;
   };
 
   const onPointerMove = ed.core.costed((e: PointerEvent) => {
     if (!drag || treeTop === null) return;
     if (!drag.active && Math.abs(e.clientY - drag.y0) < DRAG_START_PX) return;
-    drag.active = true;
+    if (!drag.active) {
+      drag.active = true;
+      window.addEventListener('keydown', onDragKey, true);
+      // Как в Figma: невыделенная строка выделяется и переносится одна.
+      if (!drag.selected) {
+        ed.send({ type: 'select', ids: [drag.id], mode: 'replace' });
+      }
+    }
     // Прокрутка во время перетаскивания обновляет `scrollTop` (замер окна).
     const y = e.clientY - treeTop + scrollTop;
     const index = Math.floor(y / ROW);
     const row = layers().rows[index - layers().start];
-    drag.target = row && row.id !== drag.id ? { index, position: dropPosition(y - index * ROW, row) } : null;
+    const bad = !!row && invalidTarget(drag, index, row);
+    drag.target = row && !bad ? { index, position: dropPosition(y - index * ROW, row) } : null;
+    setDenied(bad);
     setDrop(drag.target);
   });
 
   const onPointerUp = (row: LayerRow, e: PointerEvent) => {
     const d = drag;
-    drag = null;
-    setDrop(null);
+    endDrag();
     if (!d) return;
     if (!d.active) {
       select(row, e);
@@ -195,21 +272,23 @@ export function LayersPanel() {
     }
     const target = d.target && layers().rows[d.target.index - layers().start];
     if (!target) return;
-    // Перетащили выделенную строку — переносится всё выделение (его полный список
-    // есть только у worker'а).
-    ed.send({
-      type: 'moveLayers',
-      ids: d.selected ? undefined : [d.id],
-      target: target.id,
-      position: d.target!.position,
-    });
+    // Выделенная строка несёт всё выделение (полный список есть только у worker'а);
+    // невыделенная — только себя: идентификатор взят в момент нажатия.
+    ed.send({ type: 'moveLayers', ids: d.selected ? undefined : [d.id], target: target.id, position: d.target!.position });
   };
 
-  const rename = (row: LayerRow, name: string) => {
-    // Esc уже закрыл поле: blur удаляемого поля не должен применять набранное.
-    if (renaming() !== row.id) return;
+  const startRename = (row: LayerRow) => {
+    wantFocus = true;
+    setRenaming({ id: row.id, original: row.name });
+  };
+
+  /** Применить имя слоя по id (поле могло переехать на другую строку окна). */
+  const commitRename = (id: string, name: string) => {
+    const r = renaming();
+    // Esc или уже применено: удаляемое поле ничего не применяет.
+    if (!r || r.id !== id) return;
     setRenaming(null);
-    if (name !== row.name) ed.send({ type: 'renameLayer', id: row.id, name });
+    if (name !== r.original) ed.send({ type: 'renameLayer', id, name });
   };
 
   /** После Enter и Esc поле имени исчезает вместе с фокусом: он возвращается к строке. */
@@ -236,7 +315,7 @@ export function LayersPanel() {
         break;
       case 'Enter':
       case 'F2':
-        setRenaming(row.id);
+        startRename(row);
         break;
       // Та же команда, что на холсте; ядру клавишу не отдаём (preventDefault ниже).
       case 'Delete':
@@ -257,6 +336,7 @@ export function LayersPanel() {
       <label class="fe-field fe-field--text fe-layers-panel__search">
         <Icon name="search" class="t-muted fe-field__icon" />
         <input
+          ref={search}
           type="search"
           placeholder="Поиск слоёв"
           aria-label="Поиск слоёв"
@@ -271,8 +351,24 @@ export function LayersPanel() {
         role="tree"
         tabindex="-1"
         aria-label="Слои"
-        onScroll={ed.core.costed(() => requestWindow())}
-        onPointerLeave={() => ed.send({ type: 'hoverLayer', id: undefined })}
+        aria-multiselectable="true"
+        classList={{ 'fe-tree--denied': denied() }}
+        onScroll={ed.core.costed(() => {
+          // Строки под указателем сменились: старая подсветка на холсте неверна.
+          if (hovered) {
+            hovered = false;
+            ed.send({ type: 'hoverLayer', id: undefined });
+          }
+          requestWindow();
+        })}
+        onFocusOut={(e) => {
+          const to = e.relatedTarget as Node | null;
+          if (to && !tree.contains(to)) setFocusedSig(null);
+        }}
+        onPointerLeave={() => {
+          hovered = false;
+          ed.send({ type: 'hoverLayer', id: undefined });
+        }}
       >
         <div class="fe-tree__spacer" style={{ height: `${layers().total * ROW}px` }} />
         {/* Index, а не For: при прокрутке строки DOM переиспользуются по месту —
@@ -298,18 +394,18 @@ export function LayersPanel() {
                 aria-level={row().depth + 1}
                 aria-selected={row().selected}
                 aria-expanded={row().hasChildren ? row().expanded : undefined}
-                tabindex={row().selected || (index() === layers().start && !layers().rows.some((r) => r.selected)) ? 0 : -1}
+                tabindex={row().id === tabStop() ? 0 : -1}
                 title={row().name}
-                onPointerEnter={() => ed.send({ type: 'hoverLayer', id: row().id })}
-                onPointerDown={(e) => onPointerDown(row(), e)}
+                onPointerEnter={() => {
+                  hovered = true;
+                  ed.send({ type: 'hoverLayer', id: row().id });
+                }}
+                onPointerDown={(e) => onPointerDown(row(), index(), e)}
                 onPointerMove={onPointerMove}
                 onPointerUp={(e) => onPointerUp(row(), e)}
-                onPointerCancel={() => {
-                  drag = null;
-                  setDrop(null);
-                }}
-                onFocus={() => (focusedId = row().id)}
-                onDblClick={() => setRenaming(row().id)}
+                onPointerCancel={endDrag}
+                onFocus={() => setFocusedSig(row().id)}
+                onDblClick={() => startRename(row())}
                 onKeyDown={(e) => onKey(row(), index(), e)}
               >
                 <span class="fe-layer__caret">
@@ -332,31 +428,42 @@ export function LayersPanel() {
                 <span class="fe-layer__icon">
                   <Icon name={KIND_ICON[row().kind]} />
                 </span>
-                <Show when={renaming() === row().id} fallback={<span class="fe-layer__name">{row().name}</span>}>
-                  <input
-                    class="fe-rename fe-layer__rename"
-                    aria-label="Имя слоя"
-                    value={row().name}
-                    ref={(el) =>
+                <Show when={renaming()?.id === row().id} fallback={<span class="fe-layer__name">{row().name}</span>}>
+                  {(() => {
+                    // Поле принадлежит слою, а не месту: исчезло из окна — применяется по id.
+                    const id = row().id;
+                    let el!: HTMLInputElement;
+                    const focus = wantFocus;
+                    wantFocus = false;
+                    onCleanup(() => commitRename(id, el.value));
+                    if (focus)
                       queueMicrotask(() => {
                         el.focus();
                         el.select();
-                      })
-                    }
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => {
-                      e.stopPropagation();
-                      if (e.key === 'Enter') {
-                        rename(row(), e.currentTarget.value);
-                        refocusRow(row().id);
-                      }
-                      if (e.key === 'Escape') {
-                        setRenaming(null);
-                        refocusRow(row().id);
-                      }
-                    }}
-                    onBlur={(e) => rename(row(), e.currentTarget.value)}
-                  />
+                      });
+                    return (
+                      <input
+                        ref={el}
+                        class="fe-rename fe-layer__rename"
+                        aria-label="Имя слоя"
+                        maxlength={MAX_NAME_CHARS}
+                        value={row().name}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === 'Enter') {
+                            commitRename(id, e.currentTarget.value);
+                            refocusRow(id);
+                          }
+                          if (e.key === 'Escape') {
+                            setRenaming(null);
+                            refocusRow(id);
+                          }
+                        }}
+                        onBlur={(e) => commitRename(id, e.currentTarget.value)}
+                      />
+                    );
+                  })()}
                 </Show>
                 <span class="fe-layer__actions">
                   <button

@@ -200,3 +200,9 @@
 .fe-layer--drop-below::after {
   bottom: -1px;
 }
+
+/* Перетаскивание на недопустимую цель (саму строку, потомка): запрет вместо индикатора. */
+.fe-tree--denied,
+.fe-tree--denied .fe-layer {
+  cursor: not-allowed;
+}

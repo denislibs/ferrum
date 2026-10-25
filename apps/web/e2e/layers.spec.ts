@@ -74,6 +74,8 @@ test('перетаскивание меняет порядок и вложенн
   await page.mouse.down();
   await page.mouse.move(a.x + 60, b.y + 14, { steps: 6 });
   await page.mouse.up();
+  // Строка ушла внутрь свёрнутого фрейма (ждём обновления списка, потом раскрываем).
+  await expect(row(page, 'Экран 7')).toHaveCount(0);
   await expect(row(page, 'Экран 6')).toHaveAttribute('aria-expanded', 'false');
   await row(page, 'Экран 6').getByRole('button', { name: 'Развернуть' }).click();
   await expect(row(page, 'Экран 7')).toHaveAttribute('aria-level', '2');
@@ -248,4 +250,112 @@ test('100 000 узлов, раскрытый большой фрейм: в DOM �
   expect((await sends(page)).filter((t) => t === 'layersWindow').length).toBeLessThanOrEqual(1);
   expect(await count()).toBeLessThanOrEqual(60);
   expect(await warnings(page)).toEqual([]);
+});
+
+// ——— Fix round 1 ———
+
+test('смена страницы сбрасывает поиск и прокрутку', async ({ page }) => {
+  await openApp(page, 20_000);
+  const total = () => page.evaluate(() => window.__ferrum!.ui!.layers.total);
+  const search = page.getByRole('searchbox', { name: 'Поиск слоёв' });
+  await expect.poll(total).toBe(200);
+  await tree(page).evaluate((el) => (el.scrollTop = 3000));
+  await search.fill('Слой 98');
+  await expect.poll(total).toBe(400);
+  await page.getByRole('button', { name: 'Добавить страницу' }).click();
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  await expect(pages.getByRole('option', { name: /Страница 2/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(search).toHaveValue('');
+  await pages.getByRole('option', { name: /Страница 1/ }).click();
+  await expect.poll(total).toBe(200);
+  await expect(search).toHaveValue('');
+  expect(await tree(page).evaluate((el) => el.scrollTop)).toBe(0);
+});
+
+test('в дереве одна точка Tab, дерево помечено как мультивыбор', async ({ page }) => {
+  await openApp(page);
+  await expect(tree(page)).toHaveAttribute('aria-multiselectable', 'true');
+  await row(page, 'Экран 9').click();
+  await row(page, 'Экран 8').click({ modifiers: ['ControlOrMeta'] });
+  await row(page, 'Экран 7').click({ modifiers: ['ControlOrMeta'] });
+  await liveWhen(page, 'l.selectionCount === 3');
+  expect(await tree(page).locator('[role="treeitem"][tabindex="0"]').count()).toBe(1);
+  await page.getByRole('searchbox', { name: 'Поиск слоёв' }).focus();
+  await page.keyboard.press('Tab');
+  await expect(page.locator(':focus')).toHaveAttribute('role', 'treeitem');
+  await page.keyboard.press('Tab');
+  expect(await page.evaluate(() => !!document.activeElement?.closest('[role="tree"]'))).toBe(false);
+});
+
+test('переименование не теряется, когда окно строк сдвинулось', async ({ page }) => {
+  await openApp(page, 20_000);
+  const before = await live(page);
+  await row(page, 'Экран 199').dblclick();
+  const input = tree(page).getByRole('textbox', { name: 'Имя слоя' });
+  await input.fill('Новое имя');
+  await tree(page).hover();
+  await page.mouse.wheel(0, 4000);
+  await expect(row(page, 'Экран 199')).toHaveCount(0);
+  await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  await expect(input).toHaveCount(0);
+  await page.getByRole('searchbox', { name: 'Поиск слоёв' }).focus();
+  await tree(page).evaluate((el) => (el.scrollTop = 0));
+  await expect(row(page, 'Новое имя')).toBeVisible();
+  await expect(tree(page).getByRole('textbox')).toHaveCount(0);
+  await expect(page.getByRole('searchbox', { name: 'Поиск слоёв' })).toBeFocused();
+});
+
+test('щелчок по другой строке при переименовании применяет имя и выделяет её', async ({ page }) => {
+  await openApp(page);
+  const before = await live(page);
+  await row(page, 'Экран 9').dblclick();
+  await tree(page).getByRole('textbox', { name: 'Имя слоя' }).fill('Первая');
+  await row(page, 'Экран 7').click();
+  await expect(row(page, 'Первая')).toBeVisible();
+  await expect(row(page, 'Экран 7')).toHaveAttribute('aria-selected', 'true');
+  await liveWhen(page, `l.steps === ${before.steps + 1} && l.selectionCount === 1`);
+});
+
+test('перетаскивание: Esc отменяет, невалидная цель без индикатора, невыделенная строка выделяется', async ({ page }) => {
+  await openApp(page);
+  const before = await live(page);
+  const from = (await row(page, 'Экран 9').boundingBox())!;
+  const to = (await row(page, 'Экран 5').boundingBox())!;
+  // Esc во время жеста.
+  await page.mouse.move(from.x + 60, from.y + 14);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 60, to.y + 25, { steps: 6 });
+  await expect(row(page, 'Экран 5')).toHaveClass(/fe-layer--drop-below/);
+  await page.keyboard.press('Escape');
+  await expect(tree(page).locator('[class*="fe-layer--drop-"]')).toHaveCount(0);
+  await page.mouse.up();
+  expect((await names(page)).slice(0, 2)).toEqual(['Экран 9', 'Экран 8']);
+  expect((await live(page)).steps).toBe(before.steps);
+  // Невыделенная строка при перетаскивании выделяется и переносится сама.
+  await row(page, 'Экран 3').click();
+  await expect(row(page, 'Экран 3')).toHaveAttribute('aria-selected', 'true');
+  await expect(row(page, 'Экран 9')).toHaveAttribute('aria-selected', 'false');
+  const a = (await row(page, 'Экран 9').boundingBox())!;
+  const b = (await row(page, 'Экран 8').boundingBox())!;
+  await page.mouse.move(a.x + 60, a.y + 14);
+  await page.mouse.down();
+  await page.mouse.move(a.x + 60, b.y + 25, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(() => names(page).then((n) => n.slice(0, 2))).toEqual(['Экран 8', 'Экран 9']);
+  await expect(row(page, 'Экран 9')).toHaveAttribute('aria-selected', 'true');
+  await expect(row(page, 'Экран 3')).toHaveAttribute('aria-selected', 'false');
+  const steps = (await liveWhen(page, `l.steps === ${before.steps + 1}`)).steps;
+  // Цель — потомок самой строки: индикатора нет, перенос не происходит.
+  await row(page, 'Экран 9').getByRole('button', { name: 'Развернуть' }).click();
+  const child = tree(page).locator('[aria-level="2"]').first();
+  await expect(child).toBeVisible();
+  const p = (await row(page, 'Экран 9').boundingBox())!;
+  const c = (await child.boundingBox())!;
+  await page.mouse.move(p.x + 60, p.y + 14);
+  await page.mouse.down();
+  await page.mouse.move(p.x + 60, c.y + 14, { steps: 6 });
+  await expect(tree(page).locator('[class*="fe-layer--drop-"]')).toHaveCount(0);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  expect((await live(page)).steps).toBe(steps);
 });

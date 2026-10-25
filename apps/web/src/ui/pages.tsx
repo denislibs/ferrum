@@ -2,11 +2,12 @@
 // переключить. Операции со страницами в историю отмены не попадают, поэтому
 // удаление — только после подтверждения.
 
-import { createSignal, For, Show } from 'solid-js';
+import { createSignal, Index, Show } from 'solid-js';
 import type { PageInfo } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { ConfirmDialog } from './dialog';
 import { Icon } from './icons';
+import { MAX_NAME_CHARS } from './layers';
 
 export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => void }) {
   const ed = useEditor();
@@ -45,21 +46,23 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
       </div>
       <Show when={props.open}>
         <ul class="fe-pages__list" id="fe-pages-list" role="listbox" aria-label="Страницы">
-          <For each={pages().list}>
-            {(p) => {
-              const current = () => p.id === pages().current;
+          {/* Index: событие страниц присылает новые объекты, и For пересоздавал бы строки
+            вместе с открытым полем имени. */}
+          <Index each={pages().list}>
+            {(page) => {
+              const current = () => page().id === pages().current;
               return (
                 <li
                   class="fe-page"
                   role="option"
                   aria-selected={current()}
                   tabindex={current() ? 0 : -1}
-                  onClick={() => !current() && ed.send({ type: 'setPage', id: p.id })}
-                  onDblClick={() => setRenaming(p.id)}
+                  onClick={() => !current() && ed.send({ type: 'setPage', id: page().id })}
+                  onDblClick={() => setRenaming(page().id)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') ed.send({ type: 'setPage', id: p.id });
-                    else if (e.key === 'F2') setRenaming(p.id);
-                    else if (e.key === 'Delete' || e.key === 'Backspace') askDelete(p);
+                    if (e.key === 'Enter') ed.send({ type: 'setPage', id: page().id });
+                    else if (e.key === 'F2') setRenaming(page().id);
+                    else if (e.key === 'Delete' || e.key === 'Backspace') askDelete(page());
                     else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                       const items = Array.from((e.currentTarget.parentElement as HTMLElement).children) as HTMLElement[];
                       items[items.indexOf(e.currentTarget) + (e.key === 'ArrowDown' ? 1 : -1)]?.focus();
@@ -72,11 +75,12 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
                       <Icon name="check" />
                     </Show>
                   </span>
-                  <Show when={renaming() === p.id} fallback={<span class="fe-page__name">{p.name}</span>}>
+                  <Show when={renaming() === page().id} fallback={<span class="fe-page__name">{page().name}</span>}>
                     <input
                       class="fe-rename"
                       aria-label="Имя страницы"
-                      value={p.name}
+                      maxlength={MAX_NAME_CHARS}
+                      value={page().name}
                       ref={(el) =>
                         queueMicrotask(() => {
                           el.focus();
@@ -86,21 +90,21 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
                       onClick={(e) => e.stopPropagation()}
                       onKeyDown={(e) => {
                         e.stopPropagation();
-                        if (e.key === 'Enter') rename(p, e.currentTarget.value);
+                        if (e.key === 'Enter') rename(page(), e.currentTarget.value);
                         if (e.key === 'Escape') setRenaming(null);
                       }}
-                      onBlur={(e) => rename(p, e.currentTarget.value)}
+                      onBlur={(e) => rename(page(), e.currentTarget.value)}
                     />
                   </Show>
                   <button
                     class="fe-tool fe-tool--small fe-tool--muted fe-page__delete"
-                    aria-label={`Удалить страницу «${p.name}»`}
+                    aria-label={`Удалить страницу «${page().name}»`}
                     aria-disabled={pages().list.length <= 1 ? 'true' : undefined}
                     data-tip={pages().list.length <= 1 ? 'Единственную страницу удалить нельзя' : 'Удалить страницу'}
                     tabindex="-1"
                     onClick={(e) => {
                       e.stopPropagation();
-                      askDelete(p);
+                      askDelete(page());
                     }}
                   >
                     <Icon name="trash" />
@@ -108,7 +112,7 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
                 </li>
               );
             }}
-          </For>
+          </Index>
         </ul>
       </Show>
       <Show when={deleting()}>

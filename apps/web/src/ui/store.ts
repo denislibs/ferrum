@@ -39,6 +39,8 @@ export interface UiState {
   /** Живое состояние, нужное панелям во время жеста. */
   live: { zoom: number; busy: boolean; x: number; y: number; w: number; h: number; rotation: number; count: number };
   uiHidden: boolean;
+  /** Сколько раз открывали документ (сброс поиска и прокрутки панели слоёв). */
+  docSeq: number;
   toasts: Toast[];
 }
 
@@ -57,6 +59,7 @@ const initial: UiState = {
   stopped: null,
   live: { zoom: 1, busy: false, x: 0, y: 0, w: 0, h: 0, rotation: 0, count: 0 },
   uiHidden: false,
+  docSeq: 0,
   toasts: [],
 };
 
@@ -81,6 +84,7 @@ export function createUiStore() {
     switch (e.type) {
       case 'opened':
         setState({ ready: true, documentName: e.name });
+        setState('docSeq', (n) => n + 1);
         for (const w of e.warnings) toast(w, 'error');
         break;
       case 'documentName':
