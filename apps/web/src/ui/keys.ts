@@ -22,9 +22,9 @@ function ownsKeys(t: EventTarget | null): boolean {
   return !!t.closest('[role="menu"], [role="dialog"], [role="listbox"]');
 }
 
-/** Навигация и удаление: на холсте они двигают и удаляют выделение, а на любом
- * элементе интерфейса — его собственная работа (или ничего). Холсту они идут,
- * только если фокус на холсте или ни на чём (body). */
+/** Навигация и удаление: на холсте они двигают и удаляют выделение. Элемент
+ * управления (кнопка, переключатель, вкладка, строка, ползунок, край панели)
+ * держит их у себя; контейнеры (панель, корень дерева, тулбар) — пропускают. */
 const NAV_KEYS = new Set([
   'ArrowLeft',
   'ArrowRight',
@@ -38,10 +38,30 @@ const NAV_KEYS = new Set([
   'Backspace',
 ]);
 
-/** Фокус на холсте или нигде: клавиши навигации — редактору. */
-function canvasOrBody(t: EventTarget | null): boolean {
-  if (!(t instanceof Element)) return true;
-  return t === document.body || t === document.documentElement || t instanceof HTMLCanvasElement;
+const CONTROLS =
+  'button, select, [role="radio"], [role="tab"], [role="option"], [role="treeitem"], [role="slider"], [role="separator"], [role="menuitem"], [role="menuitemcheckbox"]';
+
+/** Откуда пришёл фокус: элемент, получивший его щелчком (нажатие указателя без
+ * клавиш после него). `:focus-visible` для этого не годится — Chromium включает его
+ * у кнопки, как только на ней нажали клавишу. */
+let pointerFocus: Element | null = null;
+let pointerActive = false;
+if (typeof document !== 'undefined') {
+  document.addEventListener('pointerdown', () => (pointerActive = true), true);
+  document.addEventListener('keydown', () => (pointerActive = false), true);
+  document.addEventListener('focusin', (e) => (pointerFocus = pointerActive && e.target instanceof Element ? e.target : null), true);
+}
+
+/** Клавишу навигации или удаления держит элемент управления в фокусе. Кнопку и
+ * переключатель — только если до них дошли с клавиатуры: после щелчка мышью
+ * Delete удаляет выделение, как в Figma. */
+function controlOwnsNav(t: EventTarget | null): boolean {
+  if (!(t instanceof Element)) return false;
+  if (editableTarget(t)) return true;
+  if (!t.matches(CONTROLS)) return false;
+  // Обычная кнопка (без своей роли) и переключатель: только с клавиатуры.
+  if (t.matches('button:not([role]), [role="radio"]')) return t !== pointerFocus;
+  return true;
 }
 
 /** Клавиши кнопок и вкладок: активировать и переходить фокусом. */
@@ -50,7 +70,7 @@ const WIDGET_KEYS = new Set(['Tab', 'Enter', 'Space', 'NumpadEnter']);
 const TREE_KEYS = new Set([...WIDGET_KEYS, 'F2']);
 
 const ARROW_ROLES =
-  '[role="tab"], [role="tree"], [role="treeitem"], [role="menuitem"], [role="option"], [role="slider"], [role="separator"], [role="toolbar"], [role="tablist"]';
+  '[role="tab"], [role="treeitem"], [role="menuitem"], [role="option"], [role="slider"], [role="separator"]';
 
 /** Пересылать ли клавишу редактору. */
 export function forwardKey(e: KeyboardEvent, isClipboardKey: (e: KeyboardEvent) => boolean): boolean {
@@ -59,14 +79,14 @@ export function forwardKey(e: KeyboardEvent, isClipboardKey: (e: KeyboardEvent) 
   if (modalOpen()) return false;
   // Tab всегда у браузера: фокус ходит по интерфейсу.
   if (e.code === 'Tab') return false;
-  // Стрелки, Home/End, Delete и Backspace на кнопке, свотче, переключателе панели
-  // не сдвигают и не удаляют выделение. Удаление из дерева слоёв — его же
-  // обработчиком (та же команда `edit.delete`), сюда клавиша не доходит.
-  if ((NAV_KEYS.has(e.code) || NAV_KEYS.has(e.key)) && !canvasOrBody(e.target)) return false;
+  // Стрелки, Home/End, Delete и Backspace на элементе управления, до которого дошли
+  // с клавиатуры, не сдвигают и не удаляют выделение. Удаление из дерева слоёв — его
+  // же обработчиком (та же команда `edit.delete`), сюда клавиша не доходит.
+  if ((NAV_KEYS.has(e.code) || NAV_KEYS.has(e.key)) && controlOwnsNav(e.target)) return false;
   const el = e.target instanceof Element ? e.target : null;
   if (el?.closest('[role="treeitem"]') && TREE_KEYS.has(e.code)) return false;
   if (el?.closest('button, [role="tab"], a') && WIDGET_KEYS.has(e.code)) return false;
-  // Стрелки внутри вкладок, деревьев, меню, списков, ползунков, тулбара и краёв панелей — их навигация.
+  // Стрелки на вкладке, строке, пункте меню и списка, ползунке и крае панели — их навигация.
   if (e.code.startsWith('Arrow') && e.target instanceof Element && e.target.closest(ARROW_ROLES)) return false;
   // Ctrl/Cmd+C, X, V идут событиями copy/cut/paste (системный буфер), а не в ядро.
   return !isClipboardKey(e);

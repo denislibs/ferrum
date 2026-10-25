@@ -364,7 +364,7 @@ test('стрелки, Delete и Backspace на кнопках панелей н�
   const controls = [
     panel.getByRole('button', { name: 'Отразить по горизонтали' }),
     panel.getByRole('button', { name: 'Пресет размера' }),
-    panel.getByRole('radio', { name: '2×' }),
+    panel.getByRole('radio', { name: '1×' }),
     panel.getByRole('button', { name: 'Добавить заливку' }),
     panel.getByRole('button', { name: 'Удалить заливку' }).first(),
     panel.getByRole('button', { name: 'Скрыть заливку' }).first(),
@@ -377,9 +377,18 @@ test('стрелки, Delete и Backspace на кнопках панелей н�
   ];
   const before = await docState(page);
   expect(before.ids).toHaveLength(1);
+  // До элемента доходят с клавиатуры (Tab, затем Shift+Tab): у кнопки :focus-visible.
+  // После щелчка мышью Delete на кнопке удаляет выделение, как в Figma (тест ниже).
+  const viaKeyboard = async (c: ReturnType<Page['locator']>) => {
+    await c.focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await expect(c).toBeFocused();
+    expect(await c.evaluate((el) => el.matches(':focus-visible'))).toBe(true);
+  };
   for (const c of controls) {
     const name = (await c.getAttribute('aria-label')) ?? (await c.textContent());
-    await c.focus();
+    await viaKeyboard(c);
     for (const k of ['ArrowLeft', 'Delete', 'Backspace', 'ArrowDown', 'Home']) await page.keyboard.press(k);
     await page.waitForTimeout(150);
     expect(await docState(page), `клавиши на «${name}»`).toEqual(before);
@@ -394,7 +403,7 @@ test('стрелки, Delete и Backspace на кнопках панелей н�
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.pages.background)).toBe('#123456ff');
   const reset = panel.getByRole('button', { name: 'Фон как в теме' });
   const bare = await docState(page);
-  await reset.focus();
+  await viaKeyboard(reset);
   for (const k of ['ArrowLeft', 'Delete', 'Backspace']) await page.keyboard.press(k);
   await page.waitForTimeout(150);
   expect(await docState(page)).toEqual(bare);
@@ -541,4 +550,59 @@ test('у кнопок-иконок панелей — подсказки «На�
   await panel.getByRole('button', { name: 'Цвет заливки' }).first().click();
   await page.getByRole('dialog', { name: 'Цвет заливки' }).getByRole('button', { name: 'Закрыть палитру' }).hover();
   await expect(tip).toHaveText('Закрыть палитру  Esc');
+});
+
+// ——— Остатки повторного ревью ———
+
+test('после щелчка мышью по фону панели, фону списка слоёв и кнопке Delete удаляет выделение', async ({ page }) => {
+  await openApp(page);
+  const tree = page.getByRole('tree', { name: 'Слои' });
+  const panel = page.locator('#panel-design');
+  const select = async (name: string) => {
+    await tree.getByRole('treeitem', { name, exact: true }).click();
+    return liveWhen(page, 'l.selectionCount === 1');
+  };
+  const deletes = async (what: string, before: { nodes: number }) => {
+    await page.keyboard.press('Delete');
+    await expect.poll(async () => (await live(page)).nodes, { message: what, timeout: 5000 }).toBeLessThan(before.nodes);
+    await liveWhen(page, 'l.selectionCount === 0');
+  };
+  // Пустое место панели «Дизайн» (под секциями).
+  let before = await select('Экран 9');
+  const pb = (await panel.boundingBox())!;
+  await page.mouse.click(pb.x + pb.width / 2, pb.y + pb.height - 10);
+  await deletes('фон панели', before);
+  // Пустое место списка слоёв (под строками).
+  before = await select('Экран 8');
+  const tb = (await tree.boundingBox())!;
+  await page.mouse.click(tb.x + tb.width / 2, tb.y + tb.height - 10);
+  await expect(tree).toBeFocused();
+  await deletes('фон списка слоёв', before);
+  // Кнопка, нажатая мышью (как в Figma).
+  before = await select('Экран 7');
+  await panel.getByRole('button', { name: 'Отразить по горизонтали' }).click();
+  before = await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  await deletes('кнопка «Отразить»', before);
+  // Инструмент тулбара, выбранный мышью.
+  before = await select('Экран 6');
+  await page.getByRole('button', { name: 'Перемещение' }).click();
+  await deletes('инструмент тулбара', before);
+});
+
+test('последняя заливка удалена, фокус на панели «Дизайн» — Delete удаляет выделение', async ({ page }) => {
+  await openApp(page);
+  const tree = page.getByRole('tree', { name: 'Слои' });
+  await tree.getByRole('treeitem', { name: 'Экран 9', exact: true }).click();
+  const before = await liveWhen(page, 'l.selectionCount === 1');
+  const panel = page.locator('#panel-design');
+  const minus = panel.getByRole('button', { name: 'Удалить заливку' });
+  while ((await minus.count()) > 0) {
+    const n = await minus.count();
+    await minus.first().click();
+    await expect(minus).toHaveCount(n - 1);
+  }
+  await panel.focus();
+  await page.keyboard.press('Delete');
+  await expect.poll(async () => (await live(page)).nodes, { timeout: 5000 }).toBeLessThan(before.nodes);
+  expect((await live(page)).selectionCount).toBe(0);
 });
