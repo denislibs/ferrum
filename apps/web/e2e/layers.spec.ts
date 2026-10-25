@@ -398,3 +398,32 @@ test('событие слоёв во время переименования н�
   await input.press('Enter');
   await expect(row(page, 'Набрано')).toBeVisible();
 });
+
+// ——— Итоговая волна исправлений ———
+
+test('во время перетаскивания строк клавиши не действуют; бросок переносит взятые', async ({ page }) => {
+  await openApp(page);
+  await row(page, 'Экран 9').click();
+  const before = await liveWhen(page, 'l.selectionCount === 1');
+  const from = (await row(page, 'Экран 9').boundingBox())!;
+  const to = (await row(page, 'Экран 7').boundingBox())!;
+  await page.mouse.move(from.x + 60, from.y + 14);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 60, to.y + 25, { steps: 6 });
+  await expect(row(page, 'Экран 7')).toHaveClass(/fe-layer--drop-below/);
+  // Выделить всё и удалить — во время жеста ничего не делают.
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.press('Delete');
+  await page.keyboard.press('Backspace');
+  await page.waitForTimeout(200);
+  let now = await live(page);
+  expect([now.selectionCount, now.nodes, now.steps]).toEqual([1, before.nodes, before.steps]);
+  await page.mouse.up();
+  await expect.poll(() => names(page).then((n) => n.slice(0, 3))).toEqual(['Экран 8', 'Экран 7', 'Экран 9']);
+  now = await liveWhen(page, `l.steps === ${before.steps + 1}`);
+  expect([now.selectionCount, now.nodes]).toEqual([1, before.nodes]);
+  // После броска клавиши снова идут холсту.
+  await page.locator('canvas').focus();
+  await page.keyboard.press('Delete');
+  await liveWhen(page, `l.steps === ${before.steps + 2} && l.selectionCount === 0`);
+});

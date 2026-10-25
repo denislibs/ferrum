@@ -53,6 +53,11 @@ interface Drag {
   depth: number;
   /** Строка выделена (при перетаскивании невыделенной она выделяется сразу). */
   selected: boolean;
+  /** Кого переносить — взято при нажатии: невыделенная строка — она сама,
+   * выделенная — всё выделение по id, а если оно больше предела id — по версии
+   * выделения (ядро откажет, если выделение с тех пор сменилось). */
+  ids: string[] | undefined;
+  version: number | undefined;
   y0: number;
   active: boolean;
   target: { index: number; position: DropPosition } | null;
@@ -214,18 +219,31 @@ export function LayersPanel() {
     setDenied(false);
     window.removeEventListener('keydown', onDragKey, true);
   };
-  /** Esc во время перетаскивания отменяет его: без переноса и шага, ядру не уходит. */
+  /** Во время перетаскивания клавиши не действуют (Ctrl+A, Delete сменили бы, что
+   * переносится); Esc отменяет жест — без переноса и шага. Ядру ничего не уходит. */
   function onDragKey(e: KeyboardEvent) {
-    if (e.key !== 'Escape' || !drag) return;
+    if (!drag) return;
     e.preventDefault();
     e.stopPropagation();
-    endDrag();
+    if (e.key === 'Escape') endDrag();
   }
 
   const onPointerDown = (row: LayerRow, index: number, e: PointerEvent) => {
     if (e.button !== 0 || renaming()?.id === row.id) return;
     const el = e.currentTarget as HTMLElement;
-    drag = { id: row.id, index, depth: row.depth, selected: row.selected, y0: e.clientY, active: false, target: null };
+    const st = ed.store.state;
+    const capped = st.selectionCount > st.selectionIds.length;
+    drag = {
+      id: row.id,
+      index,
+      depth: row.depth,
+      selected: row.selected,
+      ids: !row.selected ? [row.id] : capped ? undefined : [...st.selectionIds],
+      version: row.selected && capped ? st.selectionVersion : undefined,
+      y0: e.clientY,
+      active: false,
+      target: null,
+    };
     el.setPointerCapture(e.pointerId);
     requestWindow();
   };
@@ -272,9 +290,9 @@ export function LayersPanel() {
     }
     const target = d.target && layers().rows[d.target.index - layers().start];
     if (!target) return;
-    // Выделенная строка несёт всё выделение (полный список есть только у worker'а);
-    // невыделенная — только себя: идентификатор взят в момент нажатия.
-    ed.send({ type: 'moveLayers', ids: d.selected ? undefined : [d.id], target: target.id, position: d.target!.position });
+    // Переносится то, что взято при нажатии (см. `Drag.ids`), а не выделение на
+    // момент броска.
+    ed.send({ type: 'moveLayers', ids: d.ids, selectionVersion: d.version, target: target.id, position: d.target!.position });
   };
 
   const startRename = (row: LayerRow) => {
