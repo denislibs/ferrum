@@ -134,7 +134,17 @@ export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWid
   const ed = useEditor();
   let start = 0;
   let base = 0;
+  let edge: HTMLDivElement | null = null;
+  const stop = () => {
+    edge?.removeEventListener('pointermove', move);
+    edge = null;
+  };
   const move = ed.core.costed((e: PointerEvent) => {
+    // Кнопку отпустили, а pointerup не пришёл (за окном): перетаскивание кончилось.
+    if (e.buttons === 0) {
+      stop();
+      return;
+    }
     const dx = e.clientX - start;
     const w = clampPanel(props.side === 'left' ? base + dx : base - dx);
     ed.scheduler.mutate(() => props.onWidth(w));
@@ -154,10 +164,12 @@ export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWid
         start = e.clientX;
         base = props.width;
         e.currentTarget.setPointerCapture(e.pointerId);
-        e.currentTarget.addEventListener('pointermove', move);
+        edge = e.currentTarget;
+        edge.addEventListener('pointermove', move);
       }}
-      onPointerUp={(e) => e.currentTarget.removeEventListener('pointermove', move)}
-      onPointerCancel={(e) => e.currentTarget.removeEventListener('pointermove', move)}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+      onLostPointerCapture={stop}
       onKeyDown={(e) => {
         const grow = props.side === 'left' ? 'ArrowRight' : 'ArrowLeft';
         const shrink = props.side === 'left' ? 'ArrowLeft' : 'ArrowRight';

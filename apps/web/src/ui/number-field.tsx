@@ -243,6 +243,11 @@ export function NumberField<T = undefined>(props: NumberFieldProps<T>) {
   };
   const onPointerMove = ed.core.costed((e: PointerEvent) => {
     if (!scrub) return;
+    // Кнопку отпустили там, откуда pointerup не дошёл (за окном): жест кончается здесь.
+    if (e.buttons === 0) {
+      onPointerUp(e);
+      return;
+    }
     const dx = e.clientX - scrub.x;
     if (!scrub.moved && Math.abs(dx) < 1) return;
     scrub.moved = true;
@@ -250,7 +255,7 @@ export function NumberField<T = undefined>(props: NumberFieldProps<T>) {
     pending = scrubInput(scrubValue(scrub.start, dx, props.step ?? 1, { shift: e.shiftKey, alt: e.altKey }), scrub.s);
     if (!raf) raf = requestAnimationFrame(flush);
   });
-  const onPointerUp = (e: PointerEvent) => {
+  function onPointerUp(e: PointerEvent) {
     endScrub();
     dropPreview();
     const sc = scrub;
@@ -260,7 +265,7 @@ export function NumberField<T = undefined>(props: NumberFieldProps<T>) {
     // Вернули на исходное значение — жест отменяется (превью уже менял документ).
     if (unchanged(inp, sc.s)) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', sc.s.target, sc.s.base);
     else emit(inp, 'commit', sc.s);
-  };
+  }
 
   return (
     <label class={`fe-field fe-num ${props.class ?? ''}`} classList={{ 'fe-field--disabled': props.disabled }}>
@@ -271,6 +276,13 @@ export function NumberField<T = undefined>(props: NumberFieldProps<T>) {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={() => {
+          endScrub();
+          cancelScrub();
+        }}
+        // Захват отняли без pointerup (система, другое окно): жест отменяется без следа.
+        // После обычного отпускания `scrub` уже пуст — ничего не происходит.
+        onLostPointerCapture={() => {
+          if (!scrub) return;
           endScrub();
           cancelScrub();
         }}

@@ -437,3 +437,46 @@ test('выделение больше 1000: правка идёт ко всем;
   await expect(x).toHaveValue('77');
   expect((await summary(page)).x.value).toBe(77);
 });
+
+// ——— Итоговая волна исправлений ———
+
+const xLabel = (page: Page) => page.getByRole('tabpanel').locator('.fe-field__label', { hasText: /^X$/ });
+
+test('перетаскивание подписи: потеря захвата указателя отменяет жест', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  const box = (await xLabel(page).boundingBox())!;
+  const before = await live(page);
+  await page.mouse.move(box.x + 5, box.y + 5);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 45, box.y + 5, { steps: 4 });
+  // Превью — в сцене (рамка выделения живого состояния), документ ещё прежний.
+  await liveWhen(page, 'l.selectionX !== 14400');
+  // Захват отняли (система, другое окно): жеста больше нет, превью снято.
+  await xLabel(page).evaluate((el) => el.dispatchEvent(new PointerEvent('lostpointercapture', { pointerId: 1, bubbles: true })));
+  await page.mouse.move(box.x + 90, box.y + 5, { steps: 2 });
+  await page.mouse.up();
+  await expect.poll(async () => (await live(page)).selectionX, { timeout: 5000 }).toBe(14400);
+  await page.waitForTimeout(200);
+  expect((await live(page)).steps).toBe(before.steps);
+  expect((await summary(page)).x.value).toBe(14400);
+});
+
+test('перетаскивание подписи: движение без нажатой кнопки заканчивает жест одним шагом', async ({ page }) => {
+  await openApp(page);
+  await selectRow(page, 'Экран 9');
+  const box = (await xLabel(page).boundingBox())!;
+  const before = await live(page);
+  await page.mouse.move(box.x + 5, box.y + 5);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 25, box.y + 5, { steps: 4 });
+  // Кнопку отпустили за окном: pointerup не пришёл, следующее движение — без кнопок.
+  await xLabel(page).evaluate((el, x) => {
+    el.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, isPrimary: true, buttons: 0, clientX: x, bubbles: true }));
+  }, box.x + 25);
+  await expect.poll(async () => (await live(page)).steps, { timeout: 5000 }).toBe(before.steps + 1);
+  expect((await summary(page)).x.value).toBe(14420);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  expect((await live(page)).steps).toBe(before.steps + 1);
+});

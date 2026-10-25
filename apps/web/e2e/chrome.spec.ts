@@ -482,3 +482,32 @@ test('имя файла: Enter и F2 открывают поле, предел �
   // F2 на имени не дошёл до холста: шагов нет.
   expect((await live(page)).steps).toBe(0);
 });
+
+test('край панели: потеря захвата и движение без кнопки заканчивают перетаскивание', async ({ page }) => {
+  await openApp(page);
+  const edge = page.getByRole('separator', { name: 'Ширина левой панели' });
+  const box = (await edge.boundingBox())!;
+  const x = box.x + box.width / 2;
+  const move = (clientX: number, buttons: number) =>
+    edge.evaluate(
+      (el, a) => el.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, isPrimary: true, bubbles: true, ...a })),
+      { clientX, buttons },
+    );
+  for (const stop of ['lost', 'buttons'] as const) {
+    await page.mouse.move(x, 400);
+    await page.mouse.down();
+    await page.mouse.move(x + 20, 400, { steps: 3 });
+    const w = Number(await edge.getAttribute('aria-valuenow'));
+    expect(w, stop).toBeGreaterThan(248);
+    if (stop === 'lost') {
+      await edge.evaluate((el) => el.dispatchEvent(new PointerEvent('lostpointercapture', { pointerId: 1, bubbles: true })));
+      await move(x + 120, 1);
+    } else {
+      await move(x + 120, 0);
+      await move(x + 140, 1);
+    }
+    await page.waitForTimeout(150);
+    await expect(edge, stop).toHaveAttribute('aria-valuenow', String(w));
+    await page.mouse.up();
+  }
+});
