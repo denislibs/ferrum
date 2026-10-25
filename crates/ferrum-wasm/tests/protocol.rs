@@ -32,6 +32,8 @@ fn commands() -> Vec<Command> {
             bytes: bytes(&[0x89, b'P']),
         },
         Command::Save,
+        Command::Snapshot { thumbnail: true },
+        Command::MarkSaved { revision: 3.0 },
         Command::ReadPixels { reference: true },
         Command::LayersWindow {
             start: 10,
@@ -183,6 +185,19 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::RequestImage,
         CoreEvent::ToggleUi,
         CoreEvent::Saved { bytes: bytes(b"s") },
+        CoreEvent::Snapshot {
+            revision: 2.0,
+            name: "План".into(),
+            bytes: bytes(b"f"),
+            thumbnail: Some(bytes(b"t")),
+        },
+        CoreEvent::Snapshot {
+            revision: 3.0,
+            name: "".into(),
+            bytes: bytes(b"f"),
+            thumbnail: None,
+        },
+        CoreEvent::SaveRequested,
         CoreEvent::Pixels {
             backend: Backend::Cpu,
             width: 1,
