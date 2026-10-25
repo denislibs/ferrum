@@ -9,6 +9,7 @@ import { detectPlatform } from '../core/core';
 import { boot, dismissSplash } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { EditorContext, type Editor } from './context';
+import { ConfirmDialog } from './dialog';
 import { Menu, type MenuItem } from './menu';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
@@ -114,20 +115,33 @@ export function App(props: AppProps) {
 
   const id = props.file.id;
   let saver: Saver | undefined;
+  let offSaveKey: (() => void) | undefined;
   let disposed = false;
   // Байты файла читаются, пока запускается ядро. Не прочитались — к экрану файлов.
   let stored = false;
+  /** Поколение файла при открытии: с него начинается проверка записи. */
+  let version = props.file.version;
   const bytes = props.files.read(id).then(
-    (r) => ((stored = r.bytes !== null), r.bytes),
+    (r) => ((stored = r.bytes !== null), (version = r.meta.version), r.bytes),
     (e: unknown) => {
       props.onOpenFailed(`Не удалось открыть файл: ${e instanceof Error ? e.message : String(e)}`);
       return null;
     },
   );
+  // Сохранить не удалось (ядро остановлено, снимок или запись не прошли): уйти
+  // можно, но только с вопросом — причина в тексте, «Остаться» — по умолчанию.
+  const [askLeave, setAskLeave] = createSignal<{ reason: string; answer: (go: boolean) => void } | null>(null);
   props.onLeave(async () => {
     if (!saver) return true;
-    return saver.save();
+    if (await saver.save()) return true;
+    const reason = saver.failure() ?? 'Изменения не записаны в хранилище';
+    return new Promise<boolean>((answer) => setAskLeave({ reason, answer }));
   });
+  const answerLeave = (go: boolean) => {
+    const a = askLeave();
+    setAskLeave(null);
+    a?.answer(go);
+  };
 
   onMount(() => {
     boot(canvas, store, {
@@ -165,17 +179,29 @@ export function App(props: AppProps) {
         setEditor(ed);
         canvas.focus();
         uninstall = installClipboard(ed);
-        saver = createSaver(ed, props.files, id);
-        // Открытие файла из хранилища: ошибка до `opened` — файл испорчен, запись
-        // остаётся, а пользователь — на экране файлов с сообщением.
+        saver = createSaver(ed, props.files, id, version);
+        // Ctrl/Cmd+S, пока фокус в поле панели (клавиша не ушла ядру): тоже
+        // «Сохранить», и браузер не открывает диалог сохранения страницы.
+        const onSaveKey = (e: KeyboardEvent) => {
+          const s = eventShortcut(e);
+          if (e.defaultPrevented || !s) return;
+          if (!store.state.keymap.commands.find((c) => c.key === 'file.save')?.bindings.includes(s)) return;
+          e.preventDefault();
+          void saver?.save();
+        };
+        window.addEventListener('keydown', onSaveKey);
+        offSaveKey = () => window.removeEventListener('keydown', onSaveKey);
+        // Открытие файла из хранилища: отказ самого открытия (а не, скажем, раскладки)
+        // до `opened` — файл испорчен; запись остаётся, пользователь — на экране файлов.
         let opening = true;
         ed.core.on((e) => {
           if (opening && e.type === 'opened') {
             opening = false;
             void props.files.touch(id).catch(() => {});
-            // Имя файла — из хранилища (его могли переименовать на экране файлов).
-            if (e.name !== props.file.name) ed.send({ type: 'setDocumentName', name: props.file.name });
-          } else if (opening && stored && e.type === 'error') {
+            // Имя файла — из хранилища (его могли переименовать на экране файлов);
+            // тихо: открытие — не правка, файл из-за него не пересохраняется.
+            if (e.name !== props.file.name) ed.send({ type: 'setDocumentName', name: props.file.name, quiet: true });
+          } else if (opening && stored && e.type === 'error' && e.message.startsWith('Не удалось открыть файл')) {
             opening = false;
             props.onOpenFailed(e.message);
           } else if (e.type === 'documentName') {
@@ -196,6 +222,7 @@ export function App(props: AppProps) {
   });
   onCleanup(() => {
     disposed = true;
+    offSaveKey?.();
     uninstall?.();
     saver?.dispose();
     editor()?.dispose();
@@ -295,6 +322,18 @@ export function App(props: AppProps) {
               )}
             </Show>
           </EditorContext.Provider>
+        )}
+      </Show>
+      <Show when={askLeave()}>
+        {(a) => (
+          <ConfirmDialog
+            title="Изменения не сохранены — уйти?"
+            text={a().reason}
+            confirm="Уйти"
+            cancel="Остаться"
+            onCancel={() => answerLeave(false)}
+            onConfirm={() => answerLeave(true)}
+          />
         )}
       </Show>
       <Toasts store={store} />

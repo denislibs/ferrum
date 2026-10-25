@@ -51,10 +51,14 @@ export function sameRoute(a: Route, b: Route): boolean {
   return routeHash(a) === routeHash(b);
 }
 
-/** Сменить адрес: новая запись истории или замена текущей (`replace`). Замена не
- * даёт `hashchange` — вызывающий сам переходит к маршруту. */
-export function setHash(r: Route, replace = false): void {
-  const hash = routeHash(r);
-  if (replace) history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
-  else if (location.hash !== hash) location.hash = hash;
+/** Адрес страницы с маршрутом `r` (поиск — `?nodes=` и т. п. — сохраняется). */
+export function routeUrl(r: Route): string {
+  return `${location.pathname}${location.search}${routeHash(r)}`;
+}
+
+/** Номер записи истории, который приложение кладёт в `history.state`; `null` —
+ * запись не наша (адрес набран вручную, первая загрузка). */
+export function historyIndex(state: unknown): number | null {
+  const i = (state as { ferrumIndex?: unknown } | null)?.ferrumIndex;
+  return typeof i === 'number' && Number.isSafeInteger(i) ? i : null;
 }
