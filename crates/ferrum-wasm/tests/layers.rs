@@ -139,7 +139,7 @@ fn rows_follow_frames_not_nodes() {
 
 // ---- Раунд правок 1: кэш строк сам устаревает, поиск наращивается ----
 
-use ferrum_doc::{DocResult, NodeKind, PageId, Props, PropsPatch, Tx};
+use ferrum_doc::{Changes, DocResult, NodeKind, PageId, Props, PropsPatch, Tx};
 use ferrum_scene::Draft;
 
 /// Документ и сцена, как их ведёт редактор: правка → изменения → `apply`.
@@ -176,9 +176,17 @@ impl World {
         self.sync();
     }
 
-    fn sync(&mut self) {
+    fn sync(&mut self) -> Changes {
         let c = self.doc.take_changes(self.page);
         self.scene.apply(&c, self.doc.page(self.page).unwrap());
+        c
+    }
+
+    /// Правка, о которой дереву слоёв сообщено, как это делает worker.
+    fn edit_noted(&mut self, l: &mut Layers, f: impl FnOnce(&Tx) -> DocResult<Vec<NodeId>>) {
+        self.doc.transact(self.page, vec![], f).unwrap();
+        let c = self.sync();
+        l.note_changes(&c, &self.scene);
     }
 }
 
@@ -462,4 +470,83 @@ fn window_edges_and_reset() {
         l.window(&scene, &none()).is_some(),
         "после reset окно уходит заново"
     );
+}
+
+#[test]
+fn noted_edits_update_search_matches() {
+    let mut w = world(200);
+    let mut l = Layers::new();
+    l.set_filter("слой 42");
+    assert_eq!(l.total(&w.scene), 4);
+    let kid = w.ids[1 + 42];
+    w.edit_noted(&mut l, rename(kid, "Кнопка"));
+    assert_eq!(l.total(&w.scene), 2);
+    // Новый узел с подходящим именем появляется в результатах.
+    let f1 = w.ids[100];
+    w.edit_noted(&mut l, |tx| {
+        let n = tx.create_node(Some(f1), None, NodeKind::Rect)?;
+        tx.set_props(
+            n,
+            &PropsPatch {
+                name: Some("Слой 42 новый".into()),
+                ..Default::default()
+            },
+        )?;
+        Ok(vec![])
+    });
+    assert_eq!(l.total(&w.scene), 3);
+    // Удалённый — уходит, слот не мешает.
+    w.edit_noted(&mut l, |tx| {
+        tx.delete_nodes(&[f1])?;
+        Ok(vec![])
+    });
+    assert_eq!(l.total(&w.scene), 0);
+    w.edit_noted(&mut l, rename(w.ids[1 + 42], "Слой 42"));
+    assert_eq!(names(&mut l, &w, 0, 10), ["Экран 0", "Слой 42"]);
+    // Перенос не трогает имена.
+    let (k, f0) = (w.ids[1 + 42], w.ids[0]);
+    w.edit_noted(&mut l, |tx| {
+        tx.move_node(k, Some(f0), 0)?;
+        Ok(vec![])
+    });
+    assert_eq!(names(&mut l, &w, 0, 10), ["Экран 0", "Слой 42"]);
+}
+
+#[test]
+fn skipped_note_changes_still_shows_fresh_names() {
+    let mut w = world(200);
+    let mut l = Layers::new();
+    l.set_filter("слой 42");
+    assert_eq!(l.total(&w.scene), 4);
+    let kid = w.ids[1 + 42];
+    w.edit(rename(kid, "Кнопка"));
+    assert_eq!(l.total(&w.scene), 2, "без note_changes кэш имён не врёт");
+    w.edit(rename(kid, "Слой 42"));
+    assert_eq!(l.total(&w.scene), 4);
+    // note_changes только для последней из двух правок: первая потеряна.
+    let other = w.ids[1 + 7];
+    w.edit(rename(other, "Слой 42 а"));
+    w.edit_noted(&mut l, rename(kid, "Слой 42 б"));
+    assert_eq!(l.total(&w.scene), 5);
+    // Превью имени (без Changes) тоже не оставляет старое.
+    let p = PropsPatch {
+        name: Some("Другое".into()),
+        ..Default::default()
+    };
+    w.scene.set_preview(&[(kid, p)]);
+    assert_eq!(l.total(&w.scene), 4);
+}
+
+#[test]
+fn scene_switch_resets_name_cache() {
+    let a = world(200);
+    let b = world(30);
+    let mut l = Layers::new();
+    l.set_filter("слой 28");
+    assert_eq!(l.total(&a.scene), 4);
+    assert_eq!(l.total(&b.scene), 2, "другая сцена — кэш имён чужой");
+    l.prepare_search(&a.scene);
+    assert_eq!(l.total(&a.scene), 4);
+    // Сцена, пересобранная внутри apply, — новый экземпляр.
+    assert_ne!(a.scene.generation(), b.scene.generation());
 }

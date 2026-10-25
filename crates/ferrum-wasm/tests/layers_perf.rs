@@ -105,3 +105,72 @@ fn search_is_cached_and_narrows() {
     eprintln!("first query after prepare: {first:?}");
     assert!(first.as_millis() < 5, "после prepare: {first:?}");
 }
+
+#[test]
+fn committed_edits_keep_name_cache_warm() {
+    let mut doc = Document::new();
+    let p = doc.pages()[0].0;
+    let mut ids = vec![];
+    doc.transact(p, vec![], |tx| {
+        ids = fixture::fill(tx, 100_000)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    doc.take_changes(p);
+    doc.clear_history();
+    let mut scene = Scene::from_page(doc.page(p).unwrap());
+    let mut l = Layers::new();
+    l.set_window(0, 40);
+    let (cold, _) = timed(&mut l, &scene, "слой 42");
+    eprintln!("cold first query: {cold:?}");
+    let mut worst = Duration::ZERO;
+    for i in 0..10 {
+        // Правка при активном поиске: перенос и переименование.
+        let (kid, to, name) = (ids[1 + i], ids[100], format!("Слой 42 п{i}"));
+        doc.transact(p, vec![], |tx| {
+            tx.move_node(kid, Some(to), 0)?;
+            tx.set_props(
+                kid,
+                &PropsPatch {
+                    name: Some(name),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![])
+        })
+        .unwrap();
+        let c = doc.take_changes(p);
+        scene.apply(&c, doc.page(p).unwrap());
+        l.note_changes(&c, &scene);
+        let t = Instant::now();
+        l.total(&scene);
+        let d = t.elapsed();
+        l.window(&scene, &HashSet::new());
+        worst = worst.max(d);
+    }
+    eprintln!("query after committed edit (warm): worst {worst:?}");
+    assert_eq!(
+        l.total(&scene),
+        2000 + 10,
+        "переименованные попали в результат"
+    );
+    assert!(worst.as_millis() < 5, "после правки: {worst:?}");
+    // Для сравнения: правка без note_changes роняет кэш.
+    let kid = ids[50];
+    doc.transact(p, vec![], |tx| {
+        tx.set_props(
+            kid,
+            &PropsPatch {
+                x: Some(3.0),
+                ..Default::default()
+            },
+        )?;
+        Ok(vec![])
+    })
+    .unwrap();
+    let c = doc.take_changes(p);
+    scene.apply(&c, doc.page(p).unwrap());
+    let t = Instant::now();
+    l.total(&scene);
+    eprintln!("after edit without note_changes (cold): {:?}", t.elapsed());
+}

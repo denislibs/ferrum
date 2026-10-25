@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 
-use ferrum_doc::{NodeId, NodeKind};
+use ferrum_doc::{Changes, NodeId, NodeKind};
 use ferrum_scene::{Scene, Slot};
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
@@ -104,10 +104,15 @@ pub struct Layers {
     rows: Vec<Row>,
     /// Список строк устарел (структура, раскрытие, поиск).
     stale: bool,
-    /// Метка сцены, по которой построены строки и кэши поиска.
+    /// Экземпляр сцены и её метка состава, по которым построены строки и совпадения.
+    generation: Option<u64>,
     stamp: Option<u64>,
-    /// Имена в нижнем регистре по слотам; живёт, пока не сменится метка сцены.
-    lower: Vec<Option<Box<str>>>,
+    /// Метка, на которой кэш имён признан верным: после `sync` или `note_changes`.
+    names_stamp: Option<u64>,
+    /// Имена в нижнем регистре по слотам вместе с `NodeId` узла: освобождённый и
+    /// занятый заново слот ловится по несовпадению. Живёт, пока не сменится
+    /// экземпляр сцены; правки учитывает `note_changes`.
+    lower: Vec<Option<(NodeId, Box<str>)>>,
     /// В `lower` есть имена всех узлов страницы: полный проход — линейный просмотр
     /// кэша, без обхода дерева.
     lower_full: bool,
@@ -123,16 +128,27 @@ pub struct Layers {
     anchor: Option<NodeId>,
 }
 
-fn lowered<'a>(lower: &'a mut Vec<Option<Box<str>>>, scene: &Scene, slot: Slot) -> &'a str {
+/// Имя узла в слоте в нижнем регистре; `None` — слот не занят.
+fn lowered<'a>(
+    lower: &'a mut Vec<Option<(NodeId, Box<str>)>>,
+    scene: &Scene,
+    slot: Slot,
+) -> Option<&'a str> {
+    let n = scene.node_at(slot)?;
     let i = slot as usize;
     if lower.len() <= i {
         lower.resize_with(i + 1, || None);
     }
-    lower[i].get_or_insert_with(|| {
-        clip(&scene.at(slot).props.name, SEARCH_NAME_CHARS)
-            .to_lowercase()
-            .into_boxed_str()
-    })
+    let e = &mut lower[i];
+    if e.as_ref().map(|(id, _)| *id) != Some(n.id) {
+        *e = Some((
+            n.id,
+            clip(&n.props.name, SEARCH_NAME_CHARS)
+                .to_lowercase()
+                .into_boxed_str(),
+        ));
+    }
+    e.as_ref().map(|(_, s)| &**s)
 }
 
 impl Layers {
@@ -146,6 +162,7 @@ impl Layers {
     /// Структура страницы изменилась (правка, отмена, другая страница). Вызывать
     /// необязательно — кэш сверяется с меткой сцены, — но вызов всё сбрасывает.
     pub fn invalidate(&mut self) {
+        self.generation = None;
         self.stamp = None;
         self.stale = true;
     }
@@ -196,18 +213,64 @@ impl Layers {
         self.anchor
     }
 
-    /// Сверяет кэши с меткой сцены; чужая или новая метка сбрасывает всё.
+    /// Сверяет кэши со сценой. Другой экземпляр сцены сбрасывает всё. Сдвиг метки
+    /// состава пересобирает строки и совпадения, а кэш имён оставляет, если о
+    /// правках сообщено (`note_changes`); иначе имена могли поменяться незаметно, и
+    /// кэш имён сбрасывается: страдает только скорость.
     fn sync(&mut self, scene: &Scene) {
+        let generation = scene.generation();
         let stamp = scene.structure_stamp();
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.stamp = None;
+            self.names_stamp = None;
+            self.lower.clear();
+            self.lower_full = false;
+        }
         if self.stamp != Some(stamp) {
             self.stamp = Some(stamp);
             self.stale = true;
-            self.lower.clear();
-            self.lower_full = false;
             self.matches.clear();
             self.matches_query.clear();
             self.kept.clear();
+            if self.names_stamp != Some(stamp) {
+                self.lower.clear();
+                self.lower_full = false;
+            }
         }
+        self.names_stamp = Some(stamp);
+    }
+
+    /// Worker вызывает после `Scene::apply`: имена созданных узлов и узлов с
+    /// правкой свойств пересчитываются сразу, кэш имён остаётся полным. Если между
+    /// прошлой сверкой и этим вызовом сцена менялась ещё (пропущенный вызов, превью
+    /// имени), кэш имён сбрасывается.
+    pub fn note_changes(&mut self, changes: &Changes, scene: &Scene) {
+        let stamp = scene.structure_stamp();
+        let in_step = self.generation == Some(scene.generation())
+            && self.names_stamp.is_some_and(|n| n + 1 == stamp);
+        if !in_step {
+            // Сцена другая или пропущены шаги: следующий sync всё сбросит.
+            self.generation = None;
+            return;
+        }
+        if self.lower_full {
+            for id in changes.created.iter().chain(&changes.props) {
+                let Some(slot) = scene.slot(*id) else {
+                    continue;
+                };
+                if scene.is_draft_slot(slot) {
+                    continue;
+                }
+                // Свойства могли поменяться при том же id: запись пересчитывается.
+                if let Some(e) = self.lower.get_mut(slot as usize) {
+                    *e = None;
+                }
+                lowered(&mut self.lower, scene, slot);
+            }
+        }
+        self.names_stamp = Some(stamp);
+        // Метка строк остаётся прежней: sync увидит сдвиг и пересоберёт строки.
     }
 
     /// Строит кэш имён заранее (например, когда поле поиска получило фокус), чтобы
@@ -275,16 +338,17 @@ impl Layers {
         let narrow = !self.matches_query.is_empty() && self.filter.starts_with(&self.matches_query);
         if narrow {
             for &s in &self.matches {
-                if lowered(&mut lower, scene, s).contains(self.filter.as_str()) {
+                if lowered(&mut lower, scene, s).is_some_and(|n| n.contains(self.filter.as_str())) {
                     found.push(s);
                 }
             }
         } else {
-            // Кэш полон: просмотр по слотам, без обращения к узлам сцены.
-            for (i, name) in lower.iter().enumerate() {
-                if name
-                    .as_deref()
-                    .is_some_and(|n| n.contains(self.filter.as_str()))
+            // Кэш полон: просмотр по слотам. Узел трогаем только у совпавших —
+            // убедиться, что запись не от удалённого узла.
+            for (i, e) in lower.iter().enumerate() {
+                let Some((id, name)) = e else { continue };
+                if name.contains(self.filter.as_str())
+                    && scene.node_at(i as Slot).is_some_and(|n| n.id == *id)
                 {
                     found.push(i as Slot);
                 }
@@ -296,12 +360,15 @@ impl Layers {
         for &s in &found {
             let mut cur = Some(s);
             while let Some(c) = cur {
-                let k = &mut self.kept[c as usize];
-                if *k {
+                let i = c as usize;
+                if self.kept.len() <= i {
+                    self.kept.resize(i + 1, false);
+                }
+                if self.kept[i] {
                     break;
                 }
-                *k = true;
-                cur = scene.at(c).parent;
+                self.kept[i] = true;
+                cur = scene.node_at(c).and_then(|n| n.parent);
             }
         }
         self.lower = lower;
