@@ -2,11 +2,13 @@
 // role="menu" и клавиатура: стрелки, Home/End, Enter/Space, Esc (фокус
 // возвращается туда, откуда меню открыли), Tab закрывает. Подпись сочетания у
 // пункта — из действующей раскладки. Положение считается в фазе measure: меню
-// сначала появляется невидимым, затем встаёт у якоря в пределах окна.
+// сначала появляется невидимым, затем встаёт у якоря в пределах окна. Вне
+// редактора (экран файлов: ни ядра, ни планировщика) — чтение и запись в одном
+// кадре `requestAnimationFrame`, пункты — только с `onSelect`.
 
-import { Index, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
+import { Index, Match, onCleanup, onMount, Show, Switch, useContext, type JSX } from 'solid-js';
 import { Portal } from 'solid-js/web';
-import { useEditor } from './context';
+import { EditorContext } from './context';
 import { Icon } from './icons';
 import { shortcutLabel } from './shortcuts';
 
@@ -35,7 +37,7 @@ export interface MenuProps {
 }
 
 export function Menu(props: MenuProps): JSX.Element {
-  const ed = useEditor();
+  const ed = useContext(EditorContext);
   let el!: HTMLDivElement;
   const returnFocus = document.activeElement as HTMLElement | null;
 
@@ -49,7 +51,7 @@ export function Menu(props: MenuProps): JSX.Element {
     if (item.disabled) return;
     close(true);
     if (item.onSelect) item.onSelect();
-    else if (item.command) ed.run(item.command);
+    else if (item.command) ed?.run(item.command);
   };
 
   const onKey = (e: KeyboardEvent) => {
@@ -83,7 +85,9 @@ export function Menu(props: MenuProps): JSX.Element {
   };
 
   onMount(() => {
-    ed.scheduler.measure(() => {
+    const measure = ed ? ed.scheduler.measure : (fn: () => void) => requestAnimationFrame(fn);
+    const mutate = ed ? ed.scheduler.mutate : (fn: () => void) => fn();
+    measure(() => {
       const box = el.getBoundingClientRect();
       const a = props.anchor;
       const r = a instanceof HTMLElement ? a.getBoundingClientRect() : { left: a.x, right: a.x, top: a.y, bottom: a.y };
@@ -92,7 +96,7 @@ export function Menu(props: MenuProps): JSX.Element {
       if (x + box.width > innerWidth - 8) x = Math.max(8, innerWidth - 8 - box.width);
       if (y + box.height > innerHeight - 8) y = Math.max(8, r.top - box.height - 4);
       if (y < 8) y = 8;
-      ed.scheduler.mutate(() => {
+      mutate(() => {
         el.style.left = `${x}px`;
         el.style.top = `${y}px`;
         el.style.visibility = 'visible';
@@ -113,7 +117,7 @@ export function Menu(props: MenuProps): JSX.Element {
   });
 
   const key = (command?: string) => {
-    if (!command) return '';
+    if (!command || !ed) return '';
     const c = ed.store.state.keymap.commands.find((x) => x.key === command);
     return c?.bindings[0] ? shortcutLabel(c.bindings[0], ed.platform, ed.layout()) : '';
   };

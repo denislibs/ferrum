@@ -1,6 +1,7 @@
 // Запуск редактора: ядро на холсте, события в состояние через планировщик,
-// документ. Параметры адреса: `nodes` — страница-пример из N узлов (по умолчанию
-// пустой документ), `backend`, `transport` — как у стенда (тесты).
+// документ — байты файла из хранилища или, у нового файла, пустой документ.
+// Параметры адреса: `nodes` — новый файл со страницей-примером из N узлов
+// (тесты и замеры), `backend`, `transport` — как у стенда (тесты).
 
 import { batch, createSignal } from 'solid-js';
 import type { Backend, CoreEvent } from '../wasm/ferrum_wasm';
@@ -12,6 +13,18 @@ import { forwardKey } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
 import { loadLayoutMap, type LayoutMap } from './shortcuts';
 import type { UiStore } from './store';
+
+/** Убирает экран запуска из index.html: плавно гасит и удаляет из DOM. Безопасно
+ *  вызывать много раз и без экрана (стенд, тесты). */
+export function dismissSplash() {
+  const el = document.getElementById('fe-splash');
+  if (!el || el.classList.contains('fe-splash--done')) return;
+  el.classList.add('fe-splash--done');
+  el.removeAttribute('role');
+  const remove = () => el.remove();
+  el.addEventListener('transitionend', remove, { once: true });
+  setTimeout(remove, 400); // без перехода (prefers-reduced-motion) transitionend не придёт
+}
 
 /** Журнал событий для тестов — последние записи, не больше этого числа. */
 const EVENT_LOG = 2000;
@@ -46,6 +59,13 @@ export interface BootOptions {
   isClipboardKey?: (e: KeyboardEvent) => boolean;
   /** Перед документом: настройки пользователя (тема, раскладка, привязка) — до первого кадра. */
   beforeDocument?: (editor: Editor) => void;
+  /** Байты файла (читаются, пока запускается ядро); `null` — новый файл. */
+  document?: Promise<ArrayBuffer | null>;
+}
+
+/** Тестовый режим страницы (`__ferrumTest` или `?debug`). */
+export function isTestMode(): boolean {
+  return testMode(new URLSearchParams(location.search));
 }
 
 export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: BootOptions = {}): Promise<Editor> {
@@ -67,6 +87,7 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   });
   const uiEvents: { type: string; size?: number; message?: string }[] = [];
   const isClipboardKey = opts.isClipboardKey ?? (() => false);
+  let unguard = () => {};
   const core = await Core.start(canvas, {
     platform,
     backend: choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
@@ -91,7 +112,7 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   // Защита ставится после запуска: стартовые чтения Core — не нарушение. Предупреждения
   // в тестовом режиме копятся в `window.__ferrumWarnings`.
   if (import.meta.env.DEV || test) {
-    guardLayout([Element.prototype, HTMLElement.prototype], scheduler, (m) => {
+    unguard = guardLayout([Element.prototype, HTMLElement.prototype], scheduler, (m) => {
       console.warn(m);
       ((window as { __ferrumWarnings?: string[] }).__ferrumWarnings ??= []).push(m);
     });
@@ -125,8 +146,15 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     send: (cmd) => core.send(cmd),
     run: (command) => core.send({ type: 'execute', command }),
     layout,
+    // Ядро и защита чтений layout уходят вместе с редактором: экрану файлов они не нужны.
+    dispose: () => {
+      unguard();
+      core.dispose();
+    },
   };
   opts.beforeDocument?.(editor);
-  core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 0) });
+  const bytes = (await opts.document) ?? null;
+  if (bytes) core.send({ type: 'open', bytes: new Uint8Array(bytes) });
+  else core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 0) });
   return editor;
 }

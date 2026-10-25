@@ -25,6 +25,7 @@ export const GROUPS: { id: string; title: string }[] = [
   { id: 'arrange', title: 'Порядок' },
   { id: 'nudge', title: 'Сдвиг' },
   { id: 'view', title: 'Вид' },
+  { id: 'file', title: 'Файл' },
 ];
 
 export function groupCommands(commands: readonly KeymapEntry[]): KeymapGroup[] {

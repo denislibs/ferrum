@@ -12,15 +12,21 @@ import { clampPanel, PANEL_MAX, PANEL_MIN } from './settings';
 export { clampPanel, PANEL_MAX, PANEL_MIN };
 
 /** Пункты меню файла: другие части интерфейса добавляют свои (открыть, сохранить,
- * настройки). */
-export function FileHeader(props: { items: () => MenuItem[] }) {
+ * настройки). `onBack` — кнопка «Назад к файлам». */
+export function FileHeader(props: { items: () => MenuItem[]; onBack?: () => void }) {
   const ed = useEditor();
   const [menu, setMenu] = createSignal<HTMLElement | null>(null);
   const [editing, setEditing] = createSignal(false);
   let file!: HTMLDivElement;
   return (
     <div class="fe-panel-head">
-      <span class="fe-panel-head__mark" aria-hidden="true" />
+      <Show when={props.onBack} fallback={<span class="fe-panel-head__mark" aria-hidden="true" />}>
+        {(back) => (
+          <button class="fe-tool fe-tool--small fe-tool--muted" aria-label="Назад к файлам" data-tip="Назад к файлам" onClick={() => back()()}>
+            <Icon name="back" />
+          </button>
+        )}
+      </Show>
       <div ref={file} class="fe-panel-head__file">
         <Show
           when={editing()}
