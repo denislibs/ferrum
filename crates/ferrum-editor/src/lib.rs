@@ -11,6 +11,7 @@ mod editor;
 pub mod geometry;
 pub mod input;
 pub mod keymap;
+pub mod measure;
 mod ops;
 pub mod pages;
 pub mod panel;
