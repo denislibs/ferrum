@@ -11,7 +11,7 @@
 import { createEffect, createSignal, For, Index, on, Show, untrack } from 'solid-js';
 import type { Align, EditPhase, FillDto, StrokeDto } from '../wasm/ferrum_wasm';
 import { Section } from './chrome';
-import { cssColor, paintOpacity, parseHex, parseOpacityText, toHex, toHex6, type Rgb } from './colour';
+import { cssColor, hexHasAlpha, paintOpacity, parseHex, parseOpacityText, toHex, toHex6, type Rgb } from './colour';
 import { CommitInput } from './commit-input';
 import { useEditor } from './context';
 import { Icon } from './icons';
@@ -42,9 +42,11 @@ function shown(color: string, opacity: number): { rgb: Rgb & { a: number }; alph
  * копии: через границу потоков уходит не прокси хранилища. */
 type FillBase = EditCapture & { list: FillDto[] };
 type StrokeBase = EditCapture & { list: StrokeDto[] };
+/** Поле строки: к снимку добавляется индекс строки на начало набора (список строк потом сменится). */
+type Row<B> = B & { index: number };
 
 /** Палитра и список закрываются вместе с выделением, к которому открыты. */
-function closeOnSelection(ed: ReturnType<typeof useEditor>, open: () => boolean, close: () => void) {
+function closeOnSelection(ed: ReturnType<typeof useEditor>, open: () => boolean, close: () => void, anchor: () => HTMLElement | undefined) {
   let at: EditCapture | null = null;
   createEffect(() => {
     const o = open();
@@ -54,7 +56,14 @@ function closeOnSelection(ed: ReturnType<typeof useEditor>, open: () => boolean,
     on(
       () => [ed.store.state.selectionIds, ed.store.state.selectionVersion],
       () => {
-        if (at?.changed()) close();
+        if (!at?.changed()) return;
+        const a = anchor();
+        const inside = !!document.activeElement?.closest('.fe-picker');
+        close();
+        // Фокус был в палитре: на свотч, если он ещё есть, иначе на панель — не на body.
+        if (inside) {
+          queueMicrotask(() => (a?.isConnected ? a : document.getElementById('panel-design'))?.focus());
+        }
       },
       { defer: true },
     ),
@@ -70,7 +79,7 @@ export function FillsSection() {
   const send = (b: FillBase, fills: FillDto[], phase: EditPhase) => sendEdit(ed.send, { type: 'fills', fills }, phase, b.target);
   const replace = (b: FillBase, i: number, f: Partial<FillDto>, phase: EditPhase = 'commit') =>
     send(b, b.list.map((x, j) => (j === i ? { ...x, ...f } : x)), phase);
-  closeOnSelection(ed, () => !!picker(), () => setPicker(null));
+  closeOnSelection(ed, () => !!picker(), () => setPicker(null), () => picker()?.anchor);
   // Список стал короче, чем индекс открытой палитры (удалили заливку).
   createEffect(() => {
     const pk = picker();
@@ -134,14 +143,15 @@ export function FillsSection() {
                       class="fe-row__grow"
                       text={toHex6(c().rgb)}
                       maxLength={10}
-                      capture={begin}
+                      capture={(): Row<FillBase> => ({ ...begin(), index: index() })}
                       onCommit={(text, b) => {
                         const typed = parseHex(text);
-                        const now = b.list[index()];
+                        const now = b.list[b.index];
                         if (!typed || !now) return;
                         const cur = shown(now.color, now.opacity);
-                        if (toHex6(typed) === toHex6(cur.rgb)) return;
-                        replace(b, index(), { color: toHex({ ...typed, a: 255 }), opacity: cur.alpha });
+                        const alpha = hexHasAlpha(text) ? typed.a / 255 : cur.alpha;
+                        if (toHex6(typed) === toHex6(cur.rgb) && Math.round(alpha * 100) === Math.round(cur.alpha * 100)) return;
+                        replace(b, b.index, { color: toHex({ ...typed, a: 255 }), opacity: alpha });
                       }}
                     />
                     <CommitInput
@@ -149,14 +159,14 @@ export function FillsSection() {
                       class="fe-paint__opacity"
                       text={`${formatNumber(c().alpha * 100, 0)}%`}
                       maxLength={16}
-                      capture={begin}
+                      capture={(): Row<FillBase> => ({ ...begin(), index: index() })}
                       onCommit={(text, b) => {
-                        const now = b.list[index()];
+                        const now = b.list[b.index];
                         if (!now) return;
                         const cur = shown(now.color, now.opacity);
                         const v = parseOpacityText(text, cur.alpha * 100);
                         if (v === null || Math.round(v * 100) === Math.round(cur.alpha * 100)) return;
-                        replace(b, index(), { color: toHex({ ...cur.rgb, a: 255 }), opacity: v });
+                        replace(b, b.index, { color: toHex({ ...cur.rgb, a: 255 }), opacity: v });
                       }}
                     />
                   </Show>
@@ -223,7 +233,7 @@ export function StrokesSection() {
     sendEdit(ed.send, { type: 'strokes', strokes }, phase, b.target);
   const replace = (b: StrokeBase, i: number, s: Partial<StrokeDto>, phase: EditPhase = 'commit') =>
     send(b, b.list.map((x, j) => (j === i ? { ...x, ...s } : x)), phase);
-  closeOnSelection(ed, () => !!picker(), () => setPicker(null));
+  closeOnSelection(ed, () => !!picker(), () => setPicker(null), () => picker()?.anchor);
   createEffect(() => {
     const pk = picker();
     if (pk && !list()[pk.index]) setPicker(null);
@@ -270,15 +280,16 @@ export function StrokesSection() {
                       class="fe-row__grow"
                       text={toHex6(c().rgb)}
                       maxLength={10}
-                      capture={begin}
+                      capture={(): Row<StrokeBase> => ({ ...begin(), index: i() })}
                       onCommit={(text, b) => {
                         const typed = parseHex(text);
-                        const now = b.list[i()];
+                        const now = b.list[b.index];
                         if (!typed || !now) return;
                         const cur = shown(now.color, 1);
-                        if (toHex6(typed) === toHex6(cur.rgb)) return;
-                        // Прозрачность обводки — в её цвете: правка HEX её не трогает.
-                        replace(b, i(), { color: toHex({ ...typed, a: cur.rgb.a }) });
+                        // Прозрачность обводки — в её цвете: без альфы в записи она прежняя.
+                        const a = hexHasAlpha(text) ? typed.a : cur.rgb.a;
+                        if (toHex6(typed) === toHex6(cur.rgb) && a === cur.rgb.a) return;
+                        replace(b, b.index, { color: toHex({ ...typed, a }) });
                       }}
                     />
                     <button
@@ -386,8 +397,10 @@ export function PageSection(props: { theme: 'dark' | 'light' }) {
           capture={() => NO_SELECTION}
           onCommit={(text) => {
             const typed = parseHex(text);
-            if (!typed || toHex6(typed) === toHex6(c().rgb)) return;
-            set(typed, c().alpha, 'commit');
+            if (!typed) return;
+            const alpha = hexHasAlpha(text) ? typed.a / 255 : c().alpha;
+            if (toHex6(typed) === toHex6(c().rgb) && Math.round(alpha * 255) === Math.round(c().alpha * 255)) return;
+            set(typed, alpha, 'commit');
           }}
         />
         <Show when={bg()}>

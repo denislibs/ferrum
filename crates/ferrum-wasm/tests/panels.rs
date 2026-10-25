@@ -1031,6 +1031,46 @@ fn edit_with_explicit_ids_applies_to_them_not_to_selection() {
     assert_eq!(document_steps(&core), steps);
 }
 
+#[test]
+fn stale_selection_version_reports_error_only_for_commit() {
+    let mut core = demo(10);
+    core.take_events();
+    core.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    let version = core
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Selection { version, .. } => Some(version),
+            _ => None,
+        })
+        .expect("событие Selection");
+    let edit = |phase| Command::EditSelection {
+        edit: Edit::Number {
+            field: Field::X,
+            value: 77.0,
+            relative: false,
+        },
+        phase,
+        ids: None,
+        selection_version: Some(version - 1.0),
+    };
+    let steps = document_steps(&core);
+    // Отмена и превью с устаревшей версией — молча: жест просто снимается.
+    for phase in [EditPhase::Preview, EditPhase::Cancel] {
+        core.command(edit(phase));
+        let errs = errors(&core.take_events());
+        assert!(errs.is_empty(), "{phase:?}: {errs:?}");
+    }
+    // Запись — одна ошибка по-русски, шага нет.
+    core.command(edit(EditPhase::Commit));
+    let errs = errors(&core.take_events());
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("Выделение изменилось"), "{errs:?}");
+    assert_eq!(document_steps(&core), steps);
+}
+
 // 1100 фреймов верхнего уровня — это ~110 тыс. узлов: в отладочной сборке долго.
 #[test]
 #[cfg_attr(debug_assertions, ignore)]

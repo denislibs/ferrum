@@ -287,7 +287,8 @@ impl Core {
                         .is_some_and(|v| v != self.editor.selection_version() as f64) =>
                 {
                     self.editor.cancel_gesture();
-                    if p != EditPhase::Preview {
+                    // Ошибка — только о записи: превью и отмена жеста молчат.
+                    if p == EditPhase::Commit {
                         self.error("Выделение изменилось — правка не применена");
                     }
                 }

@@ -8,7 +8,7 @@
 // Применять ли значение (оно могло не измениться), решает `onCommit`: «то же
 // значение» шага отмены не создаёт.
 
-import { createEffect, createSignal, on, type JSX } from 'solid-js';
+import { createEffect, createSignal, on, onCleanup, type JSX } from 'solid-js';
 import { useEditor } from './context';
 
 /** Что нужно полю от снимка выделения (`captureEdit` и его расширения). */
@@ -66,6 +66,12 @@ export function CommitInput<C extends Capture>(props: CommitInputProps<C>) {
       { defer: true },
     ),
   );
+
+  // Поле убрали, пока в нём набрано (выделение сменилось, строка списка исчезла):
+  // набранное применяется к тем, кого правили, а не пропадает.
+  onCleanup(() => {
+    if (dirty() && session) commit();
+  });
 
   return (
     <label class={`fe-field ${props.class ?? ''}`}>

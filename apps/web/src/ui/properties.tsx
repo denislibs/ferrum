@@ -51,7 +51,7 @@ export function PropertiesPanel(props: { theme: 'dark' | 'light' }) {
     liveOne() ? { value: liveValue, mixed: false } : { value: n?.value ?? 0, mixed: n?.mixed ?? false };
 
   return (
-    <div class="fe-props" id="panel-design" role="tabpanel" aria-labelledby="tab-design">
+    <div class="fe-props" id="panel-design" role="tabpanel" aria-labelledby="tab-design" tabindex="-1">
       <Show when={count() > 0} fallback={<PageSection theme={props.theme} />}>
         <PositionSection edit={edit} val={val} />
         <AppearanceSection edit={edit} />

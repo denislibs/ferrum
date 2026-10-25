@@ -1,5 +1,8 @@
 /* Панель свойств: секции, поля чисел (NumberField), переключатели. */
 
+.fe-props:focus {
+  outline: none;
+}
 .fe-props {
   flex: 1;
   min-height: 0;

@@ -221,7 +221,6 @@ test('Esc во время жеста палитры — цвет на начал
   await page.mouse.move(box.x + 4, box.y + 6);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width - 4, box.y + 6, { steps: 6 });
-  await expectPixel(page, at.x, at.y, [255, 0, 0], 40).catch(() => undefined);
   await page.keyboard.press('Escape');
   // Палитра осталась открытой: Esc отменил только жест.
   await expect(picker).toBeVisible();
@@ -545,4 +544,130 @@ test('палитра с клавиатуры: фокус внутрь, стре�
   // Чтений layout вне фазы measure и ошибок страницы не было.
   expect(await page.evaluate(() => (window as unknown as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+// ---- Раунд правок 1: индекс заливки снимается вместе со списком ----
+
+/** Фигура A (две заливки у неё после «+») и рамка B с нужным числом заливок. */
+async function twoNodes(page: Page, aExtra: number, bExtra: number) {
+  await openApp(page);
+  const b = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  await selectShape(page);
+  const a = await selectedId(page);
+  for (let i = 0; i < aExtra; i++) {
+    const n = (await fills(page)).list.length;
+    await page.getByRole('button', { name: 'Добавить заливку' }).click();
+    await expect.poll(async () => (await fills(page)).list.length).toBe(n + 1);
+  }
+  await coreSend(page, { type: 'select', ids: [b], mode: 'replace' });
+  await expect.poll(async () => (await fills(page)).list[0].color).toBe('#ffffffff');
+  for (let i = 0; i < bExtra; i++) {
+    const n = (await fills(page)).list.length;
+    await page.getByRole('button', { name: 'Добавить заливку' }).click();
+    await expect.poll(async () => (await fills(page)).list.length).toBe(n + 1);
+  }
+  const bBefore = (await fills(page)).list;
+  await coreSend(page, { type: 'select', ids: [a], mode: 'replace' });
+  await expect.poll(async () => (await fills(page)).list.length).toBe(1 + aExtra);
+  return { a, b, bBefore, aBefore: (await fills(page)).list };
+}
+
+for (const [name, aExtra, bExtra] of [
+  ['у нового выделения заливок больше', 1, 2],
+  ['у нового выделения заливок меньше', 2, 0],
+] as const) {
+  test(`HEX нижней заливки при смене выделения: ${name} — правится заливка прежнего узла`, async ({ page }) => {
+    const { a, b, bBefore, aBefore } = await twoNodes(page, aExtra, bExtra);
+    const bottom = page.getByRole('textbox', { name: 'HEX заливки' }).last();
+    await bottom.click();
+    await bottom.press('ControlOrMeta+a');
+    await bottom.pressSequentially('ff0000');
+    await recordSent(page);
+    await coreSend(page, { type: 'select', ids: [b], mode: 'replace' });
+    // Выделение сменилось, поле осталось в фокусе: набранное уже применено к A.
+    await expect.poll(async () => (await sent(page)).length).toBe(1);
+    expect((await sent(page))[0]).toMatchObject({ phase: 'commit', edit: 'fills', ids: [a] });
+    await coreSend(page, { type: 'select', ids: [a], mode: 'replace' });
+    await expect.poll(async () => (await fills(page)).list[0].color).toBe('#ff0000ff');
+    const now = (await fills(page)).list;
+    expect(now.slice(1)).toEqual(aBefore.slice(1));
+    await coreSend(page, { type: 'select', ids: [b], mode: 'replace' });
+    await expect.poll(async () => (await fills(page)).list.length).toBe(bBefore.length);
+    expect((await fills(page)).list).toEqual(bBefore);
+  });
+}
+
+test('HEX с альфой в панели: заливка, обводка, фон страницы', async ({ page }) => {
+  await openApp(page);
+  await selectShape(page);
+  const hex = page.getByRole('textbox', { name: 'HEX заливки' });
+  await hex.fill('ff000080');
+  await hex.press('Enter');
+  await expect.poll(async () => (await fills(page)).list[0].opacity).toBeCloseTo(0.5, 2);
+  expect((await fills(page)).list[0].color).toBe('#ff0000ff');
+  const sh = page.getByRole('textbox', { name: 'HEX обводки' });
+  await sh.fill('00ff0040');
+  await sh.press('Enter');
+  await expect
+    .poll(() => page.evaluate(() => window.__ferrum!.ui!.summary!.strokes!.list[0].color))
+    .toBe('#00ff0040');
+  await coreSend(page, { type: 'select', ids: [], mode: 'replace' });
+  const bg = page.getByRole('textbox', { name: 'HEX фона страницы' });
+  await bg.fill('3366994d');
+  await bg.press('Enter');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.pages.background)).toBe('#3366994d');
+});
+
+test('пипетка: сбой, а не отмена, даёт одно уведомление по-русски', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { EyeDropper: unknown }).EyeDropper = class {
+      open() {
+        return Promise.reject(new DOMException('нет', 'NotAllowedError'));
+      }
+    };
+  });
+  await openApp(page);
+  await selectShape(page);
+  const before = await steps(page);
+  await page.getByRole('button', { name: 'Цвет заливки' }).click();
+  await page.getByRole('button', { name: 'Пипетка' }).click();
+  await page.getByRole('button', { name: 'Пипетка' }).click();
+  await expect(page.getByText('Не удалось взять цвет пипеткой')).toHaveCount(1);
+  expect(await steps(page)).toBe(before);
+});
+
+test('тон на стрелках переходит через 0 и 360', async ({ page }) => {
+  await openApp(page);
+  await selectShape(page);
+  await page.getByRole('button', { name: 'Цвет заливки' }).click();
+  const picker = page.getByRole('dialog', { name: 'Цвет заливки' });
+  const hex = picker.getByRole('textbox', { name: 'HEX', exact: true });
+  await hex.fill('ff0000');
+  await hex.press('Enter');
+  const hue = picker.getByRole('slider', { name: 'Тон' });
+  await expect(hue).toHaveAttribute('aria-valuenow', '0');
+  await hue.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(hue).toHaveAttribute('aria-valuenow', '359');
+  await page.keyboard.press('ArrowRight');
+  await expect(hue).toHaveAttribute('aria-valuenow', '0');
+  await page.keyboard.press('Shift+ArrowLeft');
+  await expect(hue).toHaveAttribute('aria-valuenow', '350');
+  await page.keyboard.press('Shift+ArrowRight');
+  await expect(hue).toHaveAttribute('aria-valuenow', '0');
+});
+
+test('смена выделения закрывает палитру: фокус не падает на body', async ({ page }) => {
+  await openApp(page);
+  await selectShape(page);
+  const frame = await page.evaluate(() => window.__ferrum!.ui!.layers.rows.find((r) => r.name === 'Экран 9')!.id);
+  await page.getByRole('button', { name: 'Добавить заливку' }).click();
+  await page.getByRole('button', { name: 'Цвет заливки' }).last().click();
+  await expect(page.getByRole('dialog', { name: 'Цвет заливки' }).getByRole('slider', { name: 'Насыщенность и яркость' })).toBeFocused();
+  // У рамки одна заливка: свотч, к которому была открыта палитра, исчезает.
+  await coreSend(page, { type: 'select', ids: [frame], mode: 'replace' });
+  await expect(page.getByRole('dialog', { name: 'Цвет заливки' })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement === document.body || document.activeElement === null))
+    .toBe(false);
 });

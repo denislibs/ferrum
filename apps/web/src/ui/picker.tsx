@@ -12,7 +12,7 @@
 import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import type { EditPhase } from '../wasm/ferrum_wasm';
-import { cssColor, hsbToRgb, parseHex, parseOpacityText, rgbToHsb, toHex6, type Hsb, type Rgb } from './colour';
+import { cssColor, hexHasAlpha, hsbToRgb, parseHex, parseOpacityText, rgbToHsb, toHex6, type Hsb, type Rgb } from './colour';
 import { CommitInput, type Capture } from './commit-input';
 import { useEditor } from './context';
 import { Icon } from './icons';
@@ -174,7 +174,7 @@ export function ColorPicker<C extends Capture>(props: PickerProps<C>) {
     const before = keyOf();
     const c = hsb();
     if (area === 'sb') setHsb({ h: c.h, s: clamp(c.s + dx / 100, 0, 1), b: clamp(c.b + dy / 100, 0, 1) });
-    else if (area === 'hue') setHsb({ ...c, h: clamp(c.h + dx + dy, 0, 360) });
+    else if (area === 'hue') setHsb({ ...c, h: (((c.h + dx + dy) % 360) + 360) % 360 });
     else setAlpha(clamp(Math.round(alpha() * 100 + dx + dy) / 100, 0, 1));
     if (keyOf() !== before) emit('commit', props.begin());
   };
@@ -235,8 +235,11 @@ export function ColorPicker<C extends Capture>(props: PickerProps<C>) {
       if (!c || disposed || toHex6(c) === toHex6(rgb())) return;
       setHsb(rgbToHsb(c));
       emit('commit', base);
-    } catch {
-      // Пользователь отменил пипетку (Esc) — ничего не меняем.
+    } catch (e) {
+      // Пользователь отменил пипетку (Esc) — ничего не меняем; любой другой сбой — одно уведомление.
+      if (!(e instanceof DOMException && e.name === 'AbortError')) {
+        ed.store.toast('Не удалось взять цвет пипеткой', 'error');
+      }
     }
   };
 
@@ -245,7 +248,7 @@ export function ColorPicker<C extends Capture>(props: PickerProps<C>) {
   const hexInput = (text: string, base: C) => {
     const c = parseHex(text);
     if (!c) return;
-    const a = text.replace('#', '').trim().length === 8 || text.replace('#', '').trim().length === 4 ? c.a / 255 : alpha();
+    const a = hexHasAlpha(text) ? c.a / 255 : alpha();
     if (toHex6(c) === toHex6(rgb()) && Math.round(a * 100) === Math.round(alpha() * 100)) return;
     setHsb(rgbToHsb(c));
     setAlpha(Math.round(a * 100) / 100);

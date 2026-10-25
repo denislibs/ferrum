@@ -35,6 +35,12 @@ export function parseHex(text: string): Rgba | null {
   return { r: n(0), g: n(2), b: n(4), a: h.length === 8 ? n(6) : 255 };
 }
 
+/** В записи есть альфа: `#rgba` или `#rrggbbaa`. */
+export function hexHasAlpha(text: string): boolean {
+  const n = text.trim().replace(/^#/, '').length;
+  return n === 4 || n === 8;
+}
+
 /** `#rrggbbaa` для документа. */
 export function toHex(c: Rgba): string {
   return `#${hex2(c.r)}${hex2(c.g)}${hex2(c.b)}${hex2(c.a)}`;
