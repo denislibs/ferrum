@@ -123,7 +123,7 @@ test('страницы: добавить, переключить, переиме
   await confirm.getByRole('button', { name: 'Удалить' }).click();
   await expect(pages.getByRole('option')).toHaveCount(1);
   // Сворачивается.
-  await page.getByRole('button', { name: 'Страницы' }).click();
+  await page.getByRole('button', { name: 'Страницы', exact: true }).click();
   await expect(pages).toHaveCount(0);
 });
 

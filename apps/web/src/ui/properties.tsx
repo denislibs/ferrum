@@ -13,6 +13,7 @@ import { Caret, Icon } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { NumberField, type EditTarget } from './number-field';
 import type { FieldInput } from './number';
+import { FillsSection, PageSection, StrokesSection } from './paints';
 
 /** Правка; `target` — кого правят с начала жеста (без него — текущее выделение). */
 export function sendEdit(
@@ -37,7 +38,7 @@ function numberEdit(field: Field, input: FieldInput): Edit {
     : { type: 'number', field, value: input.delta, relative: true };
 }
 
-export function PropertiesPanel() {
+export function PropertiesPanel(props: { theme: 'dark' | 'light' }) {
   const ed = useEditor();
   const s = () => ed.store.state.summary;
   const count = () => s()?.count ?? 0;
@@ -51,9 +52,11 @@ export function PropertiesPanel() {
 
   return (
     <div class="fe-props" id="panel-design" role="tabpanel" aria-labelledby="tab-design">
-      <Show when={count() > 0}>
+      <Show when={count() > 0} fallback={<PageSection theme={props.theme} />}>
         <PositionSection edit={edit} val={val} />
         <AppearanceSection edit={edit} />
+        <FillsSection />
+        <StrokesSection />
       </Show>
       <ExportSection />
     </div>

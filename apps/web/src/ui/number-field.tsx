@@ -6,7 +6,7 @@
 
 import { createEffect, createSignal, on, onCleanup, untrack, type JSX } from 'solid-js';
 import type { EditPhase } from '../wasm/ferrum_wasm';
-import { useEditor } from './context';
+import { useEditor, type Editor } from './context';
 import {
   arrowStep,
   clamp,
@@ -26,7 +26,33 @@ export interface EditTarget {
   selectionVersion: number | undefined;
 }
 
-export interface NumberFieldProps {
+/** Выделение на начало правки (жеста палитры, набора в поле): адресат и признак «сменилось». */
+export interface EditCapture {
+  target: EditTarget;
+  /** Выделено больше, чем id в событии: списка нет, действует версия. */
+  capped: boolean;
+  /** Выделение сменилось с начала правки. */
+  changed(): boolean;
+}
+
+export function captureEdit(ed: Editor): EditCapture {
+  const st = ed.store.state;
+  const capped = st.selectionCount > st.selectionIds.length;
+  const ids = [...st.selectionIds];
+  const version = st.selectionVersion;
+  return {
+    target: capped ? { ids: undefined, selectionVersion: version } : { ids, selectionVersion: undefined },
+    capped,
+    changed: () => {
+      const now = untrack(() => ed.store.state);
+      return capped
+        ? now.selectionVersion !== version
+        : now.selectionIds.length !== ids.length || now.selectionIds.some((id, i) => id !== ids[i]);
+    },
+  };
+}
+
+export interface NumberFieldProps<T = undefined> {
   /** Подпись (1–2 символа) или иконка. */
   label: JSX.Element;
   /** Название поля для чтения с экрана («Ширина»). */
@@ -44,12 +70,16 @@ export interface NumberFieldProps {
   percentOf?: number;
   disabled?: boolean;
   /** Правка: значение в единицах поля (`set`) или прибавка к каждому (`add`). */
-  /** `target` — кого правят с начала жеста: выделение могло смениться. */
-  onEdit: (input: FieldInput, phase: EditPhase, target: EditTarget) => void;
+  /** `target` — кого правят с начала жеста: выделение могло смениться; `base` — то, что
+   * вернул `capture` на начало правки (список обводок и т. п.: правка строится от него,
+   * а не от сводки нового выделения). */
+  onEdit: (input: FieldInput, phase: EditPhase, target: EditTarget, base: T) => void;
+  /** Снимок нужного правке состояния на начало набора или жеста. */
+  capture?: () => T;
   class?: string;
 }
 
-export function NumberField(props: NumberFieldProps) {
+export function NumberField<T = undefined>(props: NumberFieldProps<T>) {
   const ed = useEditor();
   const scale = () => props.scale ?? 1;
   const decimals = () => props.decimals ?? 2;
@@ -77,6 +107,7 @@ export function NumberField(props: NumberFieldProps) {
     raw: number;
     current: number;
     mixed: boolean;
+    base: T;
   }
   let session: Session | null = null;
   const snapshot = (): Session =>
@@ -91,6 +122,7 @@ export function NumberField(props: NumberFieldProps) {
         raw: props.value,
         current: props.value * scale(),
         mixed: !!props.mixed,
+        base: props.capture?.() as T,
       };
     });
   const begin = (): Session => (session ??= snapshot());
@@ -105,8 +137,8 @@ export function NumberField(props: NumberFieldProps) {
 
   const toField = (v: number) => clamp(v, props.min, props.max) / scale();
   const emit = (inp: FieldInput, phase: EditPhase, s: Session) => {
-    if (inp.kind === 'set') props.onEdit({ kind: 'set', value: toField(inp.value) }, phase, s.target);
-    else props.onEdit({ kind: 'add', delta: inp.delta / scale() }, phase, s.target);
+    if (inp.kind === 'set') props.onEdit({ kind: 'set', value: toField(inp.value) }, phase, s.target, s.base);
+    else props.onEdit({ kind: 'add', delta: inp.delta / scale() }, phase, s.target, s.base);
   };
 
   // Правка без изменений шага не создаёт: то же значение — прежнее, ограниченное
@@ -180,7 +212,7 @@ export function NumberField(props: NumberFieldProps) {
 
   const cancelScrub = () => {
     dropPreview();
-    if (scrub?.moved) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', scrub.s.target);
+    if (scrub?.moved) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', scrub.s.target, scrub.s.base);
     scrub = null;
   };
   // Esc во время перетаскивания подписи — отмена жеста без следа в истории.
@@ -226,7 +258,7 @@ export function NumberField(props: NumberFieldProps) {
     if (!sc?.moved) return;
     const inp = scrubInput(scrubValue(sc.start, e.clientX - sc.x, props.step ?? 1, { shift: e.shiftKey, alt: e.altKey }), sc.s);
     // Вернули на исходное значение — жест отменяется (превью уже менял документ).
-    if (unchanged(inp, sc.s)) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', sc.s.target);
+    if (unchanged(inp, sc.s)) props.onEdit({ kind: 'add', delta: 0 }, 'cancel', sc.s.target, sc.s.base);
     else emit(inp, 'commit', sc.s);
   };
 

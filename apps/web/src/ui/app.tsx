@@ -109,7 +109,7 @@ export function App() {
             </aside>
             <aside class="fe-side fe-side--right" aria-label="Свойства">
               <DesignHeader />
-              <PropertiesPanel />
+              <PropertiesPanel theme="dark" />
               <ResizeEdge side="right" width={right()} onWidth={setRight} />
             </aside>
             <TooltipLayer />
