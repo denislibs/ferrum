@@ -13,6 +13,7 @@ pub mod input;
 pub mod keymap;
 mod ops;
 pub mod pages;
+pub mod panel;
 pub mod presets;
 pub mod selection;
 pub mod snap;
@@ -24,5 +25,8 @@ pub use editor::{Editor, EditorEvent, Settings, WHEEL_ZOOM_SPEED};
 pub use input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 pub use keymap::{browser_reserved, BindError, Conflict, Keymap, KeymapError, Shortcut};
 pub use pages::{clean_name, MAX_NAME_CHARS};
+pub use panel::{
+    display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,
+};
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
 pub use tools::{Cursor, Tool, ToolKind, ToolOverlay};
