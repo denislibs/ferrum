@@ -6,7 +6,12 @@
 
 /** Скачивает байты файлом `name` (ссылка с `download`, адрес освобождается). */
 export function downloadBytes(name: string, bytes: Uint8Array, type: string): void {
-  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+  downloadBlob(name, new Blob([bytes as BlobPart], { type }));
+}
+
+/** Скачивает готовый `Blob` (собранный в worker'е: основной поток байты не копирует). */
+export function downloadBlob(name: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = name;

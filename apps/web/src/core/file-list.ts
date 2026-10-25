@@ -21,7 +21,15 @@ export interface FileMeta {
   trashedAt?: number;
   /** Версия превью: растёт с каждой записью превью (адреса картинок в интерфейсе по ней). */
   thumbVersion: number;
+  /** Поколение содержимого: растёт с каждой записью байтов. Запись несёт поколение,
+   * на котором основана, и не проходит, если файл с тех пор записали (другая вкладка). */
+  version: number;
 }
+
+/** Запись основана на устаревшем поколении: файл записали в другой вкладке. */
+export const CONFLICT = 'Файл изменён в другой вкладке — сохраните копию на диск или откройте файл заново';
+/** Наибольшая длина строки в запросе, байты UTF-8. */
+export const MAX_TEXT_BYTES = 4096;
 
 /** Разделы экрана файлов: недавние — по открытию, черновики — по изменению. */
 export type Section = 'recent' | 'drafts' | 'trash';
@@ -81,7 +89,11 @@ export type IoOp =
    * читает его worker. */
   | { op: 'create'; name: string; bytes: ArrayBuffer | Blob | null }
   | { op: 'read'; file: string }
-  | { op: 'write'; file: string; name: string; bytes: ArrayBuffer; thumb: ArrayBuffer | null }
+  /** `thumb`: PNG, `null` — убрать (страница пуста), `'keep'` — оставить прежнее.
+   * `base` — поколение, на котором основана запись. */
+  | { op: 'write'; file: string; name: string; bytes: ArrayBuffer; thumb: ArrayBuffer | null | 'keep'; base: number }
+  /** Байты файла `Blob`'ом, собранным в worker'е («Скачать копию»). */
+  | { op: 'blob'; file: string }
   | { op: 'rename'; file: string; name: string }
   | { op: 'touch'; file: string }
   | { op: 'trash'; file: string }
@@ -103,6 +115,7 @@ export interface IoResults {
   create: FileMeta;
   read: { meta: FileMeta; bytes: ArrayBuffer | null };
   write: FileMeta;
+  blob: Blob | null;
   rename: FileMeta;
   touch: FileMeta;
   trash: null;
@@ -123,13 +136,16 @@ export type FromIo =
   | { t: 'changed' };
 
 const BAD = 'Неверный запрос к хранилищу файлов';
+const utf8 = new TextEncoder();
 
 function isId(v: unknown): v is string {
-  return typeof v === 'string' && v.length > 0 && new TextEncoder().encode(v).length <= MAX_ID_BYTES;
+  return typeof v === 'string' && v.length > 0 && v.length <= MAX_ID_BYTES && utf8.encode(v).length <= MAX_ID_BYTES;
 }
 
+/** Строка не длиннее `MAX_TEXT_BYTES` байт UTF-8 (кириллица — два байта на знак). */
 function isName(v: unknown): v is string {
-  return typeof v === 'string' && v.length <= 4096;
+  // Больше 4096 знаков — заведомо больше 4096 байт: не кодируем мегабайты зря.
+  return typeof v === 'string' && v.length <= MAX_TEXT_BYTES && utf8.encode(v).length <= MAX_TEXT_BYTES;
 }
 
 function isCount(v: unknown, max: number): v is number {
@@ -159,6 +175,7 @@ export function requestError(r: unknown): string | null {
         ? null
         : BAD;
     case 'get':
+    case 'blob':
     case 'read':
     case 'touch':
     case 'trash':
@@ -170,9 +187,10 @@ export function requestError(r: unknown): string | null {
       if (!isName(m.name)) return BAD;
       return m.bytes === null ? null : bytesError(m.bytes, MAX_OPEN_BYTES);
     case 'write':
-      if (!isId(m.file) || !isName(m.name)) return BAD;
-      if (!(m.bytes instanceof ArrayBuffer) || !(m.thumb === null || m.thumb instanceof ArrayBuffer)) return BAD;
-      return bytesError(m.bytes, MAX_OPEN_BYTES) ?? (m.thumb === null ? null : bytesError(m.thumb, MAX_THUMB_BYTES));
+      if (!isId(m.file) || !isName(m.name) || !isCount(m.base, Number.MAX_SAFE_INTEGER)) return BAD;
+      if (!(m.bytes instanceof ArrayBuffer)) return BAD;
+      if (!(m.thumb === null || m.thumb === 'keep' || m.thumb instanceof ArrayBuffer)) return BAD;
+      return bytesError(m.bytes, MAX_OPEN_BYTES) ?? (m.thumb instanceof ArrayBuffer ? bytesError(m.thumb, MAX_THUMB_BYTES) : null);
     case 'rename':
       return isId(m.file) && isName(m.name) ? null : BAD;
     case 'emptyTrash':

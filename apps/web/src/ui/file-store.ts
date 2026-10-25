@@ -21,8 +21,13 @@ export interface FileStore {
   create(name: string, bytes?: Blob): Promise<FileMeta>;
   /** Байты файла; `null` — новый файл, ещё не сохранённый. */
   read(id: string): Promise<{ meta: FileMeta; bytes: ArrayBuffer | null }>;
-  /** Содержимое и превью (буферы передаются и здесь больше не доступны). */
-  write(id: string, name: string, bytes: ArrayBuffer, thumb: ArrayBuffer | null): Promise<FileMeta>;
+  /** Содержимое и превью (буферы передаются и здесь больше не доступны). `thumb`:
+   * `null` — убрать превью, `'keep'` — оставить прежнее. `base` — поколение файла
+   * (`FileMeta.version`), на котором основана запись; файл с тех пор записали —
+   * отказ `CONFLICT`. */
+  write(id: string, name: string, bytes: ArrayBuffer, thumb: ArrayBuffer | null | 'keep', base: number): Promise<FileMeta>;
+  /** Байты файла `Blob`'ом («Скачать копию»); `null` — новый файл без байтов. */
+  blob(id: string): Promise<Blob | null>;
   rename(id: string, name: string): Promise<FileMeta>;
   /** Отметить открытие (раздел «Недавние»). */
   touch(id: string): Promise<FileMeta>;
@@ -106,8 +111,11 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks {
   read(file: string) {
     return this.call({ op: 'read', file });
   }
-  write(file: string, name: string, bytes: ArrayBuffer, thumb: ArrayBuffer | null) {
-    return this.call({ op: 'write', file, name, bytes, thumb }, thumb ? [bytes, thumb] : [bytes]);
+  write(file: string, name: string, bytes: ArrayBuffer, thumb: ArrayBuffer | null | 'keep', base: number) {
+    return this.call({ op: 'write', file, name, bytes, thumb, base }, thumb instanceof ArrayBuffer ? [bytes, thumb] : [bytes]);
+  }
+  blob(file: string) {
+    return this.call({ op: 'blob', file });
   }
   rename(file: string, name: string) {
     return this.call({ op: 'rename', file, name });

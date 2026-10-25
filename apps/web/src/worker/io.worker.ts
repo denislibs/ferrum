@@ -9,8 +9,16 @@
 // Метаданные держатся в памяти (≤ 10 000 записей — сотни килобайт): сортировка,
 // поиск и окна — отсюда. Другие вкладки узнают об изменениях через
 // `BroadcastChannel('ferrum-files')` и перечитывают метаданные.
+//
+// Правки записей идут по одной (очередь) и читают запись из базы в той же
+// транзакции, где пишут: одновременные запись и переименование не откатывают поля
+// друг друга, а устаревшая память (другая вкладка уже записала) не пишется поверх.
+// Запись содержимого несёт поколение, на котором основана (`base`); не совпало —
+// отказ `CONFLICT`. Транзакции записи — `durability: 'strict'`: это единственная
+// копия файла.
 
 import {
+  CONFLICT,
   cleanName,
   requestError,
   sectionList,
@@ -108,6 +116,7 @@ function validMeta(v: unknown): FileMeta | null {
     openedAt: m.openedAt as number,
     size: m.size as number,
     thumbVersion: m.thumbVersion as number,
+    version: num(m.version) ? (m.version as number) : 0,
   };
   if (num(m.trashedAt)) meta.trashedAt = m.trashedAt as number;
   return meta;
@@ -143,17 +152,54 @@ function meta(id: string): FileMeta {
   return m;
 }
 
-async function putMeta(...list: FileMeta[]): Promise<void> {
+function rw(d: IDBDatabase, stores: string[]): IDBTransaction {
+  return d.transaction(stores, 'readwrite', { durability: 'strict' });
+}
+
+/** Правка одной записи: свежая запись читается в той же транзакции, `edit` даёт
+ * новую (и может дописать в другие хранилища той же транзакции) или бросает. */
+async function update(id: string, stores: string[], edit: (m: FileMeta, tx: IDBTransaction) => FileMeta): Promise<FileMeta> {
   const d = await open();
-  const tx = d.transaction('meta', 'readwrite');
-  for (const m of list) tx.objectStore('meta').put(m);
-  await done(tx);
-  for (const m of list) metas.set(m.id, m);
+  return new Promise<FileMeta>((resolve, reject) => {
+    const tx = rw(d, ['meta', ...stores]);
+    let next: FileMeta | null = null;
+    let failure: Error | null = null;
+    const req = tx.objectStore('meta').get(id);
+    req.onsuccess = () => {
+      const cur = validMeta(req.result);
+      try {
+        if (!cur) throw new Error('Файл не найден');
+        next = edit(cur, tx);
+        tx.objectStore('meta').put(next);
+      } catch (e) {
+        failure = e instanceof Error ? e : new Error(String(e));
+        tx.abort();
+      }
+    };
+    tx.oncomplete = () => {
+      metas.set(id, next!);
+      resolve(next!);
+    };
+    tx.onabort = () => reject(failure ?? storageError(tx.error));
+  });
+}
+
+/** Правки — по одной, в порядке прихода. */
+let queue: Promise<unknown> = Promise.resolve();
+function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const p = queue.then(fn, fn);
+  queue = p.catch(() => {});
+  return p;
+}
+
+async function readBytes(id: string): Promise<ArrayBuffer | null> {
+  const d = await open();
+  const bytes = (await request(d.transaction('bytes').objectStore('bytes').get(id))) as unknown;
+  return bytes instanceof ArrayBuffer ? bytes : null;
 }
 
 async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transferable[] }> {
   await ready();
-  const now = Date.now();
   switch (r.op) {
     case 'list': {
       const list = sectionList(metas.values(), r.section, r.query);
@@ -161,6 +207,32 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
     }
     case 'get':
       return { value: metas.get(r.file) ?? null };
+    case 'read': {
+      const m = meta(r.file);
+      const buf = await readBytes(r.file);
+      return { value: { meta: m, bytes: buf }, transfer: buf ? [buf] : [] };
+    }
+    case 'blob': {
+      meta(r.file);
+      const buf = await readBytes(r.file);
+      // Blob собирается здесь: основной поток не копирует сотни мегабайт.
+      return { value: buf ? new Blob([buf], { type: 'application/octet-stream' }) : null };
+    }
+    case 'thumb': {
+      const m = metas.get(r.file);
+      if (!m || m.thumbVersion === 0) return { value: null };
+      const d = await open();
+      const blob = (await request(d.transaction('thumbs').objectStore('thumbs').get(r.file))) as unknown;
+      return { value: blob instanceof Blob ? blob : null };
+    }
+    default:
+      return serial(() => mutate(r));
+  }
+}
+
+async function mutate(r: IoRequest): Promise<{ value: unknown }> {
+  const now = Date.now();
+  switch (r.op) {
     case 'create': {
       const bytes = r.bytes instanceof Blob ? await r.bytes.arrayBuffer() : r.bytes;
       const m: FileMeta = {
@@ -171,9 +243,10 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
         openedAt: now,
         size: bytes?.byteLength ?? 0,
         thumbVersion: 0,
+        version: bytes ? 1 : 0,
       };
       const d = await open();
-      const tx = d.transaction(['meta', 'bytes'], 'readwrite');
+      const tx = rw(d, ['meta', 'bytes']);
       tx.objectStore('meta').put(m);
       if (bytes) tx.objectStore('bytes').put(bytes, m.id);
       await done(tx);
@@ -181,55 +254,47 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
       changed();
       return { value: m };
     }
-    case 'read': {
-      const m = meta(r.file);
-      const d = await open();
-      const bytes = (await request(d.transaction('bytes').objectStore('bytes').get(r.file))) as unknown;
-      const buf = bytes instanceof ArrayBuffer ? bytes : null;
-      return { value: { meta: m, bytes: buf }, transfer: buf ? [buf] : [] };
-    }
     case 'write': {
-      const m = meta(r.file);
       if (failWrites) throw new Error('недостаточно места в хранилище браузера');
-      const next: FileMeta = {
-        ...m,
-        name: cleanName(r.name),
-        editedAt: now,
-        size: r.bytes.byteLength,
-        thumbVersion: m.thumbVersion + 1,
-      };
-      const d = await open();
-      const tx = d.transaction(['meta', 'bytes', 'thumbs'], 'readwrite');
-      tx.objectStore('meta').put(next);
-      tx.objectStore('bytes').put(r.bytes, m.id);
-      if (r.thumb) tx.objectStore('thumbs').put(new Blob([r.thumb], { type: 'image/png' }), m.id);
-      else tx.objectStore('thumbs').delete(m.id);
-      await done(tx);
-      metas.set(m.id, next);
+      const { bytes, thumb, base } = r;
+      const next = await update(r.file, ['bytes', 'thumbs'], (m, tx) => {
+        if (m.version !== base) throw new Error(CONFLICT);
+        tx.objectStore('bytes').put(bytes, m.id);
+        if (thumb instanceof ArrayBuffer) tx.objectStore('thumbs').put(new Blob([thumb], { type: 'image/png' }), m.id);
+        else if (thumb === null) tx.objectStore('thumbs').delete(m.id);
+        return {
+          ...m,
+          name: cleanName(r.name),
+          editedAt: now,
+          size: bytes.byteLength,
+          version: m.version + 1,
+          // Прежнее превью оставлено — версия та же, адрес картинки в интерфейсе тоже.
+          thumbVersion: thumb === 'keep' ? m.thumbVersion : m.thumbVersion + 1,
+        };
+      });
       changed();
       return { value: next };
     }
     case 'rename': {
-      const m = meta(r.file);
       const name = cleanName(r.name);
-      if (name === m.name) return { value: m };
-      const next = { ...m, name, editedAt: now };
-      await putMeta(next);
+      if (name === meta(r.file).name) return { value: meta(r.file) };
+      const next = await update(r.file, [], (m) => ({ ...m, name, editedAt: now }));
       changed();
       return { value: next };
     }
     case 'touch': {
-      const next = { ...meta(r.file), openedAt: now };
-      await putMeta(next);
+      const next = await update(r.file, [], (m) => ({ ...m, openedAt: now }));
       changed();
       return { value: next };
     }
     case 'trash':
     case 'restore': {
-      const next = { ...meta(r.file) };
-      if (r.op === 'trash') next.trashedAt = now;
-      else delete next.trashedAt;
-      await putMeta(next);
+      await update(r.file, [], (m) => {
+        const next = { ...m };
+        if (r.op === 'trash') next.trashedAt = now;
+        else delete next.trashedAt;
+        return next;
+      });
       changed();
       return { value: null };
     }
@@ -237,19 +302,12 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
     case 'emptyTrash': {
       const ids = r.op === 'delete' ? [meta(r.file).id] : [...metas.values()].filter((m) => m.trashedAt !== undefined).map((m) => m.id);
       const d = await open();
-      const tx = d.transaction(['meta', 'bytes', 'thumbs'], 'readwrite');
-      for (const id of ids) for (const s of ['meta', 'bytes', 'thumbs']) tx.objectStore(s).delete(id);
+      const tx = rw(d, ['meta', 'bytes', 'thumbs']);
+      for (const id of ids) for (const st of ['meta', 'bytes', 'thumbs']) tx.objectStore(st).delete(id);
       await done(tx);
       for (const id of ids) metas.delete(id);
       changed();
       return { value: null };
-    }
-    case 'thumb': {
-      const m = metas.get(r.file);
-      if (!m || m.thumbVersion === 0) return { value: null };
-      const d = await open();
-      const blob = (await request(d.transaction('thumbs').objectStore('thumbs').get(r.file))) as unknown;
-      return { value: blob instanceof Blob ? blob : null };
     }
     case 'seed': {
       if (!test) throw new Error('Засев доступен только в тестовом режиме');
@@ -264,9 +322,14 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
           openedAt: t,
           size: 0,
           thumbVersion: 0,
+          version: 0,
         });
       }
-      await putMeta(...list);
+      const d = await open();
+      const tx = rw(d, ['meta']);
+      for (const m of list) tx.objectStore('meta').put(m);
+      await done(tx);
+      for (const m of list) metas.set(m.id, m);
       changed();
       return { value: null };
     }
@@ -274,6 +337,8 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
       if (!test) throw new Error('Только в тестовом режиме');
       failWrites = r.on;
       return { value: null };
+    default:
+      throw new Error('Неверный запрос к хранилищу файлов');
   }
 }
 

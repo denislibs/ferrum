@@ -53,6 +53,7 @@ const meta = (id: string, name: string, t: Partial<FileMeta> = {}): FileMeta => 
   openedAt: 0,
   size: 0,
   thumbVersion: 0,
+  version: 0,
   ...t,
 });
 
@@ -103,11 +104,18 @@ test('запросы к хранилищу не доверенные: невер
   expect(requestError({ id: 1, op: 'get', file: 'x'.repeat(65) })).not.toBeNull();
   expect(requestError({ id: 1, op: 'get', file: '' })).not.toBeNull();
   expect(requestError({ id: 1, op: 'get', file: 'abc' })).toBeNull();
-  expect(requestError({ id: 1, op: 'write', file: 'a', name: 'n', bytes: new ArrayBuffer(4), thumb: null })).toBeNull();
-  expect(requestError({ id: 1, op: 'write', file: 'a', name: 'n', bytes: new Uint8Array(4), thumb: null })).not.toBeNull();
-  expect(requestError({ id: 1, op: 'write', file: 'a', name: 'n', bytes: new ArrayBuffer(4), thumb: new ArrayBuffer(9 << 20) })).toMatch(
-    /Слишком большой объём данных/,
-  );
+  const w = { id: 1, op: 'write', file: 'a', name: 'n', bytes: new ArrayBuffer(4), thumb: null, base: 0 };
+  expect(requestError(w)).toBeNull();
+  expect(requestError({ ...w, thumb: 'keep' })).toBeNull();
+  expect(requestError({ ...w, thumb: 'другое' })).not.toBeNull();
+  expect(requestError({ ...w, base: undefined })).not.toBeNull();
+  expect(requestError({ ...w, base: -1 })).not.toBeNull();
+  expect(requestError({ ...w, bytes: new Uint8Array(4) })).not.toBeNull();
+  expect(requestError({ ...w, thumb: new ArrayBuffer(9 << 20) })).toMatch(/Слишком большой объём данных/);
+  // Строки — до 4096 байт UTF-8: кириллица — два байта на знак.
+  expect(requestError({ ...w, name: 'я'.repeat(2048) })).toBeNull();
+  expect(requestError({ ...w, name: 'я'.repeat(2049) })).not.toBeNull();
+  expect(requestError({ id: 1, op: 'blob', file: 'a' })).toBeNull();
   expect(requestError({ id: 1, op: 'create', name: 'n', bytes: new Blob(['x']) })).toBeNull();
   expect(requestError({ id: 1, op: 'create', name: 'n', bytes: 'текст' })).not.toBeNull();
   expect(requestError({ id: 1, op: 'seed', count: 100_000 })).not.toBeNull();
