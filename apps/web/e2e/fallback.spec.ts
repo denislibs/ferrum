@@ -14,7 +14,7 @@
 // «неверное сообщение»).
 
 import { expect, test, type Page } from '@playwright/test';
-import { drag, expectPixel, live, liveWhen, open, screen } from './helpers';
+import { drag, expectPixel, gotoDebug, live, liveWhen, open, screen } from './helpers';
 
 interface Opt {
   /** `getContext('webgl2')` на пробном холсте 1×1 даёт `null`. */
@@ -262,7 +262,7 @@ test('много запусков и остановок ядра: контекс
 // --- 3. Холст больше предела устройства ------------------------------------
 
 test('холст больше MAX_TEXTURE_SIZE при создании: WebGL2 отклонён, рисует CPU', async ({ page }) => {
-  await page.goto('/debug.html?nodes=10');
+  await gotoDebug(page, '/debug.html?nodes=10');
   const width = await pastWebglLimit(page);
   await page.setViewportSize({ width, height: 200 });
   await open(page, '&backend=webgl');
@@ -479,7 +479,7 @@ test('worker не ответил на запуск: start отклоняется
   await stubWorker(page, { stallInit: true });
   let closed = false;
   page.on('worker', (w) => w.on('close', () => (closed = true)));
-  await page.goto('/debug.html?nodes=10');
+  await gotoDebug(page, '/debug.html?nodes=10');
   await expect(page.locator('#hud')).toHaveText('Ядро не запустилось: истекло время ожидания', { timeout: 40_000 });
   await expect.poll(() => closed).toBe(true);
   expect(await page.evaluate(() => window.__ferrum === undefined)).toBe(true);

@@ -21,6 +21,13 @@ export interface CoreOptions {
   platform?: Platform;
   /** Тесты: атлас изображений GPU из одной страницы этой стороны (вытеснение). */
   atlasSide?: number;
+  /** Пересылать ли клавишу редактору. По умолчанию — все, кроме сочетаний браузера;
+   * интерфейс оставляет себе клавиши полей ввода, меню и диалогов и сочетания
+   * буфера обмена (их ведут события `copy`/`cut`/`paste`). */
+  keyFilter?: (e: KeyboardEvent) => boolean;
+  /** Подписка до запуска: события, пришедшие вместе с `ready` (раскладка, пресеты),
+   * иначе прошли бы раньше, чем вызывающий успеет вызвать `on`. */
+  onEvent?: (e: CoreEvent) => void;
 }
 
 /** Сколько ждать события `ready` после запуска worker'а. */
@@ -89,6 +96,8 @@ export class Core {
   private maxCost = 0;
   private disposers: (() => void)[] = [];
   private failed: ((e: Error) => void) | null = null;
+  private readonly frameHooks = new Set<() => void>();
+  private keyFilter: (e: KeyboardEvent) => boolean = () => true;
   /** Ядро остановлено (сбой worker'а): сообщение было, кадров и ввода больше нет. */
   private stopped = false;
 
@@ -106,6 +115,8 @@ export class Core {
     const worker = new Worker(new URL('../worker/core.worker.ts', import.meta.url), { type: 'module' });
     const transport = createTransport(worker, opts.transport);
     const core = new Core(worker, transport, canvas);
+    if (opts.keyFilter) core.keyFilter = opts.keyFilter;
+    if (opts.onEvent) core.on(opts.onEvent);
     let timer = 0;
     const ready = new Promise<void>((resolve, reject) => {
       core.failed = reject;
@@ -229,6 +240,19 @@ export class Core {
     return this.transport.dropped();
   }
 
+  /** Вызов в каждом кадре после тика транспорта и чтения живого состояния — внутри
+   * замера бюджета (планировщик интерфейса). Возвращает отписку. */
+  onFrame(hook: () => void): () => void {
+    this.frameHooks.add(hook);
+    return () => this.frameHooks.delete(hook);
+  }
+
+  /** Обработчик интерфейса с учётом его времени в бюджет кадра (прокрутка панелей,
+   * перетаскивание полей). */
+  costed<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void {
+    return this.timed(fn);
+  }
+
   /** Обработчик с учётом времени в бюджет кадра. */
   private timed<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void {
     return (...args: A) => {
@@ -302,11 +326,13 @@ export class Core {
       this.disposers.push(() => c.removeEventListener(type, h));
     }
     this.add(window, 'keydown', (e) => {
-      if (browserKey(e)) return;
+      if (browserKey(e) || !this.keyFilter(e)) return;
       e.preventDefault();
       enc.key(sink, Kind.KEY_DOWN, e);
     });
     this.add(window, 'keyup', (e) => {
+      // Отпускание — всегда: удержание (Space — рука) не должно залипнуть, если
+      // фокус ушёл в поле, пока клавиша была нажата.
       if (!browserKey(e)) enc.key(sink, Kind.KEY_UP, e);
     });
     this.add(window, 'blur', () => enc.simple(sink, Kind.BLUR));
@@ -344,6 +370,7 @@ export class Core {
         LIVE_NAMES.forEach((n, i) => (obj[n] = live[i]));
         this.live = obj;
       }
+      for (const hook of this.frameHooks) hook();
       this.frameCost += performance.now() - t;
       // Окно последних 10 000 кадров (около трёх минут при 60 Гц).
       if (this.costs.length === 10_000) this.costs.splice(0, 1000);

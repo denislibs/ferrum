@@ -1,41 +1,12 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Ferrum — холст</title>
-    <style>
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-        overflow: hidden;
-        background: #242322;
-      }
-      #canvas {
-        display: block;
-        width: 100vw;
-        height: 100vh;
-        touch-action: none;
-        outline: none;
-      }
-      #hud {
-        position: fixed;
-        top: 8px;
-        left: 8px;
-        padding: 6px 8px;
-        border-radius: 6px;
-        background: rgb(26 25 24 / 0.85);
-        color: #e8e4df;
-        font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-        white-space: pre;
-        pointer-events: none;
-      }
-    </style>
+    <title>Ferrum</title>
   </head>
   <body>
-    <canvas id="canvas" tabindex="0"></canvas>
-    <div id="hud">запуск…</div>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

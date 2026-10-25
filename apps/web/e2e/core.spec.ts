@@ -3,7 +3,7 @@
 // отмена работает, бэкенд выбирается автоматически, ресайз и dpr применяются.
 
 import { expect, test, type Page } from '@playwright/test';
-import { drag, events, expectPixel, live, liveWhen, open, screen } from './helpers';
+import { drag, events, expectPixel, gotoDebug, live, liveWhen, open, screen } from './helpers';
 
 // Токен `canvas` дизайн-системы в тёмной теме (#1a1918).
 const CANVAS_DARK = [26, 25, 24];
@@ -204,7 +204,7 @@ test('неверный конверт сообщения не роняет worke
 test.describe('сбои worker\'а', () => {
   test('ядро не загрузилось: плашка показывает причину, start не висит', async ({ page }) => {
     await page.route('**/*.wasm', (route) => route.fulfill({ status: 200, contentType: 'application/wasm', body: 'не wasm' }));
-    await page.goto('/?nodes=10');
+    await gotoDebug(page, '/debug.html?nodes=10');
     // Причина — ошибка компиляции wasm, а не только «не запустилось».
     await expect(page.locator('#hud')).toHaveText(/^Ядро не запустилось: WebAssembly\.\w+\(\): expected magic word/, {
       timeout: 20_000,
@@ -216,7 +216,7 @@ test.describe('сбои worker\'а', () => {
     await page.route('**/assets/core.worker-*.js', (route) =>
       route.fulfill({ status: 200, contentType: 'text/javascript', body: 'это не javascript (' }),
     );
-    await page.goto('/?nodes=10');
+    await gotoDebug(page, '/debug.html?nodes=10');
     await expect(page.locator('#hud')).toHaveText('Ядро не запустилось: скрипт worker\'а не загрузился', {
       timeout: 20_000,
     });

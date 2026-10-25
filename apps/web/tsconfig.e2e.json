@@ -4,6 +4,14 @@
     "lib": ["ES2024", "DOM"],
     "types": ["node"]
   },
-  "include": ["e2e/**/*.ts", "src/window.d.ts", "playwright.config.ts", "vite.config.ts", "scripts/**/*.mjs"],
+  "include": [
+    "e2e/**/*.ts",
+    "unit/**/*.ts",
+    "src/window.d.ts",
+    "playwright.config.ts",
+    "playwright.unit.config.ts",
+    "vite.config.ts",
+    "scripts/**/*.mjs"
+  ],
   "exclude": []
 }

@@ -1,0 +1,42 @@
+/* Раскладка редактора (Figma UI3): левая панель, холст, правая панель; тулбар
+   плавает внизу по центру холста. Панели отделены от холста линией line. */
+
+.fe-app {
+  display: grid;
+  grid-template-columns: var(--left-w, var(--panel-width)) minmax(0, 1fr) var(--right-w, var(--panel-width));
+  height: 100%;
+}
+.fe-app--bare {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+.fe-stage {
+  position: relative;
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--canvas);
+}
+.fe-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  outline: none;
+}
+
+.fe-boot {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink-muted);
+}
+.fe-boot--error {
+  color: var(--ink);
+}
+.fe-boot--stopped {
+  padding: var(--space-6);
+  background: color-mix(in srgb, var(--canvas) 85%, transparent);
+  text-align: center;
+}

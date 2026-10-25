@@ -11,7 +11,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { live, screen } from './helpers';
+import { gotoDebug, live, screen } from './helpers';
 
 const NODES = 100_000;
 /** Бюджет основного потока на кадр (спека 4.2). */
@@ -112,7 +112,7 @@ async function measure(page: Page, query: string): Promise<Sample> {
     }).observe({ type: 'longtask', buffered: true });
   });
   const t0 = Date.now();
-  await page.goto(`/?nodes=${NODES}${query}`);
+  await gotoDebug(page, `/debug.html?nodes=${NODES}${query}`);
   await page.waitForFunction(() => window.__ferrum?.ready === true, null, { timeout: 120_000 });
   await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0, null, { timeout: 60_000 });
   const openMs = Date.now() - t0;

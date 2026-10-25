@@ -4,8 +4,19 @@
 import { expect, type Page } from '@playwright/test';
 import type { LiveState } from '../src/core/core';
 
+/** Заголовок страницы стенда: по нему видно, что открыт именно debug.html, а не
+ * index.html, поданный запасным маршрутом сервера на отсутствующий адрес. */
+export const DEBUG_TITLE = 'Ferrum — стенд ядра';
+
+/** Открывает стенд и проверяет, что это он: заголовок и плашка `#hud` есть только у него. */
+export async function gotoDebug(page: Page, url: string): Promise<void> {
+  await page.goto(url);
+  await expect(page).toHaveTitle(DEBUG_TITLE);
+  await expect(page.locator('#hud')).toHaveCount(1);
+}
+
 export async function open(page: Page, query = '', origin = ''): Promise<void> {
-  await page.goto(`${origin}/?nodes=1000${query}`);
+  await gotoDebug(page, `${origin}/debug.html?nodes=1000${query}`);
   await page.waitForFunction(() => window.__ferrum?.ready === true, null, { timeout: 90_000 });
   await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0);
 }
@@ -72,4 +83,13 @@ export async function drag(page: Page, from: { x: number; y: number }, dx: numbe
   await page.mouse.down();
   await page.mouse.move(from.x + dx, from.y + dy, { steps });
   await page.mouse.up();
+}
+
+/** Редактор (index.html) со страницей-примером из `nodes` узлов. */
+export async function openApp(page: Page, nodes = 1000, query = ''): Promise<void> {
+  await page.goto(`/?nodes=${nodes}${query}`);
+  await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true, null, {
+    timeout: 90_000,
+  });
+  await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0);
 }
