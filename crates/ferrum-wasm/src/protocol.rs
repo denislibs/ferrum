@@ -214,6 +214,8 @@ pub enum Command {
     ReadPixels {
         reference: bool,
     },
+    /// Измерения с Alt в текущем оверлее (для тестов): ответ — `Measurements`.
+    ReadMeasurements,
     // ——— Этап 5: панели ———
     /// Окно строк панели слоёв, которое сейчас видно (с запасом).
     LayersWindow {
@@ -436,6 +438,12 @@ pub enum CoreEvent {
     Saved {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
+    },
+    /// Измерения с Alt в оверлее: значения расстояний по порядку и число
+    /// пунктирных направляющих.
+    Measurements {
+        values: Vec<f64>,
+        guides: u32,
     },
     /// Пиксели кадра RGBA, строки сверху вниз.
     Pixels {

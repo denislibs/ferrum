@@ -54,6 +54,23 @@ async function watchKeyups(page: Page): Promise<void> {
   });
 }
 
+/** Измерения в оверлее ядра (тестовая команда `readMeasurements`): значения
+ * расстояний и число направляющих. */
+async function readMeasurements(page: Page): Promise<{ values: number[]; guides: number }> {
+  return page.evaluate(
+    () =>
+      new Promise<{ values: number[]; guides: number }>((resolve) => {
+        const core = window.__ferrum!.core!;
+        const off = core.on((e) => {
+          if (e.type !== 'measurements') return;
+          off();
+          resolve({ values: e.values, guides: e.guides });
+        });
+        core.send({ type: 'readMeasurements' });
+      }),
+  );
+}
+
 const keyups = (page: Page) =>
   page.evaluate(() => (window as unknown as { __keyups: { code: string; prevented: boolean }[] }).__keyups.splice(0));
 
@@ -73,6 +90,7 @@ test('Alt над соседом выделенного — измерения н
   // Без Alt на холсте нет цвета измерений (фикстура синяя, наведение и выделение — `select`).
   const before = await colourPixels(page, colour);
   expect(before.count, 'цвет измерений до Alt').toBeLessThan(5);
+  expect(await readMeasurements(page)).toEqual({ values: [], guides: 0 });
 
   await page.keyboard.down('Alt');
   await page.mouse.move(b.x, b.y - 2, { steps: 2 });
@@ -90,11 +108,14 @@ test('Alt над соседом выделенного — измерения н
   expect(Math.abs(cy - mid.y), `центр измерения по y: ${on.box}`).toBeLessThan(4);
   // Плашка с текстом — фиксированного экранного размера, не тоньше 10 px.
   expect(y1 - y0).toBeGreaterThanOrEqual(10);
+  // Ровно один отрезок со значением 20 и без направляющих (соседи на одной высоте).
+  expect(await readMeasurements(page)).toEqual({ values: [20], guides: 0 });
 
   await page.keyboard.up('Alt');
   await expect
     .poll(async () => (await colourPixels(page, colour)).count, { message: 'измерения не ушли', timeout: 10_000 })
     .toBeLessThan(5);
+  expect(await readMeasurements(page)).toEqual({ values: [], guides: 0 });
   // Отпускание одиночного Alt на холсте отменено (меню браузера не получает фокус),
   // фокус остался на холсте, окно в фокусе.
   expect(await keyups(page)).toEqual([{ code: 'AltLeft', prevented: true }]);
