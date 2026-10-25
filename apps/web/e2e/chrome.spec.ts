@@ -419,3 +419,44 @@ test('масштаб экспорта — группа переключател�
   await page.keyboard.press('Home');
   await expect(radio('1×')).toHaveAttribute('aria-checked', 'true');
 });
+
+const fileMenu = async (page: Page, item: string) => {
+  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: item }).click();
+};
+
+test('«Создать» спрашивает и после правок вне истории; после «Сохранить как…» — нет', async ({ page }) => {
+  await openApp(page);
+  const total = (await live(page)).nodes;
+  // Переименование страницы в историю отмены не попадает, но документ изменился.
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  await pages.getByRole('option', { name: /Страница 1/ }).dblclick();
+  await pages.getByRole('textbox', { name: 'Имя страницы' }).fill('Черновик');
+  await pages.getByRole('textbox', { name: 'Имя страницы' }).press('Enter');
+  await expect(pages.getByRole('option', { name: /Черновик/ })).toBeVisible();
+  expect((await live(page)).canUndo).toBe(0);
+  const dialog = page.getByRole('dialog', { name: 'Создать новый файл?' });
+  await fileMenu(page, 'Создать');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Отмена' }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.waitForTimeout(300);
+  expect((await live(page)).nodes).toBe(total);
+  await expect(pages.getByRole('option', { name: /Черновик/ })).toBeVisible();
+  // Сохранено — вопроса нет, документ заменяется сразу.
+  const download = page.waitForEvent('download');
+  await fileMenu(page, 'Сохранить как…');
+  await download;
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  await fileMenu(page, 'Создать');
+  await liveWhen(page, 'l.nodes < 5');
+  await expect(dialog).toHaveCount(0);
+  // Имя документа — тоже правка вне истории.
+  await page.locator('.fe-panel-head__name').dblclick();
+  await page.getByRole('textbox', { name: 'Имя файла' }).fill('Новое имя');
+  await page.getByRole('textbox', { name: 'Имя файла' }).press('Enter');
+  await expect(page.locator('.fe-panel-head__name')).toHaveText('Новое имя');
+  await fileMenu(page, 'Создать');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+});

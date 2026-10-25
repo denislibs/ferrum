@@ -158,16 +158,16 @@ export function App() {
     }
   };
 
-  // «Создать» и «Открыть…» заменяют документ: пока автосохранения нет, при правках —
-  // с вопросом; «Отмена» оставляет текущий документ.
+  // «Создать» и «Открыть…» заменяют документ: пока автосохранения нет, при правках
+  // с открытия, создания или сохранения (и вне истории отмены: страницы, фон, имя
+  // файла) — с вопросом; «Отмена» оставляет текущий документ.
   const REPLACE = {
     new: { title: 'Создать новый файл?', confirm: 'Создать', run: (ed: Editor) => ed.send({ type: 'demo', nodes: 0 }) },
     open: { title: 'Открыть другой файл?', confirm: 'Открыть', run: (ed: Editor) => void openFile(ed) },
   } as const;
   const [confirmReplace, setConfirmReplace] = createSignal<keyof typeof REPLACE | null>(null);
   const replaceDocument = (ed: Editor, kind: keyof typeof REPLACE) => {
-    const s = store.state;
-    if (s.canUndo || s.canRedo) setConfirmReplace(kind);
+    if (store.state.modified) setConfirmReplace(kind);
     else REPLACE[kind].run(ed);
   };
   const fileItems = (ed: Editor): MenuItem[] => [

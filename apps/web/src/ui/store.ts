@@ -32,6 +32,9 @@ export interface UiState {
   selectionVersion: number;
   canUndo: boolean;
   canRedo: boolean;
+  /** Документ изменён с открытия, создания или сохранения — и правками вне истории
+   * отмены (страницы, фон, имя файла). «Создать» и «Открыть…» спрашивают по нему. */
+  modified: boolean;
   documentName: string;
   layers: { start: number; total: number; rows: LayerRow[]; reveal: number | null; revealSeq: number };
   summary: Summary | null;
@@ -58,6 +61,7 @@ const initial: UiState = {
   selectionVersion: 0,
   canUndo: false,
   canRedo: false,
+  modified: false,
   documentName: '',
   layers: { start: 0, total: 0, rows: [], reveal: null, revealSeq: 0 },
   summary: null,
@@ -109,6 +113,9 @@ export function createUiStore() {
         break;
       case 'document':
         setState({ canUndo: e.canUndo, canRedo: e.canRedo });
+        break;
+      case 'modified':
+        setState('modified', e.modified);
         break;
       case 'layers':
         // Строки сверяются по id: Solid перерисовывает только изменившиеся.
