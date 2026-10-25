@@ -11,7 +11,7 @@ use crate::history::{History, HistoryEntry};
 use crate::images::ImageStore;
 use crate::page::{Inverse, PageDoc, Tx};
 use crate::scene_cache::SceneRow;
-use crate::types::{NodeId, PageId};
+use crate::types::{Color, NodeId, PageId};
 
 /// Текущая версия схемы документа. Растёт при несовместимых изменениях схемы.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -20,6 +20,9 @@ const META: &str = "meta";
 const PAGES: &str = "pages";
 const KEY_SCHEMA: &str = "schemaVersion";
 const KEY_NAME: &str = "name";
+/// Цвет фона страницы (`#rrggbbaa`) в метаданных её узла в дереве страниц. Нет
+/// ключа — фон как у холста в теме интерфейса (нейтральное значение не пишется).
+const KEY_BACKGROUND: &str = "background";
 
 /// Страница, ещё не загруженная из файла.
 pub(crate) struct UnloadedPage {
@@ -202,15 +205,41 @@ impl Document {
         Ok(())
     }
 
+    /// Удаляет страницу. Единственную — нельзя: документ без страниц не открыть.
     pub fn delete_page(&mut self, id: PageId) -> DocResult<()> {
         self.writable()?;
         self.ensure_page(id)?;
+        if self.pages().len() <= 1 {
+            return Err(DocError::LastPage);
+        }
         self.pages_tree.delete(id.0)?;
         self.root.commit();
         self.loaded.remove(&id);
         self.unloaded.remove(&id);
         self.history.forget_page(id);
         self.changes.remove(&id);
+        Ok(())
+    }
+
+    /// Цвет фона страницы; `None` — не задан (холст в цвете темы).
+    pub fn page_background(&self, id: PageId) -> Option<Color> {
+        match self.pages_tree.get_meta(id.0).ok()?.get(KEY_BACKGROUND) {
+            Some(ValueOrContainer::Value(LoroValue::String(s))) => Color::parse(&s).ok(),
+            _ => None,
+        }
+    }
+
+    /// Задаёт или снимает (`None`) цвет фона страницы. Как и остальные операции со
+    /// страницами, в историю отмены не попадает.
+    pub fn set_page_background(&mut self, id: PageId, color: Option<Color>) -> DocResult<()> {
+        self.writable()?;
+        self.ensure_page(id)?;
+        let meta = self.pages_tree.get_meta(id.0)?;
+        match color {
+            Some(c) => meta.insert(KEY_BACKGROUND, c.to_hex())?,
+            None => meta.delete(KEY_BACKGROUND)?,
+        }
+        self.root.commit();
         Ok(())
     }
 

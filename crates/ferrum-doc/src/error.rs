@@ -10,6 +10,8 @@ pub enum DocError {
     NodeNotFound(String),
     #[error("Страница {0} не найдена")]
     PageNotFound(String),
+    #[error("Нельзя удалить единственную страницу")]
+    LastPage,
     #[error("Узел {0} хранит неизвестный тип «{1}»")]
     UnknownKind(String, String),
     #[error("Нельзя переместить узел внутрь самого себя")]
