@@ -21,6 +21,9 @@ export interface CoreOptions {
   platform?: Platform;
   /** Тесты: атлас изображений GPU из одной страницы этой стороны (вытеснение). */
   atlasSide?: number;
+  /** Асинхронный Clipboard API не умеет свой формат: worker сам кодирует байты
+   * буфера обмена текстом с меткой (событие `clipboard` несёт `text`). */
+  clipboardText?: boolean;
   /** Пересылать ли клавишу редактору. По умолчанию — все, кроме сочетаний браузера;
    * интерфейс оставляет себе клавиши полей ввода, меню и диалогов и сочетания
    * буфера обмена (их ведут события `copy`/`cut`/`paste`). */
@@ -106,6 +109,8 @@ export class Core {
   private readonly hookErrors = new Set<string>();
   /** Ядро остановлено (сбой worker'а): сообщение было, кадров и ввода больше нет. */
   private stopped = false;
+  /** Ожидающие ответа `encodeClipboard` — по порядку запросов. */
+  private readonly encodes: ((text: string | null) => void)[] = [];
 
   private constructor(
     private readonly worker: Worker,
@@ -160,6 +165,7 @@ export class Core {
         dpr: devicePixelRatio,
         backend: opts.backend ?? null,
         atlas: opts.atlasSide ?? null,
+        clipboardText: opts.clipboardText ?? false,
       },
       [offscreen],
     );
@@ -185,6 +191,8 @@ export class Core {
       }
     } else if (m.t === 'fatal') {
       this.fail(m.message);
+    } else if (m.t === 'clipboardText') {
+      this.encodes.shift()?.(typeof m.text === 'string' ? m.text : null);
     }
   }
 
@@ -220,6 +228,19 @@ export class Core {
     if (error) this.emit({ type: 'error', message: error });
   }
 
+  /** Текст с меткой для байтов буфера обмена — кодирует worker (base64 десятков
+   * мегабайт в основном потоке был бы длинной задачей). `null` — отказ (больше
+   * предела — ошибка придёт событием) или ядро остановлено. Байты передаются. */
+  encodeClipboard(bytes: Uint8Array): Promise<string | null> {
+    if (this.stopped) return Promise.resolve(null);
+    const own = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+    return new Promise((resolve) => {
+      const error = this.transport.post({ t: 'encodeClipboard', bytes: own }, [own.buffer as ArrayBuffer]);
+      if (error) resolve(null);
+      else this.encodes.push(resolve);
+    });
+  }
+
   private emit(e: CoreEvent): void {
     for (const l of this.listeners) l(e);
   }
@@ -230,6 +251,7 @@ export class Core {
   private fail(message: string): void {
     if (this.stopped) return;
     this.stopped = true;
+    for (const r of this.encodes.splice(0)) r(null);
     this.stop();
     if (this.failed) this.failed(new Error(`${NOT_STARTED}: ${message}`));
     else this.emit({ type: 'error', message: `Ядро остановлено: ${message}` });
@@ -420,6 +442,7 @@ export class Core {
 
   dispose(): void {
     this.stopped = true;
+    for (const r of this.encodes.splice(0)) r(null);
     this.stop();
     this.worker.terminate();
   }

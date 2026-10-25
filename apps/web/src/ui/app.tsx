@@ -4,6 +4,7 @@
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { detectPlatform } from '../core/core';
+import { MAX_COMMAND_BYTES } from '../core/messages';
 import { boot } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { ConfirmDialog } from './dialog';
@@ -145,7 +146,13 @@ export function App() {
   const openFile = async (ed: Editor) => {
     try {
       const f = await pickFile(FERRUM_FILE);
-      if (f) ed.send({ type: 'open', bytes: await fileBytes(f) });
+      if (!f) return;
+      // Размер — до чтения: файл больше предела не копируется в память ради отказа.
+      if (f.size > MAX_COMMAND_BYTES.open) {
+        store.toast(`Не удалось открыть файл: больше ${MAX_COMMAND_BYTES.open / (1024 * 1024)} МБ`, 'error');
+        return;
+      }
+      ed.send({ type: 'open', bytes: await fileBytes(f) });
     } catch (e) {
       store.toast(`Не удалось открыть файл: ${e instanceof Error ? e.message : String(e)}`, 'error');
     }

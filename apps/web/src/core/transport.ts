@@ -34,7 +34,7 @@ export interface Transport {
 /** Сколько записей ждать в очереди основного потока, пока кольцо полно. */
 const PENDING_MAX = 4 * RING_CAPACITY;
 
-const KNOWN_MESSAGES = new Set(['started', 'events', 'live', 'fatal']);
+const KNOWN_MESSAGES = new Set(['started', 'events', 'live', 'fatal', 'clipboardText']);
 
 /** Проверка сообщения worker'а: известный вид и, для живого состояния, форма. */
 function wellFormed(m: unknown): m is FromWorker {

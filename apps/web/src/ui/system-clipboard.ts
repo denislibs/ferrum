@@ -3,9 +3,9 @@
 // `requestImage`. Разбор форматов — в clipboard.ts, байты и текст с меткой
 // разбирает worker: основной поток только переносит их.
 
+import type { ClipboardExtra } from '../core/messages';
 import type { Editor } from './context';
 import {
-  encodeText,
   eventIsEmpty,
   FERRUM_MIME,
   fromClipboardItems,
@@ -23,33 +23,54 @@ function textTarget(t: EventTarget | null): boolean {
   return modalOpen() || editableTarget(t);
 }
 
+/** Отказ записи; вырезанное уже удалено из документа — подсказка, как вернуть. */
+function writeFailed(cut: boolean): string {
+  return cut
+    ? 'Не удалось записать в буфер обмена: браузер не дал доступа. Отмена вернёт вырезанные объекты'
+    : 'Не удалось записать в буфер обмена: браузер не дал доступа. Повторите копирование';
+}
+
 export function installClipboard(ed: Editor): () => void {
-  // Запасной путь записи: байты ждут события `copy`, которое вызывает execCommand.
-  let pending: Uint8Array | null = null;
+  // Запасной путь записи: текст с меткой (его кодирует worker) ждёт события `copy`,
+  // которое вызывает execCommand.
+  let pending: string | null = null;
+  // Подсказка о доступе на чтение — одна за сеанс, а не на каждую вставку.
+  let hinted = false;
   const toast = (m: string) => ed.store.toast(m, 'error');
 
-  const writeFallback = (bytes: Uint8Array) => {
-    pending = bytes;
+  const writeText = (text: string, cut: boolean) => {
+    pending = text;
     let ok = false;
     try {
+      // Без недавнего действия пользователя (например, ответ worker'а пришёл поздно) — false.
       ok = document.execCommand('copy');
     } catch {
       ok = false;
     }
     if (!ok || pending) {
       pending = null;
-      toast('Не удалось записать в буфер обмена. Браузер не дал доступа');
+      toast(writeFailed(cut));
     }
   };
 
-  const write = (bytes: Uint8Array) => {
+  /** Браузер отказал асинхронному API: текст с меткой — от worker'а, затем execCommand. */
+  const writeViaWorker = (bytes: Uint8Array, cut: boolean) => {
+    void ed.core.encodeClipboard(bytes).then((text) => {
+      // `null` — отказ по размеру (ошибка уже пришла событием) или ядро остановлено.
+      if (text !== null) writeText(text, cut);
+    });
+  };
+
+  const write = (e: { bytes: Uint8Array } & ClipboardExtra) => {
+    const cut = e.cut === true;
     if (!supportsCustomFormat()) {
-      writeFallback(bytes);
+      if (typeof e.text === 'string') writeText(e.text, cut);
+      else writeViaWorker(e.bytes, cut);
       return;
     }
     navigator.clipboard
-      .write([new ClipboardItem({ [FERRUM_MIME]: new Blob([bytes as BlobPart], { type: FERRUM_MIME }) })])
-      .catch(() => writeFallback(bytes));
+      .write([new ClipboardItem({ [FERRUM_MIME]: new Blob([e.bytes as BlobPart], { type: FERRUM_MIME }) })])
+      .catch(() => writeViaWorker(e.bytes, cut));
   };
 
   const writePng = (bytes: Uint8Array) => {
@@ -66,6 +87,11 @@ export function installClipboard(ed: Editor): () => void {
       return await fromClipboardItems(await navigator.clipboard.read());
     } catch {
       if (!quiet) toast('Нет доступа к буферу обмена. Вставьте сочетанием клавиш');
+      else if (!hinted) {
+        // Свой формат читается только асинхронно: без доступа объекты Ferrum не вставить.
+        hinted = true;
+        ed.store.toast('Разрешите доступ к буферу обмена, чтобы вставлять объекты Ferrum');
+      }
       return null;
     }
   };
@@ -99,7 +125,7 @@ export function installClipboard(ed: Editor): () => void {
 
   const onCopy = (command: 'edit.copy' | 'edit.cut') => (e: ClipboardEvent) => {
     if (pending && command === 'edit.copy') {
-      e.clipboardData?.setData('text/plain', encodeText(pending));
+      e.clipboardData?.setData('text/plain', pending);
       pending = null;
       e.preventDefault();
       return;
@@ -122,7 +148,7 @@ export function installClipboard(ed: Editor): () => void {
   document.addEventListener('cut', cut);
   document.addEventListener('paste', paste);
   const off = ed.core.on((e) => {
-    if (e.type === 'clipboard') write(e.bytes);
+    if (e.type === 'clipboard') write(e);
     else if (e.type === 'clipboardPng') writePng(e.bytes);
     else if (e.type === 'pasteRequested') void readAsync(false).then(deliver);
     else if (e.type === 'requestImage') {

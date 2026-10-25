@@ -7,6 +7,7 @@ import type { Backend, CoreEvent } from '../wasm/ferrum_wasm';
 import { Core, detectPlatform } from '../core/core';
 import type { TransportMode } from '../core/transport';
 import type { Editor } from './context';
+import { supportsCustomFormat } from './clipboard';
 import { forwardKey } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
 import { loadLayoutMap, type LayoutMap } from './shortcuts';
@@ -64,6 +65,8 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     backend: choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
     transport: choice<TransportMode>(params, 'transport', ['sab', 'message']),
     keyFilter: (e) => forwardKey(e, isClipboardKey),
+    // Свой формат не поддерживается: текст с меткой для буфера готовит worker.
+    clipboardText: !supportsCustomFormat(),
     // Чтения layout самого Core — в фазе measure планировщика.
     measure: (read) => scheduler.measure(read),
     onEvent: (e) => {

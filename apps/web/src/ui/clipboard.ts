@@ -13,7 +13,7 @@
 // асинхронное чтение своего формата. Картинки из других приложений (PNG, JPEG,
 // WebP) ставятся узлом-изображением; не-PNG перекодирует worker.
 
-import { isMarkedText, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from '../core/clipboard-text';
+import { FERRUM_TEXT_MARKER, isMarkedText, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from '../core/clipboard-text';
 
 export {
   decodeText,
@@ -67,10 +67,12 @@ export async function fromClipboardItems(items: readonly Pick<ClipboardItem, 'ty
     }
     if (item.types.includes('text/plain')) {
       const blob = await item.getType('text/plain');
-      // Размер — до чтения: огромный текст не читается целиком ради отказа.
-      if (blob.size > MAX_CLIPBOARD_TEXT) return { kind: 'tooBig' };
-      const text = await blob.text();
-      if (isMarkedText(text)) return { kind: 'text', text };
+      // Сначала только начало: чужой текст (сколь угодно большой) не читается целиком
+      // и не заслоняет картинку того же элемента. Наш — предел до чтения.
+      if (isMarkedText(await blob.slice(0, FERRUM_TEXT_MARKER.length).text())) {
+        if (blob.size > MAX_CLIPBOARD_TEXT) return { kind: 'tooBig' };
+        return { kind: 'text', text: await blob.text() };
+      }
     }
     const image = item.types.find((t) => (IMAGE_TYPES as readonly string[]).includes(t));
     if (image) return { kind: 'image', type: image, blob: await item.getType(image) };

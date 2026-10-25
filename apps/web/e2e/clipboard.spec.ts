@@ -226,7 +226,7 @@ test('не доверенный текст: огромный текст с ме�
   expect([after.nodes, after.steps]).toEqual([before.nodes, before.steps]);
 });
 
-test('огромная картинка отклоняется по заголовку, команды после неё — по порядку', async ({ page }) => {
+test('огромная картинка отклоняется по заголовку без правки', async ({ page }) => {
   await openApp(page, 100);
   const before = await live(page);
   // JPEG в несколько байт объявляет 60 000 × 60 000: декодировать его нельзя.
@@ -235,12 +235,125 @@ test('огромная картинка отклоняется по заголо
     const sof = [0xff, 0xc0, 0, 17, 8, 0xea, 0x60, 0xea, 0x60, 3, ...new Array(9).fill(0)];
     const bytes = new Uint8Array([0xff, 0xd8, ...app0, ...sof, 0xff, 0xd9]);
     window.__ferrum!.core.send({ type: 'pasteImage', bytes });
-    // Следом — команда, которая не должна обогнать вставку.
-    window.__ferrum!.core.send({ type: 'execute', command: 'view.zoom_in' });
   });
   await expect(page.getByRole('status').filter({ hasText: 'изображение больше 8192 px' })).toBeVisible();
-  await liveWhen(page, `l.zoom === ${before.zoom * 2}`);
-  expect((await live(page)).nodes).toBe(before.nodes);
+  const after = await live(page);
+  expect([after.nodes, after.steps]).toEqual([before.nodes, before.steps]);
+});
+
+/** Настоящий JPEG `w × h` из шума (перекодировка в PNG заметно долгая) — в `window.__jpeg`. */
+async function makeJpeg(page: Page, w: number, h: number): Promise<number> {
+  return page.evaluate(
+    async ({ w, h }) => {
+      const c = new OffscreenCanvas(w, h);
+      const ctx = c.getContext('2d')!;
+      const img = ctx.createImageData(w, h);
+      let x = 12345;
+      for (let i = 0; i < img.data.length; i++) {
+        x = (x * 1103515245 + 12345) >>> 0;
+        img.data[i] = i % 4 === 3 ? 255 : x >>> 24;
+      }
+      ctx.putImageData(img, 0, 0);
+      const bytes = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg', quality: 0.9 })).arrayBuffer());
+      (window as unknown as { __jpeg: Uint8Array }).__jpeg = bytes;
+      return bytes.length;
+    },
+    { w, h },
+  );
+}
+
+/** Правка A: дублировать «Слой 1» (один шаг истории). */
+async function editA(page: Page) {
+  await selectShape(page);
+  const l = await live(page);
+  await page.keyboard.press('ControlOrMeta+KeyD');
+  return liveWhen(page, `l.steps === ${l.steps + 1} && l.nodes === ${l.nodes + 1}`);
+}
+
+test('команда после перекодируемой картинки ждёт её: отмена отменяет вставку', async ({ page }) => {
+  await openApp(page, 100);
+  await makeJpeg(page, 1200, 800);
+  const a = await editA(page);
+  await page.evaluate(() => {
+    window.__ferrum!.core.send({ type: 'pasteImage', bytes: (window as unknown as { __jpeg: Uint8Array }).__jpeg });
+    // Следом — команда отмены: она не должна обогнать вставку.
+    window.__ferrum!.core.send({ type: 'execute', command: 'edit.undo' });
+  });
+  // Вставка, затем её отмена: правка A на месте, повтор вернёт картинку.
+  await liveWhen(page, `l.canRedo === 1 && l.steps === ${a.steps + 1}`);
+  const after = await live(page);
+  expect([after.nodes, after.canUndo]).toEqual([a.nodes, 1]);
+  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'edit.redo' }));
+  await liveWhen(page, `l.nodes === ${a.nodes + 1}`);
+  expect((await ui(page)).summary?.kind).toBe('image');
+});
+
+for (const transport of ['sab', 'message'] as const) {
+  test(`ввод во время перекодировки ждёт её: Ctrl+Z отменяет вставку, а не прошлую правку (${transport})`, async ({ page }) => {
+    await openApp(page, 100, `&transport=${transport}`);
+    const size = await makeJpeg(page, 3000, 2000);
+    expect(size).toBeGreaterThan(1024 * 1024);
+    const a = await editA(page);
+    // Вставка и сразу — клавиша отмены (в том же задании: точно во время перекодировки).
+    const t = await page.evaluate(() => {
+      window.__ferrum!.core.send({ type: 'pasteImage', bytes: (window as unknown as { __jpeg: Uint8Array }).__jpeg });
+      const mac = navigator.platform.toLowerCase().startsWith('mac');
+      const key = { code: 'KeyZ', key: 'z', ctrlKey: !mac, metaKey: mac, bubbles: true };
+      window.dispatchEvent(new KeyboardEvent('keydown', key));
+      window.dispatchEvent(new KeyboardEvent('keyup', key));
+      return performance.now();
+    });
+    await liveWhen(page, `l.canRedo === 1 && l.steps === ${a.steps + 1}`);
+    const after = await live(page);
+    console.log(`перекодировка 3000 × 2000: ${(size / 1024 / 1024).toFixed(1)} МБ, до отмены ${Math.round((await page.evaluate(() => performance.now())) - t)} мс`);
+    // Отменена вставка: узлов — как после правки A, A ещё можно отменить, повтор вернёт картинку.
+    expect([after.nodes, after.canUndo, after.canRedo]).toEqual([a.nodes, 1, 1]);
+    await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'edit.redo' }));
+    await liveWhen(page, `l.nodes === ${a.nodes + 1}`);
+    expect((await ui(page)).summary?.kind).toBe('image');
+    expect(await page.evaluate(() => window.__ferrum!.core.mode)).toBe(transport);
+  });
+}
+
+/** Длинные задачи основного потока с этого момента — в `window.__long`. */
+async function watchLongTasks(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const w = window as unknown as { __long: { start: number; duration: number }[] };
+    w.__long = [];
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) w.__long.push({ start: e.startTime, duration: e.duration });
+    }).observe({ type: 'longtask', buffered: false });
+    return performance.now();
+  });
+}
+const longTasks = (page: Page, t0: number) =>
+  page.evaluate((t0) => (window as unknown as { __long: { start: number; duration: number }[] }).__long.filter((e) => e.start >= t0), t0);
+
+test('запасной путь: большое выделение кодирует worker — без длинных задач, вставка возвращает всё', async ({ page }) => {
+  await page.addInitScript(noCustomFormat);
+  await openApp(page, 20_000);
+  const before = await live(page);
+  await page.locator('canvas').focus();
+  await page.keyboard.press('ControlOrMeta+a');
+  await liveWhen(page, 'l.selectionCount > 100');
+  const t0 = await watchLongTasks(page);
+  await page.keyboard.press('ControlOrMeta+c');
+  await expect.poll(() => events(page, 'clipboard')).toBe(1);
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText().then((t) => t.startsWith('ferrum-clipboard:v1:'))))
+    .toBe(true);
+  await page.waitForTimeout(300);
+  const long = await longTasks(page, t0);
+  const bytes = await page.evaluate(() => window.__ferrum!.uiEvents!.find((e) => e.type === 'clipboard')!.size!);
+  console.log(`копирование ${before.nodes} узлов: ${(bytes / 1024 / 1024).toFixed(1)} МБ, длинных задач: ${long.length}`, long);
+  expect(long).toEqual([]);
+  expect(await errors(page)).toEqual([]);
+  await page.getByRole('button', { name: 'Добавить страницу' }).click();
+  await expect.poll(async () => (await ui(page)).pages.list.length).toBe(2);
+  await page.locator('canvas').focus();
+  await page.keyboard.press('ControlOrMeta+v');
+  await liveWhen(page, `l.nodes === ${before.nodes}`);
+  expect(await errors(page)).toEqual([]);
 });
 
 test('картинка больше 64 МБ отклоняется до копии в worker', async ({ page }) => {
@@ -374,6 +487,32 @@ test('изображение из файла: Ctrl+Shift+K, выбор, щелч
   expect((await ui(page)).summary.w.value).toBe(40);
 });
 
+test('свой формат без доступа на чтение: одна подсказка за сеанс', async ({ page }) => {
+  // Свой формат записан, а чтение отказано (как после «Запретить» в запросе
+  // Chromium). Headless без права чтения не пишет и свой формат — отказ имитируем.
+  await page.addInitScript(() => {
+    navigator.clipboard.read = () => Promise.reject(new DOMException('Read permission denied.', 'NotAllowedError'));
+  });
+  await openApp(page);
+  const hint = page.getByRole('status').filter({ hasText: 'Разрешите доступ к буферу обмена, чтобы вставлять объекты Ferrum' });
+  await selectShape(page);
+  await page.keyboard.press('ControlOrMeta+c');
+  await expect.poll(() => events(page, 'clipboard')).toBe(1);
+  // Записан именно свой формат: в тексте буфера метки нет.
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('');
+  await page.locator('canvas').focus();
+  await page.keyboard.press('ControlOrMeta+v');
+  await expect(hint).toHaveCount(1);
+  await page.keyboard.press('ControlOrMeta+v');
+  // Уведомление ушло по времени — следующая вставка его не повторяет.
+  await expect(hint).toHaveCount(0, { timeout: 10_000 });
+  await page.keyboard.press('ControlOrMeta+v');
+  await page.waitForTimeout(500);
+  await expect(hint).toHaveCount(0);
+  expect(await errors(page)).toEqual([]);
+});
+
 test.describe('без доступа на чтение буфера', () => {
   test.use({ permissions: ['clipboard-write'] });
 
@@ -402,4 +541,52 @@ test.describe('без доступа на чтение буфера', () => {
     await page.getByRole('menuitem', { name: /Вставить/ }).click();
     await expect(page.getByRole('status').filter({ hasText: 'Нет доступа к буферу обмена' })).toHaveCount(1);
   });
+});
+
+test('запись отклонена браузером: вырезание подсказывает отмену, копирование — повтор', async ({ page }) => {
+  await page.addInitScript(() => {
+    navigator.clipboard.write = () => Promise.reject(new DOMException('нет доступа', 'NotAllowedError'));
+    document.execCommand = () => false;
+  });
+  await openApp(page);
+  await selectShape(page);
+  await page.keyboard.press('ControlOrMeta+c');
+  await expect(page.getByRole('status').filter({ hasText: 'Повторите копирование' })).toBeVisible();
+  const before = await live(page);
+  await page.keyboard.press('ControlOrMeta+x');
+  await expect(page.getByRole('status').filter({ hasText: 'Отмена вернёт вырезанные объекты' })).toBeVisible();
+  await liveWhen(page, `l.nodes === ${before.nodes - 1}`);
+  await page.keyboard.press('ControlOrMeta+z');
+  await liveWhen(page, `l.nodes === ${before.nodes}`);
+});
+
+test('«Открыть…»: файл больше предела отклоняется до чтения', async ({ page }) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __read: boolean; showOpenFilePicker: unknown };
+    w.__read = false;
+    const file = {
+      size: 600 * 1024 * 1024,
+      arrayBuffer: () => {
+        w.__read = true;
+        return Promise.reject(new Error('прочитан'));
+      },
+    };
+    w.showOpenFilePicker = async () => [{ getFile: async () => file }];
+  });
+  await openApp(page, 10);
+  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('menuitem', { name: 'Открыть…' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Не удалось открыть файл: больше 512 МБ' })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __read: boolean }).__read)).toBe(false);
+});
+
+test('свой формат отклонён браузером: текст с меткой кодирует worker по запросу', async ({ page }) => {
+  await page.addInitScript(() => {
+    navigator.clipboard.write = () => Promise.reject(new DOMException('нет доступа', 'NotAllowedError'));
+  });
+  await openApp(page);
+  // Свой формат «поддерживается»: событие `clipboard` текста не несёт, его просят у worker'а.
+  await copyToNewPage(page);
+  expect((await page.evaluate(() => navigator.clipboard.readText())).startsWith('ferrum-clipboard:v1:')).toBe(true);
+  expect(await errors(page)).toEqual([]);
 });

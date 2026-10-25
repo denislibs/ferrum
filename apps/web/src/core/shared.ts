@@ -116,3 +116,56 @@ export class LiveReader {
     return this.last;
   }
 }
+
+/** Очередь worker'а на время перекодировки картинки: сообщения и записи ввода в
+ * порядке прихода — после перекодировки воспроизводятся так же по порядку. */
+export type Held<T> = { input: Uint8Array } | { msg: T };
+
+/** Убирает самую старую теряемую запись из записей ввода очереди; `false` — таких нет. */
+function evictHeld<T>(queue: Held<T>[]): boolean {
+  for (let k = 0; k < queue.length; k++) {
+    const h = queue[k];
+    if (!('input' in h)) continue;
+    const n = h.input.length / RECORD_SIZE;
+    if (!evictOldestDroppable(h.input, n)) continue;
+    if (n === 1) queue.splice(k, 1);
+    else h.input = h.input.subarray(0, (n - 1) * RECORD_SIZE);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Кладёт записи ввода (копией: буфер кольца переиспользуется) в конец очереди.
+ * Предел — `cap` записей во всей очереди, как у кольца: сверх него движение и
+ * колесо теряются (новая теряемая запись или, для нетеряемой, самая старая
+ * теряемая), а нажатия, отпускания, клавиши, blur и размер — никогда: при
+ * отсутствии теряемых они идут сверх предела. Возвращает число потерянных записей.
+ */
+export function holdInput<T>(queue: Held<T>[], records: Uint8Array, cap: number): number {
+  let total = 0;
+  for (const h of queue) if ('input' in h) total += h.input.length / RECORD_SIZE;
+  const kept = new Uint8Array(records.length);
+  let n = 0;
+  let dropped = 0;
+  for (let i = 0; i < records.length / RECORD_SIZE; i++) {
+    const rec = records.subarray(i * RECORD_SIZE, (i + 1) * RECORD_SIZE);
+    if (total + n >= cap) {
+      if (isDroppableKind(rec[Field.KIND])) {
+        dropped++;
+        continue;
+      }
+      if (evictHeld(queue)) {
+        total--;
+        dropped++;
+      } else if (evictOldestDroppable(kept, n)) {
+        n--;
+        dropped++;
+      }
+    }
+    kept.set(rec, n * RECORD_SIZE);
+    n++;
+  }
+  if (n > 0) queue.push({ input: kept.subarray(0, n * RECORD_SIZE) });
+  return dropped;
+}

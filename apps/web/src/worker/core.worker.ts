@@ -5,10 +5,18 @@
 import init, { WasmCore } from '../wasm/ferrum_wasm.js';
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import { Ctrl, CTRL_BYTES, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET } from '../core/layout.gen';
-import { decodeText } from '../core/clipboard-text';
-import { commandSizeError, isToWorker, pasteTextError, type FromWorker, type ToWorker } from '../core/messages';
+import { decodeText, encodeText, MAX_CLIPBOARD_BYTES } from '../core/clipboard-text';
+import {
+  clipboardBytesError,
+  commandSizeError,
+  isToWorker,
+  pasteTextError,
+  type ClipboardExtra,
+  type FromWorker,
+  type ToWorker,
+} from '../core/messages';
 import { imageSize } from '../core/image-size';
-import { drainRing, writeLive as writeLiveSlots } from '../core/shared';
+import { addSaturating, drainRing, holdInput, writeLive as writeLiveSlots, type Held } from '../core/shared';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -21,6 +29,9 @@ const early: ToWorker[] = [];
 let dead = false;
 /** `init` уже пришёл: второй не запускает ядро заново поверх первого. */
 let started = false;
+/** Асинхронный API не умеет свой формат: событие `clipboard` несёт и готовый текст
+ * с меткой (base64 кодирует worker, не основной поток). */
+let clipboardText = false;
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
   scope.postMessage(msg, transfer);
@@ -54,6 +65,10 @@ async function toPng(bytes: Uint8Array): Promise<Uint8Array> {
   }
   const bmp = await createImageBitmap(new Blob([bytes as BlobPart]));
   try {
+    // Заголовок мог солгать: размер декодированной картинки — проверка ещё раз.
+    if (bmp.width > MAX_IMAGE_SIDE || bmp.height > MAX_IMAGE_SIDE) {
+      throw new Error(`изображение больше ${MAX_IMAGE_SIDE} px`);
+    }
     const c = new OffscreenCanvas(bmp.width, bmp.height);
     c.getContext('2d')!.drawImage(bmp, 0, 0);
     return new Uint8Array(await (await c.convertToBlob({ type: 'image/png' })).arrayBuffer());
@@ -62,10 +77,34 @@ async function toPng(bytes: Uint8Array): Promise<Uint8Array> {
   }
 }
 
-/** Пока картинка перекодируется, следующие команды ждут: порядок команд — порядок
- * пользователя (вставка, затем отмена — отменяется вставка). */
+/** Пока картинка перекодируется, ядру не идёт ничего: следующие сообщения и записи
+ * ввода (клавиши, указатель) ждут в одной очереди в порядке прихода, а кадры
+ * рисуются как обычно. После перекодировки очередь воспроизводится по порядку:
+ * вставка, затем Ctrl+Z — отменяется вставка, а не прошлая правка. Порядок — тот, в
+ * котором worker получил вставку и ввод: основной поток сначала читает байты
+ * картинки (`blob.arrayBuffer()`, миллисекунды) и только потом шлёт команду, так что
+ * ввод в этот короткий промежуток законно идёт раньше вставки. Записи ввода в
+ * очереди ограничены ёмкостью кольца: сверх неё теряются только движение и колесо. */
 let converting = false;
-const waiting: ToWorker[] = [];
+const waiting: Held<ToWorker>[] = [];
+
+/** Перекодировка закончилась: ждавшее — по порядку; новая перекодировка снова
+ * останавливает очередь (оставшееся ждёт дальше). */
+function release(): void {
+  converting = false;
+  while (waiting.length && !converting && core) {
+    const h = waiting.shift()!;
+    if ('msg' in h) handle(h.msg);
+    else {
+      try {
+        core.input(h.input);
+      } catch (e) {
+        fatal(e);
+      }
+    }
+  }
+  step(null);
+}
 
 /** Команда ядру после проверки предела; ответы — сразу, кадр нарисуется по тику. */
 function run(cmd: ToWorker & { t: 'cmd' }): void {
@@ -79,11 +118,34 @@ function run(cmd: ToWorker & { t: 'cmd' }): void {
   sendEvents();
 }
 
+/** Событие `clipboard` для основного потока: больше предела — отказ одной ошибкой
+ * (вставка такого всё равно была бы отклонена); иначе — признак вырезания (в той же
+ * пачке изменился документ) и, для запасного пути, готовый текст с меткой. */
+function clipboardEvent(e: CoreEvent & { type: 'clipboard' }, cut: boolean): CoreEvent {
+  if (e.bytes.length > MAX_CLIPBOARD_BYTES) {
+    const mb = Math.ceil(e.bytes.length / (1024 * 1024));
+    return {
+      type: 'error',
+      message: cut
+        ? `Не удалось вырезать в буфер обмена: выделение ${mb} МБ, предел — 64 МБ. Отмена вернёт вырезанные объекты`
+        : `Не удалось скопировать: выделение ${mb} МБ, предел — 64 МБ`,
+    };
+  }
+  const x = e as typeof e & ClipboardExtra;
+  x.cut = cut;
+  if (clipboardText) x.text = encodeText(e.bytes);
+  return x;
+}
+
 /** Байты событий уходят без копии: их буферы передаются основному потоку. */
 function sendEvents(): void {
   if (!core) return;
-  const events: CoreEvent[] = core.takeEvents();
+  let events: CoreEvent[] = core.takeEvents();
   if (events.length === 0) return;
+  if (events.some((e) => e.type === 'clipboard')) {
+    const cut = events.some((e) => e.type === 'document');
+    events = events.map((e) => (e.type === 'clipboard' ? clipboardEvent(e, cut) : e));
+  }
   const transfer: Transferable[] = [];
   for (const e of events) {
     if ('bytes' in e) transfer.push(e.bytes.buffer);
@@ -111,7 +173,12 @@ function writeLive(): void {
 function step(input: Uint8Array | null): void {
   if (!core) return;
   try {
-    if (input && input.byteLength > 0) core.input(input);
+    if (input && input.byteLength > 0) {
+      if (converting) {
+        const dropped = holdInput(waiting, input, RING_CAPACITY);
+        if (dropped && sab) addSaturating(sab.ctrl, Ctrl.INPUT_DROPPED, dropped);
+      } else core.input(input);
+    }
     core.frame();
     writeLive();
     sendEvents();
@@ -149,7 +216,7 @@ function handle(msg: ToWorker): void {
     switch (msg.t) {
       case 'cmd': {
         if (converting) {
-          waiting.push(msg);
+          waiting.push({ msg });
           return;
         }
         const cmd = msg.cmd;
@@ -167,11 +234,7 @@ function handle(msg: ToWorker): void {
               (e: unknown) => postError(`Не удалось прочитать изображение: ${e instanceof Error ? e.message : 'формат не поддерживается'}`),
             )
             .catch(fatal)
-            .finally(() => {
-              converting = false;
-              // Ждавшие команды — по порядку; новая перекодировка снова остановит очередь.
-              while (waiting.length && !converting) handle(waiting.shift()!);
-            });
+            .finally(release);
           return;
         }
         run(msg);
@@ -179,7 +242,7 @@ function handle(msg: ToWorker): void {
       }
       case 'pasteText': {
         if (converting) {
-          waiting.push(msg);
+          waiting.push({ msg });
           return;
         }
         // Текст из буфера не доверенный: предел — до декодирования, испорченный
@@ -195,6 +258,14 @@ function handle(msg: ToWorker): void {
           return;
         }
         run({ t: 'cmd', cmd: { type: 'paste', bytes } });
+        break;
+      }
+      case 'encodeClipboard': {
+        // Запасной путь записи, когда браузер отказал асинхронному API: текст с
+        // меткой — отсюда. Ядра не касается, поэтому не ждёт перекодировки.
+        const error = clipboardBytesError(msg.bytes);
+        if (error) postError(error);
+        post({ t: 'clipboardText', text: error ? null : encodeText(msg.bytes) });
         break;
       }
       case 'tick':
@@ -239,6 +310,7 @@ scope.onmessage = async (e: MessageEvent<unknown>) => {
     return;
   }
   started = true;
+  clipboardText = msg.clipboardText === true;
   try {
     await init();
     core = await WasmCore.create(msg.canvas, msg.platform, msg.width, msg.height, msg.dpr, msg.backend, msg.atlas);

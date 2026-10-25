@@ -65,9 +65,24 @@ test('вставка из асинхронного API: свой формат, �
 });
 
 test('вставка из асинхронного API: размер проверяется до чтения', async () => {
-  // Blob, который нельзя читать: размер виден, чтение — ошибка теста.
-  const huge = (size: number) => ({ size, arrayBuffer: () => Promise.reject(new Error('читать нельзя')), text: () => Promise.reject(new Error('читать нельзя')) }) as unknown as Blob;
-  const item = (type: string, blob: Blob) => ({ types: [type], getType: async () => blob });
-  expect(await fromClipboardItems([item(FERRUM_MIME, huge(MAX_CLIPBOARD_BYTES + 1))])).toEqual({ kind: 'tooBig' });
-  expect(await fromClipboardItems([item('text/plain', huge(MAX_CLIPBOARD_TEXT + 1))])).toEqual({ kind: 'tooBig' });
+  // Blob, который нельзя читать целиком: размер и начало видны, полное чтение — ошибка теста.
+  const huge = (size: number, head: string) =>
+    ({
+      size,
+      slice: () => new Blob([head]),
+      arrayBuffer: () => Promise.reject(new Error('читать нельзя')),
+      text: () => Promise.reject(new Error('читать нельзя')),
+    }) as unknown as Blob;
+  const item = (map: Record<string, Blob>) => ({ types: Object.keys(map), getType: async (t: string) => map[t] });
+  expect(await fromClipboardItems([item({ [FERRUM_MIME]: huge(MAX_CLIPBOARD_BYTES + 1, '') })])).toEqual({ kind: 'tooBig' });
+  expect(await fromClipboardItems([item({ 'text/plain': huge(MAX_CLIPBOARD_TEXT + 1, FERRUM_TEXT_MARKER) })])).toEqual({
+    kind: 'tooBig',
+  });
+  // Огромный чужой текст не читается и не заслоняет картинку того же элемента.
+  const png = new Blob([new Uint8Array([137])], { type: 'image/png' });
+  expect(await fromClipboardItems([item({ 'text/plain': huge(MAX_CLIPBOARD_TEXT + 1, 'обычный текст'), 'image/png': png })])).toEqual({
+    kind: 'image',
+    type: 'image/png',
+    blob: png,
+  });
 });

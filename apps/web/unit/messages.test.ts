@@ -2,7 +2,7 @@
 // память wasm), worker проверяет ещё раз. Текст вставки — свой предел.
 
 import { expect, test } from '@playwright/test';
-import { commandSizeError, MAX_COMMAND_BYTES, pasteTextError } from '../src/core/messages';
+import { clipboardBytesError, commandSizeError, MAX_COMMAND_BYTES, pasteTextError } from '../src/core/messages';
 import { FERRUM_TEXT_MARKER, MAX_CLIPBOARD_TEXT } from '../src/core/clipboard-text';
 
 test('pasteImage: больше 64 МБ — отказ на русском', () => {
@@ -23,4 +23,10 @@ test('текст вставки: строка, не длиннее предел�
   expect(pasteTextError('A'.repeat(MAX_CLIPBOARD_TEXT + 1))).toBe(
     'Слишком большой объём данных в буфере обмена: предел — 64 МБ.',
   );
+});
+
+test('байты для текста буфера: Uint8Array не больше 64 МБ', () => {
+  expect(clipboardBytesError(new Uint8Array(8))).toBeNull();
+  expect(clipboardBytesError(new Uint8Array(64 * 1024 * 1024 + 1))).toBe('Не удалось скопировать: выделение 65 МБ, предел — 64 МБ');
+  expect(clipboardBytesError('x' as unknown as Uint8Array)).toBe('Неверная команда: байты должны быть Uint8Array.');
 });
