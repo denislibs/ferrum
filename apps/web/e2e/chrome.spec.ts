@@ -606,3 +606,31 @@ test('последняя заливка удалена, фокус на пане
   await expect.poll(async () => (await live(page)).nodes, { timeout: 5000 }).toBeLessThan(before.nodes);
   expect((await live(page)).selectionCount).toBe(0);
 });
+
+test('подсказка появляется над своей кнопкой, а не прилетает сбоку', async ({ page }) => {
+  await openApp(page);
+  // Ловим подсказку в момент вставки и замираем на первом кадре анимации появления.
+  await page.evaluate(() => {
+    const w = window as unknown as { __tipX?: number };
+    new MutationObserver((records, obs) => {
+      for (const r of records)
+        for (const n of r.addedNodes) {
+          if (!(n instanceof HTMLElement) || !n.classList.contains('fe-tooltip')) continue;
+          for (const a of n.getAnimations()) {
+            a.pause();
+            a.currentTime = 0;
+          }
+          const b = n.getBoundingClientRect();
+          w.__tipX = b.left + b.width / 2;
+          obs.disconnect();
+        }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  const tool = page.getByRole('toolbar').getByRole('button', { name: 'Фрейм', exact: true });
+  await tool.hover();
+  await expect(page.getByRole('tooltip')).toBeVisible();
+  const at = await page.evaluate(() => (window as unknown as { __tipX?: number }).__tipX);
+  const b = (await tool.boundingBox())!;
+  expect(at).toBeDefined();
+  expect(Math.abs(at! - (b.x + b.width / 2))).toBeLessThan(4);
+});

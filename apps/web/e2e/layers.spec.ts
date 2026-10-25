@@ -451,7 +451,11 @@ test('переименование слоя применяется, когда �
   await openApp(page);
   await page.getByRole('button', { name: 'Добавить страницу' }).click();
   const pages = page.getByRole('listbox', { name: 'Страницы' });
+  // Новая страница становится текущей ответом ядра: ждём его, иначе щелчок по
+  // «Странице 1» обгонит переключение и откроется пустая «Страница 2».
+  await expect(pages.getByRole('option', { name: /Страница 2/ })).toHaveAttribute('aria-selected', 'true');
   await pages.getByRole('option', { name: /Страница 1/ }).click();
+  await expect(pages.getByRole('option', { name: /Страница 1/ })).toHaveAttribute('aria-selected', 'true');
   await row(page, 'Экран 9').dblclick();
   await tree(page).getByRole('textbox', { name: 'Имя слоя' }).fill('Главная');
   await pages.getByRole('option', { name: /Страница 2/ }).click();

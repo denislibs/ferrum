@@ -24,6 +24,18 @@ import { Toasts } from './toasts';
 import { Toolbar } from './toolbar';
 import { TooltipLayer } from './tooltip';
 
+/** Убирает экран запуска из index.html: плавно гасит и удаляет из DOM. Безопасно
+ *  вызывать много раз и без экрана (стенд, тесты). */
+function dismissSplash() {
+  const el = document.getElementById('fe-splash');
+  if (!el || el.classList.contains('fe-splash--done')) return;
+  el.classList.add('fe-splash--done');
+  el.removeAttribute('role');
+  const remove = () => el.remove();
+  el.addEventListener('transitionend', remove, { once: true });
+  setTimeout(remove, 400); // без перехода (prefers-reduced-motion) transitionend не придёт
+}
+
 export function App() {
   const store = createUiStore();
   const saved = loadSettings(storage());
@@ -53,6 +65,11 @@ export function App() {
   // принята (или её нет), умолчания ядра поверх неё не пишем: иначе неудачный
   // импорт стёр бы настройки пользователя. Принята — пишем очищенный набор ядра
   // (пропущенное в нём уже отброшено, предупреждение не повторится при запуске).
+  // Экран запуска уходит, когда ядро готово или запуск не удался (тогда видна ошибка).
+  createEffect(() => {
+    if (store.state.ready || failure() || store.state.stopped) dismissSplash();
+  });
+
   const [keymap, setKeymap] = createSignal(saved.keymap);
   const [restored, setRestored] = createSignal(!saved.keymap);
   createEffect(() => {
@@ -181,7 +198,7 @@ export function App() {
 
   return (
     <ErrorBoundary
-      fallback={(err: unknown) => (
+      fallback={(err: unknown) => (dismissSplash(),
         <div class="fe-boot fe-boot--error" role="alert">
           Ошибка интерфейса: {err instanceof Error ? err.message : String(err)}. Перезагрузите страницу
         </div>
@@ -202,9 +219,9 @@ export function App() {
             if (editor()) setContext({ x: e.clientX, y: e.clientY });
           }}
         />
-        <Show when={!store.state.ready}>
-          <div class="fe-boot" classList={{ 'fe-boot--error': !!failure() }} role="status">
-            {failure() || 'Запуск редактора…'}
+        <Show when={!store.state.ready && failure()}>
+          <div class="fe-boot fe-boot--error" role="alert">
+            {failure()}
           </div>
         </Show>
         <Show when={store.state.stopped}>
