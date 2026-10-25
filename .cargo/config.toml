@@ -1,0 +1,14 @@
+# `psm` (его тянет pest → loro-internal) при сборке под wasm32 упаковывает готовый
+# объектный файл через `ar`. Системный `ar` macOS не понимает объекты wasm (архив
+# без таблицы символов, rustc падает с «section too large»), поэтому для wasm32
+# берётся llvm-ar из компонента llvm-tools тулчейна (rust-toolchain.toml).
+[env]
+AR_wasm32_unknown_unknown = { value = "scripts/llvm-ar", relative = true }
+
+# `cargo test --target wasm32-unknown-unknown` запускает тесты wasm-bindgen-test в
+# Node (wasm-bindgen-cli той же версии, что крейт wasm-bindgen, 0.2.129).
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"
+# SIMD128 есть во всех браузерах с OffscreenCanvas в worker'е (Chrome 91+,
+# Firefox 89+, Safari 16.4+): vello разбирает полосы и растеризует на CPU быстрее.
+rustflags = ["-C", "target-feature=+simd128"]

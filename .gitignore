@@ -1,1 +1,7 @@
 target/
+# Стенд apps/web: зависимости, сборка, ядро из wasm-bindgen, отчёты Playwright.
+/apps/web/node_modules/
+/apps/web/dist/
+/apps/web/src/wasm/
+/apps/web/test-results/
+/apps/web/playwright-report/

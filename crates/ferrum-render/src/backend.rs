@@ -3,6 +3,7 @@
 //! при каждом вызове заливки, поэтому сборка кадра повторяет список отрисовки
 //! узлов, а не склеивает готовые фрагменты.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kurbo::{Affine, BezPath, Rect, Stroke};
@@ -12,9 +13,40 @@ use vello_cpu::{Image, ImageSource, Pixmap, RenderContext, Resources};
 
 pub type Rgba = AlphaColor<Srgb>;
 
+/// Ключ изображения в кэшах бэкенда (атлас GPU): одна и та же картинка — один
+/// ключ, сколько бы раз и где её ни рисовали.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageKey {
+    /// Картинка документа: blake3 её байтов (тот же хэш, что в `ImageStore`).
+    Hash([u8; 32]),
+    /// Растр фрейма из растрового кэша: у каждого построения свой номер, поэтому
+    /// перестроенный растр не путается с прежним.
+    Raster(u64),
+}
+
+impl ImageKey {
+    /// Ключ картинки документа по её хэшу (hex). Строка не из 64 hex-символов
+    /// (повреждённый файл) не теряется: ключом становится blake3 самой строки.
+    pub fn for_hash(hash: &str) -> ImageKey {
+        let bytes = match blake3::Hash::from_hex(hash) {
+            Ok(h) => *h.as_bytes(),
+            Err(_) => *blake3::hash(hash.as_bytes()).as_bytes(),
+        };
+        ImageKey::Hash(bytes)
+    }
+
+    /// Новый ключ растра: номера не повторяются во всём процессе, даже если
+    /// рендереров несколько.
+    pub fn next_raster() -> ImageKey {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        ImageKey::Raster(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// Изображение как краска.
 #[derive(Clone)]
 pub struct ImagePaint {
+    pub key: ImageKey,
     pub pixmap: Arc<Pixmap>,
     /// Переводит пиксели изображения в координаты текущей трансформации.
     pub transform: Affine,

@@ -1,4 +1,6 @@
-//! Бэкенд `vello_gpu` принимает тот же кадр, что и CPU: журнал вызовов совпадает.
+//! Бэкенд `vello_gpu` принимает тот же кадр, что и CPU (журнал вызовов совпадает),
+//! и держит картинки в атласе по ключу: загрузка при первом использовании,
+//! вытеснение давно не рисовавшихся, заглушка, когда места нет.
 //! Запуск: `cargo test -p ferrum-render --features gpu --test gpu`.
 #![cfg(feature = "gpu")]
 
@@ -9,12 +11,99 @@ use std::sync::Arc;
 use common::*;
 use ferrum_doc::{Fill, NodeKind, PropsPatch};
 use ferrum_render::{
-    Camera, CpuBackend, GpuBackend, ImagePaint, NoImages, Overlay, Pixmap, RenderBackend, Renderer,
-    Rgba,
+    atlas_config, AtlasConfig, Camera, CpuBackend, GpuBackend, GpuDevice, ImageId, ImageKey,
+    ImagePaint, NoImages, Overlay, Pixmap, RenderBackend, Renderer, Rgba, EVICT_AFTER_FRAMES,
 };
-use kurbo::{Affine, BezPath, Circle, Point, Rect, Shape, Size, Stroke};
+use kurbo::{Affine, BezPath, Point, Rect, Size, Stroke};
+use vello_common::image_cache::ImageCache;
+use vello_common::paint::ImageSource;
 // Оба бэкенда используют один и тот же `peniko` (см. `cargo tree -d`).
-use vello_cpu::peniko::{Extend, Fill as FillRule};
+use vello_cpu::peniko::{Brush, Extend, Fill as FillRule};
+
+/// Устройство без GPU: выделяет место своим кэшем той же конфигурации — так же,
+/// как атлас настоящего рендерера, — и записывает загрузки и освобождения.
+struct FakeDevice {
+    atlas: ImageCache,
+    log: Vec<String>,
+    /// Сдвиг номеров: имитирует устройство, разошедшееся с зеркалом.
+    skew: u32,
+    /// Номера, выданные `upload`, — чтобы сверять их с краской в сцене.
+    issued: Vec<ImageId>,
+}
+
+impl FakeDevice {
+    fn new(config: AtlasConfig) -> FakeDevice {
+        FakeDevice {
+            atlas: ImageCache::new_with_config(config),
+            log: vec![],
+            skew: 0,
+            issued: vec![],
+        }
+    }
+}
+
+impl GpuDevice for FakeDevice {
+    fn upload(&mut self, pixmap: &Pixmap) -> Result<ImageId, String> {
+        let id = self
+            .atlas
+            .allocate(pixmap.width(), pixmap.height(), 0)
+            .map_err(|e| e.to_string())?;
+        self.log
+            .push(format!("upload {}x{}", pixmap.width(), pixmap.height()));
+        let out = ImageId::new(id.as_u32() + self.skew);
+        self.issued.push(out);
+        Ok(out)
+    }
+
+    fn destroy(&mut self, id: ImageId) {
+        self.atlas.deallocate(id);
+        self.log.push(format!("destroy {}", id.as_u32()));
+    }
+}
+
+fn gpu(w: u16, h: u16, config: AtlasConfig) -> GpuBackend<FakeDevice> {
+    GpuBackend::new(w, h, FakeDevice::new(config), config)
+}
+
+/// Атлас из одной страницы `side × side`.
+fn tiny_atlas(side: u16) -> AtlasConfig {
+    AtlasConfig {
+        max_atlases: 1,
+        atlas_size: (side, side),
+        ..atlas_config(4096)
+    }
+}
+
+fn paint(key: ImageKey, w: u16, h: u16) -> ImagePaint {
+    ImagePaint {
+        key,
+        pixmap: Arc::new(Pixmap::new(w, h)),
+        transform: Affine::IDENTITY,
+        extend: Extend::Pad,
+        alpha: 1.0,
+    }
+}
+
+/// Рисует картинку прямоугольником и сообщает, попала ли в сцену картинка (а не
+/// заглушка-цвет). Номер в краске обязан быть одним из выданных устройством.
+fn draw_image(b: &mut GpuBackend<FakeDevice>, p: &ImagePaint) -> bool {
+    b.set_image(p);
+    b.fill_rect(&Rect::new(0.0, 0.0, 10.0, 10.0));
+    match b.scene.paint() {
+        Brush::Image(img) => match &img.image {
+            ImageSource::OpaqueId { id, .. } => {
+                assert!(
+                    b.device().issued.contains(id),
+                    "номер {} не выдавало устройство",
+                    id.as_u32()
+                );
+                true
+            }
+            other => panic!("изображение не по номеру: {other:?}"),
+        },
+        _ => false,
+    }
+}
 
 /// Пересылает вызовы во внутренний бэкенд и записывает их имена; следит за
 /// глубиной обрезок и слоёв.
@@ -130,12 +219,13 @@ fn gpu_encodes_same_calls_as_cpu() {
         ..Default::default()
     };
     let (w, h) = cam.device_size();
-    let mut gpu = Recording::new(GpuBackend::new(w, h));
+    let mut gpu = Recording::new(gpu(w, h, atlas_config(8192)));
     let mut cpu = Recording::new(CpuBackend::new(w, h));
-    assert!(!gpu.supports_images());
+    // С атласом GPU-бэкенд умеет изображения, а значит и растровый кэш фреймов.
+    assert!(gpu.supports_images());
     let gpu_stats =
         Renderer::new().render(&mut gpu, &scene, &cam, &overlay, &NoImages, Some(WHITE));
-    // CPU без растрового кэша, чтобы кадры были сравнимы.
+    // CPU без растрового кэша: при этом зуме растров нет и у GPU, кадры сравнимы.
     struct NoRaster(Recording<CpuBackend>);
     impl RenderBackend for NoRaster {
         fn begin_frame(&mut self, w: u16, h: u16) {
@@ -204,21 +294,27 @@ fn gpu_encodes_same_calls_as_cpu() {
     // Так видно, что настоящие закрывающие вызовы дошли до `vello_gpu`.
     // Сцену после проверки пересоздаёт `reset` ниже.
     for extra in [
-        (|b: &mut GpuBackend| b.scene.pop_layer()) as fn(&mut GpuBackend),
+        (|b: &mut GpuBackend<FakeDevice>| b.scene.pop_layer()) as fn(&mut GpuBackend<FakeDevice>),
         |b| b.scene.pop_clip(),
     ] {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extra(&mut gpu.inner)));
         assert!(res.is_err(), "в сцене остались незакрытые слои/обрезки");
     }
 
-    // Сильное отдаление: растрового кэша у GPU-бэкенда нет — узлы рисуются LOD.
+    // Сильное отдаление: фрейм рисуется из растра, растр загружается в атлас.
     cam.set_zoom(0.02);
     gpu.inner.reset(w, h);
     gpu.log.clear();
     let stats = Renderer::new().render(&mut gpu, &scene, &cam, &overlay, &NoImages, None);
-    assert_eq!(stats.rasters, 0);
-    assert!(stats.lod_rects > 0, "LOD-путь не сработал: {stats:?}");
-    assert!(gpu.count("fill_rect") + gpu.count("fill_path") > 0);
+    assert_eq!((stats.rasters, stats.raster_builds), (1, 1), "{stats:?}");
+    assert_eq!(gpu.count("set_image"), 1);
+    assert_eq!(gpu.inner.atlas_stats().uploads, 1);
+    assert_eq!(
+        gpu.inner.device().log.len(),
+        1,
+        "{:?}",
+        gpu.inner.device().log
+    );
     assert_eq!((gpu.clips, gpu.layers), (0, 0));
 
     // Смена размера.
@@ -227,38 +323,211 @@ fn gpu_encodes_same_calls_as_cpu() {
 }
 
 #[test]
-fn image_placeholder_is_accepted() {
-    let mut gpu = Recording::new(GpuBackend::new(64, 64));
-    let paint = ImagePaint {
-        pixmap: Arc::new(Pixmap::new(4, 4)),
-        transform: Affine::IDENTITY,
-        extend: Extend::Pad,
-        alpha: 0.5,
-    };
-    gpu.set_image(&paint);
-    gpu.fill_path(
-        &Circle::new((32.0, 32.0), 20.0).to_path(0.1),
-        FillRule::NonZero,
-    );
-    // Заглушка: серая краска с учётом альфы, изображения в сцене нет.
-    let placeholder = format!("{:?}", gpu.inner.scene.paint());
-    assert!(!placeholder.contains("Image"), "{placeholder}");
-    gpu.set_color(Rgba::new([1.0, 0.0, 0.0, 1.0]));
-    let red = format!("{:?}", gpu.inner.scene.paint());
-    assert_ne!(red, placeholder, "set_color не сменил краску");
-    let stroke = Stroke::new(3.0);
-    gpu.stroke_path(&Circle::new((32.0, 32.0), 10.0).to_path(0.1), &stroke);
-    assert_eq!(gpu.inner.scene.stroke().width, 3.0);
-    gpu.fill_rect(&Rect::new(0.0, 0.0, 10.0, 10.0));
-    // Заглушка идёт через `set_color`, отдельного вызова изображения нет.
+fn image_is_uploaded_once_per_key() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    let a = paint(ImageKey::for_hash(&"ab".repeat(32)), 8, 8);
+    for _ in 0..3 {
+        b.begin_frame(64, 64);
+        assert!(draw_image(&mut b, &a));
+        // Та же картинка второй раз в кадре — без новой загрузки.
+        assert!(draw_image(&mut b, &a));
+    }
+    // Та же картинка, другой `Arc` (заново декодирована) — ключ тот же.
+    let again = paint(a.key, 8, 8);
+    assert!(draw_image(&mut b, &again));
+    // Другой ключ — другая картинка, даже с теми же пикселями.
+    let other = paint(ImageKey::for_hash(&"cd".repeat(32)), 8, 8);
+    assert!(draw_image(&mut b, &other));
+    assert_eq!(b.device().log, ["upload 8x8", "upload 8x8"]);
+    let s = b.atlas_stats();
+    assert_eq!((s.images, s.bytes, s.uploads), (2, 2 * 8 * 8 * 4, 2));
+}
+
+#[test]
+fn hash_keys_are_blake3_bytes_and_raster_keys_are_unique() {
+    let hex = blake3::hash(b"png").to_hex().to_string();
     assert_eq!(
-        gpu.log,
+        ImageKey::for_hash(&hex),
+        ImageKey::Hash(*blake3::hash(b"png").as_bytes())
+    );
+    // Повреждённый хэш из файла тоже даёт устойчивый ключ.
+    assert_eq!(ImageKey::for_hash("не хэш"), ImageKey::for_hash("не хэш"));
+    assert_ne!(ImageKey::for_hash("не хэш"), ImageKey::for_hash(&hex));
+    assert_ne!(ImageKey::next_raster(), ImageKey::next_raster());
+}
+
+#[test]
+fn full_atlas_evicts_only_images_not_drawn_this_frame() {
+    // Одна страница 64×64: две картинки 40×40 вместе не помещаются.
+    let mut b = gpu(64, 64, tiny_atlas(64));
+    let a = paint(ImageKey::Raster(1), 40, 40);
+    let c = paint(ImageKey::Raster(2), 40, 40);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &a));
+    // В этом же кадре `a` уже в сцене — вытеснять её нельзя: заглушка.
+    assert!(!draw_image(&mut b, &c));
+    assert_eq!(b.atlas_stats().misses, 1);
+    // Следующий кадр без `a`: она вытесняется ради `c`.
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &c));
+    assert_eq!(
+        b.device().log,
+        ["upload 40x40", "destroy 0", "upload 40x40"],
+        "{:?}",
+        b.device().log
+    );
+    let s = b.atlas_stats();
+    assert_eq!((s.images, s.evictions, s.misses), (1, 1, 1));
+}
+
+#[test]
+fn images_unused_for_long_are_evicted() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    let a = paint(ImageKey::Raster(7), 16, 16);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &a));
+    for _ in 0..EVICT_AFTER_FRAMES + 64 {
+        b.begin_frame(64, 64);
+    }
+    assert_eq!(b.atlas_stats().images, 0);
+    assert_eq!(b.device().log, ["upload 16x16", "destroy 0"]);
+}
+
+#[test]
+fn image_larger_than_atlas_page_is_downscaled() {
+    let mut b = gpu(64, 64, tiny_atlas(64));
+    let mut big = paint(ImageKey::Raster(3), 256, 128);
+    big.transform = Affine::translate((5.0, 0.0));
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &big));
+    assert_eq!(b.device().log, ["upload 64x32"]);
+    assert_eq!(b.atlas_stats().downscaled, 1);
+    // Матрица краски растягивает уменьшенную копию обратно в размер исходной.
+    let state = format!("{:?}", b.scene.save_current_state());
+    let expected = format!(
+        "{:?}",
+        Affine::translate((5.0, 0.0)) * Affine::scale_non_uniform(4.0, 4.0)
+    );
+    assert!(
+        state.contains(&expected),
+        "нет матрицы {expected} в {state}"
+    );
+}
+
+#[test]
+fn device_ids_out_of_step_with_mirror_break_the_atlas() {
+    let config = atlas_config(8192);
+    let mut dev = FakeDevice::new(config);
+    dev.skew = 1;
+    let mut b = GpuBackend::new(64, 64, dev, config);
+    b.begin_frame(64, 64);
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(1), 8, 8)));
+    assert!(b.atlas_error().is_some_and(|e| e.contains("рассогласован")));
+    // Номер устройства освобождён, дальше — только заглушки, без загрузок.
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(2), 8, 8)));
+    assert_eq!(b.device().log, ["upload 8x8", "destroy 1"]);
+}
+
+#[test]
+fn resized_key_is_not_replaced_while_drawn_this_frame() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    let k = ImageKey::Raster(9);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &paint(k, 8, 8)));
+    // Тот же ключ другого размера в том же кадре: старый номер уже в сцене.
+    assert!(!draw_image(&mut b, &paint(k, 16, 16)));
+    assert_eq!(b.atlas_stats().misses, 1);
+    assert_eq!(b.device().log, ["upload 8x8"]);
+    // В следующем кадре замена проходит.
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &paint(k, 16, 16)));
+    assert_eq!(b.device().log, ["upload 8x8", "destroy 0", "upload 16x16"]);
+}
+
+#[test]
+fn reset_atlas_after_device_swap_reuploads() {
+    let config = atlas_config(8192);
+    let mut b = gpu(64, 64, config);
+    let a = paint(ImageKey::Raster(1), 8, 8);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &a));
+    // Устройство потеряно и создано заново: прежние номера недействительны.
+    *b.device_mut() = FakeDevice::new(config);
+    b.reset_atlas();
+    assert_eq!(b.atlas_stats().images, 0);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &a));
+    assert_eq!(b.device().log, ["upload 8x8"]);
+    assert!(b.atlas_error().is_none());
+}
+
+#[test]
+fn reset_atlas_clears_broken_state() {
+    let config = atlas_config(8192);
+    let mut dev = FakeDevice::new(config);
+    dev.skew = 1;
+    let mut b = GpuBackend::new(64, 64, dev, config);
+    b.begin_frame(64, 64);
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(1), 8, 8)));
+    assert!(b.atlas_error().is_some());
+    *b.device_mut() = FakeDevice::new(config);
+    b.reset_atlas();
+    assert!(b.atlas_error().is_none());
+    assert!(draw_image(&mut b, &paint(ImageKey::Raster(1), 8, 8)));
+}
+
+#[test]
+fn zero_sized_image_is_placeholder_without_allocation() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    b.begin_frame(64, 64);
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(1), 0, 8)));
+    assert!(!draw_image(&mut b, &paint(ImageKey::Raster(2), 8, 0)));
+    assert!(b.device().log.is_empty());
+    let s = b.atlas_stats();
+    assert_eq!((s.images, s.uploads, s.misses), (0, 0, 0));
+}
+
+#[test]
+fn eviction_takes_least_recently_drawn_first() {
+    // Страница 64×64: три картинки 64×20 занимают 60 строк.
+    let mut b = gpu(64, 64, tiny_atlas(64));
+    let (x, y, z) = (
+        paint(ImageKey::Raster(1), 64, 20),
+        paint(ImageKey::Raster(2), 64, 20),
+        paint(ImageKey::Raster(3), 64, 20),
+    );
+    for p in [&x, &y, &z, &x] {
+        b.begin_frame(64, 64);
+        assert!(draw_image(&mut b, p));
+    }
+    // Давность: y (кадр 2), z (3), x (4). Для 64×30 хватает вытеснить y и z.
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &paint(ImageKey::Raster(4), 64, 30)));
+    assert_eq!(
+        b.device().log,
         [
-            "set_image",
-            "fill_path",
-            "set_color",
-            "stroke_path",
-            "fill_rect"
+            "upload 64x20",
+            "upload 64x20",
+            "upload 64x20",
+            "destroy 1",
+            "destroy 2",
+            "upload 64x30"
         ]
     );
+    assert_eq!(b.atlas_stats().evictions, 2);
+}
+
+#[test]
+fn image_drawn_every_frame_survives_aging() {
+    let mut b = gpu(64, 64, atlas_config(8192));
+    let a = paint(ImageKey::Raster(1), 8, 8);
+    let gone = paint(ImageKey::Raster(2), 8, 8);
+    b.begin_frame(64, 64);
+    assert!(draw_image(&mut b, &gone));
+    for _ in 0..EVICT_AFTER_FRAMES + 200 {
+        b.begin_frame(64, 64);
+        assert!(draw_image(&mut b, &a));
+    }
+    let s = b.atlas_stats();
+    assert_eq!((s.images, s.uploads, s.evictions), (1, 2, 1));
 }

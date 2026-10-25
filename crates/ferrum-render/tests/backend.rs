@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ferrum_render::{Camera, CpuBackend, ImagePaint, Pixmap, RenderBackend, Rgba};
+use ferrum_render::{Camera, CpuBackend, ImageKey, ImagePaint, Pixmap, RenderBackend, Rgba};
 use kurbo::{Affine, Point, Rect, Shape, Size};
 use vello_cpu::peniko::Extend;
 
@@ -124,6 +124,7 @@ fn set_image_after_set_color_paints_the_image() {
     // Сначала цвет, потом картинка: картинка должна заменить краску.
     b.set_color(Rgba::new(RED));
     b.set_image(&ImagePaint {
+        key: ImageKey::Raster(1),
         pixmap: Arc::new(img),
         transform: Affine::scale(4.0),
         extend: Extend::Pad,

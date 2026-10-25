@@ -1,0 +1,21 @@
+{
+  "name": "ferrum-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "wasm": "node scripts/build-wasm.mjs",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.e2e.json",
+    "e2e": "playwright test",
+    "e2e:ci": "playwright test --project=chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@types/node": "24.19.1",
+    "typescript": "6.0.3",
+    "vite": "8.3.4"
+  }
+}

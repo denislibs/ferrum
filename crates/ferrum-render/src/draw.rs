@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ferrum_doc::{NodeId, NodeKind, ScaleMode};
 use ferrum_scene::shape::Geometry;
@@ -12,7 +12,8 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use vello_cpu::peniko::{Extend, Fill};
 use vello_cpu::Pixmap;
 
-use crate::backend::{CpuBackend, ImagePaint, RenderBackend};
+use crate::backend::{CpuBackend, ImageKey, ImagePaint, RenderBackend};
+use crate::clock::{default_clock, Clock};
 use crate::display::{self, DisplayList, Item, Paint, IMAGE_PLACEHOLDER};
 use crate::image::ImageProvider;
 
@@ -122,6 +123,8 @@ struct Raster {
     scale: f64,
     origin: Point,
     pixmap: Arc<Pixmap>,
+    /// Ключ этого построения для кэшей бэкенда (атлас GPU).
+    key: ImageKey,
     last_used: u64,
     /// В растр попала заглушка вместо ещё не загруженной картинки. Такой растр не
     /// переиспользуется: картинка появится без изменения сцены, и устаревший
@@ -147,6 +150,8 @@ pub struct Painter {
     /// счётный предел).
     raster_time: Option<Duration>,
     raster_time_spent: Duration,
+    /// Часы для предела по времени; без них — только счётный предел.
+    clock: Option<Box<dyn Clock>>,
     /// Один бэкенд на все построения растров: создание `RenderContext` дороже
     /// самой отрисовки мелкого фрейма.
     raster_backend: Option<CpuBackend>,
@@ -177,6 +182,7 @@ impl Painter {
             raster_budget: 0,
             raster_time: Some(RASTER_BUILD_TIME_PER_FRAME),
             raster_time_spent: Duration::ZERO,
+            clock: default_clock(),
             raster_backend: None,
             raster_bytes: 0,
             raster_limit: bytes,
@@ -190,6 +196,11 @@ impl Painter {
     /// `RASTER_BUILDS_PER_FRAME` (детерминированно: тесты и платформы без часов).
     pub fn set_raster_time(&mut self, budget: Option<Duration>) {
         self.raster_time = budget;
+    }
+
+    /// Часы для предела времени на растры (`None` — только счётный предел).
+    pub fn set_clock(&mut self, clock: Option<Box<dyn Clock>>) {
+        self.clock = clock;
     }
 
     /// Сколько байт занимают растры в кэше.
@@ -522,7 +533,7 @@ impl Painter {
                 return false;
             }
             self.raster_budget -= 1;
-            let started = now();
+            let started = self.clock.as_ref().map(|c| c.now_ms());
             let (w, h) = (w.max(1.0) as u16, h.max(1.0) as u16);
             let mut cpu = match self.raster_backend.take() {
                 Some(mut b) => {
@@ -561,6 +572,7 @@ impl Painter {
                 scale,
                 origin: area.origin(),
                 pixmap: Arc::new(cpu.render()),
+                key: ImageKey::next_raster(),
                 last_used: self.frame,
                 placeholder,
             };
@@ -568,8 +580,9 @@ impl Painter {
             self.rasters.insert(slot, raster);
             self.enforce_raster_limit(slot);
             self.raster_backend = Some(cpu);
-            if let Some(t) = started {
-                self.raster_time_spent += t.elapsed();
+            if let (Some(t), Some(c)) = (started, self.clock.as_ref()) {
+                let ms = (c.now_ms() - t).max(0.0);
+                self.raster_time_spent += Duration::from_secs_f64(ms / 1000.0);
             }
         }
         self.blit_raster(backend, ctx, slot)
@@ -583,7 +596,9 @@ impl Painter {
             return false;
         }
         let first = self.stats.raster_builds == 0;
-        first || self.raster_time.is_none_or(|t| self.raster_time_spent < t)
+        // Без часов время не измерить: остаётся счётный предел.
+        let timed = self.raster_time.filter(|_| self.clock.is_some());
+        first || timed.is_none_or(|t| self.raster_time_spent < t)
     }
 
     /// Рисует растр фрейма из кэша (он там есть) в текущий кадр.
@@ -597,6 +612,7 @@ impl Painter {
         r.last_used = self.frame;
         backend.set_transform(ctx.transform);
         backend.set_image(&ImagePaint {
+            key: r.key,
             pixmap: r.pixmap.clone(),
             transform: Affine::translate(r.origin.to_vec2()) * Affine::scale(1.0 / r.scale),
             extend: Extend::Pad,
@@ -621,13 +637,6 @@ impl Painter {
 /// бы никогда.
 fn evictable(r: &Raster, frame: u64) -> bool {
     r.last_used + 1 < frame
-}
-
-/// Текущее время, если платформа его даёт. В `wasm32-unknown-unknown`
-/// `Instant::now` паникует; там предел по времени не работает, остаётся счётный,
-/// пока часы (`performance.now`) не придут из `ferrum-wasm`.
-fn now() -> Option<Instant> {
-    (!cfg!(target_arch = "wasm32")).then(Instant::now)
 }
 
 /// Что случилось при воспроизведении списка.
@@ -713,6 +722,7 @@ fn replay_items(
                 let (iw, ih) = (pixmap.width() as f64, pixmap.height() as f64);
                 let (transform, extend, fit) = place_image(*mode, area, iw, ih);
                 backend.set_image(&ImagePaint {
+                    key: ImageKey::for_hash(hash),
                     pixmap,
                     transform,
                     extend,
