@@ -21,7 +21,7 @@ async function placeQuadrants(page: Page, colors = QUADRANTS, x = 720, y = 1100,
     });
     const blob = await c.convertToBlob({ type: 'image/png' });
     const bytes = new Uint8Array(await blob.arrayBuffer());
-    window.__ferrum!.core.send({ type: 'placeImage', bytes });
+    window.__ferrum!.core!.send({ type: 'placeImage', bytes });
   }, colors);
   await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'tool' && e.tool === 'image'));
   const l = await live(page);
@@ -38,7 +38,7 @@ async function checkAgainstCpu(page: Page, backend: 'auto' | 'cpu' | 'webgl' | '
   await drag(page, screen(l, 200, 40), 4, 0, 2);
   const diff = await compareWithCpu(page);
   console.log(JSON.stringify(diff));
-  const active = await page.evaluate(() => window.__ferrum!.core.backend);
+  const active = await page.evaluate(() => window.__ferrum!.core!.backend);
   expect(diff.backend).toBe(backend === 'auto' ? active : backend);
   expect([diff.width, diff.height]).toEqual([1280, 720]);
   expect(diff.mean).toBeLessThan(0.1);
@@ -58,7 +58,7 @@ interface Diff {
 async function compareWithCpu(page: Page): Promise<Diff> {
   await page.evaluate(() => {
     window.__ferrum!.events.length = 0;
-    window.__ferrum!.core.send({ type: 'readPixels', reference: true });
+    window.__ferrum!.core!.send({ type: 'readPixels', reference: true });
   });
   await page.waitForFunction(() => window.__ferrum!.events.filter((e) => e.type === 'pixels').length === 2, null, {
     timeout: 30_000,
@@ -108,7 +108,7 @@ for (const backend of ['webgpu', 'webgl'] as const) {
     await placeQuadrants(page);
     await placeQuadrants(page, ['#ff00ff', '#00ffff', '#ffffff', '#000000'], 1900, 1100, 2);
     await liveWhen(page, 'l.atlasMisses >= 1');
-    await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'view.fit_selection' }));
+    await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'view.fit_selection' }));
     await liveWhen(page, 'l.zoom > 2');
     const diff = await compareWithCpu(page);
     console.log(JSON.stringify(diff));

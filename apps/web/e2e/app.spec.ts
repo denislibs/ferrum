@@ -9,7 +9,7 @@ test('редактор запускает ядро и получает раск�
   const info = await page.evaluate(() => {
     const f = window.__ferrum!;
     return {
-      mode: f.core.mode,
+      mode: f.core!.mode,
       commands: f.ui!.keymap.commands.length,
       presets: f.ui!.presets.length,
       pages: f.ui!.pages.list.length,
@@ -49,7 +49,7 @@ test('клавиши с холста доходят до редактора', as
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.tool)).toBe('move');
   // Кадры идут и после ввода: счётчик кадров worker'а растёт.
   const before = (await live(page)).frames;
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'view.zoom_in' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'view.zoom_in' }));
   await liveWhen(page, `l.frames > ${before}`);
 });
 
@@ -84,10 +84,10 @@ test('сбой обработчика кадра не останавливает
   await page.evaluate(() => {
     const w = window as unknown as { __ticks: number };
     w.__ticks = 0;
-    window.__ferrum!.core.onFrame(() => {
+    window.__ferrum!.core!.onFrame(() => {
       throw new Error('проверочный сбой');
     });
-    window.__ferrum!.core.onFrame(() => w.__ticks++);
+    window.__ferrum!.core!.onFrame(() => w.__ticks++);
   });
   await page.waitForFunction(() => (window as unknown as { __ticks: number }).__ticks > 10);
   await expect(page.locator('.fe-toast', { hasText: 'Ошибка интерфейса: проверочный сбой' })).toHaveCount(1);
@@ -145,13 +145,13 @@ test('замер (__ferrumPerf): ядро доступно, журнала и з
 test('сбой ядра после запуска виден пользователю один раз', async ({ page }) => {
   await openApp(page);
   // Сбой worker'а после `ready` — тот же путь, что `fatal` от worker'а.
-  await page.evaluate(() => (window.__ferrum!.core as unknown as { fail(m: string): void }).fail('проверка'));
+  await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
   await expect(page.getByRole('alert')).toHaveText('Ядро остановлено: проверка. Правки больше не принимаются — перезагрузите страницу');
   // Команды после остановки — без новых окон и без вечной очереди.
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'edit.undo' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'edit.undo' }));
   await expect(page.getByRole('alert')).toHaveCount(1);
   // Ни уведомлений, ни нового окна на каждую команду после остановки.
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'edit.redo' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'edit.redo' }));
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
   await expect(page.locator('.fe-toast')).toHaveCount(0);
   expect(await page.evaluate(() => window.__ferrum!.ui!.toasts.length)).toBe(0);

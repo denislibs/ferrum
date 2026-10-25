@@ -11,7 +11,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { gotoDebug, live, liveWhen, screen } from './helpers';
+import { expectCore, gotoDebug, live, liveWhen, screen } from './helpers';
 
 const NODES = 100_000;
 /** Бюджет основного потока на кадр (спека 4.2). */
@@ -61,19 +61,19 @@ async function saveAndOpen(page: Page): Promise<{ fileMb: number; saveMs: number
       });
     f.events.length = 0;
     const t0 = performance.now();
-    f.core.send({ type: 'save' });
+    f.core!.send({ type: 'save' });
     await until(() => f.events.some((e) => e.type === 'saved'));
     const saveMs = performance.now() - t0;
     const saved = f.events.find((e) => e.type === 'saved');
     if (!saved || saved.type !== 'saved') throw new Error('нет сохранения');
     const fileMb = saved.bytes.length / 1e6;
     f.events.length = 0;
-    const frames = f.core.live!.frames;
+    const frames = f.core!.live!.frames;
     const t1 = performance.now();
-    f.core.send({ type: 'open', bytes: saved.bytes });
+    f.core!.send({ type: 'open', bytes: saved.bytes });
     await until(() => f.events.some((e) => e.type === 'opened'));
     const fileOpenMs = performance.now() - t1;
-    await until(() => f.core.live!.frames > frames);
+    await until(() => f.core!.live!.frames > frames);
     return { fileMb, saveMs, fileOpenMs, fileFrameMs: performance.now() - t1 };
   });
 }
@@ -114,18 +114,18 @@ async function measure(page: Page, query: string): Promise<Sample> {
   const t0 = Date.now();
   await gotoDebug(page, `/debug.html?nodes=${NODES}${query}`);
   await page.waitForFunction(() => window.__ferrum?.ready === true, null, { timeout: 120_000 });
-  await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0, null, { timeout: 60_000 });
+  await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0, null, { timeout: 60_000 });
   const openMs = Date.now() - t0;
   // Время кадров worker'а — из живого состояния, на каждом новом кадре.
   const start = await page.evaluate(() => {
     const w = window as unknown as { __frameMs: number[] };
     w.__frameMs = [];
-    let seen = window.__ferrum!.core.live!.frames;
+    let seen = window.__ferrum!.core!.live!.frames;
     const z = window as unknown as { __minZoom: number; __atlasMax: number };
     z.__minZoom = Infinity;
     z.__atlasMax = 0;
     const tick = () => {
-      const l = window.__ferrum!.core.live!;
+      const l = window.__ferrum!.core!.live!;
       z.__minZoom = Math.min(z.__minZoom, l.zoom);
       z.__atlasMax = Math.max(z.__atlasMax, l.atlasImages);
       if (l.frames !== seen) {
@@ -135,7 +135,7 @@ async function measure(page: Page, query: string): Promise<Sample> {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
-    window.__ferrum!.core.resetMainThreadStats();
+    window.__ferrum!.core!.resetMainThreadStats();
     return performance.now();
   });
   await interact(page);
@@ -143,7 +143,7 @@ async function measure(page: Page, query: string): Promise<Sample> {
   await page.waitForTimeout(300);
   const sample = await page.evaluate((start) => {
     const w = window as unknown as { __longTasks: { start: number; duration: number }[]; __frameMs: number[] };
-    const core = window.__ferrum!.core;
+    const core = window.__ferrum!.core!;
     const main = core.mainThreadStats();
     const frames = [...w.__frameMs].sort((a, b) => a - b);
     const pick = (q: number) => (frames.length ? frames[Math.min(frames.length - 1, Math.round((frames.length - 1) * q))] : 0);
@@ -225,13 +225,14 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   });
   await page.goto(`/?nodes=${NODES}`);
   await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 120_000 });
+  await expectCore(page);
   const tree = page.getByRole('tree', { name: 'Слои' });
   // Раскрыть десять верхних фреймов («Экран 999» … «Экран 990»): первый — кнопкой
   // строки, остальные — той же командой (их строки уходят за окно списка).
   await tree.getByRole('treeitem', { name: 'Экран 999', exact: true }).getByRole('button', { name: 'Развернуть' }).click();
   await page.evaluate(() => {
     const rows = window.__ferrum!.ui!.layers.rows.filter((r) => r.depth === 0).slice(0, 10);
-    for (const r of rows) window.__ferrum!.core.send({ type: 'expandLayer', id: r.id, expanded: true });
+    for (const r of rows) window.__ferrum!.core!.send({ type: 'expandLayer', id: r.id, expanded: true });
   });
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.layers.total)).toBe(1000 + 990);
   // Выделить строки 0 … 999 (10 фреймов и 990 их детей): первая — щелчком,
@@ -259,13 +260,13 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
     // Запросы окна строк, ушедшие ядру во время жеста.
     const w = window as unknown as { __windowReqs: number };
     w.__windowReqs = 0;
-    const core = window.__ferrum!.core;
+    const core = window.__ferrum!.core!;
     const send = core.send.bind(core);
     core.send = (cmd) => {
       if (cmd.type === 'layersWindow') w.__windowReqs++;
       send(cmd);
     };
-    window.__ferrum!.core.resetMainThreadStats();
+    window.__ferrum!.core!.resetMainThreadStats();
     return performance.now();
   });
   const steps0 = (await live(page)).steps;
@@ -301,7 +302,7 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   const after = await liveWhen(page, `l.steps === ${steps0 + 1} && l.busy === 0`);
   const sample = await page.evaluate((start) => {
     const w = window as unknown as { __longTasks: { start: number; duration: number }[] };
-    const main = window.__ferrum!.core.mainThreadStats();
+    const main = window.__ferrum!.core!.mainThreadStats();
     const w2 = w as unknown as { __longObs: PerformanceObserver };
     // Записи, ещё не доставленные наблюдателю, тоже в счёт.
     for (const e of w2.__longObs.takeRecords()) w.__longTasks.push({ start: e.startTime, duration: e.duration });
@@ -315,7 +316,7 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
       mainMaxMs: main.maxMs,
       mainP95Ms: main.p95Ms,
       mainFrames: main.frames,
-      dropped: window.__ferrum!.core.droppedInput(),
+      dropped: window.__ferrum!.core!.droppedInput(),
     };
   }, start);
   const out = path.join(info.project.outputDir, 'perf-ui.json');

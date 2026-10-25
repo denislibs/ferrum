@@ -106,12 +106,12 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   const expose = test || perfHook();
   window.__ferrum = {
     core: expose ? core : undefined,
+    scheduler: expose ? scheduler : undefined,
     events: [],
     uiEvents: test ? uiEvents : undefined,
     ready: false,
     ui: store.state,
-  } as unknown as NonNullable<Window['__ferrum']>;
-  if (expose) (window.__ferrum as unknown as { scheduler: typeof scheduler }).scheduler = scheduler;
+  };
   // Раскладка клавиатуры для подписей: приходит позже запуска и может смениться.
   const [layout, setLayout] = createSignal<LayoutMap>();
   const refreshLayout = () => void loadLayoutMap().then((m) => setLayout(() => m));

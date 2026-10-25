@@ -234,7 +234,7 @@ test('огромная картинка отклоняется по заголо
     const app0 = [0xff, 0xe0, 0, 16, ...new Array(14).fill(0)];
     const sof = [0xff, 0xc0, 0, 17, 8, 0xea, 0x60, 0xea, 0x60, 3, ...new Array(9).fill(0)];
     const bytes = new Uint8Array([0xff, 0xd8, ...app0, ...sof, 0xff, 0xd9]);
-    window.__ferrum!.core.send({ type: 'pasteImage', bytes });
+    window.__ferrum!.core!.send({ type: 'pasteImage', bytes });
   });
   await expect(page.getByRole('status').filter({ hasText: 'изображение больше 8192 px' })).toBeVisible();
   const after = await live(page);
@@ -275,15 +275,15 @@ test('команда после перекодируемой картинки ж
   await makeJpeg(page, 1200, 800);
   const a = await editA(page);
   await page.evaluate(() => {
-    window.__ferrum!.core.send({ type: 'pasteImage', bytes: (window as unknown as { __jpeg: Uint8Array }).__jpeg });
+    window.__ferrum!.core!.send({ type: 'pasteImage', bytes: (window as unknown as { __jpeg: Uint8Array }).__jpeg });
     // Следом — команда отмены: она не должна обогнать вставку.
-    window.__ferrum!.core.send({ type: 'execute', command: 'edit.undo' });
+    window.__ferrum!.core!.send({ type: 'execute', command: 'edit.undo' });
   });
   // Вставка, затем её отмена: правка A на месте, повтор вернёт картинку.
   await liveWhen(page, `l.canRedo === 1 && l.steps === ${a.steps + 1}`);
   const after = await live(page);
   expect([after.nodes, after.canUndo]).toEqual([a.nodes, 1]);
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'edit.redo' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'edit.redo' }));
   await liveWhen(page, `l.nodes === ${a.nodes + 1}`);
   expect((await ui(page)).summary?.kind).toBe('image');
 });
@@ -296,7 +296,7 @@ for (const transport of ['sab', 'message'] as const) {
     const a = await editA(page);
     // Вставка и сразу — клавиша отмены (в том же задании: точно во время перекодировки).
     const t = await page.evaluate(() => {
-      window.__ferrum!.core.send({ type: 'pasteImage', bytes: (window as unknown as { __jpeg: Uint8Array }).__jpeg });
+      window.__ferrum!.core!.send({ type: 'pasteImage', bytes: (window as unknown as { __jpeg: Uint8Array }).__jpeg });
       const mac = navigator.platform.toLowerCase().startsWith('mac');
       const key = { code: 'KeyZ', key: 'z', ctrlKey: !mac, metaKey: mac, bubbles: true };
       window.dispatchEvent(new KeyboardEvent('keydown', key));
@@ -308,10 +308,10 @@ for (const transport of ['sab', 'message'] as const) {
     console.log(`перекодировка 3000 × 2000: ${(size / 1024 / 1024).toFixed(1)} МБ, до отмены ${Math.round((await page.evaluate(() => performance.now())) - t)} мс`);
     // Отменена вставка: узлов — как после правки A, A ещё можно отменить, повтор вернёт картинку.
     expect([after.nodes, after.canUndo, after.canRedo]).toEqual([a.nodes, 1, 1]);
-    await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'edit.redo' }));
+    await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'edit.redo' }));
     await liveWhen(page, `l.nodes === ${a.nodes + 1}`);
     expect((await ui(page)).summary?.kind).toBe('image');
-    expect(await page.evaluate(() => window.__ferrum!.core.mode)).toBe(transport);
+    expect(await page.evaluate(() => window.__ferrum!.core!.mode)).toBe(transport);
   });
 }
 
@@ -329,7 +329,8 @@ async function watchLongTasks(page: Page): Promise<number> {
 const longTasks = (page: Page, t0: number) =>
   page.evaluate((t0) => (window as unknown as { __long: { start: number; duration: number }[] }).__long.filter((e) => e.start >= t0), t0);
 
-test('запасной путь: большое выделение кодирует worker — без длинных задач, вставка возвращает всё', async ({ page }) => {
+test('запасной путь: большое выделение кодирует worker — без длинных задач, вставка возвращает всё @perf', async ({ page }, info) => {
+  test.skip(info.project.name !== 'chromium', 'ворота длинных задач — в проекте chromium');
   await page.addInitScript(noCustomFormat);
   await openApp(page, 20_000);
   const before = await live(page);
@@ -367,7 +368,7 @@ test('картинка больше 64 МБ отклоняется до копи
   });
   await expect(page.getByRole('status').filter({ hasText: 'Слишком большой объём данных: 65 МБ, предел — 64 МБ' })).toBeVisible();
   // Команда в обход интерфейса — отказ предела команды (до передачи worker'у).
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'pasteImage', bytes: new Uint8Array(65 * 1024 * 1024) }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'pasteImage', bytes: new Uint8Array(65 * 1024 * 1024) }));
   await expect.poll(() => errors(page)).toEqual(['Слишком большой объём данных: 65 МБ, предел — 64 МБ']);
   expect((await live(page)).nodes).toBe(before.nodes);
 });
@@ -396,7 +397,7 @@ test('«Сохранить как…» и «Открыть…»', async ({ page 
 
 test('«Сохранить как…»: имя файла из имени документа очищается', async ({ page }) => {
   await openApp(page, 10);
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'setDocumentName', name: 'План: этаж 1/2' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'setDocumentName', name: 'План: этаж 1/2' }));
   await expect.poll(async () => (await ui(page)).documentName).toBe('План: этаж 1/2');
   await page.getByRole('button', { name: 'Меню файла' }).click();
   const download = page.waitForEvent('download');
@@ -441,7 +442,8 @@ test('«Открыть…» при правках спрашивает; отме
   expect([after.nodes, after.steps]).toEqual([edited.nodes, edited.steps]);
 });
 
-test('«Сохранить как…» на 100 000 узлах — без длинных задач основного потока', async ({ page }) => {
+test('«Сохранить как…» на 100 000 узлах — без длинных задач основного потока @perf', async ({ page }, info) => {
+  test.skip(info.project.name !== 'chromium', 'ворота длинных задач — в проекте chromium');
   await openApp(page, 100_000);
   await page.evaluate(() => {
     const w = window as unknown as { __long: { start: number; duration: number }[] };

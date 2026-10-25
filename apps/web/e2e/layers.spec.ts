@@ -151,7 +151,7 @@ test('виртуальный список: в DOM только окно стро
 /** Команды, которые интерфейс отправил ядру (типы), с момента вызова. */
 async function recordSends(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const core = window.__ferrum!.core as unknown as { send(c: { type: string }): void };
+    const core = window.__ferrum!.core! as unknown as { send(c: { type: string }): void };
     const w = window as unknown as { __sends: string[] };
     w.__sends = [];
     const send = core.send.bind(core);
@@ -373,7 +373,7 @@ test('событие страниц во время переименования
   // Событие страниц, пока поле открыто: переименовать другую страницу через ядро.
   await page.evaluate(() => {
     const p = window.__ferrum!.ui!.pages.list[0];
-    window.__ferrum!.core.send({ type: 'renamePage', id: p.id, name: 'Первая' });
+    window.__ferrum!.core!.send({ type: 'renamePage', id: p.id, name: 'Первая' });
   });
   await expect(pages.getByRole('option', { name: /Первая/ })).toBeVisible();
   await expect(input).toHaveValue('Набрано');
@@ -391,7 +391,7 @@ test('событие слоёв во время переименования н�
   // Выделение другого слоя через ядро: приходит событие слоёв с новыми объектами.
   await page.evaluate(() => {
     const r = window.__ferrum!.ui!.layers.rows[3];
-    window.__ferrum!.core.send({ type: 'select', ids: [r.id], mode: 'replace' });
+    window.__ferrum!.core!.send({ type: 'select', ids: [r.id], mode: 'replace' });
   });
   await expect(row(page, 'Экран 6')).toHaveAttribute('aria-selected', 'true');
   await expect(input).toHaveValue('Набрано');

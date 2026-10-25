@@ -26,8 +26,8 @@ test('стенд запускает worker и транспорт на общей
   await open(page);
   const info = await page.evaluate(() => ({
     isolated: crossOriginIsolated,
-    mode: window.__ferrum!.core.mode,
-    backend: window.__ferrum!.core.backend,
+    mode: window.__ferrum!.core!.mode,
+    backend: window.__ferrum!.core!.backend,
     errors: window.__ferrum!.events.filter((e) => e.type === 'error'),
   }));
   expect(info).toMatchObject({ isolated: true, mode: 'sab', errors: [] });
@@ -56,20 +56,20 @@ test('перетаскивание двигает узел, отмена воз�
 
 test('без заголовков изоляции работает запасной транспорт postMessage', async ({ page }) => {
   await open(page, '', 'http://localhost:4174');
-  const info = await page.evaluate(() => ({ isolated: crossOriginIsolated, mode: window.__ferrum!.core.mode }));
+  const info = await page.evaluate(() => ({ isolated: crossOriginIsolated, mode: window.__ferrum!.core!.mode }));
   expect(info).toEqual({ isolated: false, mode: 'message' });
   await dragMovesAndUndoReturns(page);
 });
 
 test('postMessage можно выбрать и на изолированной странице', async ({ page }) => {
   await open(page, '&transport=message');
-  expect(await page.evaluate(() => window.__ferrum!.core.mode)).toBe('message');
+  expect(await page.evaluate(() => window.__ferrum!.core!.mode)).toBe('message');
   await dragMovesAndUndoReturns(page);
 });
 
 test('в режиме postMessage ресайз и ввод доходят до worker\'а', async ({ page }) => {
   await open(page, '', 'http://localhost:4174');
-  expect(await page.evaluate(() => window.__ferrum!.core.mode)).toBe('message');
+  expect(await page.evaluate(() => window.__ferrum!.core!.mode)).toBe('message');
   const before = await live(page);
   await page.setViewportSize({ width: 900, height: 500 });
   const l = await liveWhen(page, 'l.viewportW === 900 && l.viewportH === 500');
@@ -81,14 +81,14 @@ test('в режиме postMessage ресайз и ввод доходят до w
   await page.keyboard.up('Control');
   const zoomed = await liveWhen(page, `l.zoom > ${before.zoom}`);
   expect(zoomed.inputs).toBeGreaterThan(before.inputs);
-  expect(await page.evaluate(() => window.__ferrum!.core.droppedInput())).toBe(0);
+  expect(await page.evaluate(() => window.__ferrum!.core!.droppedInput())).toBe(0);
 });
 
 test('без WebGPU выбирается запасной бэкенд', async ({ page }) => {
   await open(page);
   const { backend, fallbacks } = await page.evaluate(() => ({
-    backend: window.__ferrum!.core.backend,
-    fallbacks: window.__ferrum!.core.fallbacks,
+    backend: window.__ferrum!.core!.backend,
+    fallbacks: window.__ferrum!.core!.fallbacks,
   }));
   // В headless Chromium без флагов адаптера WebGPU нет, а WebGL2 — программный
   // (SwiftShader): автовыбор доходит до vello_cpu.
@@ -101,13 +101,13 @@ test('без WebGPU выбирается запасной бэкенд', async (
 
 test('явно запрошенный WebGL2 берётся и программным', async ({ page }) => {
   await open(page, '&backend=webgl');
-  expect(await page.evaluate(() => window.__ferrum!.core.backend)).toBe('webgl');
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('webgl');
   await dragMovesAndUndoReturns(page);
 });
 
 test('WebGPU выбирается, если доступен @gpu', async ({ page }) => {
   await open(page);
-  expect(await page.evaluate(() => window.__ferrum!.core.backend)).toBe('webgpu');
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('webgpu');
   await dragMovesAndUndoReturns(page);
 });
 
@@ -129,7 +129,7 @@ test.describe('плотность экрана 2', () => {
     await open(page);
     const l = await live(page);
     expect([l.dpr, l.deviceW, l.deviceH]).toEqual([2, 2560, 1440]);
-    await page.evaluate(() => window.__ferrum!.core.send({ type: 'readPixels', reference: false }));
+    await page.evaluate(() => window.__ferrum!.core!.send({ type: 'readPixels', reference: false }));
     await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'pixels'));
     const size = await page.evaluate(() => {
       const e = window.__ferrum!.events.find((e) => e.type === 'pixels')!;
@@ -167,11 +167,11 @@ test('копирование и вставка идут через событи�
 test('неверная команда не роняет worker', async ({ page }) => {
   await open(page);
   // Команды из основного потока не доверенные: форма проверяется в worker'е.
-  await page.evaluate(() => window.__ferrum!.core.send(JSON.parse('{"type":"formatDisk"}')));
+  await page.evaluate(() => window.__ferrum!.core!.send(JSON.parse('{"type":"formatDisk"}')));
   await page.waitForFunction(() =>
     window.__ferrum!.events.some((e) => e.type === 'error' && e.message.startsWith('Неверная команда')),
   );
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'view.zoom_in' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'view.zoom_in' }));
   const l = await liveWhen(page, 'l.zoom > 0.5');
   expect(l.nodes).toBe(1000);
 });
@@ -181,7 +181,7 @@ test('неверный конверт сообщения не роняет worke
   await page.evaluate(() => (window.__ferrum!.events.length = 0));
   // Сообщения worker'у не доверенные: не объект, неизвестный вид, команда не объект.
   await page.evaluate(() => {
-    const worker = (window.__ferrum!.core as unknown as { worker: Worker }).worker;
+    const worker = (window.__ferrum!.core! as unknown as { worker: Worker }).worker;
     for (const m of [null, { t: 'cmd', cmd: null }, { t: 'cmd', cmd: 42 }, {}, { t: 'init' }]) worker.postMessage(m);
   });
   const errors = () =>
@@ -194,7 +194,7 @@ test('неверный конверт сообщения не роняет worke
   expect(empty).toBe('Неверное сообщение для ядра');
   expect(init).toBe('Ядро уже запущено: повторный init пропущен');
   // Ядро работает дальше.
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'execute', command: 'view.zoom_in' }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'view.zoom_in' }));
   const l = await liveWhen(page, 'l.zoom > 0.5');
   expect(l.nodes).toBe(1000);
   expect((await errors()).filter((m) => m.startsWith('Ядро остановлено'))).toEqual([]);
@@ -225,7 +225,7 @@ test.describe('сбои worker\'а', () => {
   test('сбой после запуска приходит событием error и попадает на плашку', async ({ page }) => {
     await open(page);
     await page.evaluate(() => {
-      const worker = (window.__ferrum!.core as unknown as { worker: Worker }).worker;
+      const worker = (window.__ferrum!.core! as unknown as { worker: Worker }).worker;
       worker.dispatchEvent(new ErrorEvent('error', { message: 'проверочный сбой' }));
     });
     await page.waitForFunction(() =>
@@ -236,6 +236,6 @@ test.describe('сбои worker\'а', () => {
 
   test('неверные параметры адреса игнорируются', async ({ page }) => {
     await open(page, '&backend=вулкан&transport=пигеон&atlas=abc');
-    expect(await page.evaluate(() => window.__ferrum!.core.mode)).toBe('sab');
+    expect(await page.evaluate(() => window.__ferrum!.core!.mode)).toBe('sab');
   });
 });

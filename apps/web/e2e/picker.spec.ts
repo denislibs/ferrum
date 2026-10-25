@@ -153,7 +153,7 @@ interface Sent {
 /** Журнал команд, ушедших ядру (`editSelection`, `setPageBackground`). */
 async function recordSent(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const core = window.__ferrum!.core as unknown as { send(c: Record<string, unknown>): void };
+    const core = window.__ferrum!.core! as unknown as { send(c: Record<string, unknown>): void };
     const send = core.send.bind(core);
     const w = window as unknown as { __sent: Sent[] };
     w.__sent = [];
@@ -175,7 +175,7 @@ const phases = async (page: Page, type = 'editSelection') =>
   (await sent(page)).filter((c) => c.type === type).map((c) => c.phase);
 const count = (list: (string | undefined)[], phase: string) => list.filter((p) => p === phase).length;
 const coreSend = (page: Page, cmd: Record<string, unknown>) =>
-  page.evaluate((c) => window.__ferrum!.core.send(c as never), cmd);
+  page.evaluate((c) => window.__ferrum!.core!.send(c as never), cmd);
 const steps = async (page: Page) => (await live(page)).steps;
 /** События ядра, дошедшие до интерфейса (журнал тестового режима). */
 const events = (page: Page, type: string) =>
@@ -440,7 +440,7 @@ test('заливка изображением показывается и не �
     const c = new OffscreenCanvas(4, 4);
     c.getContext('2d')!.fillRect(0, 0, 4, 4);
     const blob = await c.convertToBlob({ type: 'image/png' });
-    window.__ferrum!.core.send({ type: 'pasteImage', bytes: new Uint8Array(await blob.arrayBuffer()) });
+    window.__ferrum!.core!.send({ type: 'pasteImage', bytes: new Uint8Array(await blob.arrayBuffer()) });
   });
   await liveWhen(page, 'l.selectionCount === 1');
   await expect(page.getByText('Изображение · Заполнить')).toBeVisible();

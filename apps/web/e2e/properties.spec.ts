@@ -138,7 +138,7 @@ test('набранное в поле не затирается событиям�
   const send = (f: string, value: number) =>
     page.evaluate(
       ([field, value]) =>
-        window.__ferrum!.core.send({ type: 'editSelection', edit: { type: 'number', field, value, relative: false } as never, phase: 'commit', ids: undefined, selectionVersion: undefined }),
+        window.__ferrum!.core!.send({ type: 'editSelection', edit: { type: 'number', field, value, relative: false } as never, phase: 'commit', ids: undefined, selectionVersion: undefined }),
       [f, value] as const,
     );
   await expect(x).toHaveValue('14400');
@@ -234,7 +234,7 @@ test('подпись захватывает указатель: жест идё�
 
 // ---- Раунд 1: адресат правки, «Смешанные», мелочи поля ----
 
-const coreSend = (page: Page, cmd: unknown) => page.evaluate((c) => window.__ferrum!.core.send(c as never), cmd);
+const coreSend = (page: Page, cmd: unknown) => page.evaluate((c) => window.__ferrum!.core!.send(c as never), cmd);
 const rowsTop = (page: Page) => page.getByRole('tree', { name: 'Слои' }).evaluate((el) => (el.scrollTop = 0));
 const xOf = async (page: Page, name: string) => {
   await rowsTop(page);
@@ -353,7 +353,7 @@ test('превью подписи — не чаще кадра и без пов�
   await openApp(page);
   await selectRow(page, 'Экран 9');
   await page.evaluate(() => {
-    const core = window.__ferrum!.core as unknown as { send(c: { type: string; phase?: string; edit?: { value: number } }): void };
+    const core = window.__ferrum!.core! as unknown as { send(c: { type: string; phase?: string; edit?: { value: number } }): void };
     const send = core.send.bind(core);
     const w = window as unknown as { __prev: number[]; __cancels: number };
     w.__prev = [];

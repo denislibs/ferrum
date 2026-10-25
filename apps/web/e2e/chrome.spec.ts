@@ -54,8 +54,8 @@ test('подсказка «Название  Клавиша» — из дейс�
   await move.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
   await page.evaluate(() => {
-    window.__ferrum!.core.send({ type: 'unbind', command: 'tool.move', shortcut: 'KeyV' });
-    window.__ferrum!.core.send({ type: 'bind', command: 'tool.move', shortcut: 'KeyQ', replace: false });
+    window.__ferrum!.core!.send({ type: 'unbind', command: 'tool.move', shortcut: 'KeyV' });
+    window.__ferrum!.core!.send({ type: 'bind', command: 'tool.move', shortcut: 'KeyQ', replace: false });
   });
   await ui(page, (s) => s.keymap.commands.length);
   await page.waitForFunction(() => window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.move')?.bindings[0] === 'KeyQ');
@@ -69,7 +69,7 @@ test('подсказка «Название  Клавиша» — из дейс�
   const rect = page.getByRole('button', { name: 'Прямоугольник', exact: true });
   await rect.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Прямоугольник  R');
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'bind', command: 'tool.move', shortcut: 'KeyR', replace: true }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'bind', command: 'tool.move', shortcut: 'KeyR', replace: true }));
   await page.waitForFunction(() => !window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.rect')?.bindings.includes('KeyR'));
   // Открытая подсказка прямоугольника потеряла «R» (клавиша ушла к «Перемещению»).
   await expect(page.getByRole('tooltip')).toHaveText('Прямоугольник');
@@ -320,7 +320,7 @@ test('фокус пункта меню не теряется, когда пун�
   await page.keyboard.press('ArrowDown');
   const fit = menu.getByRole('menuitem', { name: /Показать всё/ });
   await expect(fit).toBeFocused();
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'setZoom', zoom: 2 }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'setZoom', zoom: 2 }));
   await liveWhen(page, 'l.zoom === 2');
   await expect(menu.getByRole('menuitemcheckbox', { name: /Масштаб 200%/ })).toHaveAttribute('aria-checked', 'true');
   await expect(fit).toBeFocused();
@@ -343,9 +343,9 @@ test('край панели: правая кнопка мыши не начин�
 /** Выделение и число шагов: ни одна клавиша на виджете панели не должна их менять. */
 const docState = (page: Page) =>
   page.evaluate(() => ({
-    steps: window.__ferrum!.core.live!.steps,
-    nodes: window.__ferrum!.core.live!.nodes,
-    x: window.__ferrum!.core.live!.selectionX,
+    steps: window.__ferrum!.core!.live!.steps,
+    nodes: window.__ferrum!.core!.live!.nodes,
+    x: window.__ferrum!.core!.live!.selectionX,
     ids: [...window.__ferrum!.ui!.selectionIds],
     background: window.__ferrum!.ui!.pages.background,
   }));

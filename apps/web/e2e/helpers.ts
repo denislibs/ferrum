@@ -15,14 +15,23 @@ export async function gotoDebug(page: Page, url: string): Promise<void> {
   await expect(page.locator('#hud')).toHaveCount(1);
 }
 
+/** Ядро раскрыто в `window.__ferrum` (тестовый режим, стенд или `__ferrumPerf`):
+ * дальше тесты пишут `window.__ferrum!.core!` — здесь это проверено, а не принято
+ * на веру. */
+export async function expectCore(page: Page): Promise<void> {
+  const kind = await page.evaluate(() => typeof window.__ferrum?.core?.send);
+  expect(kind, 'window.__ferrum.core нет: страница не в тестовом режиме').toBe('function');
+}
+
 export async function open(page: Page, query = '', origin = ''): Promise<void> {
   await gotoDebug(page, `${origin}/debug.html?nodes=1000${query}`);
   await page.waitForFunction(() => window.__ferrum?.ready === true, null, { timeout: 90_000 });
-  await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0);
+  await expectCore(page);
+  await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0);
 }
 
 export function live(page: Page): Promise<LiveState> {
-  return page.evaluate(() => window.__ferrum!.core.live!);
+  return page.evaluate(() => window.__ferrum!.core!.live!);
 }
 
 /** Ждёт, пока живое состояние не удовлетворит условию (возвращает его). */
@@ -93,7 +102,8 @@ export async function openApp(page: Page, nodes = 1000, query = ''): Promise<voi
   await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true, null, {
     timeout: 90_000,
   });
-  await page.waitForFunction(() => (window.__ferrum!.core.live?.frames ?? 0) > 0);
+  await expectCore(page);
+  await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0);
 }
 
 /** Точка мира на экране редактора: холст между панелями, его угол — со страницы. */

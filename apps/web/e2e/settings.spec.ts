@@ -178,7 +178,7 @@ test('светлая тема: интерфейс и холст при запу�
 
 test('привязка к пикселям выключается в настройках', async ({ page }) => {
   await openApp(page, 0);
-  await page.evaluate(() => window.__ferrum!.core.send({ type: 'setZoom', zoom: 3 }));
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'setZoom', zoom: 3 }));
   await liveWhen(page, 'l.zoom === 3');
   // Каждый прямоугольник — на своём месте: иначе второй притянулся бы к краю первого.
   let offset = 0;
