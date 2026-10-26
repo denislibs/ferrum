@@ -2,6 +2,8 @@
 // открыть → сравнить. Сравниваются строки дерева слоёв (id, имена, типы, вложенность),
 // сводка свойств выделенного фрейма и картинка документа без оверлеев — превью первой
 // страницы, которое ядро рисует заново после открытия (PNG байт в байт). Идёт и в Firefox.
+// Здесь файл записан целиком; восстановление правок из журнала после перезагрузки (тоже
+// с Firefox) — в `journal.spec.ts`.
 
 import { expect, test, type Page } from '@playwright/test';
 import { appScreen, drag, drawRect, editorReady, fileId, live, liveWhen, testMode } from './helpers';

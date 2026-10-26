@@ -425,6 +425,27 @@ test('запасная запись: удачная запись убирает 
   expect(legacy.getItem(PENDING)).toBeNull();
 });
 
+test('запасная запись: новое значение не влезло в предел — прежнее значение поля из неё убрано', async () => {
+  const legacy = memory();
+  const f = fakeBackend();
+  const s = await openSettings(f.backend, legacy);
+  // Worker не отвечает: поля остаются в запасной.
+  f.backend.setSettings = (p) => {
+    Object.assign(f.data, p);
+    return new Promise(() => {});
+  };
+  s.update({ keymap: '{"old":1}', theme: 'light' });
+  expect(JSON.parse(legacy.getItem(PENDING)!)).toEqual({ keymap: '{"old":1}', theme: 'light' });
+  // 50 000 кавычек — в пределе раскладки (64 КБ), но в JSON запасной — 100 000 знаков.
+  const big = '"'.repeat(50_000);
+  s.update({ keymap: big });
+  // Прежней раскладки в запасной нет: при запуске она не перекроет новую из базы.
+  expect(JSON.parse(legacy.getItem(PENDING)!)).toEqual({ theme: 'light' });
+  const t = await openSettings(fakeBackend({ ...f.data }).backend, legacy);
+  expect(t.current.keymap).toBe(big);
+  expect(t.current.theme).toBe('light');
+});
+
 test('запасная запись при неудачном чтении — только для показа: без записи, ключ остаётся', async () => {
   const legacy = memory();
   legacy.setItem(PENDING, JSON.stringify({ theme: 'light', pixelSnap: 'мусор' }));

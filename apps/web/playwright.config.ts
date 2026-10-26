@@ -5,6 +5,10 @@ import { defineConfig, firefox } from '@playwright/test';
 // File System Access. Проект есть, только если браузер установлен
 // (`npx playwright install firefox`): без него прогон не падает. В CI его нет.
 const FIREFOX = existsSync(firefox.executablePath());
+if (!FIREFOX) {
+  // Тесты @firefox пропущены не молча: прогон говорит, почему и как их включить.
+  console.warn('Firefox для Playwright не установлен — тесты @firefox пропущены (npx playwright install firefox)');
+}
 
 // Стенд собирается заранее (`npm run wasm && npm run build`); тесты идут против
 // `vite preview` — того же бандла, что уйдёт пользователю. Два сервера: с

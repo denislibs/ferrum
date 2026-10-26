@@ -79,20 +79,31 @@ function readPending(store: Storage | null): Partial<Settings> {
 }
 
 /** Запасная запись: `put` — дописать поля, `drop` — убрать. Общая для вкладок, поэтому
- * читается заново перед каждой правкой. Больше предела или закрытое хранилище — без неё. */
+ * читается заново перед каждой правкой. Новые значения не влезли в предел — этих полей
+ * в ней нет вовсе: их прежние значения при запуске перекрыли бы новые из базы. */
 function editPending(store: Storage | null, put: Partial<Settings>, drop: readonly string[] = []): void {
   try {
     if (!store) return;
     const next: Record<string, unknown> = { ...readPending(store), ...put };
     for (const k of drop) delete next[k];
-    if (Object.keys(next).length === 0) {
-      store.removeItem(PENDING_KEY);
-      return;
+    let text = JSON.stringify(next);
+    if (text.length > MAX_SETTINGS_BYTES) {
+      for (const k of Object.keys(put)) delete next[k];
+      text = JSON.stringify(next);
     }
-    const text = JSON.stringify(next);
-    if (text.length <= MAX_SETTINGS_BYTES) store.setItem(PENDING_KEY, text);
+    if (Object.keys(next).length === 0 || text.length > MAX_SETTINGS_BYTES) store.removeItem(PENDING_KEY);
+    else store.setItem(PENDING_KEY, text);
   } catch {
-    // Нет места или хранилище закрыто: запись в базу всё равно идёт.
+    // Нет места: хотя бы убрать прежние значения этих полей (запись меньше); запись в
+    // базу всё равно идёт. Хранилище закрыто — запасной и не прочитать.
+    try {
+      const rest: Record<string, unknown> = readPending(store);
+      for (const k of [...Object.keys(put), ...drop]) delete rest[k];
+      if (Object.keys(rest).length === 0) store?.removeItem(PENDING_KEY);
+      else store?.setItem(PENDING_KEY, JSON.stringify(rest));
+    } catch {
+      // Ничего не сделать.
+    }
   }
 }
 
