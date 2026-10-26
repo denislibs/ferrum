@@ -22,7 +22,7 @@ import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { restartText, type Restart } from './restart';
 import type { Route } from './router';
-import { createSaver, type Saver, type SaverOptions } from './saver';
+import { createSaver, SETTLE_MS, type Saver, type SaverOptions } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
 import { installClipboard } from './system-clipboard';
 import { createUiStore } from './store';
@@ -267,6 +267,28 @@ export function App(props: AppProps) {
             // Хранилище не ответило — исход пачек неизвестен: честнее «не сохранились».
             if (s) void s.settled().then((ok) => restart(!ok || s.pending()));
             else restart(false);
+          }
+          if (e.type === 'surfaceRestored') store.toast('Видеокарта перезапущена');
+          if (e.type === 'surfaceFailed') {
+            // Поверхность GPU не пережила потерю: правки — в журнал (ядро живо), и тот же
+            // файл — в новом редакторе с запасным бэкендом (контекст холста — один раз).
+            // Перезапуск — тот же, что после сбоя ядра (блокировка файла, предел два раза
+            // в минуту на оба вида).
+            const { next, message } = e;
+            console.error(message);
+            const s = saver;
+            // Хранилище не ответило за `SETTLE_MS` — исход пачки неизвестен: «не сохранились».
+            const flushed = s
+              ? Promise.race([s.flushJournal(), new Promise<boolean>((r) => window.setTimeout(() => r(false), SETTLE_MS))])
+              : Promise.resolve(true);
+            void flushed.then((ok) => {
+              // Пока писали журнал, редактор могли снять: перезапуск старого открыл бы его
+              // поверх нового.
+              if (disposed) return;
+              if (!props.onRestart({ reason: 'gpu', lost: !ok || (s?.pending() ?? false), backend: next, message })) {
+                store.toast(`Рендер остановлен: ${message}`, 'error');
+              }
+            });
           }
           if (e.type === 'exported') {
             downloadBytes(e.name, e.bytes, 'image/png');

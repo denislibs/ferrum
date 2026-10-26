@@ -234,6 +234,17 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::Error {
             message: "ой".into(),
         },
+        CoreEvent::SurfaceLost {
+            backend: Backend::Webgl,
+            message: "Контекст WebGL2 потерян".into(),
+        },
+        CoreEvent::SurfaceRestored {
+            backend: Backend::Webgpu,
+        },
+        CoreEvent::SurfaceFailed {
+            next: Backend::Cpu,
+            message: "не вышло".into(),
+        },
         CoreEvent::Layers {
             start: 0,
             total: 1,

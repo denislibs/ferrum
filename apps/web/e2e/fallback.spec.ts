@@ -14,7 +14,7 @@
 // «неверное сообщение»).
 
 import { expect, test, type Page } from '@playwright/test';
-import { drag, expectPixel, gotoDebug, live, liveWhen, open, screen } from './helpers';
+import { drag, drawRect, editorReady, expectPixel, fileId, gotoDebug, live, liveWhen, open, screen, storedFile } from './helpers';
 
 interface Opt {
   /** `getContext('webgl2')` на пробном холсте 1×1 даёт `null`. */
@@ -39,6 +39,10 @@ function prelude(opt: Opt): string {
   const F = {};
   let gpuDevice = null;
   let realGl = null;
+  // Расширение потери контекста: у потерянного контекста getExtension даёт null,
+  // поэтому для возврата оно запоминается при потере (пролог — строка в обратных
+  // кавычках: без них в комментариях).
+  let loseExt = null;
   const fail = (what) => { throw new Error('внедрённый сбой: ' + what); };
 
   const getContext = OffscreenCanvas.prototype.getContext;
@@ -131,7 +135,12 @@ function prelude(opt: Opt): string {
     }
     // Потеря устройства WebGPU и контекста WebGL2.
     if (name === 'loseDevice') gpuDevice.destroy();
-    if (name === 'loseGl') realGl.getExtension('WEBGL_lose_context').loseContext();
+    if (name === 'loseGl') {
+      loseExt = realGl.getExtension('WEBGL_lose_context');
+      loseExt.loseContext();
+    }
+    // Браузер вернул контекст (worker «принял» потерю — preventDefault, иначе возврата нет).
+    if (name === 'restoreGl') loseExt.restoreContext();
   });
 })();
 `;
@@ -435,24 +444,94 @@ test('ошибка проверки WebGPU вне вызовов: сообщен
   expect(await errors(page)).toHaveLength(1);
 });
 
-test('потеря устройства WebGPU: сообщение, поверхность не рисует @gpu', async ({ page }) => {
+/** Первое событие вида `type` в журнале стенда (ждёт его). */
+async function firstEvent(page: Page, type: string): Promise<Record<string, unknown>> {
+  await page.waitForFunction((t) => window.__ferrum!.events.some((e) => e.type === t), type, { timeout: 15_000 });
+  return page.evaluate((t) => window.__ferrum!.events.find((e) => e.type === t) as unknown as Record<string, unknown>, type);
+}
+
+test('потеря устройства WebGPU: устройство создано заново, рисует снова @gpu', async ({ page }) => {
   await stubWorker(page, {});
   await open(page, '&backend=webgpu');
   expect((await info(page)).backend).toBe('webgpu');
   await page.evaluate(() => (window.__ferrum!.events.length = 0));
   await fault(page, 'loseDevice');
+  const lost = await firstEvent(page, 'surfaceLost');
+  expect(lost.backend).toBe('webgpu');
+  expect(lost.message).toMatch(/^Устройство WebGPU потеряно \(.*\): /);
+  expect(await firstEvent(page, 'surfaceRestored')).toEqual({ type: 'surfaceRestored', backend: 'webgpu' });
   await poke(page);
-  await expectDead(page, /^Устройство WebGPU потеряно \(.*\): /);
+  await expectDrawn(page);
+  expect(await errors(page)).toEqual([]);
 });
 
-test('потеря контекста WebGL2: сообщение, поверхность не рисует @gpu', async ({ page }) => {
+test('потеря контекста WebGL2 и его возврат: поверхность создана заново, рисует снова', async ({ page }) => {
   await stubWorker(page, {});
   await open(page, '&backend=webgl');
   expect((await info(page)).backend).toBe('webgl');
   await page.evaluate(() => (window.__ferrum!.events.length = 0));
   await fault(page, 'loseGl');
+  expect((await firstEvent(page, 'surfaceLost')).message).toMatch(/^Контекст WebGL2 потерян/);
+  await fault(page, 'restoreGl');
+  expect(await firstEvent(page, 'surfaceRestored')).toEqual({ type: 'surfaceRestored', backend: 'webgl' });
   await poke(page);
-  await expectDead(page, /^Контекст WebGL2 потерян/);
+  await expectDrawn(page);
+  expect(await errors(page)).toEqual([]);
+  expect(await page.evaluate(() => window.__ferrum!.events.some((e) => e.type === 'surfaceFailed'))).toBe(false);
+});
+
+test('контекст WebGL2 не вернулся: запасной бэкенд CPU', async ({ page }) => {
+  await stubWorker(page, {});
+  await open(page, '&backend=webgl');
+  await page.evaluate(() => (window.__ferrum!.events.length = 0));
+  await fault(page, 'loseGl');
+  const failed = await firstEvent(page, 'surfaceFailed');
+  expect(failed.next).toBe('cpu');
+  expect(failed.message).toMatch(/^Контекст WebGL2 потерян; пересоздать не удалось: контекст WebGL2 не восстановлен$/);
+  expect(await errors(page)).toEqual([]);
+});
+
+test('редактор: WebGL2 потерян навсегда — перезапуск на процессоре, документ на месте', async ({ page }) => {
+  await stubWorker(page, {});
+  const id = await storedFile(page, '&backend=webgl&fullSave=600000');
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('webgl');
+  await drawRect(page, 150);
+  await page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
+  await fault(page, 'loseGl');
+  await expect(
+    page.locator('.fe-toast', { hasText: 'Видеокарта недоступна — редактор перезапущен с рендером на процессоре' }),
+  ).toHaveCount(1, { timeout: 15_000 });
+  await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
+  await editorReady(page);
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
+  // Правка до потери ушла в журнал перед перезапуском.
+  await liveWhen(page, 'l.nodes === 2');
+  expect(fileId(page)).toBe(id);
+});
+
+test('редактор: после перезапуска на процессоре сбой ядра оставляет CPU; предел перезапусков общий с потерей GPU', async ({ page }) => {
+  await stubWorker(page, {});
+  await storedFile(page, '&backend=webgl');
+  const markOld = () => page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
+  const newCore = async () => {
+    await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
+    await editorReady(page);
+  };
+  // Первый перезапуск — потеря GPU.
+  await markOld();
+  await fault(page, 'loseGl');
+  await expect(page.locator('.fe-toast', { hasText: 'Видеокарта недоступна' })).toHaveCount(1, { timeout: 15_000 });
+  await newCore();
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
+  // Второй — сбой ядра: бэкенд остаётся запасным.
+  await markOld();
+  await page.evaluate(() => window.__ferrum!.core!.testPanic());
+  await expect(page.locator('.fe-toast', { hasText: 'Редактор перезапущен' })).toHaveCount(1);
+  await newCore();
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
+  // Третий за минуту — уже нет: плашка остановки.
+  await page.evaluate(() => window.__ferrum!.core!.testPanic());
+  await expect(page.getByRole('alert')).toContainText('Ядро остановлено: паника в ядре: тестовая паника ядра');
 });
 
 // --- 8. Сбои самого worker'а ----------------------------------------------------

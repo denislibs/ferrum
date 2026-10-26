@@ -524,6 +524,22 @@ pub enum CoreEvent {
     Error {
         message: String,
     },
+    /// Поверхность GPU потеряна (устройство WebGPU, контекст WebGL2): worker создаёт
+    /// её заново; до `SurfaceRestored` кадров нет.
+    SurfaceLost {
+        backend: Backend,
+        message: String,
+    },
+    /// Поверхность создана заново, кадры идут.
+    SurfaceRestored {
+        backend: Backend,
+    },
+    /// Пересоздать не удалось (или потери повторяются): интерфейс перезапускает ядро
+    /// с бэкендом `next`, документ — из файла и журнала.
+    SurfaceFailed {
+        next: Backend,
+        message: String,
+    },
     // ——— Этап 5: панели ———
     /// Окно строк панели слоёв. `reveal` — строка первого выделенного, если
     /// выделение пришло с холста (панель прокручивает к ней).
