@@ -2,10 +2,13 @@
 // только шлёт запросы и получает метаданные, окна списка и превью; байты файлов
 // приходят и уходят передачей (transfer), без копий в основном потоке.
 //
-// База `ferrum`, версия 1:
+// База `ferrum`, версия 2:
 // - `meta` — записи `FileMeta` (ключ `id`): список читает только их;
 // - `bytes` — id → ArrayBuffer файла `.ferrum`;
-// - `thumbs` — id → Blob PNG превью.
+// - `thumbs` — id → Blob PNG превью;
+// - `journal` (с версии 2) — `[id, сеанс, номер]` → ArrayBuffer пачки журнала
+//   изменений: правки после байтов файла, по порядку записи. Запись файла стирает
+//   пачки до номера своего снимка в той же транзакции.
 // Метаданные держатся в памяти (≤ 10 000 записей — сотни килобайт): сортировка,
 // поиск и окна — отсюда. Другие вкладки узнают об изменениях через
 // `BroadcastChannel('ferrum-files')` и перечитывают метаданные.
@@ -28,12 +31,13 @@ import {
   type FileMeta,
   type FromIo,
   type IoRequest,
+  type IoResults,
   type ToIo,
 } from '../core/file-list';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const DB_NAME = 'ferrum';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const CHANNEL = 'ferrum-files';
 
 let test = false;
@@ -69,6 +73,7 @@ function open(): Promise<IDBDatabase> {
       if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('bytes')) d.createObjectStore('bytes');
       if (!d.objectStoreNames.contains('thumbs')) d.createObjectStore('thumbs');
+      if (!d.objectStoreNames.contains('journal')) d.createObjectStore('journal');
     };
     req.onsuccess = () => {
       const d = req.result;
@@ -198,6 +203,26 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return p;
 }
 
+/** Все пачки журнала файла: ключи `[id, сеанс, номер]`, массив больше любого числа. */
+function journalRange(id: string): IDBKeyRange {
+  return IDBKeyRange.bound([id], [id, []]);
+}
+
+/** Байты файла и пачки журнала после них — одной транзакцией. Журнал без байтов не
+ * отдаётся: его пачки начаты на снимке, которого нет. */
+async function readFile(id: string): Promise<{ value: IoResults['read']; transfer: Transferable[] }> {
+  const m = meta(id);
+  const d = await open();
+  const tx = d.transaction(['bytes', 'journal']);
+  const [raw, entries] = await Promise.all([
+    request(tx.objectStore('bytes').get(id)) as Promise<unknown>,
+    request(tx.objectStore('journal').getAll(journalRange(id))) as Promise<unknown[]>,
+  ]);
+  const bytes = raw instanceof ArrayBuffer ? raw : null;
+  const journal = bytes ? entries.filter((b): b is ArrayBuffer => b instanceof ArrayBuffer) : [];
+  return { value: { meta: m, bytes, journal }, transfer: [...(bytes ? [bytes] : []), ...journal] };
+}
+
 async function readBytes(id: string): Promise<ArrayBuffer | null> {
   const d = await open();
   const bytes = (await request(d.transaction('bytes').objectStore('bytes').get(id))) as unknown;
@@ -213,11 +238,10 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
     }
     case 'get':
       return { value: metas.get(r.file) ?? null };
-    case 'read': {
-      const m = meta(r.file);
-      const buf = await readBytes(r.file);
-      return { value: { meta: m, bytes: buf }, transfer: buf ? [buf] : [] };
-    }
+    case 'read':
+      // В очереди правок: пачка журнала, отправленная раньше чтения, в нём уже есть
+      // (после сбоя ядра редактор читает файл сразу).
+      return serial(() => readFile(r.file));
     case 'blob': {
       meta(r.file);
       const buf = await readBytes(r.file);
@@ -262,15 +286,17 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
     }
     case 'write': {
       if (failWrites) throw new Error('недостаточно места в хранилище браузера');
-      const { bytes, thumb, base } = r;
+      const { bytes, thumb, base, journal } = r;
       // Имя записи здесь не меняется: оно — из хранилища (переименование — `rename`,
       // в том числе из другой вкладки), снимок его не затирает.
       const next = await update(
         r.file,
-        ['bytes', 'thumbs'],
+        ['bytes', 'thumbs', 'journal'],
         (m, tx) => {
           if (m.version !== base) throw new Error(CONFLICT);
           tx.objectStore('bytes').put(bytes, m.id);
+          // Пачки, вошедшие в снимок, — в той же транзакции: файл и журнал не расходятся.
+          if (journal) tx.objectStore('journal').delete(IDBKeyRange.bound([m.id], [m.id, journal.session, journal.upTo]));
           if (thumb instanceof ArrayBuffer) tx.objectStore('thumbs').put(new Blob([thumb], { type: 'image/png' }), m.id);
           else if (thumb === null) tx.objectStore('thumbs').delete(m.id);
           return {
@@ -286,6 +312,20 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
       );
       changed();
       return { value: next };
+    }
+    case 'appendJournal': {
+      // Запись есть (удалённый навсегда файл журнал не воскрешает).
+      meta(r.file);
+      const d = await open();
+      const tx = rw(d, ['journal']);
+      tx.objectStore('journal').put(r.bytes, [r.file, r.session, r.batch]);
+      await done(tx);
+      return { value: null };
+    }
+    case 'journalCount': {
+      if (!test) throw new Error('Только в тестовом режиме');
+      const d = await open();
+      return { value: await request(d.transaction('journal').objectStore('journal').count(journalRange(r.file))) };
     }
     case 'rename': {
       const name = cleanName(r.name);
@@ -314,8 +354,11 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
     case 'emptyTrash': {
       const ids = r.op === 'delete' ? [meta(r.file).id] : [...metas.values()].filter((m) => m.trashedAt !== undefined).map((m) => m.id);
       const d = await open();
-      const tx = rw(d, ['meta', 'bytes', 'thumbs']);
-      for (const id of ids) for (const st of ['meta', 'bytes', 'thumbs']) tx.objectStore(st).delete(id);
+      const tx = rw(d, ['meta', 'bytes', 'thumbs', 'journal']);
+      for (const id of ids) {
+        for (const st of ['meta', 'bytes', 'thumbs']) tx.objectStore(st).delete(id);
+        tx.objectStore('journal').delete(journalRange(id));
+      }
       await done(tx);
       for (const id of ids) metas.delete(id);
       changed();

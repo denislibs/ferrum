@@ -102,7 +102,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     if (!snap) return false;
     try {
       const thumb = snap.thumbnail ? ownBuffer(snap.thumbnail) : snap.keepThumbnail ? 'keep' : null;
-      const meta = await files.write(id, ownBuffer(snap.bytes), thumb, base);
+      const meta = await files.write(id, ownBuffer(snap.bytes), thumb, base, null);
       base = meta.version;
       ed.send({ type: 'markSaved', revision: snap.revision });
       reported = null;

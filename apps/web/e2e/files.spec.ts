@@ -521,7 +521,7 @@ test('вторая вкладка с тем же файлом: «Файл отк
   await other.evaluate(async (i) => {
     const s = window.__ferrumFiles!.store;
     const m = (await s.get(i))!;
-    await s.write(i, new ArrayBuffer(8), null, m.version);
+    await s.write(i, new ArrayBuffer(8), null, m.version, null);
     await s.rename(i, 'Чужая');
   }, id);
   await drawRect(page);

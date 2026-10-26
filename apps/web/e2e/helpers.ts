@@ -118,3 +118,41 @@ export async function appScreen(page: Page, l: LiveState, x: number, y: number):
   const p = screen(l, x, y);
   return { x: box.x + p.x, y: box.y + p.y };
 }
+
+/** Тестовый режим интерфейса до загрузки страницы: хуки хранилища, ядро в `__ferrum`. */
+export async function testMode(page: Page): Promise<void> {
+  await page.addInitScript(() => ((window as { __ferrumTest?: boolean }).__ferrumTest = true));
+}
+
+/** Редактор открыт и ядро готово (после перезапуска — новое ядро). */
+export async function editorReady(page: Page): Promise<void> {
+  await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true, null, {
+    timeout: 90_000,
+  });
+  await expectCore(page);
+  await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0);
+}
+
+/** id файла из адреса редактора (`#/file/<id>`). */
+export function fileId(page: Page): string {
+  const m = /#\/file\/([^/?#]+)/.exec(page.url());
+  if (!m) throw new Error(`не адрес файла: ${page.url()}`);
+  return decodeURIComponent(m[1]);
+}
+
+/** Прямоугольник инструментом R около центра холста (`dx` — сдвиг по x в мире);
+ * ждёт записанный узел: в сцене на один больше и жест закончен (черновик рисования
+ * тоже в сцене, поэтому одного числа узлов мало). */
+export async function drawRect(page: Page, dx = 0): Promise<void> {
+  const before = (await live(page)).nodes;
+  await page.locator('canvas').click({ position: { x: 10, y: 10 } });
+  await page.keyboard.press('KeyR');
+  const l = await live(page);
+  await drag(page, await appScreen(page, l, l.cameraX - 50 + dx, l.cameraY - 40), 100, 80);
+  await liveWhen(page, `l.nodes === ${before + 1} && l.busy === 0`);
+}
+
+/** Пачек журнала файла в хранилище (тестовый хук worker'а ввода-вывода). */
+export function journalCount(page: Page, id: string): Promise<number> {
+  return page.evaluate((i) => window.__ferrumFiles!.store.journalCount(i), id);
+}

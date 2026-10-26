@@ -30,6 +30,13 @@ export interface FileMeta {
 export const CONFLICT = 'Файл изменён в другой вкладке — сохраните копию на диск или откройте файл заново';
 /** Записи нет: файл удалили навсегда (другая вкладка), пока он был открыт. */
 export const GONE = 'Файл удалён в другой вкладке — сохраните копию на диск';
+
+/** Пачка журнала изменений: сеанс редактора (число из времени открытия — сеансы
+ * одного файла упорядочены по времени) и номер пачки ядра в этом сеансе. */
+export interface JournalMark {
+  session: number;
+  batch: number;
+}
 /** Наибольшая длина строки в запросе, байты UTF-8. */
 export const MAX_TEXT_BYTES = 4096;
 
@@ -92,8 +99,21 @@ export type IoOp =
   | { op: 'create'; name: string; bytes: ArrayBuffer | Blob | null }
   | { op: 'read'; file: string }
   /** `thumb`: PNG, `null` — убрать (страница пуста), `'keep'` — оставить прежнее.
-   * `base` — поколение, на котором основана запись. */
-  | { op: 'write'; file: string; bytes: ArrayBuffer; thumb: ArrayBuffer | null | 'keep'; base: number }
+   * `base` — поколение, на котором основана запись. `journal` — снимок вобрал пачки
+   * этого сеанса до `upTo` включительно и все пачки прежних сеансов: они стираются в
+   * той же транзакции; `null` — журнала у файла ещё нет. */
+  | {
+      op: 'write';
+      file: string;
+      bytes: ArrayBuffer;
+      thumb: ArrayBuffer | null | 'keep';
+      base: number;
+      journal: { session: number; upTo: number } | null;
+    }
+  /** Пачка журнала изменений (байты передаются). */
+  | { op: 'appendJournal'; file: string; session: number; batch: number; bytes: ArrayBuffer }
+  /** Тесты: пачек журнала у файла. */
+  | { op: 'journalCount'; file: string }
   /** Байты файла `Blob`'ом, собранным в worker'е («Скачать копию»). */
   | { op: 'blob'; file: string }
   | { op: 'rename'; file: string; name: string }
@@ -115,8 +135,11 @@ export interface IoResults {
   list: { total: number; rows: FileMeta[] };
   get: FileMeta | null;
   create: FileMeta;
-  read: { meta: FileMeta; bytes: ArrayBuffer | null };
+  /** `journal` — пачки, записанные после байтов файла, по порядку (без байтов — пусто). */
+  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[] };
   write: FileMeta;
+  appendJournal: null;
+  journalCount: number;
   blob: Blob | null;
   rename: FileMeta;
   touch: FileMeta;
@@ -154,6 +177,19 @@ function isCount(v: unknown, max: number): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max;
 }
 
+/** Целое ≥ 0 не больше `Number.MAX_SAFE_INTEGER` (сеанс, номер пачки). */
+function isWhole(v: unknown): v is number {
+  return isCount(v, Number.MAX_SAFE_INTEGER) && Number.isInteger(v);
+}
+
+/** Отметка журнала у записи файла: `null` или `{ session, upTo }` целыми. */
+function isJournalUpTo(v: unknown): boolean {
+  if (v === null) return true;
+  if (typeof v !== 'object') return false;
+  const j = v as Record<string, unknown>;
+  return isWhole(j.session) && isWhole(j.upTo);
+}
+
 /** Байты не того вида, лежат в общей памяти или больше предела — текст ошибки. */
 function bytesError(v: unknown, max: number): string | null {
   const size = v instanceof ArrayBuffer ? v.byteLength : typeof Blob === 'function' && v instanceof Blob ? v.size : -1;
@@ -184,12 +220,18 @@ export function requestError(r: unknown): string | null {
     case 'restore':
     case 'delete':
     case 'thumb':
+    case 'journalCount':
       return isId(m.file) ? null : BAD;
+    case 'appendJournal':
+      if (!isId(m.file) || !isWhole(m.session) || !isWhole(m.batch)) return BAD;
+      if (!(m.bytes instanceof ArrayBuffer)) return BAD;
+      return bytesError(m.bytes, MAX_OPEN_BYTES);
     case 'create':
       if (!isName(m.name)) return BAD;
       return m.bytes === null ? null : bytesError(m.bytes, MAX_OPEN_BYTES);
     case 'write':
       if (!isId(m.file) || !isCount(m.base, Number.MAX_SAFE_INTEGER)) return BAD;
+      if (!isJournalUpTo(m.journal)) return BAD;
       if (!(m.bytes instanceof ArrayBuffer)) return BAD;
       if (!(m.thumb === null || m.thumb === 'keep' || m.thumb instanceof ArrayBuffer)) return BAD;
       return bytesError(m.bytes, MAX_OPEN_BYTES) ?? (m.thumb instanceof ArrayBuffer ? bytesError(m.thumb, MAX_THUMB_BYTES) : null);

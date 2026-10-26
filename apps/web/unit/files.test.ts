@@ -104,7 +104,7 @@ test('запросы к хранилищу не доверенные: невер
   expect(requestError({ id: 1, op: 'get', file: 'x'.repeat(65) })).not.toBeNull();
   expect(requestError({ id: 1, op: 'get', file: '' })).not.toBeNull();
   expect(requestError({ id: 1, op: 'get', file: 'abc' })).toBeNull();
-  const w = { id: 1, op: 'write', file: 'a', bytes: new ArrayBuffer(4), thumb: null, base: 0 };
+  const w = { id: 1, op: 'write', file: 'a', bytes: new ArrayBuffer(4), thumb: null, base: 0, journal: null };
   expect(requestError(w)).toBeNull();
   expect(requestError({ ...w, thumb: 'keep' })).toBeNull();
   expect(requestError({ ...w, thumb: 'другое' })).not.toBeNull();
@@ -139,4 +139,28 @@ test('раскладка экрана файлов: столбцы по шири
   expect(filesWindow(48 * 100, 720, l)).toEqual({ start: 99, count: 17 });
   expect(filesWindow(0, 100_000, l).count).toBe(MAX_WINDOW);
   expect(filesWindow(g.rowH * 3, 600, g).start).toBe(2 * g.cols);
+});
+
+test('журнал: запросы к хранилищу проверяются', () => {
+  const buf = new ArrayBuffer(4);
+  const ok = { id: 1, op: 'appendJournal', file: 'f1', session: 1_700_000_000_000_123, batch: 3, bytes: buf };
+  expect(requestError(ok)).toBeNull();
+  for (const bad of [
+    { ...ok, session: -1 },
+    { ...ok, session: 1.5 },
+    { ...ok, batch: Number.MAX_SAFE_INTEGER + 2 },
+    { ...ok, bytes: 'x' },
+    { ...ok, bytes: new Uint8Array(4) },
+    { ...ok, file: '' },
+  ]) {
+    expect(requestError(bad), JSON.stringify(bad)).toBe('Неверный запрос к хранилищу файлов');
+  }
+  const write = { id: 2, op: 'write', file: 'f1', bytes: buf, thumb: 'keep', base: 1, journal: null };
+  expect(requestError(write)).toBeNull();
+  expect(requestError({ ...write, journal: { session: 5, upTo: 2 } })).toBeNull();
+  for (const journal of [{ session: 5 }, { session: 'x', upTo: 1 }, { session: 1, upTo: -3 }, 7, undefined]) {
+    expect(requestError({ ...write, journal }), JSON.stringify(journal)).toBe('Неверный запрос к хранилищу файлов');
+  }
+  expect(requestError({ id: 3, op: 'journalCount', file: 'f1' })).toBeNull();
+  expect(requestError({ id: 3, op: 'journalCount', file: 7 })).toBe('Неверный запрос к хранилищу файлов');
 });
