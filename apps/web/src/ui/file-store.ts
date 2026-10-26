@@ -63,6 +63,8 @@ export interface FileStore {
 export interface FileStoreTestHooks {
   seed(count: number): Promise<void>;
   failWrites(on: boolean): Promise<void>;
+  /** Записи настроек не отвечают и не пишутся (worker уничтожен раньше записи). */
+  holdSettings(on: boolean): Promise<void>;
   /** Пачек журнала файла в базе. */
   journalCount(id: string): Promise<number>;
   /** Поля настроек в базе и запись полей (как у `SettingsBackend`). */
@@ -183,6 +185,9 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks, SettingsBack
   }
   async failWrites(on: boolean) {
     await this.call({ op: 'failWrites', on });
+  }
+  async holdSettings(on: boolean) {
+    await this.call({ op: 'holdSettings', on });
   }
   createFromDisk(handle: FileSystemFileHandle) {
     return this.call({ op: 'createFromDisk', handle });

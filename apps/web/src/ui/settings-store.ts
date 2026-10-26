@@ -9,9 +9,16 @@
 // при запуске — не дольше `SETTLE_MS` (база не отвечает — умолчания и уведомление,
 // экран не ждёт). Раскладка панелей (ширины, страницы) у каждой вкладки своя: чужие
 // значения только запоминаются базой, в `current` этой вкладки не входят.
+// Запись идёт через worker ввода-вывода, а его уничтожают вместе со страницей раньше,
+// чем запись дойдёт до базы (перезагрузка, закрытие сразу после смены). Поэтому каждое
+// изменение сначала синхронно ложится в запасную запись `localStorage`
+// (`ferrum.settings.pending`, ≤ 80 КБ) и убирается из неё после удачной записи; при
+// запуске оставшиеся поля применяются поверх базы и записываются в неё (база не
+// прочитана — только показываются).
 
 import { SETTLE_MS } from './saver';
-import { loadSettings, parseSettings, parseSettingsPatch, diffSettings, SETTINGS_KEY, THEME_KEY, type Settings } from './settings';
+import { MAX_SETTINGS_BYTES } from '../core/limits';
+import { loadSettings, parseSettings, parseSettingsPatch, diffSettings, PENDING_KEY, SETTINGS_KEY, THEME_KEY, type Settings } from './settings';
 
 /** Поля раскладки панелей: у каждой вкладки свои, изменения других вкладок не применяются. */
 const LOCAL_FIELDS: readonly (keyof Settings)[] = ['leftWidth', 'rightWidth', 'pagesOpen'];
@@ -59,6 +66,36 @@ function mirrorTheme(store: Storage | null, theme: Settings['theme']): void {
   }
 }
 
+/** Запасная запись несохранённых полей (не доверенная: только верные поля). */
+function readPending(store: Storage | null): Partial<Settings> {
+  try {
+    const text = store?.getItem(PENDING_KEY);
+    if (!text || text.length > MAX_SETTINGS_BYTES) return {};
+    const raw: unknown = JSON.parse(text);
+    return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? parseSettingsPatch(raw as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Запасная запись: `put` — дописать поля, `drop` — убрать. Общая для вкладок, поэтому
+ * читается заново перед каждой правкой. Больше предела или закрытое хранилище — без неё. */
+function editPending(store: Storage | null, put: Partial<Settings>, drop: readonly string[] = []): void {
+  try {
+    if (!store) return;
+    const next: Record<string, unknown> = { ...readPending(store), ...put };
+    for (const k of drop) delete next[k];
+    if (Object.keys(next).length === 0) {
+      store.removeItem(PENDING_KEY);
+      return;
+    }
+    const text = JSON.stringify(next);
+    if (text.length <= MAX_SETTINGS_BYTES) store.setItem(PENDING_KEY, text);
+  } catch {
+    // Нет места или хранилище закрыто: запись в базу всё равно идёт.
+  }
+}
+
 /** `readMs` — предел чтения при запуске (тесты — короче). */
 export async function openSettings(backend: SettingsBackend, legacy: Storage | null, readMs = SETTLE_MS): Promise<SettingsStore> {
   const errors = new Set<(m: string) => void>();
@@ -85,21 +122,49 @@ export async function openSettings(backend: SettingsBackend, legacy: Storage | n
   } finally {
     clearTimeout(timer);
   }
+  /** Поля прошлого запуска, не дошедшие до базы: поверх прочитанного. */
+  const unsaved = readPending(legacy);
+  /** Номер последней записи каждого поля: удачная запись убирает поле из запасной,
+   * только если с тех пор его не меняли. */
+  const gen: Partial<Record<keyof Settings, number>> = {};
+  let writes = 0;
+  const save = (changed: Partial<Settings>) => {
+    const mine = ++writes;
+    const keys = Object.keys(changed) as (keyof Settings)[];
+    for (const k of keys) gen[k] = mine;
+    // Синхронно, до запроса worker'у: страницу могут закрыть раньше его ответа.
+    editPending(legacy, changed);
+    backend.setSettings(changed).then(
+      () => {
+        reported = null;
+        editPending(
+          legacy,
+          {},
+          keys.filter((k) => gen[k] === mine),
+        );
+      },
+      (e: unknown) => report(`Не удалось сохранить настройки: ${text(e)}`),
+    );
+  };
   let current: Settings;
   if (readFailed) {
     // База не прочитана — переносить нельзя (затёрли бы её поля прежней записью):
-    // прежняя запись, если есть, — только для показа, без записи и удаления.
-    current = hasLegacy(legacy) ? loadSettings(legacy) : parseSettings({});
+    // прежняя запись и запасная, если есть, — только для показа, без записи и удаления.
+    current = { ...(hasLegacy(legacy) ? loadSettings(legacy) : parseSettings({})), ...unsaved };
   } else if (Object.keys(raw).length === 0 && hasLegacy(legacy)) {
     // Первый запуск после этапа 6: перенести прежнюю запись и удалить её.
-    current = loadSettings(legacy);
+    current = { ...loadSettings(legacy), ...unsaved };
     try {
       await backend.setSettings({ ...current });
       legacy?.removeItem(SETTINGS_KEY);
+      editPending(legacy, {}, Object.keys(unsaved));
     } catch (e) {
       report(`Не удалось сохранить настройки: ${text(e)}`);
     }
-  } else current = parseSettings(raw);
+  } else {
+    current = { ...parseSettings(raw), ...unsaved };
+    if (Object.keys(unsaved).length > 0) save(unsaved);
+  }
   mirrorTheme(legacy, current.theme);
 
   const listeners = new Set<(p: Partial<Settings>) => void>();
@@ -122,10 +187,7 @@ export async function openSettings(backend: SettingsBackend, legacy: Storage | n
       if (Object.keys(changed).length === 0) return;
       current = { ...current, ...changed };
       if (changed.theme) mirrorTheme(legacy, changed.theme);
-      backend.setSettings(changed).then(
-        () => (reported = null),
-        (e: unknown) => report(`Не удалось сохранить настройки: ${text(e)}`),
-      );
+      save(changed);
     },
     rollback(patch) {
       const changed = diffSettings(current, parseSettingsPatch(patch));

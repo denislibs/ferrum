@@ -211,3 +211,23 @@ test('хранилище не отвечает — экран с умолчан�
   await page.waitForTimeout(500);
   await expect(page.locator('.fe-toast', { hasText: 'Не удалось прочитать настройки' })).toHaveCount(1);
 });
+
+test('настройка, изменённая прямо перед перезагрузкой, не теряется: worker не успел записать', async ({ page }) => {
+  await testMode(page);
+  await page.goto(newFileUrl(10));
+  await editorReady(page);
+  // Как при закрытии вкладки: worker уничтожается раньше, чем запись дойдёт до базы.
+  await page.evaluate(() => window.__ferrumFiles!.store.holdSettings(true));
+  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Настройки' });
+  await dialog.getByRole('tab', { name: 'Тема' }).click();
+  await dialog.getByRole('radio', { name: 'Светлая' }).check();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.reload();
+  await editorReady(page);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  // Запасная запись перенесена в базу и убрана.
+  await expect.poll(() => stored(page)).toMatchObject({ theme: 'light' });
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('ferrum.settings.pending'))).toBeNull();
+});

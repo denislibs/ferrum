@@ -54,6 +54,7 @@ const SETTINGS_CHANNEL = 'ferrum-settings';
 
 let test = false;
 let failWrites = false;
+let holdSettings = false;
 let db: Promise<IDBDatabase> | null = null;
 const metas = new Map<string, FileMeta>();
 let loaded: Promise<void> | null = null;
@@ -367,6 +368,10 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
       const blob = (await request(d.transaction('thumbs').objectStore('thumbs').get(r.file))) as unknown;
       return { value: blob instanceof Blob ? blob : null };
     }
+    case 'setSettings':
+      // Тесты: запись «потеряна» — ответа нет (вне очереди правок: её не держит).
+      if (holdSettings) return new Promise<never>(() => {});
+      return serial(() => mutate(r));
     default:
       return serial(() => mutate(r));
   }
@@ -597,6 +602,10 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
     case 'failWrites':
       if (!test) throw new Error('Только в тестовом режиме');
       failWrites = r.on;
+      return { value: null };
+    case 'holdSettings':
+      if (!test) throw new Error('Только в тестовом режиме');
+      holdSettings = r.on;
       return { value: null };
     default:
       throw new Error('Неверный запрос к хранилищу файлов');

@@ -381,3 +381,66 @@ test('предел раскладки — в байтах UTF-8', () => {
   expect(parseSettingsPatch({ keymap: 'я'.repeat(40_000) })).toEqual({});
   expect(parseSettingsPatch({ keymap: 'a'.repeat(40_000) })).toEqual({ keymap: 'a'.repeat(40_000) });
 });
+
+/** Запасная запись несохранённых полей в `localStorage`. */
+const PENDING = 'ferrum.settings.pending';
+
+test('запись настроек не дошла (вкладку закрыли раньше worker\'а) — поля из запасной записи при следующем запуске', async () => {
+  const legacy = memory();
+  const f = fakeBackend({ theme: 'dark' });
+  const s = await openSettings(f.backend, legacy);
+  // Worker уничтожен вместе со страницей: ответа на запись нет, в базе — прежнее.
+  f.backend.setSettings = () => new Promise(() => {});
+  s.update({ theme: 'light', leftWidth: 320 });
+  const g = fakeBackend({ theme: 'dark', filesView: 'list' });
+  const t = await openSettings(g.backend, legacy);
+  expect(t.current).toMatchObject({ theme: 'light', leftWidth: 320, filesView: 'list' });
+  await tick();
+  expect(g.writes).toEqual([{ theme: 'light', leftWidth: 320 }]);
+  expect(legacy.getItem(PENDING)).toBeNull();
+  expect(legacy.getItem(THEME_KEY)).toBe('light');
+});
+
+test('запасная запись: удачная запись убирает только свои поля, более новое значение остаётся', async () => {
+  const legacy = memory();
+  const f = fakeBackend();
+  const s = await openSettings(f.backend, legacy);
+  const done: (() => void)[] = [];
+  f.backend.setSettings = (p) =>
+    new Promise<void>((resolve) =>
+      done.push(() => {
+        Object.assign(f.data, p);
+        resolve();
+      }),
+    );
+  s.update({ theme: 'light' });
+  s.update({ theme: 'system', pixelSnap: false });
+  expect(JSON.parse(legacy.getItem(PENDING)!)).toEqual({ theme: 'system', pixelSnap: false });
+  done[0]();
+  await tick();
+  // Первая запись (light) прошла, но тема с тех пор новее — остаётся в запасной.
+  expect(JSON.parse(legacy.getItem(PENDING)!)).toEqual({ theme: 'system', pixelSnap: false });
+  done[1]();
+  await tick();
+  expect(legacy.getItem(PENDING)).toBeNull();
+});
+
+test('запасная запись при неудачном чтении — только для показа: без записи, ключ остаётся', async () => {
+  const legacy = memory();
+  legacy.setItem(PENDING, JSON.stringify({ theme: 'light', pixelSnap: 'мусор' }));
+  const f = fakeBackend({ theme: 'dark' });
+  f.backend.settings = async () => {
+    throw new Error('сбой чтения');
+  };
+  const s = await openSettings(f.backend, legacy);
+  expect(s.current.theme).toBe('light');
+  expect(s.current.pixelSnap).toBe(true);
+  await tick();
+  expect(f.writes).toEqual([]);
+  expect(legacy.getItem(PENDING)).not.toBeNull();
+  // Мусор и запись больше предела не читаются.
+  legacy.setItem(PENDING, 'не JSON');
+  expect((await openSettings(fakeBackend({ theme: 'dark' }).backend, legacy)).current.theme).toBe('dark');
+  legacy.setItem(PENDING, JSON.stringify({ theme: 'light', keymap: 'a'.repeat(90_000) }));
+  expect((await openSettings(fakeBackend({ theme: 'dark' }).backend, legacy)).current.theme).toBe('dark');
+});

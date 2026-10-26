@@ -28,6 +28,9 @@ import { MAX_KEYMAP_BYTES, MAX_SETTINGS_BYTES } from '../core/limits';
 export const SETTINGS_KEY = 'ferrum.settings.v1';
 /** Зеркало темы в `localStorage` для `theme-init.js` (тема до первого рисования). */
 export const THEME_KEY = 'ferrum.theme';
+/** Поля, ещё не записанные в базу (запись идёт через worker, а его уничтожают вместе
+ * со страницей раньше, чем она дойдёт): при следующем запуске — поверх базы и в неё. */
+export const PENDING_KEY = 'ferrum.settings.pending';
 
 /** Пределы ширины боковых панелей. */
 export const PANEL_MIN = 200;

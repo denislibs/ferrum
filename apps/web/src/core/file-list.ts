@@ -150,7 +150,10 @@ export type IoOp =
   /** Тесты: засеять `count` пустых записей (только в тестовом режиме). */
   | { op: 'seed'; count: number }
   /** Тесты: следующие записи содержимого отказывают, как при нехватке места. */
-  | { op: 'failWrites'; on: boolean };
+  | { op: 'failWrites'; on: boolean }
+  /** Тесты: записи настроек не отвечают и не пишутся — как worker, уничтоженный
+   * вместе со страницей раньше, чем запись дошла до базы. */
+  | { op: 'holdSettings'; on: boolean };
 
 export type IoRequest = { id: number } & IoOp;
 
@@ -180,6 +183,7 @@ export interface IoResults {
   thumb: Blob | null;
   seed: null;
   failWrites: null;
+  holdSettings: null;
 }
 
 export type ToIo = { t: 'init'; test: boolean } | ({ t: 'req' } & IoRequest);
@@ -298,6 +302,7 @@ export function requestError(r: unknown): string | null {
     case 'seed':
       return isCount(m.count, MAX_SEED) ? null : BAD;
     case 'failWrites':
+    case 'holdSettings':
       return typeof m.on === 'boolean' ? null : BAD;
     default:
       return BAD;
