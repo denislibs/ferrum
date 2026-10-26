@@ -58,6 +58,10 @@ function testIntervals(): SaverOptions {
   return { journalMs: ms('journal'), fullIdleMs: ms('fullSave') };
 }
 
+/** Последняя запись перед остановкой рендера (потеря GPU без перезапуска): снимок
+ * и полный файл — не дольше этого, дальше ядро останавливается без них. */
+const SAVE_STOP_MS = SETTLE_MS * 2;
+
 export function App(props: AppProps) {
   const store = createUiStore();
   const saved = loadSettings(storage());
@@ -169,7 +173,10 @@ export function App(props: AppProps) {
   const [askLeave, setAskLeave] = createSignal<{ reason: string; answer: (go: boolean) => void } | null>(null);
   props.onLeave(async () => {
     if (!saver) return true;
-    if (await saver.save()) return true;
+    // Ядро остановлено: запись либо сразу отвечает (сохранять нечего или нельзя), либо
+    // повисла ещё до остановки — тогда не ждать её вечно, а спросить.
+    const saved = store.state.stopped ? withTimeout(saver.save(), SETTLE_MS, false) : saver.save();
+    if (await saved) return true;
     // Редактор уже снят (перезапуск после сбоя ядра во время ухода): спросить
     // некому — остаться, иначе уход корня ждал бы ответа вечно.
     if (disposed) return false;
@@ -295,7 +302,9 @@ export function App(props: AppProps) {
               // Перезапускать больше нельзя: холст мёртв навсегда, а правки вслепую хуже
               // остановки. Пока ядро живо — полный файл (уход потом без вопроса), затем
               // ядро остановлено: кадров и ввода нет, плашка — как при сбое ядра.
-              if (s && (await s.save()) && store.state.modified) {
+              // Запись не ответила за `SAVE_STOP_MS` (снимок или хранилище повисли) — стоп
+              // всё равно: признак изменений остаётся, уход спросит о несохранённом.
+              if (s && (await withTimeout(s.save(), SAVE_STOP_MS, false)) && store.state.modified) {
                 // Записано: ядро ответит «изменений нет» (`markSaved`) — его ждёт сохранитель
                 // (уход без вопроса). Не ответило за `SETTLE_MS` — стоп всё равно. Событие
                 // в состояние интерфейса кладёт кадр планировщика, а кадров после остановки

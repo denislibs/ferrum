@@ -579,6 +579,31 @@ test('редактор: перезапуски исчерпаны, WebGL2 пот
   await liveWhen(page, 'l.nodes === 2');
 });
 
+test('редактор: перезапуски исчерпаны, запись файла не отвечает — плашка всё равно, уход спрашивает о несохранённом', async ({ page }) => {
+  await stubWorker(page, {});
+  await storedFile(page, '&backend=webgl&fullSave=600000&journal=600000');
+  for (let i = 0; i < 2; i++) {
+    await markOld(page);
+    await page.evaluate(() => window.__ferrum!.core!.testPanic());
+    await newCore(page);
+  }
+  await drawRect(page, 150);
+  // Полная запись повисает навсегда.
+  await page.evaluate(() => {
+    const store = window.__ferrumFiles!.store as unknown as { write: () => Promise<void> };
+    store.write = () => new Promise<void>(() => {});
+  });
+  await fault(page, 'loseGl');
+  await expect(page.getByRole('alert')).toContainText('Рендер остановлен: Контекст WebGL2 потерян', { timeout: 15_000 });
+  expect(await page.evaluate(() => (window.__ferrum!.core as unknown as { stopped: boolean }).stopped)).toBe(true);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  // Уход не висит: вопрос о несохранённом.
+  await page.evaluate(() => (location.hash = '#/'));
+  await expect(page.getByRole('dialog')).toHaveCount(1, { timeout: 10_000 });
+  await page.getByRole('dialog').getByRole('button', { name: 'Уйти' }).click();
+  await expect(page.locator('.fe-files')).toHaveCount(1);
+});
+
 test('редактор: WebGPU потерян навсегда, WebGL2 не запустился — уведомление называет рендер нового ядра @gpu', async ({ page }) => {
   // В новом worker'е проба WebGL2 не даёт контекста: принудительный WebGL2 уступает CPU.
   await stubWorker(page, { noProbeContext: true });
