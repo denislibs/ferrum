@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::atomic::atomic_write;
+use crate::io_error;
 use crate::{
     CONFLICT, DISK_CHANGED, DISK_MISSING, GONE, MAX_JOURNAL_BATCHES, MAX_NAME_CHARS,
     MAX_OPEN_BYTES, MAX_THUMB_BYTES, MAX_WINDOW, NOT_FOUND, UNTITLED,
@@ -36,12 +37,28 @@ fn too_large(limit: u64, actual: Option<u64>) -> String {
 /// Номера сеанса и пачки — целые не больше `Number.MAX_SAFE_INTEGER` (как в интерфейсе).
 const MAX_SAFE: u64 = (1 << 53) - 1;
 
-/// Байты файла и сеанс журнала: `session` — наибольший сеанс среди всех пачек файла
-/// (`None` — пачек нет), как поле `session` ответа `read` веб-хранилища.
+/// Чтение файла для открытия — одним снимком под одной блокировкой библиотеки, как
+/// ответ `read` веб-хранилища: метаданные, байты файла, пачки журнала после них по
+/// порядку записи и `session` — наибольший сеанс среди всех пачек файла (`None` —
+/// пачек нет). Без байтов файла журнала нет: его пачки начаты на снимке, которого нет.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileRead {
+    pub meta: FileMeta,
     pub bytes: Option<Vec<u8>>,
+    pub journal: Vec<Vec<u8>>,
     pub session: Option<u64>,
+    /// Журнал сверх пределов (больше `MAX_JOURNAL_BATCHES` пачек или файл вместе с ним
+    /// больше `MAX_OPEN_BYTES`): файл открывается без него, интерфейс уведомляет.
+    pub journal_dropped: bool,
+}
+
+/// Пачки журнала файла на диске: имена по порядку записи (не больше
+/// `MAX_JOURNAL_BATCHES`), число всех пачек, их общий размер и наибольший сеанс.
+struct JournalScan {
+    names: Vec<String>,
+    count: usize,
+    bytes: u64,
+    session: Option<u64>,
 }
 
 /// Метаданные записи — как `FileMeta` интерфейса (`core/file-list.ts`).
@@ -264,8 +281,9 @@ impl Library {
     fn save_index(&self) -> Result<(), String> {
         let mut list: Vec<&Entry> = self.entries.values().collect();
         list.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
-        let json = serde_json::to_vec_pretty(&list).map_err(|e| e.to_string())?;
-        atomic_write(&self.root.join("library.json"), &json).map_err(|e| e.to_string())
+        let json = serde_json::to_vec_pretty(&list)
+            .map_err(|_| "не удалось подготовить список файлов".to_string())?;
+        atomic_write(&self.root.join("library.json"), &json).map_err(|e| io_error(&e))
     }
 
     /// Меняет запись и сохраняет список; при отказе сохранения запись в памяти — прежняя
@@ -358,7 +376,7 @@ impl Library {
 
     /// Новая запись: файл появится в папке документов при первой записи.
     pub fn create(&mut self, name: &str) -> Result<FileMeta, String> {
-        fs::create_dir_all(&self.docs).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&self.docs).map_err(|e| io_error(&e))?;
         let name = clean_name(name);
         let path = self.free_path(&name);
         let now = now_ms();
@@ -386,7 +404,7 @@ impl Library {
 
     /// Запись для файла, выбранного в диалоге «Открыть…» (тот же файл — прежняя запись).
     pub fn add_existing(&mut self, path: &Path) -> Result<FileMeta, String> {
-        let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        let path = fs::canonicalize(path).map_err(|e| io_error(&e))?;
         if let Some(id) = self
             .entries
             .values()
@@ -396,7 +414,7 @@ impl Library {
             // Открыли файл из корзины — он возвращается (иначе «Очистить корзину» стёрла бы его).
             return self.commit(&id, |e| e.meta.trashed_at = None);
         }
-        let md = fs::metadata(&path).map_err(|e| e.to_string())?;
+        let md = fs::metadata(&path).map_err(|e| io_error(&e))?;
         if md.len() > MAX_OPEN_BYTES {
             return Err(too_large(MAX_OPEN_BYTES, Some(md.len())));
         }
@@ -426,11 +444,41 @@ impl Library {
         })
     }
 
-    /// Байты файла и наибольший сеанс журнала одним вызовом (как `read` веб-хранилища).
+    /// Метаданные, байты файла, сеанс и пачки журнала одним вызовом (как `read`
+    /// веб-хранилища). Журнал сверх пределов файл не запирает: файл читается без него.
     pub fn read_file(&mut self, id: &str) -> Result<FileRead, String> {
         let bytes = self.read(id)?;
-        let session = self.journal_session(id)?;
-        Ok(FileRead { bytes, session })
+        let meta = self.entry(id)?.meta.clone();
+        let scan = self.journal_scan(id);
+        let mut journal = Vec::new();
+        let mut journal_dropped = false;
+        if let Some(b) = &bytes {
+            let mut total = (b.len() as u64).saturating_add(scan.bytes);
+            if scan.count > MAX_JOURNAL_BATCHES || total > MAX_OPEN_BYTES {
+                journal_dropped = true;
+            } else {
+                let dir = self.journal_dir(id);
+                total = b.len() as u64;
+                for name in &scan.names {
+                    let batch = fs::read(dir.join(name)).map_err(|e| io_error(&e))?;
+                    // Пачку дописали извне после подсчёта — предел всё равно держится.
+                    total = total.saturating_add(batch.len() as u64);
+                    if total > MAX_OPEN_BYTES {
+                        journal.clear();
+                        journal_dropped = true;
+                        break;
+                    }
+                    journal.push(batch);
+                }
+            }
+        }
+        Ok(FileRead {
+            meta,
+            bytes,
+            journal,
+            session: scan.session,
+            journal_dropped,
+        })
     }
 
     /// Байты файла; `None` — новый файл, ещё не записанный.
@@ -443,12 +491,12 @@ impl Library {
                 Err(DISK_MISSING.to_string())
             };
         }
-        let len = fs::metadata(&e.path).map_err(|e| e.to_string())?.len();
+        let len = fs::metadata(&e.path).map_err(|e| io_error(&e))?.len();
         if len > MAX_OPEN_BYTES {
             return Err(too_large(MAX_OPEN_BYTES, Some(len)));
         }
-        let bytes = fs::read(&e.path).map_err(|e| e.to_string())?;
-        let modified = mtime(&e.path).map_err(|e| e.to_string())?;
+        let bytes = fs::read(&e.path).map_err(|e| io_error(&e))?;
+        let modified = mtime(&e.path).map_err(|e| io_error(&e))?;
         let size = bytes.len() as f64;
         let e = self.entry_mut(id)?;
         if e.disk_modified != modified || e.meta.size != size {
@@ -490,16 +538,16 @@ impl Library {
             if !e.path.exists() {
                 return Err(DISK_MISSING.to_string());
             }
-            let now = mtime(&e.path).map_err(|e| e.to_string())?;
+            let now = mtime(&e.path).map_err(|e| io_error(&e))?;
             if now != e.disk_modified {
                 return Err(DISK_CHANGED.to_string());
             }
         }
         if let Some(dir) = e.path.parent() {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            fs::create_dir_all(dir).map_err(|e| io_error(&e))?;
         }
-        atomic_write(&e.path, bytes).map_err(|e| e.to_string())?;
-        let modified = mtime(&e.path).map_err(|e| e.to_string())?;
+        atomic_write(&e.path, bytes).map_err(|e| io_error(&e))?;
+        let modified = mtime(&e.path).map_err(|e| io_error(&e))?;
         let e = self.entry_mut(id)?;
         let old = e.meta.clone();
         // Файл уже заменён: его новое время изменения запоминаем при любом исходе, иначе
@@ -529,7 +577,7 @@ impl Library {
         }
         let path = self.root.join("thumbs").join(format!("{id}.png"));
         match png {
-            Some(b) => atomic_write(&path, b).map_err(|e| e.to_string())?,
+            Some(b) => atomic_write(&path, b).map_err(|e| io_error(&e))?,
             None => {
                 let _ = fs::remove_file(&path);
             }
@@ -565,38 +613,44 @@ impl Library {
             return Err(too_large(MAX_OPEN_BYTES, Some(bytes.len() as u64)));
         }
         let dir = self.journal_dir(id);
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        atomic_write(&dir.join(journal_name(session, batch)), bytes).map_err(|e| e.to_string())
+        fs::create_dir_all(&dir).map_err(|e| io_error(&e))?;
+        atomic_write(&dir.join(journal_name(session, batch)), bytes).map_err(|e| io_error(&e))
     }
 
-    /// Пачки журнала на диске: `(сеанс, имя, размер)` по порядку записи. Больше
-    /// `MAX_JOURNAL_BATCHES` пачек — отказ, не чтение всего каталога в память.
-    fn journal_files(&self, id: &str) -> Result<Vec<(u64, String, u64)>, String> {
-        let mut out = Vec::new();
+    /// Пачки журнала на диске. Имён в памяти не больше `MAX_JOURNAL_BATCHES` (не весь
+    /// каталог), но число, размер и наибольший сеанс — по всем пачкам.
+    fn journal_scan(&self, id: &str) -> JournalScan {
+        let mut scan = JournalScan {
+            names: Vec::new(),
+            count: 0,
+            bytes: 0,
+            session: None,
+        };
         let Ok(dir) = fs::read_dir(self.journal_dir(id)) else {
-            return Ok(out);
+            return scan;
         };
         for d in dir.filter_map(|d| d.ok()) {
             let name = d.file_name().to_string_lossy().into_owned();
             if let Some((s, _)) = parse_journal_name(&name) {
-                if out.len() >= MAX_JOURNAL_BATCHES {
-                    return Err(format!(
-                        "Неверная команда: в журнале изменений больше {MAX_JOURNAL_BATCHES} записей"
-                    ));
+                scan.count += 1;
+                scan.bytes = scan
+                    .bytes
+                    .saturating_add(d.metadata().map_or(0, |m| m.len()));
+                scan.session = scan.session.max(Some(s));
+                if scan.names.len() < MAX_JOURNAL_BATCHES {
+                    scan.names.push(name);
                 }
-                let len = d.metadata().map_or(0, |m| m.len());
-                out.push((s, name, len));
             }
         }
-        out.sort_by(|a, b| a.1.cmp(&b.1));
-        Ok(out)
+        scan.names.sort();
+        scan
     }
 
     /// Наибольший сеанс среди всех пачек файла (`None` — пачек нет); не зависит от того,
-    /// есть ли байты файла.
+    /// есть ли байты файла, и от пределов журнала.
     pub fn journal_session(&self, id: &str) -> Result<Option<u64>, String> {
         self.entry(id)?;
-        Ok(self.journal_files(id)?.iter().map(|f| f.0).max())
+        Ok(self.journal_scan(id).session)
     }
 
     /// Имена пачек журнала по порядку записи. Без байтов файла журнала нет: его пачки
@@ -607,15 +661,20 @@ impl Library {
         if !e.path.exists() {
             return Ok(Vec::new());
         }
-        let files = self.journal_files(id)?;
-        let mut total = fs::metadata(&e.path).map_err(|e| e.to_string())?.len();
-        for f in &files {
-            total = total.saturating_add(f.2);
+        let scan = self.journal_scan(id);
+        if scan.count > MAX_JOURNAL_BATCHES {
+            return Err(format!(
+                "Неверная команда: в журнале изменений больше {MAX_JOURNAL_BATCHES} записей"
+            ));
         }
+        let total = fs::metadata(&e.path)
+            .map_err(|e| io_error(&e))?
+            .len()
+            .saturating_add(scan.bytes);
         if total > MAX_OPEN_BYTES {
             return Err(too_large(MAX_OPEN_BYTES, Some(total)));
         }
-        Ok(files.into_iter().map(|f| f.1).collect())
+        Ok(scan.names)
     }
 
     /// Пачка журнала по имени (только имена своего вида: не путь).
@@ -625,11 +684,11 @@ impl Library {
             return Err(BAD.into());
         }
         let path = self.journal_dir(id).join(name);
-        let len = fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        let len = fs::metadata(&path).map_err(|e| io_error(&e))?.len();
         if len > MAX_OPEN_BYTES {
             return Err(too_large(MAX_OPEN_BYTES, Some(len)));
         }
-        fs::read(path).map_err(|e| e.to_string())
+        fs::read(path).map_err(|e| io_error(&e))
     }
 
     fn drop_journal(&self, id: &str, gone: impl Fn(u64, u64) -> bool) {
@@ -710,8 +769,8 @@ impl Library {
         // Тот же файл (регистр, нормализация, жёсткая ссылка) — не копировать и не удалять.
         let same = same_file(path, &e.path);
         if !same && e.path.exists() {
-            let bytes = fs::read(&e.path).map_err(|e| e.to_string())?;
-            atomic_write(path, &bytes).map_err(|e| e.to_string())?;
+            let bytes = fs::read(&e.path).map_err(|e| io_error(&e))?;
+            atomic_write(path, &bytes).map_err(|e| io_error(&e))?;
         }
         let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let modified = mtime(&path).unwrap_or(0.0);
@@ -734,6 +793,6 @@ impl Library {
     pub fn copy_to(&self, id: &str, path: &Path) -> Result<(), String> {
         let e = self.entry(id)?;
         let bytes = fs::read(&e.path).map_err(|_| DISK_MISSING.to_string())?;
-        atomic_write(path, &bytes).map_err(|e| e.to_string())
+        atomic_write(path, &bytes).map_err(|e| io_error(&e))
     }
 }

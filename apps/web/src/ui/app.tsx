@@ -6,7 +6,7 @@
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { detectPlatform } from '../core/core';
-import { MAX_OPEN_BYTES } from '../core/limits';
+import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
 import { boot, dismissSplash, isTestMode } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { EditorContext, type Editor } from './context';
@@ -202,8 +202,10 @@ export function App(props: AppProps) {
       if (!r.bytes) return null;
       let journal = r.journal;
       const total = journal.reduce((n, b) => n + b.byteLength, r.bytes.byteLength);
-      if (total > MAX_OPEN_BYTES) {
-        // Файл с журналом больше предела открытия: открыть хотя бы файл.
+      if (r.journalTooLarge || journal.length > MAX_JOURNAL_ENTRIES || total > MAX_OPEN_BYTES) {
+        // Журнал сверх пределов (пачек больше 100 000 или файл с журналом больше 512 МБ;
+        // хранилище могло не читать его вовсе): ядро отвергло бы всё открытие — открыть
+        // хотя бы файл. Первая полная запись сотрёт прежние сеансы журнала.
         store.toast('Журнал изменений слишком большой — файл открыт без несохранённых правок', 'error');
         journal = [];
       }

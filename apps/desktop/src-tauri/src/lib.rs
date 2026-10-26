@@ -24,8 +24,8 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use ferrum_desktop_store::{FileMeta, Library, ListResult, Section, Settings};
-use serde::Deserialize;
+use ferrum_desktop_store::{io_error, FileMeta, Library, ListResult, ReadParts, Section, Settings};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
@@ -34,6 +34,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 struct Desk {
     lib: Mutex<Library>,
     settings: Mutex<Settings>,
+    /// Части чтений файла, ещё не забранные интерфейсом (`files_read_part`).
+    parts: Mutex<ReadParts>,
 }
 
 type Res<T> = Result<T, String>;
@@ -48,6 +50,9 @@ impl Desk {
     }
     fn settings(&self) -> MutexGuard<'_, Settings> {
         self.settings.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    fn parts(&self) -> MutexGuard<'_, ReadParts> {
+        self.parts.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -108,16 +113,50 @@ fn files_create(name: String, desk: State<'_, Desk>) -> Res<FileMeta> {
     desk.lib().create(&name)
 }
 
-/// Байты файла; пустой ответ — новый файл без байтов.
+/// Байты файла («Скачать копию»); пустой ответ — новый файл без байтов.
 #[tauri::command(async)]
 fn files_read(id: String, desk: State<'_, Desk>) -> Res<Response> {
     Ok(Response::new(desk.lib().read(&id)?.unwrap_or_default()))
 }
 
-/// Наибольший сеанс среди пачек журнала файла (`null` — пачек нет).
+/// Ответ `files_read_open`: всё, кроме байтов; байты — `parts` частей чтения `ticket`
+/// (сначала файл, если `bytes`, затем пачки журнала по порядку).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadHead {
+    meta: FileMeta,
+    session: Option<u64>,
+    ticket: u64,
+    parts: usize,
+    bytes: bool,
+    journal_dropped: bool,
+}
+
+/// Открытие файла: метаданные, байты, сеанс и журнал — одним снимком под одной
+/// блокировкой библиотеки (запись между частями чтения не смешает старые байты с
+/// новым поколением). Байты ждут в `parts`, интерфейс забирает их по одной.
 #[tauri::command(async)]
-fn files_journal_session(id: String, desk: State<'_, Desk>) -> Res<Option<u64>> {
-    desk.lib().journal_session(&id)
+fn files_read_open(id: String, desk: State<'_, Desk>) -> Res<ReadHead> {
+    let r = desk.lib().read_file(&id)?;
+    let bytes = r.bytes.is_some();
+    let mut parts: Vec<Vec<u8>> = r.bytes.into_iter().collect();
+    parts.extend(r.journal);
+    let count = parts.len();
+    let ticket = desk.parts().put(parts);
+    Ok(ReadHead {
+        meta: r.meta,
+        session: r.session,
+        ticket,
+        parts: count,
+        bytes,
+        journal_dropped: r.journal_dropped,
+    })
+}
+
+/// Следующая часть чтения `ticket` — сырым ответом (`ArrayBuffer` в окне).
+#[tauri::command(async)]
+fn files_read_part(ticket: u64, desk: State<'_, Desk>) -> Res<Response> {
+    Ok(Response::new(desk.parts().take(ticket)?))
 }
 
 #[tauri::command(async)]
@@ -144,16 +183,6 @@ fn files_thumb(id: String, desk: State<'_, Desk>) -> Res<Response> {
 fn files_journal_append(request: Request<'_>, desk: State<'_, Desk>) -> Res<()> {
     let (bytes, a): (&[u8], JournalArgs) = raw(&request)?;
     desk.lib().journal_append(&a.id, a.session, a.batch, bytes)
-}
-
-#[tauri::command(async)]
-fn files_journal_names(id: String, desk: State<'_, Desk>) -> Res<Vec<String>> {
-    desk.lib().journal_names(&id)
-}
-
-#[tauri::command(async)]
-fn files_journal_read(id: String, name: String, desk: State<'_, Desk>) -> Res<Response> {
-    Ok(Response::new(desk.lib().journal_read(&id, &name)?))
 }
 
 #[tauri::command(async)]
@@ -333,8 +362,9 @@ fn open_desk(app: &tauri::App) -> Result<Desk, String> {
     let (lib, warnings) = Library::open(&data, &docs).map_err(|e| match e.kind() {
         ErrorKind::WouldBlock => e.to_string(),
         _ => format!(
-            "Не удалось открыть библиотеку файлов ({}): {e}",
-            data.display()
+            "Не удалось открыть библиотеку файлов ({}): {}",
+            data.display(),
+            io_error(&e)
         ),
     })?;
     for w in warnings {
@@ -343,13 +373,15 @@ fn open_desk(app: &tauri::App) -> Result<Desk, String> {
     let settings_path = config.join("settings.json");
     let settings = Settings::open(&settings_path).map_err(|e| {
         format!(
-            "Не удалось открыть настройки ({}): {e}",
-            settings_path.display()
+            "Не удалось открыть настройки ({}): {}",
+            settings_path.display(),
+            io_error(&e)
         )
     })?;
     Ok(Desk {
         lib: Mutex::new(lib),
         settings: Mutex::new(settings),
+        parts: Mutex::new(ReadParts::default()),
     })
 }
 
@@ -397,13 +429,12 @@ pub fn run() {
             files_get,
             files_create,
             files_read,
-            files_journal_session,
+            files_read_open,
+            files_read_part,
             files_write,
             files_write_thumb,
             files_thumb,
             files_journal_append,
-            files_journal_names,
-            files_journal_read,
             files_rename,
             files_touch,
             files_trash,

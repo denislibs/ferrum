@@ -22,11 +22,29 @@
 
 mod atomic;
 mod library;
+mod parts;
 mod settings;
+
+use std::io;
 
 pub use atomic::atomic_write;
 pub use library::{FileMeta, FileRead, Library, ListResult, Section};
+pub use parts::ReadParts;
 pub use settings::{Settings, SETTINGS_FIELDS};
+
+/// Ошибка ОС — словами для пользователя (как `storageError` и `diskError` веб-версии):
+/// частые причины — по-русски, прочие — русским началом и подробностью ОС после него.
+/// Интерфейс ставит текст после «Не удалось сохранить файл: » и подобного.
+pub fn io_error(e: &io::Error) -> String {
+    use io::ErrorKind as K;
+    match e.kind() {
+        K::StorageFull | K::QuotaExceeded => "недостаточно места на диске".into(),
+        K::PermissionDenied => "нет доступа к файлу или папке".into(),
+        K::ReadOnlyFilesystem => "диск доступен только для чтения".into(),
+        K::NotFound => "файл или папка не найдены".into(),
+        _ => format!("ошибка диска: {e}"),
+    }
+}
 
 /// Тексты отказов — те же, что у веб-хранилища (`core/file-list.ts`).
 pub const CONFLICT: &str =

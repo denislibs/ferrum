@@ -44,7 +44,7 @@ import {
   type IoResults,
   type ToIo,
 } from '../core/file-list';
-import { MAX_OPEN_BYTES, tooLarge } from '../core/limits';
+import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, tooLarge } from '../core/limits';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const DB_NAME = 'ferrum';
@@ -309,14 +309,20 @@ function journalRange(id: string): IDBKeyRange {
 }
 
 /** Байты файла и пачки журнала после них — одной транзакцией. Журнал без байтов не
- * отдаётся: его пачки начаты на снимке, которого нет. */
+ * отдаётся: его пачки начаты на снимке, которого нет. Пачек больше
+ * `MAX_JOURNAL_ENTRIES` — не читаются вовсе (сначала дешёвый `count`): файл
+ * открывается без журнала, с уведомлением (`journalTooLarge`). */
 async function readFile(id: string): Promise<{ value: IoResults['read']; transfer: Transferable[] }> {
   const m = meta(id);
   const d = await open();
   const tx = d.transaction(['bytes', 'journal']);
+  const journalStore = tx.objectStore('journal');
   const [raw, entries, last] = await Promise.all([
     request(tx.objectStore('bytes').get(id)) as Promise<unknown>,
-    request(tx.objectStore('journal').getAll(journalRange(id))) as Promise<unknown[]>,
+    // `getAll` — в обработчике ответа `count`: транзакция ещё активна.
+    request(journalStore.count(journalRange(id))).then((n) =>
+      n > MAX_JOURNAL_ENTRIES ? null : (request(journalStore.getAll(journalRange(id))) as Promise<unknown[]>),
+    ),
     // Последний ключ `[id, сеанс, номер]` — наибольший сеанс (ключи упорядочены).
     request(tx.objectStore('journal').openKeyCursor(journalRange(id), 'prev')).then((c) => c?.key),
   ]);
@@ -333,10 +339,11 @@ async function readFile(id: string): Promise<{ value: IoResults['read']; transfe
       await done(w);
     }
   }
-  const journal = bytes ? entries.filter((b): b is ArrayBuffer => b instanceof ArrayBuffer) : [];
+  const journal = bytes && entries ? entries.filter((b): b is ArrayBuffer => b instanceof ArrayBuffer) : [];
+  const journalTooLarge = !!bytes && entries === null;
   const s = Array.isArray(last) ? last[1] : null;
   const session = typeof s === 'number' && Number.isSafeInteger(s) && s >= 0 ? s : null;
-  return { value: { meta: m, bytes, journal, session }, transfer: [...(bytes ? [bytes] : []), ...journal] };
+  return { value: { meta: m, bytes, journal, session, journalTooLarge }, transfer: [...(bytes ? [bytes] : []), ...journal] };
 }
 
 async function readBytes(id: string): Promise<ArrayBuffer | null> {

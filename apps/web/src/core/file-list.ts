@@ -163,8 +163,10 @@ export interface IoResults {
   get: FileMeta | null;
   create: FileMeta;
   /** `journal` — пачки, записанные после байтов файла, по порядку (без байтов — пусто);
-   * `session` — наибольший сеанс среди всех пачек файла (`null` — пачек нет). */
-  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[]; session: number | null };
+   * `session` — наибольший сеанс среди всех пачек файла (`null` — пачек нет);
+   * `journalTooLarge` — журнал сверх пределов (больше `MAX_JOURNAL_ENTRIES` пачек или
+   * файл вместе с ним больше `MAX_OPEN_BYTES`) не прочитан: файл открывается без него. */
+  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[]; session: number | null; journalTooLarge?: boolean };
   write: FileMeta;
   appendJournal: null;
   journalCount: number;

@@ -55,33 +55,86 @@ test('запись — сырым телом с параметрами в заг
   expect(calls[1]).toMatchObject({ cmd: 'files_write_thumb', args: new Uint8Array(0) });
 });
 
-test('чтение — байты и пачки журнала по порядку; пустой ответ — новый файл без журнала', async () => {
+test('чтение — одним снимком: метаданные, сеанс и части (файл, затем пачки по порядку); пустое — новый файл без журнала', async () => {
   const meta = { id: ID, name: 'Макет', version: 1 };
-  let bytes = new Uint8Array([7, 7]).buffer;
-  let session: number | null = 4;
+  let head = { meta, session: 4 as number | null, ticket: 9, parts: 3, bytes: true, journalDropped: false };
+  let parts = [new Uint8Array([7, 7]).buffer, new Uint8Array([1]).buffer, new Uint8Array([2]).buffer];
   const calls = fakeIpc({
-    files_read: () => bytes,
-    files_get: () => meta,
-    files_journal_session: () => session,
-    files_journal_names: () => ['a', 'b'],
-    files_journal_read: (a) => new Uint8Array([(a as { name: string }).name === 'a' ? 1 : 2]).buffer,
+    files_read_open: () => head,
+    files_read_part: (a) => {
+      expect(a).toEqual({ ticket: head.ticket });
+      return parts.shift();
+    },
   });
   const s = new TauriFileStore();
   const r = await s.read(ID);
+  expect(calls[0]).toMatchObject({ cmd: 'files_read_open', args: { id: ID } });
+  expect(calls.map((c) => c.cmd)).toEqual(['files_read_open', 'files_read_part', 'files_read_part', 'files_read_part']);
   expect(r.meta).toEqual(meta);
   expect(new Uint8Array(r.bytes!)).toEqual(new Uint8Array([7, 7]));
   expect(r.journal.map((b) => new Uint8Array(b)[0])).toEqual([1, 2]);
   expect(r.session).toBe(4);
-  bytes = new ArrayBuffer(0);
-  calls.length = 0;
+  expect(r.journalTooLarge).toBe(false);
   // Сеанс — наибольший среди пачек и без байтов файла (как у веб-хранилища).
+  head = { ...head, parts: 0, bytes: false };
+  calls.length = 0;
   const empty = await s.read(ID);
   expect(empty.bytes).toBeNull();
   expect(empty.journal).toEqual([]);
   expect(empty.session).toBe(4);
-  expect(calls.some((c) => c.cmd === 'files_journal_names')).toBe(false);
-  session = null;
-  expect((await s.read(ID)).session).toBeNull();
+  expect(calls.map((c) => c.cmd)).toEqual(['files_read_open']);
+  // Журнал сверх пределов: файл без журнала и признак — уведомит редактор.
+  head = { ...head, parts: 1, bytes: true, journalDropped: true, session: null };
+  parts = [new Uint8Array([5]).buffer];
+  const big = await s.read(ID);
+  expect(new Uint8Array(big.bytes!)).toEqual(new Uint8Array([5]));
+  expect(big.journal).toEqual([]);
+  expect(big.journalTooLarge).toBe(true);
+  expect(big.session).toBeNull();
+});
+
+test('чтение, запись и журнал — по очереди: чтение не встаёт между частями записи', async () => {
+  const log: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  fakeIpc({
+    files_write: async () => {
+      log.push('write:start');
+      await held;
+      log.push('write:end');
+      return { id: ID, version: 2 };
+    },
+    files_write_thumb: () => {
+      log.push('thumb');
+      return { id: ID, version: 2, thumbVersion: 1 };
+    },
+    files_journal_append: () => {
+      log.push('append');
+      return null;
+    },
+    files_read_open: () => {
+      log.push('read');
+      return { meta: { id: ID, version: 2 }, session: null, ticket: 1, parts: 0, bytes: false, journalDropped: false };
+    },
+  });
+  const s = new TauriFileStore();
+  const w = s.write(ID, new ArrayBuffer(1), new ArrayBuffer(1), 1, { session: 1, upTo: 1 });
+  const r = s.read(ID);
+  const a = s.appendJournal(ID, { session: 2, batch: 1 }, new ArrayBuffer(1));
+  await new Promise((t) => setTimeout(t, 10));
+  expect(log).toEqual(['write:start']);
+  release();
+  await Promise.all([w, r, a]);
+  expect(log).toEqual(['write:start', 'write:end', 'thumb', 'read', 'append']);
+  // Отказ в очереди не останавливает следующие.
+  fakeIpc({
+    files_journal_append: () => {
+      throw 'нет доступа к файлу или папке';
+    },
+    files_read_open: () => ({ meta: { id: ID }, session: null, ticket: 1, parts: 0, bytes: false, journalDropped: false }),
+  });
+  await expect(s.appendJournal(ID, { session: 2, batch: 2 }, new ArrayBuffer(1))).rejects.toThrow('нет доступа к файлу или папке');
+  await expect(s.read(ID)).resolves.toMatchObject({ bytes: null });
 });
 
 test('отказ Rust — ошибка с тем же текстом; список узнаёт о своих правках', async () => {

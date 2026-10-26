@@ -387,7 +387,8 @@ fn failed_index_save_does_not_advance_the_generation() {
     lib.journal_append(&m.id, 1, 1, b"j").unwrap();
     set_mode(&data, 0o555);
     let err = lib.write(&m.id, b"BB", 1.0, Some((1, 1)));
-    assert!(err.is_err(), "индекс не записан — отказ");
+    // Причина — по-русски, без английского текста ОС.
+    assert_eq!(err, Err("нет доступа к файлу или папке".to_string()));
     assert_eq!(fs::read(docs.join("Индекс.ferrum")).unwrap(), b"BB");
     assert_eq!(lib.get(&m.id).unwrap().version, 1.0, "поколение прежнее");
     assert_eq!(lib.journal_names(&m.id).unwrap().len(), 1, "журнал цел");
@@ -556,4 +557,121 @@ fn settings_open_drops_unknown_and_non_simple_fields() {
             .clone(),
     )
     .unwrap();
+}
+
+#[test]
+fn read_file_is_one_snapshot_of_meta_bytes_session_and_journal() {
+    let (mut lib, ..) = lib();
+    let _cleanup = cleanup();
+    let m = lib.create("Снимок чтения").unwrap();
+    lib.journal_append(&m.id, 20, 1, b"before").unwrap();
+    // Без байтов файла журнала нет, но сеанс — наибольший среди пачек.
+    let empty = lib.read_file(&m.id).unwrap();
+    assert_eq!(empty.bytes, None);
+    assert!(empty.journal.is_empty() && !empty.journal_dropped);
+    assert_eq!((empty.session, empty.meta.version), (Some(20), 0.0));
+    lib.write(&m.id, b"F", 0.0, None).unwrap();
+    lib.journal_append(&m.id, 20, 2, b"b").unwrap();
+    lib.journal_append(&m.id, 10, 7, b"c").unwrap();
+    let r = lib.read_file(&m.id).unwrap();
+    assert_eq!(r.meta.version, 1.0, "метаданные — того же чтения");
+    assert_eq!(r.bytes.as_deref(), Some(&b"F"[..]));
+    assert_eq!(
+        r.journal,
+        vec![b"c".to_vec(), b"before".to_vec(), b"b".to_vec()]
+    );
+    assert_eq!(r.session, Some(20));
+    assert!(!r.journal_dropped);
+    // Запись со снимком: новые байты, новое поколение и без вошедших пачек — вместе.
+    lib.write(&m.id, b"F2", 1.0, Some((20, 1))).unwrap();
+    let r = lib.read_file(&m.id).unwrap();
+    assert_eq!(
+        (r.meta.version, r.bytes.as_deref()),
+        (2.0, Some(&b"F2"[..]))
+    );
+    assert_eq!(r.journal, vec![b"b".to_vec()]);
+}
+
+#[test]
+fn journal_over_the_limits_opens_the_file_without_it() {
+    let (mut lib, data, _) = lib();
+    let _cleanup = cleanup();
+    let m = lib.create("Большой журнал").unwrap();
+    lib.write(&m.id, b"F", 0.0, None).unwrap();
+    let dir = data.join("journal").join(&m.id);
+    fs::create_dir_all(&dir).unwrap();
+    // Файл вместе с журналом больше 512 МБ (разреженный файл).
+    let big = dir.join(format!("{:020}-{:020}.bin", 3, 1));
+    fs::File::create(&big)
+        .unwrap()
+        .set_len(MAX_OPEN_BYTES)
+        .unwrap();
+    let r = lib.read_file(&m.id).unwrap();
+    assert_eq!(r.bytes.as_deref(), Some(&b"F"[..]));
+    assert!(r.journal.is_empty() && r.journal_dropped);
+    assert_eq!(r.session, Some(3));
+    fs::remove_file(&big).unwrap();
+    // Больше 100 000 пачек.
+    for i in 0..=MAX_JOURNAL_BATCHES as u64 {
+        fs::write(dir.join(format!("{:020}-{:020}.bin", 1 + i % 2, i)), b"").unwrap();
+    }
+    let r = lib.read_file(&m.id).unwrap();
+    assert!(r.journal.is_empty() && r.journal_dropped);
+    assert_eq!(r.session, Some(2), "сеанс — и при журнале сверх предела");
+    assert_eq!(lib.journal_session(&m.id).unwrap(), Some(2));
+    // Запись со снимком нового сеанса стирает прежние сеансы — журнал снова в пределах.
+    lib.write(&m.id, b"F2", 1.0, Some((5, 0))).unwrap();
+    let r = lib.read_file(&m.id).unwrap();
+    assert!(r.journal.is_empty() && !r.journal_dropped);
+}
+
+#[test]
+fn os_errors_are_in_russian_with_the_detail_after_them() {
+    use std::io::{Error, ErrorKind};
+    assert_eq!(
+        io_error(&Error::from(ErrorKind::StorageFull)),
+        "недостаточно места на диске"
+    );
+    assert_eq!(
+        io_error(&Error::from(ErrorKind::PermissionDenied)),
+        "нет доступа к файлу или папке"
+    );
+    assert_eq!(
+        io_error(&Error::from(ErrorKind::NotFound)),
+        "файл или папка не найдены"
+    );
+    assert_eq!(
+        io_error(&Error::from(ErrorKind::ReadOnlyFilesystem)),
+        "диск доступен только для чтения"
+    );
+    let other = io_error(&Error::other("Device not configured"));
+    assert_eq!(other, "ошибка диска: Device not configured");
+    #[cfg(unix)]
+    assert_eq!(
+        io_error(&Error::from_raw_os_error(28)),
+        "недостаточно места на диске",
+        "ENOSPC"
+    );
+}
+
+#[test]
+fn read_parts_are_taken_in_order_and_only_once() {
+    let mut parts = ReadParts::default();
+    let a = parts.put(vec![b"file".to_vec(), b"j1".to_vec()]);
+    let b = parts.put(vec![b"other".to_vec()]);
+    assert_ne!(a, b);
+    assert_eq!(parts.take(a).unwrap(), b"file");
+    assert_eq!(parts.take(b).unwrap(), b"other");
+    assert_eq!(parts.take(a).unwrap(), b"j1");
+    // Всё отдано — чтения больше нет.
+    assert!(parts.take(a).unwrap_err().contains("откройте файл заново"));
+    // Брошенные чтения не копятся: старое вытесняется новыми.
+    let old = parts.put(vec![b"x".to_vec()]);
+    for _ in 0..ReadParts::KEEP {
+        parts.put(vec![b"y".to_vec()]);
+    }
+    assert!(parts.take(old).is_err());
+    // Пустое чтение (новый файл без журнала) не занимает места.
+    let none = parts.put(Vec::new());
+    assert!(parts.take(none).is_err());
 }

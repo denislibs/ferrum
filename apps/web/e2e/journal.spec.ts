@@ -4,7 +4,7 @@
 // к экрану файлов стирают журнал.
 
 import { expect, test, type Page } from '@playwright/test';
-import { drawRect, editorReady, journalCount, live, liveWhen, storedFile } from './helpers';
+import { drawRect, editorReady, fileId, journalCount, live, liveWhen, storedFile } from './helpers';
 
 const meta = (page: Page, id: string) => page.evaluate((i) => window.__ferrumFiles!.store.get(i), id);
 const toast = (page: Page, text: string) => page.locator('.fe-toast', { hasText: text });
@@ -104,4 +104,45 @@ test('повреждённая пачка: файл открыт, одно ув�
   await expect(
     toast(page, 'Не все несохранённые изменения удалось восстановить: журнал изменений повреждён'),
   ).toHaveCount(1);
+});
+
+test('журнал больше 100 000 пачек: файл открыт без журнала, одно уведомление; запись стирает журнал', async ({ page }) => {
+  const id = await storedFile(page, '&fullSave=600000');
+  // 100 001 пачка прежнего сеанса — прямо в базу (одной транзакцией).
+  await page.evaluate(
+    (i) =>
+      new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open('ferrum');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const d = req.result;
+          const tx = d.transaction('journal', 'readwrite');
+          const st = tx.objectStore('journal');
+          const one = new Uint8Array([1]).buffer;
+          for (let b = 0; b <= 100_000; b++) st.put(one, [i, 1, b]);
+          tx.oncomplete = () => {
+            d.close();
+            resolve();
+          };
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+    id,
+  );
+  // Хранилище не читает такой журнал: сначала число пачек.
+  const r = await page.evaluate(async (i) => {
+    const x = await window.__ferrumFiles!.store.read(i);
+    return { bytes: x.bytes !== null, journal: x.journal.length, tooLarge: x.journalTooLarge, session: (x.session ?? 0) >= 1 };
+  }, id);
+  expect(r).toEqual({ bytes: true, journal: 0, tooLarge: true, session: true });
+  await page.reload();
+  await editorReady(page);
+  await liveWhen(page, 'l.nodes === 1');
+  await expect(toast(page, 'Журнал изменений слишком большой — файл открыт без несохранённых правок')).toHaveCount(1);
+  expect(fileId(page)).toBe(id);
+  // Правка и Ctrl+S: полный файл стирает прежний сеанс журнала целиком.
+  await drawRect(page, 150);
+  await page.locator('canvas').focus();
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect.poll(() => journalCount(page, id), { timeout: 30_000 }).toBe(0);
 });

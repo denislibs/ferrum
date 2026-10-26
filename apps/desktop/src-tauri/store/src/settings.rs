@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::atomic::atomic_write;
+use crate::io_error;
 
 /// Поля настроек — те же, что `SETTINGS_FIELDS` интерфейса.
 pub const SETTINGS_FIELDS: [&str; 7] = [
@@ -71,14 +72,15 @@ impl Settings {
         }
         let mut next = self.values.clone();
         next.extend(patch);
-        let json = serde_json::to_vec_pretty(&next).map_err(|e| e.to_string())?;
+        let json = serde_json::to_vec_pretty(&next)
+            .map_err(|_| "не удалось подготовить настройки".to_string())?;
         if json.len() > MAX_SETTINGS_BYTES {
             return Err("Слишком большой объём данных: настройки больше 80 КБ".into());
         }
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            fs::create_dir_all(dir).map_err(|e| io_error(&e))?;
         }
-        atomic_write(&self.path, &json).map_err(|e| e.to_string())?;
+        atomic_write(&self.path, &json).map_err(|e| io_error(&e))?;
         self.values = next;
         Ok(())
     }

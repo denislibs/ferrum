@@ -51,6 +51,28 @@ function raw<T>(cmd: string, bytes: ArrayBuffer, args: Record<string, unknown>):
 
 const bytesOrNull = (b: ArrayBuffer) => (b.byteLength > 0 ? b : null);
 
+/** Чтение, запись и журнал — по одному, в порядке вызова (как `serial` worker'а
+ * ввода-вывода): чтение после сбоя ядра не встаёт между записью файла и записью
+ * превью прежнего редактора, пачка, отправленная раньше чтения, в нём уже есть.
+ * Очередь одна на окно (не на экземпляр): Rust-хранилище тоже одно. */
+let queue: Promise<unknown> = Promise.resolve();
+function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const p = queue.then(fn, fn);
+  queue = p.catch(() => {});
+  return p;
+}
+
+/** Ответ `files_read_open`: снимок под одной блокировкой библиотеки; байты — `parts`
+ * частей чтения `ticket` (сначала файл, если `bytes`, затем пачки журнала). */
+interface ReadHead {
+  meta: FileMeta;
+  session: number | null;
+  ticket: number;
+  parts: number;
+  bytes: boolean;
+  journalDropped: boolean;
+}
+
 export class TauriFileStore implements FileStore, SettingsBackend {
   private readonly listeners = new Set<() => void>();
 
@@ -83,21 +105,28 @@ export class TauriFileStore implements FileStore, SettingsBackend {
     for (const l of this.listeners) l();
     return meta;
   }
-  async read(id: string) {
-    const bytes = bytesOrNull(await invoke<ArrayBuffer>('files_read', { id }));
-    const meta = await this.get(id);
-    if (!meta) throw new Error('Файл не найден');
-    // Наибольший сеанс среди пачек — и без байтов файла (новый сеанс берётся после него).
-    const session = await invoke<number | null>('files_journal_session', { id });
-    const journal: ArrayBuffer[] = [];
-    if (bytes) {
-      for (const name of await invoke<string[]>('files_journal_names', { id })) {
-        journal.push(await invoke<ArrayBuffer>('files_journal_read', { id, name }));
-      }
-    }
-    return { meta, bytes, journal, session };
+  read(id: string) {
+    return serial(async () => {
+      // Метаданные, сеанс (наибольший среди пачек — и без байтов файла) и журнал —
+      // одним снимком в Rust; части забираются сырыми ответами, без JSON и копий.
+      const head = await invoke<ReadHead>('files_read_open', { id });
+      const parts: ArrayBuffer[] = [];
+      for (let i = 0; i < head.parts; i++) parts.push(await invoke<ArrayBuffer>('files_read_part', { ticket: head.ticket }));
+      const file = head.bytes ? parts.shift() : undefined;
+      const bytes = file ? bytesOrNull(file) : null;
+      return { meta: head.meta, bytes, journal: bytes ? parts : [], session: head.session, journalTooLarge: head.journalDropped };
+    });
   }
-  async write(
+  write(
+    id: string,
+    bytes: ArrayBuffer,
+    thumb: ArrayBuffer | null | 'keep',
+    base: number,
+    journal: { session: number; upTo: number } | null,
+  ) {
+    return serial(() => this.writeNow(id, bytes, thumb, base, journal));
+  }
+  private async writeNow(
     id: string,
     bytes: ArrayBuffer,
     thumb: ArrayBuffer | null | 'keep',
@@ -120,7 +149,7 @@ export class TauriFileStore implements FileStore, SettingsBackend {
     return meta;
   }
   async appendJournal(id: string, mark: JournalMark, bytes: ArrayBuffer) {
-    await raw<null>('files_journal_append', bytes, { id, session: mark.session, batch: mark.batch });
+    await serial(() => raw<null>('files_journal_append', bytes, { id, session: mark.session, batch: mark.batch }));
   }
   async blob(id: string) {
     const b = bytesOrNull(await invoke<ArrayBuffer>('files_read', { id }));
