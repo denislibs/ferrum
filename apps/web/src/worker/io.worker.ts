@@ -31,6 +31,7 @@ import {
   DISK_ACCESS,
   DISK_CHANGED,
   DISK_MISSING,
+  DISK_TAKEN,
   GONE,
   nameFromFile,
   cleanName,
@@ -535,6 +536,13 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
       return { value: m };
     }
     case 'attachDisk': {
+      // Файл другой записи не занять: запись затёрла бы единственную копию той (как в
+      // десктопе). Вопрос браузера «заменить?» об этом не говорит.
+      for (const m of metas.values()) {
+        if (m.id === r.file || !m.disk) continue;
+        const rec = await diskOf(m.id);
+        if (rec && (await rec.handle.isSameEntry(r.handle))) throw new Error(DISK_TAKEN);
+      }
       // Байты записи — в выбранный файл (их может не быть: новый файл, ещё не сохранённый).
       // Запись уже на диске — её байты в прежнем файле, не в базе.
       const cur = meta(r.file).disk ? await diskOf(r.file) : null;
@@ -554,12 +562,23 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
       return { value: next };
     }
     case 'appendJournal': {
-      // Запись есть (удалённый навсегда файл журнал не воскрешает).
+      // Запись есть — по базе, в той же транзакции (удалённый навсегда, в том числе в
+      // другой вкладке, файл журнал не воскрешает: осиротевших пачек нет).
       meta(r.file);
       const d = await open();
-      const tx = rw(d, ['journal']);
-      tx.objectStore('journal').put(r.bytes, [r.file, r.session, r.batch]);
-      await done(tx);
+      const tx = rw(d, ['meta', 'journal']);
+      let missing = false;
+      const req = tx.objectStore('meta').get(r.file);
+      req.onsuccess = () => {
+        if (validMeta(req.result)) tx.objectStore('journal').put(r.bytes, [r.file, r.session, r.batch]);
+        else {
+          missing = true;
+          tx.abort();
+        }
+      };
+      await done(tx).catch((e: unknown) => {
+        throw missing ? new Error('Файл не найден') : e;
+      });
       return { value: null };
     }
     case 'setSettings': {

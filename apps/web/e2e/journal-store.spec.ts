@@ -84,6 +84,34 @@ test('пачка удалённого файла — отказ «Файл не 
   expect(message).toBe('Файл не найден');
 });
 
+test('пачка файла, удалённого в другой вкладке, — отказ по базе, сиротских пачек нет', async ({ page }) => {
+  const r = await page.evaluate(async () => {
+    const s = window.__ferrumFiles!.store;
+    const m = await s.create('Чужое удаление', new Blob([new Uint8Array([1])]));
+    // Другая вкладка удалила запись: в памяти этого worker'а она ещё есть.
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('ferrum');
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const d = req.result;
+        const tx = d.transaction('meta', 'readwrite');
+        tx.objectStore('meta').delete(m.id);
+        tx.oncomplete = () => {
+          d.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+    const message = await s.appendJournal(m.id, { session: 1, batch: 1 }, new ArrayBuffer(1)).then(
+      () => 'записано',
+      (e: Error) => e.message,
+    );
+    return { message, count: await s.journalCount(m.id) };
+  });
+  expect(r).toEqual({ message: 'Файл не найден', count: 0 });
+});
+
 test('база версии 1 с файлами открывается как нынешняя (3): файлы целы, журнал работает', async ({ browser }) => {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();

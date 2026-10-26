@@ -182,6 +182,29 @@ test('«Сохранить на диск…» у записи, уже связа
   await liveWhen(page, 'l.nodes === 1');
 });
 
+test('«Сохранить на диск…» в файл другой записи — отказ, тот файл цел', async ({ page }) => {
+  await stubPickers(page);
+  const first = await storedFile(page, '&fullSave=600000');
+  await fileMenu(page, 'Сохранить на диск…');
+  await expect(toast(page, 'Файл сохранён на диск: Без названия.ferrum')).toHaveCount(1);
+  const size = await diskSize(page, 'Без названия.ferrum');
+  // Другая запись с двумя прямоугольниками — «Сохранить на диск…» в тот же файл.
+  await nextEditor(page, async () => {
+    await page.evaluate(() => (location.hash = '#/new'));
+  });
+  const second = fileId(page);
+  expect(second).not.toBe(first);
+  await drawRect(page);
+  await drawRect(page, 150);
+  await fileMenu(page, 'Сохранить на диск…');
+  await expect(
+    toast(page, 'Не удалось сохранить на диск: Этот файл принадлежит другой записи Ferrum — выберите другое имя'),
+  ).toHaveCount(1);
+  expect(await diskSize(page, 'Без названия.ferrum')).toBe(size);
+  expect((await meta(page, second))!.disk).toBeUndefined();
+  expect((await meta(page, first))!.disk).toBe('Без названия.ferrum');
+});
+
 test('файл на диске изменён другой программой: журнал в базе, уход спрашивает', async ({ page }) => {
   await testMode(page);
   await stubPickers(page);
