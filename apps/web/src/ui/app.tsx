@@ -22,7 +22,7 @@ import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { restartText, type Restart } from './restart';
 import type { Route } from './router';
-import { createSaver, SETTLE_MS, type Saver, type SaverOptions } from './saver';
+import { createSaver, SETTLE_MS, withTimeout, type Saver, type SaverOptions } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
 import { installClipboard } from './system-clipboard';
 import { createUiStore } from './store';
@@ -239,7 +239,12 @@ export function App(props: AppProps) {
           if (e.type === 'recovered') recovered = true;
           if (opening && e.type === 'opened') {
             opening = false;
-            if (props.restart) store.toast(restartText(props.restart), props.restart.lost ? 'error' : 'info');
+            if (props.restart) {
+              // После потери GPU — рендер, который новое ядро действительно получило:
+              // принудительный бэкенд, не запустившись, уступает CPU.
+              const r = props.restart.reason === 'gpu' ? { ...props.restart, backend: ed.core.backend ?? props.restart.backend } : props.restart;
+              store.toast(restartText(r), r.lost ? 'error' : 'info');
+            }
             else if (recovered) store.toast('Восстановлены изменения, не записанные в файл');
             void props.files.touch(id).catch(() => {});
             // Имя файла — из хранилища (его могли переименовать на экране файлов);
@@ -268,6 +273,9 @@ export function App(props: AppProps) {
             if (s) void s.settled().then((ok) => restart(!ok || s.pending()));
             else restart(false);
           }
+          // Потеря поверхности GPU: worker создаёт её заново; причина — в консоль, даже
+          // если пересоздать удастся.
+          if (e.type === 'surfaceLost') console.warn(e.message);
           if (e.type === 'surfaceRestored') store.toast('Видеокарта перезапущена');
           if (e.type === 'surfaceFailed') {
             // Поверхность GPU не пережила потерю: правки — в журнал (ядро живо), и тот же
@@ -278,16 +286,37 @@ export function App(props: AppProps) {
             console.error(message);
             const s = saver;
             // Хранилище не ответило за `SETTLE_MS` — исход пачки неизвестен: «не сохранились».
-            const flushed = s
-              ? Promise.race([s.flushJournal(), new Promise<boolean>((r) => window.setTimeout(() => r(false), SETTLE_MS))])
-              : Promise.resolve(true);
-            void flushed.then((ok) => {
+            const flushed = s ? withTimeout(s.flushJournal(), SETTLE_MS, false) : Promise.resolve(true);
+            void flushed.then(async (ok) => {
               // Пока писали журнал, редактор могли снять: перезапуск старого открыл бы его
               // поверх нового.
               if (disposed) return;
-              if (!props.onRestart({ reason: 'gpu', lost: !ok || (s?.pending() ?? false), backend: next, message })) {
-                store.toast(`Рендер остановлен: ${message}`, 'error');
+              if (props.onRestart({ reason: 'gpu', lost: !ok || (s?.pending() ?? false), backend: next, message })) return;
+              // Перезапускать больше нельзя: холст мёртв навсегда, а правки вслепую хуже
+              // остановки. Пока ядро живо — полный файл (уход потом без вопроса), затем
+              // ядро остановлено: кадров и ввода нет, плашка — как при сбое ядра.
+              if (s && (await s.save()) && store.state.modified) {
+                // Записано: ядро ответит «изменений нет» (`markSaved`) — его ждёт сохранитель
+                // (уход без вопроса). Не ответило за `SETTLE_MS` — стоп всё равно. Событие
+                // в состояние интерфейса кладёт кадр планировщика, а кадров после остановки
+                // нет — признак снимается здесь.
+                const clean = await withTimeout(
+                  new Promise<boolean>((resolve) => {
+                    const off = ed.core.on((m) => {
+                      if (m.type === 'modified' && !m.modified) {
+                        off();
+                        resolve(true);
+                      }
+                    });
+                  }),
+                  SETTLE_MS,
+                  false,
+                );
+                if (clean) store.setState('modified', false);
               }
+              if (disposed) return;
+              ed.core.dispose();
+              store.setState('stopped', (prev) => prev ?? `Рендер остановлен: ${message}`);
             });
           }
           if (e.type === 'exported') {

@@ -14,7 +14,7 @@
 // «неверное сообщение»).
 
 import { expect, test, type Page } from '@playwright/test';
-import { drag, drawRect, editorReady, expectPixel, fileId, gotoDebug, live, liveWhen, open, screen, storedFile } from './helpers';
+import { drag, drawRect, editorReady, expectPixel, fileId, gotoDebug, journalCount, live, liveWhen, open, screen, storedFile } from './helpers';
 
 interface Opt {
   /** `getContext('webgl2')` на пробном холсте 1×1 даёт `null`. */
@@ -107,6 +107,8 @@ function prelude(opt: Opt): string {
     // Запоминаем устройство, чтобы потом сломать его снаружи.
     const requestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
     navigator.gpu.requestAdapter = async (...a) => {
+      // После loseDeviceForGood адаптера нет: устройство заново не создать.
+      if (F.loseDeviceForGood) return null;
       const adapter = await requestAdapter(...a);
       if (adapter) {
         const requestDevice = adapter.requestDevice.bind(adapter);
@@ -134,7 +136,7 @@ function prelude(opt: Opt): string {
       gpuDevice.queue.submit([]);
     }
     // Потеря устройства WebGPU и контекста WebGL2.
-    if (name === 'loseDevice') gpuDevice.destroy();
+    if (name === 'loseDevice' || name === 'loseDeviceForGood') gpuDevice.destroy();
     if (name === 'loseGl') {
       loseExt = realGl.getExtension('WEBGL_lose_context');
       loseExt.loseContext();
@@ -461,7 +463,12 @@ test('потеря устройства WebGPU: устройство созда�
   expect(lost.message).toMatch(/^Устройство WebGPU потеряно \(.*\): /);
   expect(await firstEvent(page, 'surfaceRestored')).toEqual({ type: 'surfaceRestored', backend: 'webgpu' });
   await poke(page);
-  await expectDrawn(page);
+  // Новое устройство рисует: пиксели — из GPU (снимок страницы в headless холст
+  // WebGPU может не показать, а последний кадр старого устройства на нём остаётся).
+  const at = screen(await live(page), 200, 40);
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'readPixels', reference: false }));
+  await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'pixels'));
+  expect(await pixelsAt(page, at)).toEqual(['webgpu', 1, 120, 200]);
   expect(await errors(page)).toEqual([]);
 });
 
@@ -491,18 +498,31 @@ test('контекст WebGL2 не вернулся: запасной бэкен
   expect(await errors(page)).toEqual([]);
 });
 
+/** Пометить ядро редактора: после перезапуска `newCore` ждёт другое. */
+async function markOld(page: Page): Promise<void> {
+  await page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
+}
+
+/** Новое ядро редактора готово (старое помечено `markOld`). */
+async function newCore(page: Page): Promise<void> {
+  await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
+  await editorReady(page);
+}
+
 test('редактор: WebGL2 потерян навсегда — перезапуск на процессоре, документ на месте', async ({ page }) => {
   await stubWorker(page, {});
-  const id = await storedFile(page, '&backend=webgl&fullSave=600000');
+  // Пачки журнала сами не уходят (journal — 10 мин): правка попадает в журнал только
+  // записью перед перезапуском.
+  const id = await storedFile(page, '&backend=webgl&fullSave=600000&journal=600000');
   expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('webgl');
   await drawRect(page, 150);
-  await page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
+  expect(await journalCount(page, id)).toBe(0);
+  await markOld(page);
   await fault(page, 'loseGl');
   await expect(
     page.locator('.fe-toast', { hasText: 'Видеокарта недоступна — редактор перезапущен с рендером на процессоре' }),
   ).toHaveCount(1, { timeout: 15_000 });
-  await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
-  await editorReady(page);
+  await newCore(page);
   expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
   // Правка до потери ушла в журнал перед перезапуском.
   await liveWhen(page, 'l.nodes === 2');
@@ -512,26 +532,70 @@ test('редактор: WebGL2 потерян навсегда — переза�
 test('редактор: после перезапуска на процессоре сбой ядра оставляет CPU; предел перезапусков общий с потерей GPU', async ({ page }) => {
   await stubWorker(page, {});
   await storedFile(page, '&backend=webgl');
-  const markOld = () => page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
-  const newCore = async () => {
-    await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
-    await editorReady(page);
-  };
   // Первый перезапуск — потеря GPU.
-  await markOld();
+  await markOld(page);
   await fault(page, 'loseGl');
   await expect(page.locator('.fe-toast', { hasText: 'Видеокарта недоступна' })).toHaveCount(1, { timeout: 15_000 });
-  await newCore();
+  await newCore(page);
   expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
   // Второй — сбой ядра: бэкенд остаётся запасным.
-  await markOld();
+  await markOld(page);
   await page.evaluate(() => window.__ferrum!.core!.testPanic());
   await expect(page.locator('.fe-toast', { hasText: 'Редактор перезапущен' })).toHaveCount(1);
-  await newCore();
+  await newCore(page);
   expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
   // Третий за минуту — уже нет: плашка остановки.
   await page.evaluate(() => window.__ferrum!.core!.testPanic());
   await expect(page.getByRole('alert')).toContainText('Ядро остановлено: паника в ядре: тестовая паника ядра');
+});
+
+test('редактор: перезапуски исчерпаны, WebGL2 потерян навсегда — плашка «Рендер остановлен», правка записана, уход работает', async ({ page }) => {
+  await stubWorker(page, {});
+  const id = await storedFile(page, '&backend=webgl&fullSave=600000&journal=600000');
+  // Два перезапуска за минуту (сбои ядра) — предел исчерпан.
+  for (let i = 0; i < 2; i++) {
+    await markOld(page);
+    await page.evaluate(() => window.__ferrum!.core!.testPanic());
+    await newCore(page);
+  }
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('webgl');
+  await drawRect(page, 150);
+  await markOld(page);
+  await fault(page, 'loseGl');
+  await expect(page.getByRole('alert')).toContainText(
+    'Рендер остановлен: Контекст WebGL2 потерян; пересоздать не удалось: контекст WebGL2 не восстановлен. Правки больше не принимаются',
+    { timeout: 15_000 },
+  );
+  // Перезапуска нет; ядро остановлено — ввод в него не идёт.
+  expect(await page.evaluate(() => (window.__ferrum!.core as unknown as { old?: boolean; stopped: boolean }).stopped)).toBe(true);
+  // Правка до остановки записана: несохранённого нет.
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  // Уход — без вопроса; файл открывается снова с правкой.
+  await page.evaluate(() => (location.hash = '#/'));
+  await expect(page.locator('.fe-files')).toHaveCount(1);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.evaluate((i) => (location.hash = `#/file/${encodeURIComponent(i)}`), id);
+  await newCore(page);
+  await liveWhen(page, 'l.nodes === 2');
+});
+
+test('редактор: WebGPU потерян навсегда, WebGL2 не запустился — уведомление называет рендер нового ядра @gpu', async ({ page }) => {
+  // В новом worker'е проба WebGL2 не даёт контекста: принудительный WebGL2 уступает CPU.
+  await stubWorker(page, { noProbeContext: true });
+  const warnings: string[] = [];
+  page.on('console', (m) => m.type() === 'warning' && warnings.push(m.text()));
+  await storedFile(page, '&backend=webgpu');
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('webgpu');
+  await markOld(page);
+  await fault(page, 'loseDeviceForGood');
+  await expect(
+    page.locator('.fe-toast', { hasText: 'Видеокарта недоступна — редактор перезапущен с рендером на процессоре' }),
+  ).toHaveCount(1, { timeout: 15_000 });
+  await newCore(page);
+  expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
+  await liveWhen(page, 'l.nodes === 1');
+  // Причина потери — в консоли (предупреждение о потере, до попыток пересоздать).
+  expect(warnings.some((t) => /^Устройство WebGPU потеряно/.test(t))).toBe(true);
 });
 
 // --- 8. Сбои самого worker'а ----------------------------------------------------

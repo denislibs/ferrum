@@ -43,6 +43,17 @@ export const FULL_MAX_MS = 300_000;
  * отвечает — перезапуск всё равно идёт, а правки считаются потерянными. */
 export const SETTLE_MS = 2500;
 
+/** `p` или, если он не успел за `ms`, — `fallback`; таймер снимается в любом случае. */
+export function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = window.setTimeout(() => resolve(fallback), ms);
+    void p.then((v) => {
+      clearTimeout(timer);
+      resolve(v);
+    });
+  });
+}
+
 export interface SaverOptions {
   /** Тесты: интервалы журнала и полного файла. */
   journalMs?: number;
@@ -332,14 +343,7 @@ export function createSaver(
     save,
     flushJournal,
     pending: () => dirty || unjournaled() || (!stored && modified),
-    settled: () =>
-      new Promise<boolean>((resolve) => {
-        const timer = window.setTimeout(() => resolve(false), SETTLE_MS);
-        void appended.then(() => {
-          clearTimeout(timer);
-          resolve(true);
-        });
-      }),
+    settled: () => withTimeout(appended.then(() => true), SETTLE_MS, false),
     failure: () => failure,
     dispose() {
       clearTimeout(journalTimer);

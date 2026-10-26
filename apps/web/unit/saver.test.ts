@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test';
 import type { CoreEvent } from '../src/wasm/ferrum_wasm';
 import type { Editor } from '../src/ui/context';
 import type { FileStore, JournalMark } from '../src/ui/file-store';
-import { createSaver, FULL_IDLE_MS, FULL_MAX_MS, JOURNAL_MS, newSession, sessionAfter, SETTLE_MS } from '../src/ui/saver';
+import { createSaver, FULL_IDLE_MS, FULL_MAX_MS, JOURNAL_MS, newSession, sessionAfter, SETTLE_MS, withTimeout } from '../src/ui/saver';
 
 test('сеанс журнала: по времени, целый, безопасный', () => {
   const t = Date.UTC(2026, 9, 28, 12, 0, 0);
@@ -339,4 +339,23 @@ test('сеанс сохранителя — после наибольшего с
   p.batch(0);
   expect(await ok).toBe(true);
   expect(p.marks[0].session).toBeGreaterThanOrEqual(now);
+});
+
+test('withTimeout: ответ раньше предела — он, и таймер снят; позже — запасное значение', async () => {
+  const h = harness(true);
+  const before = h.timers.size;
+  let done!: (v: boolean) => void;
+  const fast = withTimeout(new Promise<boolean>((r) => (done = r)), SETTLE_MS, false);
+  expect(h.timers.size).toBe(before + 1);
+  done(true);
+  expect(await fast).toBe(true);
+  expect(h.timers.size).toBe(before);
+  let result: boolean | undefined;
+  void withTimeout(new Promise<boolean>(() => {}), SETTLE_MS, false).then((v) => (result = v));
+  h.advance(SETTLE_MS - 1);
+  await h.tick();
+  expect(result).toBeUndefined();
+  h.advance(1);
+  await h.tick();
+  expect(result).toBe(false);
 });
