@@ -283,6 +283,25 @@ test('перезапуск после сбоя ядра: ожидающие flus
   expect(k.writes).toEqual([]);
 });
 
+test('сбой ядра, пока пишется пачка: settled ждёт записи, pending — по её итогу', async () => {
+  const h = harness(true);
+  h.emit({ type: 'modified', modified: true });
+  // Пачка отдана ядром, запись в хранилище ещё идёт — и не удастся.
+  h.failAppends(true);
+  h.batch(0);
+  h.emit({ type: 'error', message: 'Ядро остановлено: паника в ядре: тестовая паника ядра' });
+  // Сразу после сбоя правки выглядят «в журнале» — сообщение было бы ложным.
+  expect(h.saver.pending()).toBe(false);
+  await h.saver.settled();
+  expect(h.saver.pending()).toBe(true);
+  // Удачная запись — правки в журнале.
+  const k = harness(true);
+  k.emit({ type: 'modified', modified: true });
+  k.batch(0);
+  await k.saver.settled();
+  expect(k.saver.pending()).toBe(false);
+});
+
 test('сеанс сохранителя — после наибольшего сеанса журнала файла', async () => {
   const future = (Date.now() + 3_600_000) * 1000 + 3;
   const h = harness(true, future);

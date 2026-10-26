@@ -96,22 +96,30 @@ export function Root() {
   /** Моменты перезапусков редактора — для предела `allowRestart`. */
   const restarts: number[] = [];
   /** Тот же файл — в новом редакторе (сбой ядра, потеря GPU). Блокировка файла
-   * остаётся за вкладкой; метаданные — заново (имя могли сменить). `false` —
-   * перезапусков слишком много. */
+   * остаётся за вкладкой; метаданные — заново (имя могли сменить, файл — убрать в
+   * корзину). `false` — перезапусков слишком много или редактор уже уходит. */
   const restart = (file: FileMeta, r: Restart, backend: Backend | undefined): boolean => {
+    // Уход уже удался (блокировка снята, корень открывает другое): перезапуск открыл
+    // бы файл без блокировки — остаётся плашка, пока не сменится экран.
+    if (leave === null) return false;
     if (!allowRestart(restarts, performance.now())) return false;
-    // Ядро остановлено: прежний уход (сохранить и остановить) больше не нужен.
-    leave = null;
+    // Ядро остановлено, сохранять нечего: переход до нового редактора уходит сразу —
+    // через `release()`, и `seq` отменяет перезапуск.
+    leave = async () => true;
     const my = ++seq;
     const show = (m: FileMeta) => setView({ kind: 'editor', file: m, restart: r, backend: r.backend ?? backend });
+    const away = (notice: string) => {
+      leave = null;
+      release();
+      toFiles(notice);
+    };
     files.get(file.id).then(
       (m) => {
         if (my !== seq) return;
-        if (m) show(m);
-        else {
-          release();
-          toFiles('Файл не найден');
-        }
+        if (!m) away('Файл не найден');
+        // Как при открытии: файл из корзины — сначала восстановить (правки в журнале).
+        else if (m.trashedAt !== undefined) away('Файл в корзине — восстановите его, чтобы открыть');
+        else show(m);
       },
       () => my === seq && show(file),
     );

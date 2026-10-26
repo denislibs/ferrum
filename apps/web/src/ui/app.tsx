@@ -257,7 +257,11 @@ export function App(props: AppProps) {
             // новом редакторе, правки — из файла и журнала. Сбой во время открытия
             // перезапуска не вызывает: испорченный журнал крутил бы его вечно.
             console.error(e.message);
-            props.onRestart({ reason: 'crash', lost: saver?.pending() ?? false, message: e.message });
+            // Потеряно ли что-то — когда пачки, отданные ядром до сбоя, дописаны (или нет).
+            const s = saver;
+            const restart = (lost: boolean) => props.onRestart({ reason: 'crash', lost, message: e.message });
+            if (s) void s.settled().then(() => restart(s.pending()));
+            else restart(false);
           }
           if (e.type === 'exported') {
             downloadBytes(e.name, e.bytes, 'image/png');

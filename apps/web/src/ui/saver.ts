@@ -56,6 +56,9 @@ export interface Saver {
   flushJournal(): Promise<boolean>;
   /** Есть правки, которых нет ни в журнале, ни в файле (сообщение после сбоя ядра). */
   pending(): boolean;
+  /** Отданные ядром пачки дописаны (или не удались): после сбоя ядра `pending` —
+   * только после этого, иначе неудачная запись последней пачки прошла бы как «сохранено». */
+  settled(): Promise<void>;
   /** Почему не удалась последняя запись (для вопроса при уходе); `null` — удалась. */
   failure(): string | null;
   dispose(): void;
@@ -325,6 +328,7 @@ export function createSaver(
     save,
     flushJournal,
     pending: () => dirty || unjournaled() || (!stored && modified),
+    settled: () => appended.then(() => {}),
     failure: () => failure,
     dispose() {
       clearTimeout(journalTimer);

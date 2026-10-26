@@ -68,3 +68,86 @@ test('вне тестового режима паника по сообщени�
   await expect(toast(page, 'Неверное сообщение для ядра')).toHaveCount(1);
   await expect(page.locator('.fe-boot--stopped')).toHaveCount(0);
 });
+
+// --- Перезапуск и переходы корня: блокировка файла (Web Locks) не течёт и не теряется ---
+
+/** Держит ли вкладка блокировку файла `id`. */
+const locked = (page: Page, id: string) =>
+  page.evaluate(async (i) => ((await navigator.locks.query()).held ?? []).some((l) => l.name === `ferrum-file:${i}`), id);
+
+/** Остановка ядра после открытия (тот же путь, что `fatal` от worker'а); внутри других
+ * функций страницы — тем же выражением (замыкания в страницу не переносятся). */
+const failCore = () => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка');
+
+test('переход сразу после сбоя (перезапуск ещё не открыл редактор): блокировка снята, файл открывается снова', async ({ page }) => {
+  const id = await storedFile(page);
+  // Сбой и сразу «назад к файлам»: переход приходит, пока перезапуск перечитывает запись.
+  await page.evaluate(() => {
+    (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка');
+    location.hash = '#/';
+  });
+  await expect(page.locator('.fe-files')).toHaveCount(1);
+  await expect.poll(() => locked(page, id)).toBe(false);
+  // Тот же файл в той же вкладке — редактор, а не «открыт в другой вкладке».
+  await page.evaluate((i) => (location.hash = `#/file/${i}`), id);
+  await editorReady(page);
+  expect(fileId(page)).toBe(id);
+  await expect(toast(page, 'Файл открыт в другой вкладке')).toHaveCount(0);
+  expect(await locked(page, id)).toBe(true);
+});
+
+test('сбой после удачного ухода (файл ещё не сменился): без перезапуска, новый файл открыт с блокировкой', async ({ page }) => {
+  const id = await storedFile(page);
+  // Уход уже удался и блокировка снята; ядро падает, пока создаётся новый файл.
+  await page.evaluate(() => {
+    const store = window.__ferrumFiles!.store as unknown as { create: (...a: unknown[]) => Promise<unknown> };
+    const create = store.create.bind(store);
+    store.create = (...a) => {
+      (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка');
+      return create(...a);
+    };
+  });
+  await page.evaluate(() => (location.hash = '#/new'));
+  await expect.poll(() => /#\/file\//.test(page.url()) && fileId(page) !== id).toBe(true);
+  await editorReady(page);
+  const created = fileId(page);
+  expect(await locked(page, created)).toBe(true);
+  expect(await locked(page, id)).toBe(false);
+  await expect(page.locator('.fe-boot--stopped')).toHaveCount(0);
+  await expect(toast(page, 'Редактор перезапущен')).toHaveCount(0);
+});
+
+test('файл ушёл в корзину до перезапуска: экран файлов с сообщением, блокировка снята', async ({ page }) => {
+  const id = await storedFile(page);
+  await page.evaluate((i) => window.__ferrumFiles!.store.trash(i), id);
+  await page.evaluate(failCore);
+  await expect(toast(page, 'Файл в корзине — восстановите его, чтобы открыть')).toHaveCount(1);
+  await expect(page.locator('.fe-files')).toHaveCount(1);
+  await expect.poll(() => locked(page, id)).toBe(false);
+});
+
+test('сбой во время ухода с вопросом: «Остаться» без зависания, новый редактор, дальше уход работает', async ({ page }) => {
+  const id = await storedFile(page);
+  await drawRect(page, 150);
+  // Ядро падает, едва уход попросил снимок: сохранить не удалось — вопрос об уходе.
+  await page.evaluate(() => {
+    const core = window.__ferrum!.core! as unknown as { send(c: { type: string }): void; old?: boolean };
+    core.old = true;
+    const send = core.send.bind(core);
+    core.send = (c) => {
+      send(c);
+      if (c.type === 'snapshot') queueMicrotask(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
+    };
+  });
+  await page.evaluate(() => (location.hash = '#/'));
+  await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
+  await editorReady(page);
+  // Перезапуск ответил на вопрос «Остаться»: тот же файл, вопроса нет.
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(fileId(page)).toBe(id);
+  expect(await locked(page, id)).toBe(true);
+  // Корень не завис в уходе: следующий переход проходит.
+  await page.evaluate(() => (location.hash = '#/'));
+  await expect(page.locator('.fe-files')).toHaveCount(1);
+  await expect.poll(() => locked(page, id)).toBe(false);
+});
