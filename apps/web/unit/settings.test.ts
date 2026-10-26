@@ -318,3 +318,66 @@ test('ошибка записи настроек — одно уведомлен
   await tick();
   expect(errors).toHaveLength(2);
 });
+
+test('чтение настроек не удалось — без переноса: прежняя запись цела, база не тронута, уведомление «прочитать»', async () => {
+  const legacy = memory();
+  legacy.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'light', leftWidth: 300 }));
+  const f = fakeBackend({ theme: 'dark' });
+  f.backend.settings = async () => {
+    throw new Error('сбой чтения');
+  };
+  const s = await openSettings(f.backend, legacy);
+  const errors: string[] = [];
+  s.onError((m) => errors.push(m));
+  expect(f.writes).toEqual([]);
+  expect(legacy.getItem(SETTINGS_KEY)).not.toBeNull();
+  // Прежняя запись — только для показа: тема пользователя, а не умолчание.
+  expect(s.current.theme).toBe('light');
+  expect(errors).toEqual(['Не удалось прочитать настройки: сбой чтения']);
+});
+
+test('чтение настроек повисло — через предел умолчания и одно уведомление', async () => {
+  const f = fakeBackend({ theme: 'light' });
+  f.backend.settings = () => new Promise(() => {});
+  const t0 = Date.now();
+  const s = await openSettings(f.backend, memory(), 50);
+  expect(Date.now() - t0).toBeLessThan(1000);
+  const errors: string[] = [];
+  s.onError((m) => errors.push(m));
+  expect(s.current).toEqual(DEFAULT_SETTINGS);
+  expect(errors).toEqual(['Не удалось прочитать настройки: хранилище не отвечает']);
+});
+
+test('раскладка панелей у каждой вкладки своя: чужие ширины и страницы не входят в текущие', async () => {
+  const f = fakeBackend({ leftWidth: 300 });
+  const s = await openSettings(f.backend, memory());
+  const seen: Partial<typeof DEFAULT_SETTINGS>[] = [];
+  s.onChange((p) => seen.push(p));
+  f.remote({ leftWidth: 400, rightWidth: 350, pagesOpen: false, theme: 'light' });
+  expect(seen).toEqual([{ theme: 'light' }]);
+  expect(s.current).toMatchObject({ leftWidth: 300, rightWidth: 248, pagesOpen: true, theme: 'light' });
+  // Своё изменение ширины пишется, хотя в базе сейчас чужая.
+  s.update({ leftWidth: 300, pagesOpen: true });
+  await tick();
+  expect(f.writes).toEqual([]);
+  s.update({ leftWidth: 320 });
+  await tick();
+  expect(f.writes).toEqual([{ leftWidth: 320 }]);
+});
+
+test('откат без записи: ядро не приняло чужую раскладку', async () => {
+  const f = fakeBackend({ keymap: '{"a":1}' });
+  const s = await openSettings(f.backend, memory());
+  f.remote({ keymap: '{"b":2}' });
+  expect(s.current.keymap).toBe('{"b":2}');
+  s.rollback({ keymap: '{"a":1}' });
+  await tick();
+  expect(s.current.keymap).toBe('{"a":1}');
+  expect(f.writes).toEqual([]);
+});
+
+test('предел раскладки — в байтах UTF-8', () => {
+  // 40 000 знаков кириллицы — 80 000 байт: больше предела раскладки (64 КБ).
+  expect(parseSettingsPatch({ keymap: 'я'.repeat(40_000) })).toEqual({});
+  expect(parseSettingsPatch({ keymap: 'a'.repeat(40_000) })).toEqual({ keymap: 'a'.repeat(40_000) });
+});

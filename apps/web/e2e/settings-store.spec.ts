@@ -152,3 +152,62 @@ test('настройки не теряются при перезапуске я�
   await editorReady(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 });
+
+test('чужое изменение темы не возвращает в базу раскладку панелей этой вкладки', async ({ context }) => {
+  const a = await context.newPage();
+  const b = await context.newPage();
+  await testMode(a);
+  await testMode(b);
+  await a.goto(newFileUrl(10));
+  await editorReady(a);
+  await b.goto(newFileUrl(10));
+  await editorReady(b);
+  // A сворачивает страницы — запись в базе.
+  await a.getByRole('button', { name: 'Страницы', exact: true }).click();
+  await expect(a.getByRole('listbox', { name: 'Страницы' })).toHaveCount(0);
+  await expect.poll(() => stored(a)).toMatchObject({ pagesOpen: false });
+  // A уходит к списку файлов: её редактор не перепишет поле, если B его затрёт.
+  await a.goto('/');
+  await expect(a.getByRole('heading', { level: 1 })).toBeVisible();
+  // B (страницы открыты) меняет тему: пишет только тему.
+  await b.getByRole('button', { name: 'Меню файла' }).click();
+  await b.getByRole('menuitem', { name: /Настройки/ }).click();
+  const dialog = b.getByRole('dialog', { name: 'Настройки' });
+  await dialog.getByRole('tab', { name: 'Тема' }).click();
+  await dialog.getByRole('radio', { name: 'Светлая' }).check();
+  await expect.poll(() => stored(b)).toMatchObject({ theme: 'light' });
+  await expect(a.locator('html')).toHaveAttribute('data-theme', 'light');
+  // Отложенная запись B (четверть секунды) прошла — выбор A на месте.
+  await b.waitForTimeout(600);
+  expect(await stored(a)).toMatchObject({ theme: 'light', pagesOpen: false });
+  await a.goto(newFileUrl(10));
+  await editorReady(a);
+  await expect(a.getByRole('button', { name: 'Страницы', exact: true })).toBeVisible();
+  await expect(a.getByRole('listbox', { name: 'Страницы' })).toHaveCount(0);
+});
+
+test('хранилище не отвечает — экран с умолчаниями и одним уведомлением, заставка не висит', async ({ context }) => {
+  // Другая страница держит обновление схемы бесконечно (транзакция обновления не
+  // кончается): открытие базы в приложении не получает ни успеха, ни ошибки.
+  const holder = await context.newPage();
+  await holder.goto('/theme-init.js');
+  await holder.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        const req = indexedDB.open('ferrum', 3);
+        req.onupgradeneeded = () => {
+          const st = req.result.createObjectStore('settings');
+          const spin = () => (st.get('theme').onsuccess = spin);
+          spin();
+          resolve();
+        };
+      }),
+  );
+  const page = await context.newPage();
+  await testMode(page);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.fe-toast', { hasText: 'Не удалось прочитать настройки: хранилище не отвечает' })).toHaveCount(1);
+  await page.waitForTimeout(500);
+  await expect(page.locator('.fe-toast', { hasText: 'Не удалось прочитать настройки' })).toHaveCount(1);
+});

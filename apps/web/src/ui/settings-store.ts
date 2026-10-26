@@ -5,9 +5,16 @@
 // применяются на лету. При первом запуске настройки переносятся из прежней записи
 // `localStorage` (`ferrum.settings.v1`), и она удаляется. Тему до первого рисования
 // читает `theme-init.js` — для него тема зеркалится в `localStorage` (`ferrum.theme`).
-// Ошибка чтения или записи — одно уведомление, пока запись снова не удастся.
+// Ошибка чтения или записи — одно уведомление, пока запись снова не удастся. Чтение
+// при запуске — не дольше `SETTLE_MS` (база не отвечает — умолчания и уведомление,
+// экран не ждёт). Раскладка панелей (ширины, страницы) у каждой вкладки своя: чужие
+// значения только запоминаются базой, в `current` этой вкладки не входят.
 
+import { SETTLE_MS } from './saver';
 import { loadSettings, parseSettings, parseSettingsPatch, diffSettings, SETTINGS_KEY, THEME_KEY, type Settings } from './settings';
+
+/** Поля раскладки панелей: у каждой вкладки свои, изменения других вкладок не применяются. */
+const LOCAL_FIELDS: readonly (keyof Settings)[] = ['leftWidth', 'rightWidth', 'pagesOpen'];
 
 /** Где лежат поля: worker ввода-вывода (`IdbFileStore`) или Tauri. */
 export interface SettingsBackend {
@@ -24,6 +31,9 @@ export interface SettingsStore {
   readonly current: Settings;
   /** Записать изменённые поля (те же значения — без записи). */
   update(patch: Partial<Settings>): void;
+  /** Вернуть поля к прежним без записи (чужое значение не принято, например раскладка
+   * клавиш, которую отверг ядро этой вкладки). */
+  rollback(patch: Partial<Settings>): void;
   /** Поля, изменённые в другой вкладке; возвращает отписку. */
   onChange(listener: (patch: Partial<Settings>) => void): () => void;
   /** Ошибки чтения и записи (каждая — один раз); ошибка до подписки отдаётся первому. */
@@ -49,7 +59,8 @@ function mirrorTheme(store: Storage | null, theme: Settings['theme']): void {
   }
 }
 
-export async function openSettings(backend: SettingsBackend, legacy: Storage | null): Promise<SettingsStore> {
+/** `readMs` — предел чтения при запуске (тесты — короче). */
+export async function openSettings(backend: SettingsBackend, legacy: Storage | null, readMs = SETTLE_MS): Promise<SettingsStore> {
   const errors = new Set<(m: string) => void>();
   let pendingError: string | null = null;
   let reported: string | null = null;
@@ -61,13 +72,25 @@ export async function openSettings(backend: SettingsBackend, legacy: Storage | n
   };
 
   let raw: Record<string, unknown> = {};
+  let readFailed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    raw = await backend.settings();
+    raw = await Promise.race([
+      backend.settings(),
+      new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('хранилище не отвечает')), readMs))),
+    ]);
   } catch (e) {
+    readFailed = true;
     report(`Не удалось прочитать настройки: ${text(e)}`);
+  } finally {
+    clearTimeout(timer);
   }
   let current: Settings;
-  if (Object.keys(raw).length === 0 && hasLegacy(legacy)) {
+  if (readFailed) {
+    // База не прочитана — переносить нельзя (затёрли бы её поля прежней записью):
+    // прежняя запись, если есть, — только для показа, без записи и удаления.
+    current = hasLegacy(legacy) ? loadSettings(legacy) : parseSettings({});
+  } else if (Object.keys(raw).length === 0 && hasLegacy(legacy)) {
     // Первый запуск после этапа 6: перенести прежнюю запись и удалить её.
     current = loadSettings(legacy);
     try {
@@ -83,6 +106,7 @@ export async function openSettings(backend: SettingsBackend, legacy: Storage | n
   const off = backend.onSettings((p) => {
     // Запись другой вкладки — не доверенная: только верные поля и только изменения.
     const changed = diffSettings(current, parseSettingsPatch(p));
+    for (const k of LOCAL_FIELDS) delete changed[k];
     if (Object.keys(changed).length === 0) return;
     current = { ...current, ...changed };
     if (changed.theme) mirrorTheme(legacy, changed.theme);
@@ -102,6 +126,11 @@ export async function openSettings(backend: SettingsBackend, legacy: Storage | n
         () => (reported = null),
         (e: unknown) => report(`Не удалось сохранить настройки: ${text(e)}`),
       );
+    },
+    rollback(patch) {
+      const changed = diffSettings(current, parseSettingsPatch(patch));
+      current = { ...current, ...changed };
+      if (changed.theme) mirrorTheme(legacy, changed.theme);
     },
     onChange(l) {
       listeners.add(l);

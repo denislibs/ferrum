@@ -15,7 +15,7 @@ import { Menu, type MenuItem } from './menu';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
-import { resolveTheme, type Settings, type ThemeChoice } from './settings';
+import { diffSettings, resolveTheme, type Settings, type ThemeChoice } from './settings';
 import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
 import { downloadBytes, fileName } from './files';
@@ -115,26 +115,49 @@ export function App(props: AppProps) {
   createEffect(() => editor()?.send({ type: 'setSettings', pixelSnap: pixelSnap() }));
   // Запись — не чаще раза в четверть секунды (края панелей тянутся каждый кадр), и
   // сразу при уходе со страницы.
-  let pending: Partial<Settings> | null = null;
+  let pending: Settings | null = null;
   let writeTimer = 0;
+  // Что этот редактор уже записал (или принял от другой вкладки): пишутся только поля,
+  // изменённые здесь, — чужие (вид списка, раскладка панелей другой вкладки) не
+  // затираются своими прежними значениями.
+  let written: Settings = { ...saved };
   const flush = () => {
     clearTimeout(writeTimer);
-    // Только изменённые поля: чужие (вид списка, изменения другой вкладки) не затираются.
-    if (pending) props.settings.update(pending);
+    if (pending) {
+      const changed = diffSettings(written, pending);
+      written = pending;
+      if (Object.keys(changed).length > 0) props.settings.update(changed);
+    }
     pending = null;
   };
   // Настройки, изменённые в другой вкладке: тема, привязка и раскладка — на лету
   // (ширина панелей у каждой вкладки своя).
   const offRemote = props.settings.onChange((p) => {
-    if (p.theme) setThemeChoice(p.theme);
-    if (p.pixelSnap !== undefined) setPixelSnap(p.pixelSnap);
+    // Принятое от другой вкладки — уже в базе: обратно не пишется.
+    if (p.theme) {
+      written = { ...written, theme: p.theme };
+      setThemeChoice(p.theme);
+    }
+    if (p.pixelSnap !== undefined) {
+      written = { ...written, pixelSnap: p.pixelSnap };
+      setPixelSnap(p.pixelSnap);
+    }
     if (p.keymap !== undefined && p.keymap !== keymap()) {
-      setKeymap(p.keymap);
+      const prev = keymap();
+      const next = p.keymap;
+      written = { ...written, keymap: next };
+      setKeymap(next);
       const ed = editor();
       if (ed) {
-        store.quietKeymapImport();
-        ed.send(p.keymap ? { type: 'importKeymap', json: p.keymap } : { type: 'resetKeymap', command: undefined });
+        // Ядро не приняло чужую раскладку — назад к прежней, без записи.
+        store.quietKeymapImport(undefined, () => {
+          written = { ...written, keymap: prev };
+          setKeymap(prev);
+          props.settings.rollback({ keymap: prev });
+        });
+        ed.send(next ? { type: 'importKeymap', json: next } : { type: 'resetKeymap', command: undefined });
       }
+      // Ядра ещё нет — импортирует `beforeDocument` (нынешнюю, а не прочитанную при запуске).
     }
   });
   const offErrors = props.settings.onError((m) => store.toast(m, 'error'));
@@ -144,6 +167,7 @@ export function App(props: AppProps) {
   });
   createEffect(() => {
     pending = {
+      ...written,
       theme: themeChoice(),
       pixelSnap: pixelSnap(),
       keymap: keymap(),
@@ -219,7 +243,10 @@ export function App(props: AppProps) {
       beforeDocument: (ed) => {
         ed.send({ type: 'setTheme', theme: theme() });
         ed.send({ type: 'setSettings', pixelSnap: pixelSnap() });
-        if (saved.keymap) {
+        // Нынешняя раскладка: другая вкладка могла сменить её, пока ядро запускалось.
+        const km = keymap();
+        if (km) {
+          setRestored(false);
           store.quietKeymapImport(
             () => setRestored(true),
             () => {
@@ -227,7 +254,7 @@ export function App(props: AppProps) {
               setRestored(true);
             },
           );
-          ed.send({ type: 'importKeymap', json: saved.keymap });
+          ed.send({ type: 'importKeymap', json: km });
         }
       },
       // Ctrl/Cmd+C, X, V, пока они вызывают копирование, вырезание и вставку, идут

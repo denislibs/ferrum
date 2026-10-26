@@ -56,13 +56,15 @@ export function storage(): Storage | null {
   }
 }
 
+const utf8 = new TextEncoder();
 const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 /** Проверка каждого поля: верное значение или `undefined`. */
 const FIELDS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined } = {
   theme: (v) => (v === 'light' || v === 'system' || v === 'dark' ? v : undefined),
   pixelSnap: (v) => (typeof v === 'boolean' ? v : undefined),
-  keymap: (v) => (typeof v === 'string' && v.length <= MAX_KEYMAP_BYTES ? v : undefined),
+  // Предел — в байтах UTF-8, как у записи настроек в worker'е (80 КБ на запись).
+  keymap: (v) => (typeof v === 'string' && v.length <= MAX_KEYMAP_BYTES && utf8.encode(v).length <= MAX_KEYMAP_BYTES ? v : undefined),
   // Ширина из хранилища — в пределах края панели (как при перетаскивании).
   leftWidth: (v) => (isNumber(v) ? clampPanel(v) : undefined),
   rightWidth: (v) => (isNumber(v) ? clampPanel(v) : undefined),
