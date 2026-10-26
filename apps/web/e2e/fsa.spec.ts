@@ -146,7 +146,7 @@ test('доступ к файлу на диске — вопрос; «Разре�
   await expect(page).toHaveURL(/#\/$/);
 });
 
-test('без File System Access пунктов «с диска» и «на диск» нет', async ({ page }) => {
+test('без File System Access пунктов «с диска» и «на диск» нет @firefox', async ({ page }) => {
   await page.addInitScript(() => {
     delete (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker;
   });
