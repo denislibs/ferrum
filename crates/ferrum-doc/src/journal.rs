@@ -106,7 +106,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<Batch> {
 /// Итог применения журнала при открытии.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Replayed {
-    /// Пачек применено (повреждённые не считаются).
+    /// Пачек применено (повреждённые не считаются; 0, если документ не изменился).
     pub applied: usize,
     /// Что восстановить не удалось — по-русски, для пользователя.
     pub warnings: Vec<String>,

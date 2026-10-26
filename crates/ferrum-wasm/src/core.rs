@@ -277,14 +277,26 @@ impl Core {
                 self.events.push(CoreEvent::Journal {
                     batch: self.journal_batch as f64,
                     bytes: Some(ByteBuf::from(bytes)),
+                    failed: false,
                 });
             }
             Ok(None) if reply => self.events.push(CoreEvent::Journal {
                 batch: self.journal_batch as f64,
                 bytes: None,
+                failed: false,
             }),
             Ok(None) => {}
-            Err(e) => self.error(format!("Не удалось записать журнал изменений: {e}")),
+            // Перед снимком ошибка не нужна: те же правки уйдут в файл снимка, а
+            // не выйдет и он — об этом скажет его ошибка.
+            Err(_) if !reply => {}
+            Err(e) => {
+                self.error(format!("Не удалось записать журнал изменений: {e}"));
+                self.events.push(CoreEvent::Journal {
+                    batch: self.journal_batch as f64,
+                    bytes: None,
+                    failed: true,
+                });
+            }
         }
     }
 

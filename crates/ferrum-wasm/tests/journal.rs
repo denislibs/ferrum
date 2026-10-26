@@ -45,7 +45,12 @@ fn stored(nodes: u32) -> (Vec<u8>, Core) {
 fn journal(ev: &[CoreEvent]) -> Vec<(f64, Option<Vec<u8>>)> {
     ev.iter()
         .filter_map(|e| match e {
-            CoreEvent::Journal { batch, bytes } => {
+            CoreEvent::Journal {
+                batch,
+                bytes,
+                failed,
+            } => {
+                assert!(!failed, "сбоя пачки в тестах нет");
                 Some((*batch, bytes.as_ref().map(|b| b.to_vec())))
             }
             _ => None,
@@ -131,7 +136,9 @@ fn snapshot_flushes_the_journal_first_and_carries_its_number() {
     let ev = c.take_events();
     let j = ev
         .iter()
-        .position(|e| matches!(e, CoreEvent::Journal { batch, bytes: Some(_) } if *batch == 1.0))
+        .position(
+            |e| matches!(e, CoreEvent::Journal { batch, bytes: Some(_), .. } if *batch == 1.0),
+        )
         .expect("пачка перед снимком");
     let (s, file2) = ev
         .iter()
@@ -195,4 +202,118 @@ fn too_many_batches_is_an_error_and_keeps_the_document() {
     assert!(ev.iter().any(|e| matches!(e, CoreEvent::Error { message }
         if message.starts_with("Не удалось открыть файл: в журнале"))));
     assert_eq!(c.editor().scene().len(), 5);
+}
+
+#[test]
+fn demo_then_edit_journals_only_the_edit_and_restores_it() {
+    let mut c = core();
+    c.command(Command::Demo { nodes: 10 });
+    c.command(Command::Save);
+    let file = c
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Saved { bytes } => Some(bytes.into_vec()),
+            _ => None,
+        })
+        .expect("нет Saved");
+    run(&mut c, "edit.select_all");
+    run(&mut c, "edit.delete");
+    let (batch, bytes) = flush(&mut c);
+    assert_eq!(batch, 1.0, "пример в журнал не входит");
+    let bytes = bytes.expect("правка");
+    // Только удаление, не 10 узлов примера.
+    let (full, _) = (file.len(), ());
+    assert!(bytes.len() < full, "пачка {} Б, файл {full} Б", bytes.len());
+    let (back, ev) = reopen(&file, &[bytes]);
+    assert!(ev.contains(&CoreEvent::Recovered { batches: 1 }));
+    assert_eq!(back.editor().scene().len(), 0);
+    assert_eq!(c.editor().scene().len(), 0);
+}
+
+#[test]
+fn recovery_matches_parents_and_properties() {
+    let (file, mut c) = stored(10);
+    run(&mut c, "edit.select_all");
+    run(&mut c, "nudge.right");
+    run(&mut c, "nudge.right");
+    let (_, b) = flush(&mut c);
+    let (back, _) = reopen(&file, &[b.unwrap()]);
+    let (mut a, mut b) = (
+        ferrum_doc::container::decode(&saved(&mut c))
+            .unwrap()
+            .document,
+        ferrum_doc::container::decode(&saved(&mut { back }))
+            .unwrap()
+            .document,
+    );
+    let page = a.pages()[0].0;
+    assert_eq!(page, b.pages()[0].0);
+    let (pa, pb) = (a.page(page).unwrap(), b.page(page).unwrap());
+    let ids = pa.walk();
+    assert_eq!(ids.len(), 10);
+    assert_eq!(ids, pb.walk());
+    for id in ids.iter().take(4) {
+        assert_eq!(pa.parent(*id), pb.parent(*id));
+        assert_eq!(
+            pa.props(*id).unwrap(),
+            pb.props(*id).unwrap(),
+            "свойства {id:?}"
+        );
+    }
+}
+
+fn saved(c: &mut Core) -> Vec<u8> {
+    c.command(Command::Save);
+    c.take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Saved { bytes } => Some(bytes.into_vec()),
+            _ => None,
+        })
+        .expect("нет Saved")
+}
+
+#[test]
+fn second_open_in_the_same_core_continues_batch_numbering() {
+    let (file, mut c) = stored(10);
+    run(&mut c, "edit.select_all");
+    run(&mut c, "edit.delete");
+    assert_eq!(flush(&mut c).0, 1.0);
+    c.command(Command::Open {
+        bytes: ByteBuf::from(file),
+    });
+    c.take_events();
+    run(&mut c, "edit.select_all");
+    run(&mut c, "edit.delete");
+    let (n, bytes) = flush(&mut c);
+    assert!(bytes.is_some());
+    assert_eq!(n, 2.0, "номера растут за всё время жизни ядра");
+}
+
+#[test]
+fn journal_that_changes_nothing_is_not_a_recovery() {
+    let (file, mut c) = stored(10);
+    run(&mut c, "edit.select_all");
+    run(&mut c, "edit.delete");
+    let (_, b) = flush(&mut c);
+    let b = b.unwrap();
+    // Первая пачка уже в файле, который тоже сохранил эти правки: повтор — пропуск.
+    c.command(Command::Save);
+    let saved = c
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Saved { bytes } => Some(bytes.into_vec()),
+            _ => None,
+        })
+        .expect("нет Saved");
+    let _ = file;
+    let (back, ev) = reopen(&saved, &[b]);
+    assert!(
+        !ev.iter().any(|e| matches!(e, CoreEvent::Recovered { .. })),
+        "{ev:?}"
+    );
+    assert!(!ev.contains(&CoreEvent::Modified { modified: true }));
+    assert_eq!(back.editor().scene().len(), 0);
 }

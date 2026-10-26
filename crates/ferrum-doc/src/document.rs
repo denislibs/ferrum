@@ -510,6 +510,16 @@ impl Document {
                     .into(),
             );
         }
+        // Ничего не изменилось (журнал от другого файла, всё «ждёт» предыдущих
+        // обновлений) — ничего и не применено.
+        let changed = self.root.oplog_vv() != self.journaled_root
+            || self
+                .loaded
+                .iter()
+                .any(|(id, p)| self.journaled_pages.get(id) != Some(&p.oplog_vv()));
+        if !changed {
+            out.applied = 0;
+        }
         self.mark_journal();
         out
     }

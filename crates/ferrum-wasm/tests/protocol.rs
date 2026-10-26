@@ -211,10 +211,17 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::Journal {
             batch: 5.0,
             bytes: Some(bytes(b"j")),
+            failed: false,
         },
         CoreEvent::Journal {
             batch: 5.0,
             bytes: None,
+            failed: false,
+        },
+        CoreEvent::Journal {
+            batch: 5.0,
+            bytes: None,
+            failed: true,
         },
         CoreEvent::Recovered { batches: 2 },
         CoreEvent::SaveRequested,
