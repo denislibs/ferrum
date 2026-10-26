@@ -1,0 +1,6 @@
+# Десктоп Ferrum на Tauri 2 (этап 6). Свой workspace — не часть корневого: Tauri
+# тянет сотни крейтов и системные библиотеки окна, а `cargo test --workspace` ядра не
+# должен их собирать.
+[workspace]
+members = ["store"]
+resolver = "2"

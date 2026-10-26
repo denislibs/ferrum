@@ -7,6 +7,8 @@ members = [
     "crates/ferrum-editor",
     "crates/ferrum-wasm",
 ]
+# Десктоп — свой workspace со своим Cargo.lock (Tauri и сотни крейтов окна).
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 edition = "2021"
