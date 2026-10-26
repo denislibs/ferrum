@@ -9,6 +9,8 @@ import { nameFromFile } from '../core/file-list';
 import { mb } from '../core/limits';
 import { MAX_COMMAND_BYTES } from '../core/messages';
 import { FERRUM_FILE, pickFile } from './files';
+import type { Settings } from './settings';
+import type { SettingsBackend } from './settings-store';
 
 export type { FileMeta, JournalMark, Section } from '../core/file-list';
 
@@ -60,9 +62,13 @@ export interface FileStoreTestHooks {
   failWrites(on: boolean): Promise<void>;
   /** Пачек журнала файла в базе. */
   journalCount(id: string): Promise<number>;
+  /** Поля настроек в базе и запись полей (как у `SettingsBackend`). */
+  settings(): Promise<Record<string, unknown>>;
+  setSettings(patch: Partial<Settings>): Promise<void>;
 }
 
-export class IdbFileStore implements FileStore, FileStoreTestHooks {
+export class IdbFileStore implements FileStore, FileStoreTestHooks, SettingsBackend {
+  private readonly settingsListeners = new Set<(patch: Record<string, unknown>) => void>();
   private readonly worker: Worker;
   private seq = 0;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -94,6 +100,10 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks {
     if (typeof m !== 'object' || m === null) return;
     if (m.t === 'changed') {
       for (const l of this.listeners) l();
+      return;
+    }
+    if (m.t === 'settings') {
+      for (const l of this.settingsListeners) l(m.patch);
       return;
     }
     if (m.t !== 'res') return;
@@ -169,6 +179,16 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks {
   }
   async failWrites(on: boolean) {
     await this.call({ op: 'failWrites', on });
+  }
+  settings() {
+    return this.call({ op: 'settings' });
+  }
+  async setSettings(patch: Partial<Settings>) {
+    await this.call({ op: 'setSettings', patch });
+  }
+  onSettings(listener: (patch: Record<string, unknown>) => void) {
+    this.settingsListeners.add(listener);
+    return () => this.settingsListeners.delete(listener);
   }
   onChange(listener: () => void) {
     this.listeners.add(listener);

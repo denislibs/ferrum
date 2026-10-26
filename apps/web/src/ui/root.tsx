@@ -10,6 +10,8 @@ import { App } from './app';
 import { isTestMode } from './boot';
 import { FilesScreen } from './files-screen';
 import { IdbFileStore, type FileMeta, type Section } from './file-store';
+import { storage } from './settings';
+import { openSettings, type SettingsStore } from './settings-store';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { allowRestart, type Restart } from './restart';
 import { historyIndex, parseRoute, routeHash, routeUrl, type Route } from './router';
@@ -216,21 +218,42 @@ export function Root() {
       restoring = false;
       return;
     }
+    // Настройки ещё читаются (экрана нет): первый переход возьмёт адрес, куда пришли.
+    if (!settings) {
+      early = { to: historyIndex(e.state) };
+      return;
+    }
     void go(parseRoute(location.hash), false, { to: historyIndex(e.state) });
   };
   window.addEventListener('popstate', onPop);
+  // Настройки — до первого экрана: тема, вид списка и раскладка нужны сразу (экраны
+  // получают их готовыми). Хранилище настроек живёт у корня: перезапуск редактора
+  // после сбоя ядра или потери GPU его не теряет.
+  let settings: SettingsStore | null = null;
+  let early: { to: number | null } | undefined;
+  let disposed = false;
+  void openSettings(files, storage()).then((s) => {
+    if (disposed) {
+      s.dispose();
+      return;
+    }
+    settings = s;
+    void go(parseRoute(location.hash), false, early);
+  });
   onCleanup(() => {
+    disposed = true;
     window.removeEventListener('popstate', onPop);
     release();
+    settings?.dispose();
     files.dispose();
   });
-  void go(parseRoute(location.hash));
 
   return (
     <Switch>
       <Match when={view().kind === 'files'}>
         <FilesScreen
           files={files}
+          settings={settings!}
           section={(view() as Extract<View, { kind: 'files' }>).section}
           notice={(view() as Extract<View, { kind: 'files' }>).notice}
           navigate={navigate}
@@ -241,6 +264,7 @@ export function Root() {
           <App
             file={v.file}
             files={files}
+            settings={settings!}
             restart={v.restart}
             backend={v.backend}
             onRestart={(r) => restart(v.file, r, v.backend)}

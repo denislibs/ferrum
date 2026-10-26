@@ -2,13 +2,15 @@
 // только шлёт запросы и получает метаданные, окна списка и превью; байты файлов
 // приходят и уходят передачей (transfer), без копий в основном потоке.
 //
-// База `ferrum`, версия 2:
+// База `ferrum`, версия 3:
 // - `meta` — записи `FileMeta` (ключ `id`): список читает только их;
 // - `bytes` — id → ArrayBuffer файла `.ferrum`;
 // - `thumbs` — id → Blob PNG превью;
 // - `journal` (с версии 2) — `[id, сеанс, номер]` → ArrayBuffer пачки журнала
 //   изменений: правки после байтов файла, по порядку записи. Запись файла стирает
-//   пачки до номера своего снимка в той же транзакции.
+//   пачки до номера своего снимка в той же транзакции;
+// - `settings` (с версии 3) — поле настроек пользователя → значение: вкладки пишут
+//   только изменённые поля, другие узнают через `BroadcastChannel('ferrum-settings')`.
 // Метаданные держатся в памяти (≤ 10 000 записей — сотни килобайт): сортировка,
 // поиск и окна — отсюда. Другие вкладки узнают об изменениях через
 // `BroadcastChannel('ferrum-files')` и перечитывают метаданные.
@@ -37,8 +39,9 @@ import {
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const DB_NAME = 'ferrum';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const CHANNEL = 'ferrum-files';
+const SETTINGS_CHANNEL = 'ferrum-settings';
 
 let test = false;
 let failWrites = false;
@@ -46,6 +49,7 @@ let db: Promise<IDBDatabase> | null = null;
 const metas = new Map<string, FileMeta>();
 let loaded: Promise<void> | null = null;
 const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL) : null;
+const settingsChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(SETTINGS_CHANNEL) : null;
 
 function post(msg: FromIo, transfer: Transferable[] = []): void {
   scope.postMessage(msg, transfer);
@@ -56,12 +60,15 @@ function storageError(e: unknown): Error {
   const name = e instanceof DOMException ? e.name : '';
   if (name === 'QuotaExceededError') return new Error('недостаточно места в хранилище браузера');
   if (name === 'InvalidStateError' || name === 'SecurityError') return new Error('хранилище браузера недоступно');
+  // Другая вкладка с более новой версией приложения уже обновила схему базы.
+  if (name === 'VersionError') return new Error('хранилище обновлено в другой вкладке — обновите страницу');
   return new Error(e instanceof Error && e.message ? e.message : 'ошибка хранилища браузера');
 }
 
 function open(): Promise<IDBDatabase> {
   db ??= new Promise<IDBDatabase>((resolve, reject) => {
     let req: IDBOpenDBRequest;
+    let gaveUp = false;
     try {
       req = indexedDB.open(DB_NAME, DB_VERSION);
     } catch (e) {
@@ -74,9 +81,16 @@ function open(): Promise<IDBDatabase> {
       if (!d.objectStoreNames.contains('bytes')) d.createObjectStore('bytes');
       if (!d.objectStoreNames.contains('thumbs')) d.createObjectStore('thumbs');
       if (!d.objectStoreNames.contains('journal')) d.createObjectStore('journal');
+      if (!d.objectStoreNames.contains('settings')) d.createObjectStore('settings');
     };
     req.onsuccess = () => {
       const d = req.result;
+      // Открытие уже отклонено (`onblocked`) — позднее соединение не нужно: закрыть,
+      // иначе оно держало бы базу и мешало следующему обновлению схемы.
+      if (gaveUp) {
+        d.close();
+        return;
+      }
       // Другая вкладка обновляет схему: уступаем, при следующем запросе откроемся заново.
       d.onversionchange = () => {
         d.close();
@@ -85,7 +99,12 @@ function open(): Promise<IDBDatabase> {
       resolve(d);
     };
     req.onerror = () => reject(storageError(req.error));
-    req.onblocked = () => reject(new Error('хранилище занято другой вкладкой'));
+    // Старая вкладка держит прежнюю версию базы и не уступает (вкладки этого приложения
+    // закрывают соединение по `versionchange`): отказ сразу, а не вечное ожидание.
+    req.onblocked = () => {
+      gaveUp = true;
+      reject(new Error('хранилище занято другой вкладкой — закройте её или обновите'));
+    };
   });
   // Неудачное открытие не кэшируем: следующая попытка откроет заново.
   db.catch(() => (db = null));
@@ -252,6 +271,16 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
       // Blob собирается здесь: основной поток не копирует сотни мегабайт.
       return { value: buf ? new Blob([buf], { type: 'application/octet-stream' }) : null };
     }
+    case 'settings': {
+      const d = await open();
+      const st = d.transaction('settings').objectStore('settings');
+      const [keys, values] = await Promise.all([request(st.getAllKeys()), request(st.getAll())]);
+      const out: Record<string, unknown> = {};
+      keys.forEach((k, i) => {
+        if (typeof k === 'string') out[k] = values[i];
+      });
+      return { value: out };
+    }
     case 'thumb': {
       const m = metas.get(r.file);
       if (!m || m.thumbVersion === 0) return { value: null };
@@ -324,6 +353,14 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
       const tx = rw(d, ['journal']);
       tx.objectStore('journal').put(r.bytes, [r.file, r.session, r.batch]);
       await done(tx);
+      return { value: null };
+    }
+    case 'setSettings': {
+      const d = await open();
+      const tx = rw(d, ['settings']);
+      for (const [k, v] of Object.entries(r.patch)) tx.objectStore('settings').put(v, k);
+      await done(tx);
+      settingsChannel?.postMessage({ patch: r.patch });
       return { value: null };
     }
     case 'journalCount': {
@@ -399,6 +436,16 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
     default:
       throw new Error('Неверный запрос к хранилищу файлов');
   }
+}
+
+if (settingsChannel) {
+  // Поля настроек от другой вкладки — своему интерфейсу (он проверит значения).
+  settingsChannel.onmessage = (e: MessageEvent<unknown>) => {
+    const patch = (e.data as { patch?: unknown } | null)?.patch;
+    if (typeof patch === 'object' && patch !== null && !Array.isArray(patch)) {
+      post({ t: 'settings', patch: patch as Record<string, unknown> });
+    }
+  };
 }
 
 if (channel) {

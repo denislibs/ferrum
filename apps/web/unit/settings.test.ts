@@ -9,9 +9,14 @@ import type { KeymapEntry } from '../src/wasm/ferrum_wasm';
 import { createUiStore } from '../src/ui/store';
 import { shortcutLabel } from '../src/ui/shortcuts';
 import { conflictsOf, filterGroups, groupCommands, recordKey, reservedOf } from '../src/ui/keymap-ui';
+import { openSettings, type SettingsBackend } from '../src/ui/settings-store';
 import {
   DEFAULT_SETTINGS,
+  diffSettings,
   loadSettings,
+  parseSettings,
+  parseSettingsPatch,
+  THEME_KEY,
   PANEL_MAX,
   PANEL_MIN,
   resolveTheme,
@@ -223,4 +228,93 @@ test('ширина панелей из хранилища зажата в пре
     const got = loadSettings(s);
     expect([got.leftWidth, got.rightWidth], String(stored)).toEqual([loaded, loaded]);
   }
+});
+
+/** Хранилище настроек в памяти: запись, чужие изменения, отказ. */
+function fakeBackend(initial: Record<string, unknown> = {}) {
+  const data: Record<string, unknown> = { ...initial };
+  const listeners = new Set<(p: Record<string, unknown>) => void>();
+  const writes: Record<string, unknown>[] = [];
+  let fail = false;
+  const backend: SettingsBackend = {
+    settings: async () => ({ ...data }),
+    setSettings: async (p) => {
+      if (fail) throw new Error('нет места');
+      writes.push({ ...p });
+      Object.assign(data, p);
+    },
+    onSettings: (l) => {
+      listeners.add(l);
+      return () => listeners.delete(l);
+    },
+  };
+  return {
+    data,
+    writes,
+    backend,
+    setFail: (v: boolean) => (fail = v),
+    remote: (p: Record<string, unknown>) => {
+      Object.assign(data, p);
+      for (const l of listeners) l(p);
+    },
+  };
+}
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test('поля настроек: только верные, остальное — умолчания или пропуск', () => {
+  expect(parseSettingsPatch({ theme: 'light', pixelSnap: 'да', leftWidth: 1000, чужое: 1 })).toEqual({ theme: 'light', leftWidth: 480 });
+  expect(parseSettings({ theme: 'синяя', pagesOpen: false })).toEqual({ ...DEFAULT_SETTINGS, pagesOpen: false });
+  expect(diffSettings(DEFAULT_SETTINGS, { theme: 'dark', pixelSnap: false, keymap: undefined })).toEqual({ pixelSnap: false });
+});
+
+test('перенос из localStorage: один раз, прежняя запись удаляется, тема зеркалится', async () => {
+  const legacy = memory();
+  legacy.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'light', filesView: 'list', leftWidth: 300 }));
+  const f = fakeBackend();
+  const s = await openSettings(f.backend, legacy);
+  expect(s.current).toMatchObject({ theme: 'light', filesView: 'list', leftWidth: 300 });
+  expect(f.data).toMatchObject({ theme: 'light', filesView: 'list', leftWidth: 300, pixelSnap: true });
+  expect(legacy.getItem(SETTINGS_KEY)).toBeNull();
+  expect(legacy.getItem(THEME_KEY)).toBe('light');
+  // В базе уже есть — прежняя запись (если вдруг снова появилась) не читается.
+  legacy.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'dark' }));
+  expect((await openSettings(f.backend, legacy)).current.theme).toBe('light');
+});
+
+test('пишутся только изменённые поля; чужие применяются и обратно не пишутся', async () => {
+  const f = fakeBackend({ theme: 'dark', filesView: 'grid' });
+  const s = await openSettings(f.backend, memory());
+  const seen: Partial<typeof DEFAULT_SETTINGS>[] = [];
+  s.onChange((p) => seen.push(p));
+  s.update({ ...s.current, leftWidth: 320 });
+  await tick();
+  expect(f.writes).toEqual([{ leftWidth: 320 }]);
+  // Другая вкладка сменила вид и прислала мусор в теме: вид применяется, тема — нет.
+  f.remote({ filesView: 'list', theme: 'синяя' });
+  expect(seen).toEqual([{ filesView: 'list' }]);
+  expect(s.current.filesView).toBe('list');
+  // Своя запись всех полей после чужого изменения его не затирает.
+  s.update({ ...s.current });
+  await tick();
+  expect(f.writes).toHaveLength(1);
+  expect(f.data.filesView).toBe('list');
+});
+
+test('ошибка записи настроек — одно уведомление, пока запись не удастся', async () => {
+  const f = fakeBackend();
+  const s = await openSettings(f.backend, memory());
+  const errors: string[] = [];
+  s.onError((m) => errors.push(m));
+  f.setFail(true);
+  s.update({ theme: 'light' });
+  s.update({ theme: 'system' });
+  await tick();
+  expect(errors).toEqual(['Не удалось сохранить настройки: нет места']);
+  f.setFail(false);
+  s.update({ theme: 'dark' });
+  await tick();
+  f.setFail(true);
+  s.update({ theme: 'light' });
+  await tick();
+  expect(errors).toHaveLength(2);
 });

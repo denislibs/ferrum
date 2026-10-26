@@ -15,7 +15,8 @@ import { Menu, type MenuItem } from './menu';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
-import { loadSettings, resolveTheme, storage, updateSettings, type Settings, type ThemeChoice } from './settings';
+import { resolveTheme, type Settings, type ThemeChoice } from './settings';
+import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
 import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
@@ -33,6 +34,8 @@ import { TooltipLayer } from './tooltip';
 export interface AppProps {
   file: FileMeta;
   files: FileStore;
+  /** Настройки пользователя (IndexedDB, общие для вкладок). */
+  settings: SettingsStore;
   /** Уход с редактора: сохранить и остановить ядро; `false` — запись не удалась, остаться. */
   onLeave: (leave: () => Promise<boolean>) => void;
   /** Файл из хранилища не открылся (испорчен): к экрану файлов с этим сообщением. */
@@ -64,7 +67,7 @@ const SAVE_STOP_MS = SETTLE_MS * 2;
 
 export function App(props: AppProps) {
   const store = createUiStore();
-  const saved = loadSettings(storage());
+  const saved = props.settings.current;
   const [editor, setEditor] = createSignal<Editor>();
   const [failure, setFailure] = createSignal('');
   const [left, setLeft] = createSignal(saved.leftWidth);
@@ -116,10 +119,29 @@ export function App(props: AppProps) {
   let writeTimer = 0;
   const flush = () => {
     clearTimeout(writeTimer);
-    // Поверх сохранённых: поля экрана файлов (вид списка) редактор не трогает.
-    if (pending) updateSettings(storage(), pending);
+    // Только изменённые поля: чужие (вид списка, изменения другой вкладки) не затираются.
+    if (pending) props.settings.update(pending);
     pending = null;
   };
+  // Настройки, изменённые в другой вкладке: тема, привязка и раскладка — на лету
+  // (ширина панелей у каждой вкладки своя).
+  const offRemote = props.settings.onChange((p) => {
+    if (p.theme) setThemeChoice(p.theme);
+    if (p.pixelSnap !== undefined) setPixelSnap(p.pixelSnap);
+    if (p.keymap !== undefined && p.keymap !== keymap()) {
+      setKeymap(p.keymap);
+      const ed = editor();
+      if (ed) {
+        store.quietKeymapImport();
+        ed.send(p.keymap ? { type: 'importKeymap', json: p.keymap } : { type: 'resetKeymap', command: undefined });
+      }
+    }
+  });
+  const offErrors = props.settings.onError((m) => store.toast(m, 'error'));
+  onCleanup(() => {
+    offRemote();
+    offErrors();
+  });
   createEffect(() => {
     pending = {
       theme: themeChoice(),

@@ -17,7 +17,8 @@ import { Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { RenameInput } from './rename-input';
 import type { Route } from './router';
-import { loadSettings, resolveTheme, storage, updateSettings, type FilesView } from './settings';
+import { resolveTheme, type FilesView } from './settings';
+import type { SettingsStore } from './settings-store';
 import { createUiStore } from './store';
 import { Toasts } from './toasts';
 
@@ -32,6 +33,8 @@ const SECTIONS: { id: Section; title: string; icon: IconName }[] = [
 
 export interface FilesScreenProps {
   files: FileStore;
+  /** Настройки пользователя (вид списка, тема). */
+  settings: SettingsStore;
   section: Section;
   /** Сообщение (файл не найден, не открылся); `seq` — чтобы то же сообщение показалось снова. */
   notice: { text: string; seq: number } | null;
@@ -42,11 +45,12 @@ type Confirm = { kind: 'delete'; file: FileMeta } | { kind: 'empty' };
 
 export function FilesScreen(props: FilesScreenProps) {
   const ui = createUiStore();
-  const saved = loadSettings(storage());
+  const saved = props.settings.current;
   // Тему до первого рисования ставит theme-init.js, после редактора она уже на
-  // <html>; здесь — только «как в системе», которая следует за системой на лету.
+  // <html>; здесь — «как в системе» на лету и тема, сменённая в другой вкладке.
   const media = matchMedia('(prefers-color-scheme: dark)');
-  const applyTheme = () => (document.documentElement.dataset.theme = resolveTheme(loadSettings(storage()).theme, media.matches));
+  const applyTheme = () => (document.documentElement.dataset.theme = resolveTheme(props.settings.current.theme, media.matches));
+  applyTheme();
   media.addEventListener('change', applyTheme);
   onCleanup(() => media.removeEventListener('change', applyTheme));
 
@@ -348,8 +352,17 @@ export function FilesScreen(props: FilesScreenProps) {
 
   const chooseView = (v: FilesView) => {
     setView(v);
-    updateSettings(storage(), { filesView: v });
+    props.settings.update({ filesView: v });
   };
+  const offRemote = props.settings.onChange((p) => {
+    if (p.theme) applyTheme();
+    if (p.filesView) setView(p.filesView);
+  });
+  const offErrors = props.settings.onError((m) => ui.toast(m, 'error'));
+  onCleanup(() => {
+    offRemote();
+    offErrors();
+  });
 
   const sub = (f: FileMeta) =>
     props.section === 'trash'

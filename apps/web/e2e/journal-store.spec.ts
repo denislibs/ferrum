@@ -84,7 +84,7 @@ test('пачка удалённого файла — отказ «Файл не 
   expect(message).toBe('Файл не найден');
 });
 
-test('база версии 1 с файлами открывается как версия 2: файлы целы, журнал работает', async ({ browser }) => {
+test('база версии 1 с файлами открывается как нынешняя (3): файлы целы, журнал работает', async ({ browser }) => {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   await testMode(page);
@@ -151,6 +151,6 @@ test('база версии 1 с файлами открывается как в
       version,
     };
   });
-  expect(r).toEqual({ name: 'Старый файл', bytes: [7, 8, 9, 10], journalBefore: 0, journalAfter: [5], version: 2 });
+  expect(r).toEqual({ name: 'Старый файл', bytes: [7, 8, 9, 10], journalBefore: 0, journalAfter: [5], version: 3 });
   await ctx.close();
 });

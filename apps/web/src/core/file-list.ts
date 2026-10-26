@@ -4,7 +4,11 @@
 // чистые функции, общие для него и модульных тестов. Всё, что пересекает границу
 // потоков, не доверенное: проверки — `requestError`.
 
-import { MAX_NAME_CHARS, MAX_OPEN_BYTES, tooLarge } from './limits';
+import { MAX_NAME_CHARS, MAX_OPEN_BYTES, MAX_SETTINGS_BYTES, tooLarge } from './limits';
+
+/** Поля настроек пользователя в хранилище `settings` — по ключу на поле: вкладки
+ * пишут только свои изменения и не затирают чужие. Значения проверяет интерфейс. */
+export const SETTINGS_FIELDS = ['theme', 'pixelSnap', 'keymap', 'leftWidth', 'rightWidth', 'pagesOpen', 'filesView'] as const;
 
 /** Запись о файле — без байтов: список читает только метаданные. Время — мс эпохи. */
 export interface FileMeta {
@@ -114,6 +118,10 @@ export type IoOp =
   | { op: 'appendJournal'; file: string; session: number; batch: number; bytes: ArrayBuffer }
   /** Тесты: пачек журнала у файла. */
   | { op: 'journalCount'; file: string }
+  /** Все поля настроек (не доверенные). */
+  | { op: 'settings' }
+  /** Записать только эти поля настроек; другие вкладки получат их событием. */
+  | { op: 'setSettings'; patch: Record<string, unknown> }
   /** Байты файла `Blob`'ом, собранным в worker'е («Скачать копию»). */
   | { op: 'blob'; file: string }
   | { op: 'rename'; file: string; name: string }
@@ -141,6 +149,8 @@ export interface IoResults {
   write: FileMeta;
   appendJournal: null;
   journalCount: number;
+  settings: Record<string, unknown>;
+  setSettings: null;
   blob: Blob | null;
   rename: FileMeta;
   touch: FileMeta;
@@ -159,7 +169,9 @@ export type FromIo =
   | { t: 'res'; id: number; ok: true; value: unknown }
   | { t: 'res'; id: number; ok: false; message: string }
   /** Список изменился (здесь или в другой вкладке): экрану файлов — перечитать окно. */
-  | { t: 'changed' };
+  | { t: 'changed' }
+  /** Другая вкладка записала поля настроек. */
+  | { t: 'settings'; patch: Record<string, unknown> };
 
 const BAD = 'Неверный запрос к хранилищу файлов';
 const utf8 = new TextEncoder();
@@ -197,6 +209,17 @@ function bytesError(v: unknown, max: number): string | null {
   if (size < 0) return BAD;
   if (size > max) return tooLarge(max, size);
   return null;
+}
+
+/** Поля настроек к записи: непустой объект известных полей с простыми значениями,
+ * весь — не больше предела записи настроек. */
+function settingsPatchError(v: unknown): string | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return BAD;
+  const keys = Object.keys(v);
+  if (keys.length === 0 || keys.some((k) => !(SETTINGS_FIELDS as readonly string[]).includes(k))) return BAD;
+  if (Object.values(v).some((x) => !['string', 'number', 'boolean'].includes(typeof x))) return BAD;
+  const size = utf8.encode(JSON.stringify(v)).length;
+  return size > MAX_SETTINGS_BYTES ? tooLarge(MAX_SETTINGS_BYTES, size) : null;
 }
 
 /** Текст ошибки, если запрос к worker'у не годится; `null` — можно выполнять.
@@ -239,7 +262,10 @@ export function requestError(r: unknown): string | null {
     case 'rename':
       return isId(m.file) && isName(m.name) ? null : BAD;
     case 'emptyTrash':
+    case 'settings':
       return null;
+    case 'setSettings':
+      return settingsPatchError(m.patch);
     case 'seed':
       return isCount(m.count, MAX_SEED) ? null : BAD;
     case 'failWrites':

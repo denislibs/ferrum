@@ -285,7 +285,7 @@ test('сетка и список переключаются и запомина�
   await expect(page.locator('.fe-file-row .fe-file-row__size')).toHaveText('—');
   await page.reload();
   await expect(page.locator('.fe-file-row')).toHaveCount(1);
-  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ferrum.settings.v1')!));
+  const stored = await page.evaluate(() => window.__ferrumFiles!.store.settings());
   expect(stored).toMatchObject({ theme: 'light', leftWidth: 300, filesView: 'list' });
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   // Стрелки в группе вида.
@@ -550,7 +550,7 @@ test('испорченная сохранённая раскладка не ме
   await page.keyboard.press('ControlOrMeta+KeyS');
   await expect.poll(() => page.evaluate((i) => window.__ferrumFiles!.store.get(i).then((m) => m?.size ?? 0), id)).toBeGreaterThan(0);
   // Раскладка в настройках, которую ядро отвергнет до открытия файла.
-  await page.evaluate(() => localStorage.setItem('ferrum.settings.v1', JSON.stringify({ keymap: 'не раскладка' })));
+  await page.evaluate(() => window.__ferrumFiles!.store.setSettings({ keymap: 'не раскладка' }));
   await page.reload();
   await editorReady(page);
   expect(fileId(page)).toBe(id);

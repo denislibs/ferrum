@@ -413,7 +413,7 @@ test('сохранённая раскладка применяется при з
   // Тема из того же значения не пострадала, а испорченная раскладка из хранилища ушла.
   await expect(bad.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect
-    .poll(() => bad.evaluate(() => JSON.parse(localStorage.getItem('ferrum.settings.v1')!).keymap as string))
+    .poll(() => bad.evaluate(() => window.__ferrumFiles!.store.settings().then((s) => String(s.keymap ?? ''))))
     .not.toContain('чужой');
 });
 
@@ -557,7 +557,7 @@ test('частично верная сохранённая раскладка: �
   });
   await openApp(page);
   await expect(page.getByRole('status').filter({ hasText: 'Сохранённая раскладка: пропущено' })).toHaveCount(1);
-  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('ferrum.settings.v1')!).keymap as string);
+  const stored = () => page.evaluate(() => window.__ferrumFiles!.store.settings().then((s) => String(s.keymap ?? '')));
   await expect.poll(stored).not.toContain('нет.такой');
   expect(await stored()).toContain('KeyQ');
   await page.reload();
