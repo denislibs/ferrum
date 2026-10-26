@@ -103,3 +103,31 @@ export function resize(sink: Sink, width: number, height: number, dpr: number): 
     v.setFloat64(at + Field.C, dpr, true);
   });
 }
+
+/** Физическая клавиша Alt (Option на macOS). */
+export function isAltCode(code: string): boolean {
+  return code === 'AltLeft' || code === 'AltRight';
+}
+
+/** Одиночное нажатие Alt: между нажатием и отпусканием не было других клавиш. На
+ * Windows отпускание такого Alt переводит фокус в меню браузера — пока Alt держат
+ * для измерений на холсте, этого быть не должно. Указатель «одиночность» не
+ * снимает: отпускание после Alt+перетаскивания так же уводило бы фокус. */
+export function createLoneAlt(): { down(e: KeyboardEvent): void; up(e: KeyboardEvent): boolean; reset(): void } {
+  let alone = false;
+  return {
+    down(e) {
+      if (!isAltCode(e.code)) alone = false;
+      else if (!e.repeat) alone = true;
+    },
+    up(e) {
+      if (!isAltCode(e.code)) return false;
+      const lone = alone;
+      alone = false;
+      return lone;
+    },
+    reset() {
+      alone = false;
+    },
+  };
+}

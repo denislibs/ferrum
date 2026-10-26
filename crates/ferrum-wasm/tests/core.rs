@@ -671,3 +671,32 @@ mod present {
         assert_eq!(s.error("Ошибка WebGPU: новая".into()), Soft::Quiet);
     }
 }
+
+#[test]
+fn read_measurements_reports_alt_measurements() {
+    use ferrum_editor::KeyEvent;
+    let mut core = demo(1000);
+    let read = |core: &mut Core| {
+        core.take_events();
+        core.command(Command::ReadMeasurements);
+        core.take_events()
+            .into_iter()
+            .find_map(|e| match e {
+                CoreEvent::Measurements { values, guides } => Some((values, guides)),
+                _ => None,
+            })
+            .expect("событие measurements")
+    };
+    // «Слой 0» (0, 0, 120 × 80) выделен, Alt, наведение на «Слой 1» (140, 0): зазор 20.
+    let a = screen(60.0, 40.0);
+    core.handle(Input::PointerDown(pointer(a, 0.0)));
+    core.handle(Input::PointerUp(pointer(a, 10.0)));
+    assert_eq!(read(&mut core), (vec![], 0), "без Alt");
+    core.handle(Input::KeyDown(KeyEvent::new("AltLeft", Modifiers::ALT)));
+    let mut e = pointer(screen(200.0, 40.0), 20.0);
+    e.modifiers = Modifiers::ALT;
+    core.handle(Input::PointerMove(e));
+    assert_eq!(read(&mut core), (vec![20.0], 0));
+    core.handle(Input::KeyUp(KeyEvent::new("AltLeft", Modifiers::NONE)));
+    assert_eq!(read(&mut core), (vec![], 0), "Alt отпущен");
+}

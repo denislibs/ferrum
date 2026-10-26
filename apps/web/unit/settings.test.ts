@@ -191,6 +191,25 @@ test('холст темы: одно значение в интерфейсе, т
   }
 });
 
+test('цвета оверлеев холста: те же токены дизайн-системы в интерфейсе и в ядре', () => {
+  // Оверлеи рисует ядро (OverlayTheme в ferrum-render), интерфейс передаёт ему только
+  // тему; значения должны совпадать с токенами theme.css. `measure` — измерения с Alt.
+  const css = readFileSync(new URL('../src/ui/styles/theme.css', import.meta.url), 'utf8');
+  const rs = readFileSync(new URL('../../../crates/ferrum-render/src/overlay.rs', import.meta.url), 'utf8');
+  const tokens = { select: 'select', on_select: 'on-select', component: 'component', frame_label: 'ink-muted', measure: 'danger' };
+  for (const theme of ['dark', 'light'] as const) {
+    const block = css.slice(css.indexOf(theme === 'dark' ? ":root[data-theme='dark']" : ":root[data-theme='light']"));
+    const fn = rs.slice(rs.indexOf(`pub fn ${theme}() -> OverlayTheme`));
+    const body = fn.slice(0, fn.indexOf('\n    }'));
+    for (const [field, token] of Object.entries(tokens)) {
+      const want = block.match(new RegExp(`--${token}:\\s*#([0-9a-f]{6});`))?.[1];
+      const got = body.match(new RegExp(`\\b${field}: hex\\(0x([0-9a-f]{6})\\)`))?.[1];
+      expect(want, `${theme}: --${token} в theme.css`).toBeDefined();
+      expect(got, `${theme}: ${field} в OverlayTheme`).toBe(want);
+    }
+  }
+});
+
 test('ширина панелей из хранилища зажата в пределах края панели', () => {
   const s = memory();
   for (const [stored, loaded] of [

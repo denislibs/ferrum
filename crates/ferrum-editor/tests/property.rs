@@ -199,6 +199,8 @@ struct Stats {
     flips: u64,
     /// Из них — ресайзы за противоположную сторону.
     resize_flips: u64,
+    /// Шаги, после которых остались измерения с Alt (Alt нажат при отпускании).
+    measured: u64,
 }
 
 fn check_clean(h: &mut H, what: &str) -> Result<(), TestCaseError> {
@@ -273,6 +275,10 @@ fn play(
                 }
                 let t = k as f64 / *n as f64;
                 h.mv(p.x + to.0 as f64 * t, p.y + to.1 as f64 * t, cur);
+                assert!(
+                    !h.ed.is_busy() || h.ed.overlay().measurements.is_empty(),
+                    "измерения во время жеста"
+                );
                 if h.ed.overlay().marquee.is_some() {
                     out.marquees += 1;
                 }
@@ -350,6 +356,33 @@ fn run(acts: &[Act], stats: &mut Stats) -> Result<(), TestCaseError> {
             }
         }
         check_clean(&mut h, &what)?;
+        let measures = h.ed.overlay().measurements;
+        if matches!(a, Act::Gesture { end: End::Blur, .. }) {
+            prop_assert!(
+                measures.is_empty(),
+                "{}: измерения после потери фокуса",
+                what
+            );
+        }
+        for m in &measures {
+            let finite = [m.line.p0, m.line.p1]
+                .iter()
+                .all(|p| p.x.is_finite() && p.y.is_finite());
+            prop_assert!(
+                finite && m.value.is_finite() && m.value >= 0.0,
+                "{}: {:?}",
+                what,
+                m
+            );
+            prop_assert!(
+                m.kind != ferrum_render::MeasureKind::Distance || m.value > 0.0,
+                "{}: нулевое расстояние",
+                what
+            );
+        }
+        if !measures.is_empty() {
+            stats.measured += 1;
+        }
         let made = h.ed.step_count() - steps;
         prop_assert!(made <= 1, "{}: больше одного шага ({})", what, made);
         if kind == "history" || made == 0 {
@@ -417,6 +450,7 @@ fn random_event_sequences_keep_editor_consistent() {
     // Против пустых прогонов: каждый вид жеста действительно записывался и
     // проверялся отменой.
     assert!(st.gesture_steps > 300, "{st:?}");
+    assert!(st.measured > 0, "{st:?}");
     assert!(st.draw_steps > 40, "{st:?}");
     assert!(st.resize_steps > 30, "{st:?}");
     assert!(st.rotate_steps > 10, "{st:?}");

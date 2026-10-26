@@ -35,6 +35,7 @@ fn commands() -> Vec<Command> {
         Command::Snapshot { thumbnail: true },
         Command::MarkSaved { revision: 3.0 },
         Command::ReadPixels { reference: true },
+        Command::ReadMeasurements,
         Command::LayersWindow {
             start: 10,
             count: 40,
@@ -306,6 +307,18 @@ fn field_names_match_typescript() {
     assert_eq!(
         serde_json::to_value(Command::ReadPixels { reference: false }).unwrap(),
         json!({"type": "readPixels", "reference": false})
+    );
+    assert_eq!(
+        serde_json::to_value(Command::ReadMeasurements).unwrap(),
+        json!({"type": "readMeasurements"})
+    );
+    assert_eq!(
+        serde_json::to_value(CoreEvent::Measurements {
+            values: vec![20.0],
+            guides: 1
+        })
+        .unwrap(),
+        json!({"type": "measurements", "values": [20.0], "guides": 1})
     );
     assert_eq!(
         serde_json::to_value(&events()[5]).unwrap(),

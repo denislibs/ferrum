@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use common::*;
 use ferrum_doc::{Color, Fill, NodeKind, PropsPatch, ScaleMode, Stroke, StrokeAlign};
-use ferrum_render::{Camera, Overlay, OverlayTheme, Pixmap, Renderer, Rgba};
+use ferrum_render::{Camera, Measure, MeasureKind, Overlay, OverlayTheme, Pixmap, Renderer, Rgba};
 use kurbo::{Line, Point, Rect, Size};
 use vello_cpu::color::PremulRgba8;
 
@@ -371,6 +371,131 @@ fn overlays() {
         .count();
     assert!(text_px >= 20, "пикселей текста в плашке: {text_px}");
     golden("overlays", &img);
+}
+
+/// Измерения с Alt, как их отдаёт редактор для выделения S (20, 20, 60 × 40) и
+/// объекта T (140, 90, 50 × 40) по диагонали от него: зазоры 60 по x и 30 по y от
+/// центра S и пунктирные направляющие вдоль краёв T.
+fn diagonal_measurements() -> Vec<Measure> {
+    let d = |a: (f64, f64), b: (f64, f64), value: f64| Measure {
+        line: Line::new(a, b),
+        value,
+        kind: MeasureKind::Distance,
+    };
+    let g = |a: (f64, f64), b: (f64, f64)| Measure {
+        line: Line::new(a, b),
+        value: 0.0,
+        kind: MeasureKind::Guide,
+    };
+    vec![
+        d((80.0, 40.0), (140.0, 40.0), 60.0),
+        g((140.0, 40.0), (140.0, 90.0)),
+        d((50.0, 60.0), (50.0, 90.0), 30.0),
+        g((50.0, 90.0), (140.0, 90.0)),
+    ]
+}
+
+/// Границы плашки: пиксели цвета `c` (±12) в прямоугольнике поиска.
+fn plate(img: &Pixmap, xs: std::ops::Range<u16>, ys: std::ops::Range<u16>, c: [u8; 3]) -> Rect {
+    let hits: Vec<(u16, u16)> = xs
+        .flat_map(|x| ys.clone().map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+            let p = px(img, x, y);
+            (0..3).all(|i| p[i].abs_diff(c[i]) <= 12)
+        })
+        .collect();
+    assert!(hits.len() > 100, "пикселей плашки: {}", hits.len());
+    let r = |f: fn(&(u16, u16)) -> u16| hits.iter().map(f);
+    Rect::new(
+        f64::from(r(|q| q.0).min().unwrap()),
+        f64::from(r(|q| q.1).min().unwrap()),
+        f64::from(r(|q| q.0).max().unwrap()),
+        f64::from(r(|q| q.1).max().unwrap()),
+    )
+}
+
+#[test]
+fn measurements() {
+    let mut p = Page::new();
+    p.add(None, NodeKind::Rect, rect(20.0, 20.0, 60.0, 40.0));
+    p.add(None, NodeKind::Rect, rect(140.0, 90.0, 50.0, 40.0));
+    let scene = p.scene();
+    let bg = Rgba::from_rgba8(0x1e, 0x1e, 0x1e, 255);
+    let overlay = Overlay {
+        measurements: diagonal_measurements(),
+        frame_labels: false,
+        pixel_grid: false,
+        ..Default::default()
+    };
+    let img = render_overlay(&scene, &camera(240.0, 160.0), &overlay, bg);
+    let measure = [0xff, 0x7a, 0x7a];
+    let canvas = [0x1e, 0x1e, 0x1e];
+    // Сплошные линии в 1 px цвета `measure` (тёмная тема — `danger` #ff7a7a): горизонталь
+    // по строке 40 от края S (x = 80) до края T (x = 140), вертикаль по столбцу 50.
+    assert_px(&img, 85, 40, measure, 2);
+    assert_px(&img, 135, 40, measure, 2);
+    assert_px(&img, 85, 39, canvas, 0);
+    assert_px(&img, 85, 41, canvas, 0);
+    assert_px(&img, 50, 64, measure, 2);
+    assert_px(&img, 49, 64, canvas, 0);
+    assert_px(&img, 51, 64, canvas, 0);
+    // Линия кончается на краю T: левее S (x < 80) её нет.
+    assert_px(&img, 78, 40, [0xd9, 0xd9, 0xd9], 2);
+    // Направляющая вдоль левого края T — пунктир 4 px через 3 px от y = 40: штрих
+    // 40..44, промежуток 44..47, штрих 47..51.
+    assert_px(&img, 140, 42, measure, 2);
+    assert_px(&img, 140, 45, canvas, 0);
+    assert_px(&img, 140, 48, measure, 2);
+    // Вдоль верхнего края T — от x = 50: штрихи 50..54, 57..61, промежуток 54..57.
+    assert_px(&img, 59, 90, measure, 2);
+    assert_px(&img, 55, 90, canvas, 0);
+    // Плашки значений по серединам линий — (110, 40) и (50, 75): заливка `measure`,
+    // внутри текст цвета `on_select` (#1a1918), отступив от краёв.
+    for (xs, ys, cx, cy) in [(90..131, 28..53, 110.5, 40.5), (35..66, 63..88, 50.5, 75.0)] {
+        let r = plate(&img, xs, ys, measure);
+        let c = r.center();
+        assert!((c.x + 0.5 - cx).abs() <= 1.5, "центр плашки по x: {r:?}");
+        assert!((c.y + 0.5 - cy).abs() <= 1.5, "центр плашки по y: {r:?}");
+        assert!(r.height() >= 10.0 && r.width() >= 14.0, "плашка {r:?}");
+        let ink = (r.x0 as u16 + 2..r.x1 as u16 - 1)
+            .flat_map(|x| (r.y0 as u16 + 2..r.y1 as u16 - 1).map(move |y| (x, y)))
+            .filter(|&(x, y)| px(&img, x, y)[0] < 0x80)
+            .count();
+        assert!(ink >= 15, "пикселей текста в плашке {r:?}: {ink}");
+    }
+    // Размер в экранных пикселях не зависит от зума: при зуме 2 линия всё ещё 1 px,
+    // а плашка той же высоты.
+    let mut cam2 = camera(240.0, 160.0);
+    cam2.set_center(Point::new(80.0, 50.0));
+    cam2.set_zoom(2.0);
+    let img2 = render_overlay(&scene, &cam2, &overlay, bg);
+    // Мир (x, 40) → экран (2x − 40, 0.5 + ...): горизонталь по строке 2·40 − 100 + 80 = 60.
+    let row = (cam2.world_to_screen(Point::new(100.0, 40.0)).y).floor() as u16;
+    assert_px(&img2, 130, row, measure, 2);
+    assert_px(&img2, 130, row - 1, canvas, 0);
+    assert_px(&img2, 130, row + 1, canvas, 0);
+    let mid = cam2.world_to_screen(Point::new(110.0, 40.0));
+    let (mx, my) = (mid.x as u16, mid.y as u16);
+    let r2 = plate(&img2, mx - 20..mx + 21, my - 12..my + 13, measure);
+    let r1 = plate(&img, 90..131, 28..53, measure);
+    assert_eq!(r2.height(), r1.height(), "плашка не масштабируется зумом");
+    assert_eq!(r2.width(), r1.width(), "плашка не масштабируется зумом");
+    // Светлая тема: `danger` #c22c2c, текст плашки белый (`on_select`).
+    let light = Overlay {
+        theme: OverlayTheme::light(),
+        ..overlay.clone()
+    };
+    let img_l = render_overlay(&scene, &camera(240.0, 160.0), &light, WHITE);
+    assert_px(&img_l, 85, 40, [0xc2, 0x2c, 0x2c], 2);
+    assert_px(&img_l, 140, 42, [0xc2, 0x2c, 0x2c], 2);
+    assert_px(&img_l, 140, 45, [255, 255, 255], 0);
+    let r = plate(&img_l, 90..131, 28..53, [0xc2, 0x2c, 0x2c]);
+    let white = (r.x0 as u16 + 2..r.x1 as u16 - 1)
+        .flat_map(|x| (r.y0 as u16 + 2..r.y1 as u16 - 1).map(move |y| (x, y)))
+        .filter(|&(x, y)| px(&img_l, x, y)[1] > 0xc0)
+        .count();
+    assert!(white >= 15, "белых пикселей текста в плашке: {white}");
+    golden("measurements", &img);
 }
 
 #[test]
