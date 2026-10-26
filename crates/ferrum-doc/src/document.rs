@@ -107,9 +107,16 @@ impl Document {
                 "Файл создан в более новой версии Ferrum (схема {version}). Он открыт только для чтения"
             ));
         }
-        for (id, _) in doc.pages() {
+        for (id, name) in doc.pages() {
             if !doc.unloaded.contains_key(&id) {
-                warnings.push(format!("Страница {id} повреждена и открыта пустой"));
+                let name = if name.is_empty() {
+                    "без названия"
+                } else {
+                    &name
+                };
+                warnings.push(format!(
+                    "Файл повреждён: не удалось прочитать страницу «{name}». Она открыта пустой"
+                ));
                 doc.loaded.insert(id, PageDoc::new());
             }
         }
