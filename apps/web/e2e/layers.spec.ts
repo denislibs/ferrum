@@ -15,15 +15,17 @@ test('выделение из панели слоёв и с холста', async
   await expect(row(page, 'Экран 8')).toHaveAttribute('aria-selected', 'true');
   const l = await liveWhen(page, 'l.selectionCount === 1');
   expect([l.selectionW, l.selectionH]).toEqual([1440, 1024]);
-  // Щелчок по узлу на холсте: фрейм раскрывается, строка выделена.
+  // Щелчок по узлу на холсте: строка выделена, список прокручен к ней.
   const node = await appScreen(page, l, 200, 40);
   await page.mouse.click(node.x, node.y);
-  await expect(row(page, 'Экран 0')).toHaveAttribute('aria-expanded', 'true');
   await expect(row(page, 'Слой 1')).toHaveAttribute('aria-selected', 'true');
   await expect(row(page, 'Слой 1')).toBeInViewport();
-  // Shift — диапазон, Ctrl/Cmd — добавить. Строки фреймов наверху списка: список
-  // прокручен к «Слой 1», их нет в DOM, пока не прокрутить обратно.
+  // Фрейм раскрыт. Его строка наверху списка, а список прокручен к «Слой 1» внизу:
+  // в окне виртуального списка её нет, пока не прокрутить обратно (до прокрутки
+  // она видна лишь мгновение — проверять её там нельзя).
   await tree(page).evaluate((el) => (el.scrollTop = 0));
+  await expect(row(page, 'Экран 0')).toHaveAttribute('aria-expanded', 'true');
+  // Shift — диапазон, Ctrl/Cmd — добавить.
   await row(page, 'Экран 9').click();
   await row(page, 'Экран 7').click({ modifiers: ['Shift'] });
   await liveWhen(page, 'l.selectionCount === 3');
