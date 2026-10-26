@@ -424,6 +424,21 @@ export function App(props: AppProps) {
       store.toast(`Не удалось сохранить на диск: ${e instanceof Error ? e.message : String(e)}`, 'error');
     }
   };
+  // «Сохранить копию на диск…»: в десктопе — родной диалог (копия сохранённого файла),
+  // в браузере — байты из ядра скачиванием.
+  const saveCopy = async (ed: Editor) => {
+    const copy = props.files.disk?.saveCopy;
+    if (!copy) {
+      ed.send({ type: 'save' });
+      return;
+    }
+    try {
+      if (saver && !(await saver.save())) return;
+      if (await copy(id, fileName(store.state.documentName, '.ferrum'))) store.toast('Копия сохранена');
+    } catch (e) {
+      store.toast(`Не удалось сохранить копию: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
   const disk = (items: MenuItem[]): MenuItem[] => (props.files.disk ? items : []);
   const fileItems = (ed: Editor): MenuItem[] => [
     { label: 'Новый файл', onSelect: () => props.navigate({ kind: 'new' }) },
@@ -431,7 +446,7 @@ export function App(props: AppProps) {
     ...disk([{ label: 'Открыть с диска…', onSelect: () => void openLinked() }]),
     { label: 'Сохранить', command: 'file.save', onSelect: () => void saver?.save() },
     ...disk([{ label: 'Сохранить на диск…', onSelect: () => void saveToDisk() }]),
-    { label: 'Сохранить копию на диск…', onSelect: () => ed.send({ type: 'save' }) },
+    { label: 'Сохранить копию на диск…', onSelect: () => void saveCopy(ed) },
     { separator: true },
     { label: 'Все файлы', onSelect: () => props.navigate({ kind: 'files', section: 'recent' }) },
     { label: 'Настройки…', onSelect: () => setSettingsOpen(true) },

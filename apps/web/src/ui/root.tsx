@@ -10,9 +10,10 @@ import { App } from './app';
 import { dismissSplash, isTestMode } from './boot';
 import { FilesScreen } from './files-screen';
 import { ConfirmDialog } from './dialog';
-import { IdbFileStore, type FileMeta, type Section } from './file-store';
+import { IdbFileStore, type FileMeta, type FileStore, type Section } from './file-store';
+import { isTauri, TauriFileStore } from './tauri';
 import { storage } from './settings';
-import { openSettings, type SettingsStore } from './settings-store';
+import { openSettings, type SettingsBackend, type SettingsStore } from './settings-store';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { allowRestart, type Restart } from './restart';
 import { historyIndex, parseRoute, routeHash, routeUrl, type Route } from './router';
@@ -63,8 +64,10 @@ async function lockFile(id: string): Promise<Lock> {
 
 export function Root() {
   const test = isTestMode();
-  const files = new IdbFileStore(test);
-  if (test) window.__ferrumFiles = { store: files };
+  // Десктоп — хранилище на диске через Tauri; браузер — IndexedDB в worker'е.
+  const idb = isTauri() ? null : new IdbFileStore(test);
+  const files: FileStore & SettingsBackend = idb ?? new TauriFileStore();
+  if (test && idb) window.__ferrumFiles = { store: idb };
   const [view, setView] = createSignal<View>({ kind: 'wait' });
   let leave: (() => Promise<boolean>) | null = null;
   let unlock: (() => void) | null = null;

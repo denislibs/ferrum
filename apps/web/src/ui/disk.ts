@@ -17,6 +17,8 @@ export interface DiskFiles {
   access(id: string): Promise<Access>;
   /** Запросить доступ — только из обработчика действия пользователя. */
   requestAccess(id: string): Promise<boolean>;
+  /** Копия файла в выбранное место родным диалогом (десктоп); нет — копия скачиванием. */
+  saveCopy?(id: string, suggestedName: string): Promise<boolean>;
 }
 
 /** Запросы к worker'у ввода-вывода, которые нужны диску (их даёт `IdbFileStore`). */

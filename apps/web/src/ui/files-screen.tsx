@@ -210,6 +210,11 @@ export function FilesScreen(props: FilesScreenProps) {
   const act = (what: string, p: Promise<unknown>) => p.catch((e: unknown) => ui.toast(errorText(what, e), 'error'));
   const download = async (f: FileMeta) => {
     try {
+      // Десктоп: копия родным диалогом (скачивание ссылкой в окне Tauri ненадёжно).
+      if (props.files.disk?.saveCopy) {
+        if (await props.files.disk.saveCopy(f.id, fileName(f.name, '.ferrum'))) ui.toast('Копия сохранена');
+        return;
+      }
       // Blob собирает worker: основной поток байты не копирует.
       const blob = await props.files.blob(f.id);
       if (blob) downloadBlob(fileName(f.name, '.ferrum'), blob);
