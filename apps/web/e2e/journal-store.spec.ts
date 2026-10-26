@@ -151,6 +151,6 @@ test('база версии 1 с файлами открывается как н
       version,
     };
   });
-  expect(r).toEqual({ name: 'Старый файл', bytes: [7, 8, 9, 10], journalBefore: 0, journalAfter: [5], version: 3 });
+  expect(r).toEqual({ name: 'Старый файл', bytes: [7, 8, 9, 10], journalBefore: 0, journalAfter: [5], version: 4 });
   await ctx.close();
 });

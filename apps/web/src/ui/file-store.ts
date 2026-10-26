@@ -11,6 +11,7 @@ import { MAX_COMMAND_BYTES } from '../core/messages';
 import { FERRUM_FILE, pickFile } from './files';
 import type { Settings } from './settings';
 import type { SettingsBackend } from './settings-store';
+import { createDiskFiles, fsaSupported, type DiskFiles, type DiskIo } from './disk';
 
 export type { FileMeta, JournalMark, Section } from '../core/file-list';
 
@@ -53,6 +54,8 @@ export interface FileStore {
   thumbnail(id: string): Promise<Blob | null>;
   /** Список изменился (здесь или в другой вкладке); возвращает отписку. */
   onChange(listener: () => void): () => void;
+  /** Файлы на диске (File System Access, Tauri); нет — пунктов «с диска» нет. */
+  readonly disk?: DiskFiles;
   dispose(): void;
 }
 
@@ -67,8 +70,9 @@ export interface FileStoreTestHooks {
   setSettings(patch: Partial<Settings>): Promise<void>;
 }
 
-export class IdbFileStore implements FileStore, FileStoreTestHooks, SettingsBackend {
+export class IdbFileStore implements FileStore, FileStoreTestHooks, SettingsBackend, DiskIo {
   private readonly settingsListeners = new Set<(patch: Record<string, unknown>) => void>();
+  readonly disk: DiskFiles | undefined = fsaSupported() ? createDiskFiles(this) : undefined;
   private readonly worker: Worker;
   private seq = 0;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -179,6 +183,15 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks, SettingsBack
   }
   async failWrites(on: boolean) {
     await this.call({ op: 'failWrites', on });
+  }
+  createFromDisk(handle: FileSystemFileHandle) {
+    return this.call({ op: 'createFromDisk', handle });
+  }
+  attachDisk(file: string, handle: FileSystemFileHandle) {
+    return this.call({ op: 'attachDisk', file, handle });
+  }
+  handle(file: string) {
+    return this.call({ op: 'handle', file });
   }
   settings() {
     return this.call({ op: 'settings' });

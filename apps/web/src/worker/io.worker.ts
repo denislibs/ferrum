@@ -2,7 +2,7 @@
 // только шлёт запросы и получает метаданные, окна списка и превью; байты файлов
 // приходят и уходят передачей (transfer), без копий в основном потоке.
 //
-// База `ferrum`, версия 3:
+// База `ferrum`, версия 4:
 // - `meta` — записи `FileMeta` (ключ `id`): список читает только их;
 // - `bytes` — id → ArrayBuffer файла `.ferrum`;
 // - `thumbs` — id → Blob PNG превью;
@@ -10,7 +10,11 @@
 //   изменений: правки после байтов файла, по порядку записи. Запись файла стирает
 //   пачки до номера своего снимка в той же транзакции;
 // - `settings` (с версии 3) — поле настроек пользователя → значение: вкладки пишут
-//   только изменённые поля, другие узнают через `BroadcastChannel('ferrum-settings')`.
+//   только изменённые поля, другие узнают через `BroadcastChannel('ferrum-settings')`;
+// - `handles` (с версии 4) — id → `{ handle, lastModified }` записи, связанной с
+//   файлом на диске (File System Access): байты — в файле, не в `bytes`; запись — через
+//   `createWritable` (браузер подменяет файл целиком при `close`), чужая правка файла
+//   видна по `lastModified`.
 // Метаданные держатся в памяти (≤ 10 000 записей — сотни килобайт): сортировка,
 // поиск и окна — отсюда. Другие вкладки узнают об изменениях через
 // `BroadcastChannel('ferrum-files')` и перечитывают метаданные.
@@ -24,7 +28,11 @@
 
 import {
   CONFLICT,
+  DISK_ACCESS,
+  DISK_CHANGED,
+  DISK_MISSING,
   GONE,
+  nameFromFile,
   cleanName,
   requestError,
   sectionList,
@@ -36,10 +44,11 @@ import {
   type IoResults,
   type ToIo,
 } from '../core/file-list';
+import { MAX_OPEN_BYTES, tooLarge } from '../core/limits';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const DB_NAME = 'ferrum';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const CHANNEL = 'ferrum-files';
 const SETTINGS_CHANNEL = 'ferrum-settings';
 
@@ -82,6 +91,7 @@ function open(): Promise<IDBDatabase> {
       if (!d.objectStoreNames.contains('thumbs')) d.createObjectStore('thumbs');
       if (!d.objectStoreNames.contains('journal')) d.createObjectStore('journal');
       if (!d.objectStoreNames.contains('settings')) d.createObjectStore('settings');
+      if (!d.objectStoreNames.contains('handles')) d.createObjectStore('handles');
     };
     req.onsuccess = () => {
       const d = req.result;
@@ -144,6 +154,7 @@ function validMeta(v: unknown): FileMeta | null {
     version: num(m.version) ? (m.version as number) : 0,
   };
   if (num(m.trashedAt)) meta.trashedAt = m.trashedAt as number;
+  if (typeof m.disk === 'string' && m.disk.length > 0 && m.disk.length <= 4096) meta.disk = m.disk;
   return meta;
 }
 
@@ -222,6 +233,55 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return p;
 }
 
+interface DiskRecord {
+  handle: FileSystemFileHandle;
+  /** `lastModified` файла после нашего последнего чтения или записи. */
+  lastModified: number;
+}
+
+/** Ошибка File System Access — словами для пользователя. */
+function diskError(e: unknown): Error {
+  const name = e instanceof DOMException ? e.name : '';
+  if (name === 'NotFoundError') return new Error(DISK_MISSING);
+  if (name === 'NotAllowedError' || name === 'SecurityError') return new Error(DISK_ACCESS);
+  return storageError(e);
+}
+
+async function diskOf(id: string): Promise<DiskRecord | null> {
+  const d = await open();
+  const v = (await request(d.transaction('handles').objectStore('handles').get(id))) as unknown;
+  const r = v as Partial<DiskRecord> | undefined;
+  return r && r.handle instanceof FileSystemFileHandle && typeof r.lastModified === 'number'
+    ? { handle: r.handle, lastModified: r.lastModified }
+    : null;
+}
+
+async function fileOf(handle: FileSystemFileHandle): Promise<File> {
+  try {
+    return await handle.getFile();
+  } catch (e) {
+    throw diskError(e);
+  }
+}
+
+/** Записать байты в файл на диске: браузер пишет во временный и подменяет им файл при `close`. */
+async function writeDisk(handle: FileSystemFileHandle, bytes: ArrayBuffer): Promise<number> {
+  let w: FileSystemWritableFileStream;
+  try {
+    w = await handle.createWritable();
+  } catch (e) {
+    throw diskError(e);
+  }
+  try {
+    await w.write(bytes);
+    await w.close();
+  } catch (e) {
+    await w.abort().catch(() => {});
+    throw diskError(e);
+  }
+  return (await fileOf(handle)).lastModified;
+}
+
 /** Все пачки журнала файла: ключи `[id, сеанс, номер]`, массив больше любого числа. */
 function journalRange(id: string): IDBKeyRange {
   return IDBKeyRange.bound([id], [id, []]);
@@ -239,7 +299,19 @@ async function readFile(id: string): Promise<{ value: IoResults['read']; transfe
     // Последний ключ `[id, сеанс, номер]` — наибольший сеанс (ключи упорядочены).
     request(tx.objectStore('journal').openKeyCursor(journalRange(id), 'prev')).then((c) => c?.key),
   ]);
-  const bytes = raw instanceof ArrayBuffer ? raw : null;
+  let bytes = raw instanceof ArrayBuffer ? raw : null;
+  const disk = m.disk ? await diskOf(id) : null;
+  if (disk) {
+    // Байты — в файле на диске; пустой файл (только что выбранный для сохранения) — новый.
+    const f = await fileOf(disk.handle);
+    if (f.size > MAX_OPEN_BYTES) throw new Error(tooLarge(MAX_OPEN_BYTES, f.size));
+    bytes = f.size > 0 ? await f.arrayBuffer() : null;
+    if (f.lastModified !== disk.lastModified) {
+      const w = rw(d, ['handles']);
+      w.objectStore('handles').put({ handle: disk.handle, lastModified: f.lastModified }, id);
+      await done(w);
+    }
+  }
   const journal = bytes ? entries.filter((b): b is ArrayBuffer => b instanceof ArrayBuffer) : [];
   const s = Array.isArray(last) ? last[1] : null;
   const session = typeof s === 'number' && Number.isSafeInteger(s) && s >= 0 ? s : null;
@@ -266,11 +338,18 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
       // (после сбоя ядра редактор читает файл сразу).
       return serial(() => readFile(r.file));
     case 'blob': {
-      meta(r.file);
+      // Файл на диске — уже Blob (`File`): основной поток его не копирует.
+      if (meta(r.file).disk) {
+        const disk = await diskOf(r.file);
+        if (disk) return { value: await fileOf(disk.handle) };
+      }
       const buf = await readBytes(r.file);
       // Blob собирается здесь: основной поток не копирует сотни мегабайт.
       return { value: buf ? new Blob([buf], { type: 'application/octet-stream' }) : null };
     }
+    case 'handle':
+      meta(r.file);
+      return { value: (await diskOf(r.file))?.handle ?? null };
     case 'settings': {
       const d = await open();
       const st = d.transaction('settings').objectStore('settings');
@@ -320,14 +399,27 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
     case 'write': {
       if (failWrites) throw new Error('недостаточно места в хранилище браузера');
       const { bytes, thumb, base, journal } = r;
+      // Файл на диске: сначала он (атомарно), затем метаданные и журнал в базе. Сбой
+      // между ними оставит пачки, уже вошедшие в файл, — их повтор безвреден.
+      let disk: { handle: FileSystemFileHandle; lastModified: number } | null = null;
+      const known = metas.get(r.file);
+      if (known?.disk) {
+        const rec = await diskOf(r.file);
+        if (rec) {
+          if (known.version !== base) throw new Error(CONFLICT);
+          if ((await fileOf(rec.handle)).lastModified !== rec.lastModified) throw new Error(DISK_CHANGED);
+          disk = { handle: rec.handle, lastModified: await writeDisk(rec.handle, bytes) };
+        }
+      }
       // Имя записи здесь не меняется: оно — из хранилища (переименование — `rename`,
       // в том числе из другой вкладки), снимок его не затирает.
       const next = await update(
         r.file,
-        ['bytes', 'thumbs', 'journal'],
+        ['bytes', 'thumbs', 'journal', 'handles'],
         (m, tx) => {
           if (m.version !== base) throw new Error(CONFLICT);
-          tx.objectStore('bytes').put(bytes, m.id);
+          if (disk) tx.objectStore('handles').put(disk, m.id);
+          else tx.objectStore('bytes').put(bytes, m.id);
           // Пачки, вошедшие в снимок, — в той же транзакции: файл и журнал не расходятся.
           if (journal) tx.objectStore('journal').delete(IDBKeyRange.bound([m.id], [m.id, journal.session, journal.upTo]));
           if (thumb instanceof ArrayBuffer) tx.objectStore('thumbs').put(new Blob([thumb], { type: 'image/png' }), m.id);
@@ -342,7 +434,79 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
           };
         },
         GONE,
-      );
+      ).catch(async (e: unknown) => {
+        // Файл на диске уже записан, а база — нет: его новое `lastModified` всё равно
+        // запомнить, иначе своя же запись выглядела бы чужой правкой (`DISK_CHANGED`)
+        // при каждой следующей. Поколение прежнее — следующая запись пройдёт.
+        if (disk) {
+          const written = disk;
+          await open()
+            .then((d) => {
+              const tx = rw(d, ['handles']);
+              tx.objectStore('handles').put(written, r.file);
+              return done(tx);
+            })
+            .catch(() => {});
+        }
+        throw e;
+      });
+      changed();
+      return { value: next };
+    }
+    case 'createFromDisk': {
+      // Тот же файл уже в списке — его запись (без дубля).
+      for (const m of metas.values()) {
+        if (!m.disk) continue;
+        const rec = await diskOf(m.id);
+        if (!rec || !(await rec.handle.isSameEntry(r.handle))) continue;
+        // Запись в корзине: файл снова открыли с диска — вернуть её из корзины.
+        if (m.trashedAt === undefined) return { value: m };
+        const back = await update(m.id, [], (cur) => {
+          const next = { ...cur };
+          delete next.trashedAt;
+          return next;
+        });
+        changed();
+        return { value: back };
+      }
+      const f = await fileOf(r.handle);
+      if (f.size > MAX_OPEN_BYTES) throw new Error(tooLarge(MAX_OPEN_BYTES, f.size));
+      const m: FileMeta = {
+        id: crypto.randomUUID(),
+        name: nameFromFile(f.name),
+        createdAt: now,
+        editedAt: f.lastModified || now,
+        openedAt: now,
+        size: f.size,
+        thumbVersion: 0,
+        version: f.size > 0 ? 1 : 0,
+        disk: f.name,
+      };
+      const d = await open();
+      const tx = rw(d, ['meta', 'handles']);
+      tx.objectStore('meta').put(m);
+      tx.objectStore('handles').put({ handle: r.handle, lastModified: f.lastModified }, m.id);
+      await done(tx);
+      metas.set(m.id, m);
+      changed();
+      return { value: m };
+    }
+    case 'attachDisk': {
+      // Байты записи — в выбранный файл (их может не быть: новый файл, ещё не сохранённый).
+      // Запись уже на диске — её байты в прежнем файле, не в базе.
+      const cur = meta(r.file).disk ? await diskOf(r.file) : null;
+      let bytes: ArrayBuffer | null;
+      if (cur) {
+        const f = await fileOf(cur.handle);
+        bytes = f.size > 0 ? await f.arrayBuffer() : null;
+      } else bytes = await readBytes(r.file);
+      const lastModified = bytes ? await writeDisk(r.handle, bytes) : (await fileOf(r.handle)).lastModified;
+      // Поколение не меняется: содержимое то же, открытый редактор пишет дальше.
+      const next = await update(r.file, ['bytes', 'handles'], (m, tx) => {
+        tx.objectStore('handles').put({ handle: r.handle, lastModified }, m.id);
+        tx.objectStore('bytes').delete(m.id);
+        return { ...m, disk: r.handle.name };
+      });
       changed();
       return { value: next };
     }
@@ -395,9 +559,10 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
     case 'emptyTrash': {
       const ids = r.op === 'delete' ? [meta(r.file).id] : [...metas.values()].filter((m) => m.trashedAt !== undefined).map((m) => m.id);
       const d = await open();
-      const tx = rw(d, ['meta', 'bytes', 'thumbs', 'journal']);
+      const tx = rw(d, ['meta', 'bytes', 'thumbs', 'journal', 'handles']);
       for (const id of ids) {
-        for (const st of ['meta', 'bytes', 'thumbs']) tx.objectStore(st).delete(id);
+        // Файл на диске не трогаем: удаляется только запись о нём.
+        for (const st of ['meta', 'bytes', 'thumbs', 'handles']) tx.objectStore(st).delete(id);
         tx.objectStore('journal').delete(journalRange(id));
       }
       await done(tx);

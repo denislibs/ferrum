@@ -99,7 +99,7 @@ test('база версии 2 обновляется до 3: файлы, бай�
   expect(await page.evaluate((i) => window.__ferrumFiles!.store.journalCount(i), id)).toBe(1);
   await page.evaluate(() => window.__ferrumFiles!.store.setSettings({ theme: 'light' }));
   expect(await stored(page)).toMatchObject({ theme: 'light' });
-  // Сама база: версия 3, прежние хранилища с данными, новое — настройки.
+  // Сама база: нынешняя версия (4), прежние хранилища с данными, новое — настройки.
   const db = await old.evaluate(
     (i) =>
       new Promise<unknown>((resolve, reject) => {
@@ -128,7 +128,7 @@ test('база версии 2 обновляется до 3: файлы, бай�
       }),
     id,
   );
-  expect(db).toEqual({ version: 3, bytes: 8, thumb: 5, journal: 1, theme: 'light' });
+  expect(db).toEqual({ version: 4, bytes: 8, thumb: 5, journal: 1, theme: 'light' });
 });
 
 test('настройки не теряются при перезапуске ядра', async ({ page }) => {

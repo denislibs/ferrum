@@ -164,3 +164,12 @@ test('журнал: запросы к хранилищу проверяются'
   expect(requestError({ id: 3, op: 'journalCount', file: 'f1' })).toBeNull();
   expect(requestError({ id: 3, op: 'journalCount', file: 7 })).toBe('Неверный запрос к хранилищу файлов');
 });
+
+test('диск: запросы с дескриптором — только с настоящим дескриптором', () => {
+  // В Node нет FileSystemFileHandle: любой «дескриптор» — подделка.
+  const fake = { kind: 'file', name: 'x.ferrum' };
+  expect(requestError({ id: 1, op: 'createFromDisk', handle: fake })).toBe('Неверный запрос к хранилищу файлов');
+  expect(requestError({ id: 2, op: 'attachDisk', file: 'f1', handle: fake })).toBe('Неверный запрос к хранилищу файлов');
+  expect(requestError({ id: 3, op: 'handle', file: 'f1' })).toBeNull();
+  expect(requestError({ id: 3, op: 'handle', file: '' })).toBe('Неверный запрос к хранилищу файлов');
+});

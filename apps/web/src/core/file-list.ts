@@ -28,7 +28,17 @@ export interface FileMeta {
   /** Поколение содержимого: растёт с каждой записью байтов. Запись несёт поколение,
    * на котором основана, и не проходит, если файл с тех пор записали (другая вкладка). */
   version: number;
+  /** Запись связана с файлом на диске (File System Access): его имя. Байты — в нём,
+   * а не в базе. */
+  disk?: string;
 }
+
+/** Файл на диске записала другая программа после нашего чтения или записи. */
+export const DISK_CHANGED = 'Файл на диске изменён другой программой — сохраните копию на диск или откройте файл заново';
+/** Файла на диске нет: перемещён или удалён. */
+export const DISK_MISSING = 'Файл на диске не найден — он перемещён или удалён';
+/** Браузер не дал доступ к файлу на диске. */
+export const DISK_ACCESS = 'Нет доступа к файлу на диске';
 
 /** Запись основана на устаревшем поколении: файл записали в другой вкладке. */
 export const CONFLICT = 'Файл изменён в другой вкладке — сохраните копию на диск или откройте файл заново';
@@ -118,6 +128,12 @@ export type IoOp =
   | { op: 'appendJournal'; file: string; session: number; batch: number; bytes: ArrayBuffer }
   /** Тесты: пачек журнала у файла. */
   | { op: 'journalCount'; file: string }
+  /** Новая запись, связанная с файлом на диске (тот же файл — его прежняя запись). */
+  | { op: 'createFromDisk'; handle: FileSystemFileHandle }
+  /** Связать запись с файлом на диске: записать в него её байты, дальше — писать туда. */
+  | { op: 'attachDisk'; file: string; handle: FileSystemFileHandle }
+  /** Дескриптор файла на диске (запрос доступа — в окне); `null` — запись не на диске. */
+  | { op: 'handle'; file: string }
   /** Все поля настроек (не доверенные). */
   | { op: 'settings' }
   /** Записать только эти поля настроек; другие вкладки получат их событием. */
@@ -151,6 +167,9 @@ export interface IoResults {
   journalCount: number;
   settings: Record<string, unknown>;
   setSettings: null;
+  createFromDisk: FileMeta;
+  attachDisk: FileMeta;
+  handle: FileSystemFileHandle | null;
   blob: Blob | null;
   rename: FileMeta;
   touch: FileMeta;
@@ -188,6 +207,11 @@ function isName(v: unknown): v is string {
 
 function isCount(v: unknown, max: number): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max;
+}
+
+/** Настоящий дескриптор файла (где File System Access нет — никакой не настоящий). */
+function isHandle(v: unknown): v is FileSystemFileHandle {
+  return typeof FileSystemFileHandle === 'function' && v instanceof FileSystemFileHandle;
 }
 
 /** Целое ≥ 0 не больше `Number.MAX_SAFE_INTEGER` (сеанс, номер пачки). */
@@ -245,7 +269,12 @@ export function requestError(r: unknown): string | null {
     case 'delete':
     case 'thumb':
     case 'journalCount':
+    case 'handle':
       return isId(m.file) ? null : BAD;
+    case 'createFromDisk':
+      return isHandle(m.handle) ? null : BAD;
+    case 'attachDisk':
+      return isId(m.file) && isHandle(m.handle) ? null : BAD;
     case 'appendJournal':
       if (!isId(m.file) || !isWhole(m.session) || !isWhole(m.batch)) return BAD;
       if (!(m.bytes instanceof ArrayBuffer)) return BAD;

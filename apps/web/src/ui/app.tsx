@@ -405,10 +405,32 @@ export function App(props: AppProps) {
     const meta = await importFromDisk(props.files, (t) => store.toast(t, 'error'));
     if (meta) props.navigate({ kind: 'file', id: meta.id });
   };
+  // File System Access: файл на диске, связанный с записью (правки пишутся в него).
+  const openLinked = async () => {
+    try {
+      const meta = await props.files.disk?.open();
+      if (meta) props.navigate({ kind: 'file', id: meta.id });
+    } catch (e) {
+      store.toast(`Не удалось открыть файл: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
+  const saveToDisk = async () => {
+    try {
+      // Сначала — последнее в хранилище: на диск уходит свежий файл.
+      if (saver && !(await saver.save())) return;
+      const meta = await props.files.disk?.saveAs(id, fileName(store.state.documentName, '.ferrum'));
+      if (meta) store.toast(`Файл сохранён на диск: ${meta.disk}`);
+    } catch (e) {
+      store.toast(`Не удалось сохранить на диск: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
+  const disk = (items: MenuItem[]): MenuItem[] => (props.files.disk ? items : []);
   const fileItems = (ed: Editor): MenuItem[] => [
     { label: 'Новый файл', onSelect: () => props.navigate({ kind: 'new' }) },
     { label: 'Открыть…', onSelect: () => void openFromDisk() },
+    ...disk([{ label: 'Открыть с диска…', onSelect: () => void openLinked() }]),
     { label: 'Сохранить', command: 'file.save', onSelect: () => void saver?.save() },
+    ...disk([{ label: 'Сохранить на диск…', onSelect: () => void saveToDisk() }]),
     { label: 'Сохранить копию на диск…', onSelect: () => ed.send({ type: 'save' }) },
     { separator: true },
     { label: 'Все файлы', onSelect: () => props.navigate({ kind: 'files', section: 'recent' }) },

@@ -224,6 +224,14 @@ export function FilesScreen(props: FilesScreenProps) {
     const meta = await importFromDisk(props.files, (t) => ui.toast(t, 'error'));
     if (meta) open(meta);
   };
+  const openLinked = async () => {
+    try {
+      const meta = await props.files.disk?.open();
+      if (meta) open(meta);
+    } catch (e) {
+      ui.toast(errorText('Не удалось открыть файл', e), 'error');
+    }
+  };
   const menuItems = (f: FileMeta): MenuItem[] =>
     props.section === 'trash'
       ? [
@@ -367,7 +375,7 @@ export function FilesScreen(props: FilesScreenProps) {
   const sub = (f: FileMeta) =>
     props.section === 'trash'
       ? `Удалён ${relativeTime(f.trashedAt ?? 0, now())}`
-      : `Изменён ${relativeTime(f.editedAt, now())}`;
+      : `${f.disk ? 'На диске · ' : ''}Изменён ${relativeTime(f.editedAt, now())}`;
 
   const empty = () =>
     loaded() && total() === 0 ? (query().trim() ? 'Ничего не найдено' : props.section === 'trash' ? 'Корзина пуста' : 'Здесь пока нет файлов') : '';
@@ -481,6 +489,12 @@ export function FilesScreen(props: FilesScreenProps) {
                   <Icon name="upload" />
                   Импорт…
                 </button>
+                <Show when={props.files.disk}>
+                  <button class="fe-btn fe-btn--secondary" onClick={() => void openLinked()}>
+                    <Icon name="upload" />
+                    Открыть с диска…
+                  </button>
+                </Show>
                 <button class="fe-btn fe-btn--primary" onClick={() => props.navigate({ kind: 'new' })}>
                   <Icon name="plus" />
                   Новый файл
@@ -616,7 +630,11 @@ export function FilesScreen(props: FilesScreenProps) {
           return v.kind === 'delete' ? (
             <ConfirmDialog
               title="Удалить файл навсегда?"
-              text={`Файл «${v.file.name}» будет удалён без возможности восстановления`}
+              text={
+                v.file.disk
+                  ? `Запись «${v.file.name}» будет удалена из списка; файл «${v.file.disk}» на диске останется`
+                  : `Файл «${v.file.name}» будет удалён без возможности восстановления`
+              }
               confirm="Удалить"
               cancel="Отмена"
               onCancel={() => setConfirm(null)}

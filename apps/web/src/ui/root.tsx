@@ -7,8 +7,9 @@
 import { createSignal, Match, onCleanup, Switch } from 'solid-js';
 import { UNTITLED } from '../core/file-list';
 import { App } from './app';
-import { isTestMode } from './boot';
+import { dismissSplash, isTestMode } from './boot';
 import { FilesScreen } from './files-screen';
+import { ConfirmDialog } from './dialog';
 import { IdbFileStore, type FileMeta, type Section } from './file-store';
 import { storage } from './settings';
 import { openSettings, type SettingsStore } from './settings-store';
@@ -21,7 +22,9 @@ type View =
   | { kind: 'files'; section: Section; notice: { text: string; seq: number } | null }
   /** `restart` — редактор запущен заново после сбоя; `backend` — бэкенд рендера
    * (после потери GPU — запасной, и для следующих перезапусков тоже). */
-  | { kind: 'editor'; file: FileMeta; restart?: Restart; backend?: Backend };
+  | { kind: 'editor'; file: FileMeta; restart?: Restart; backend?: Backend }
+  /** Файл на диске без доступа (браузер перезапущен): вопрос, ответ — по щелчку. */
+  | { kind: 'access'; file: FileMeta; answer: (ok: boolean) => void };
 
 /** Сколько ждать блокировку файла, прежде чем сказать «открыт в другой вкладке»:
  * своя прежняя блокировка (F5, файлы → тот же файл) снимается не мгновенно. */
@@ -130,6 +133,20 @@ export function Root() {
 
   /** Открыть файл в редакторе: занят другой вкладкой — к экрану файлов. */
   async function edit(file: FileMeta, my: number): Promise<void> {
+    // Файл на диске: доступ к нему после перезапуска браузера снова разрешает
+    // пользователь — щелчком в вопросе (запросу нужно действие пользователя).
+    if (file.disk && files.disk && (await files.disk.access(file.id).catch(() => 'denied' as const)) !== 'granted') {
+      const disk = files.disk;
+      // Вопрос — поверх заставки нельзя: она перехватывала бы щелчки.
+      dismissSplash(true);
+      const ok = await new Promise<boolean>((answer) => setView({ kind: 'access', file, answer }));
+      const granted = ok && (await disk.requestAccess(file.id).catch(() => false));
+      if (my !== seq) return;
+      if (!granted) {
+        toFiles('Нет доступа к файлу на диске — разрешите его или откройте файл заново');
+        return;
+      }
+    }
     const lock = await lockFile(file.id);
     if (my !== seq) {
       if ('release' in lock) lock.release();
@@ -250,6 +267,18 @@ export function Root() {
 
   return (
     <Switch>
+      <Match when={(() => { const v = view(); return v.kind === 'access' ? v : null; })()} keyed>
+        {(v) => (
+          <ConfirmDialog
+            title="Разрешить доступ к файлу на диске?"
+            text={`Ferrum откроет «${v.file.disk}» и будет сохранять изменения в него`}
+            confirm="Разрешить"
+            cancel="Отмена"
+            onConfirm={() => v.answer(true)}
+            onCancel={() => v.answer(false)}
+          />
+        )}
+      </Match>
       <Match when={view().kind === 'files'}>
         <FilesScreen
           files={files}

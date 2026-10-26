@@ -443,7 +443,7 @@ test('правки вне истории (страница, имя файла) �
   await page.waitForTimeout(300);
   expect(await modified()).toBe(true);
   // «Сохранить» — запись в хранилище снимает признак.
-  await fileMenu(page, /^Сохранить(?! копию)/);
+  await fileMenu(page, /^Сохранить(?! копию| на диск)/);
   await expect.poll(modified).toBe(false);
   // Имя документа — тоже правка вне истории; запись в хранилище — с новым именем.
   await page.locator('.fe-panel-head__name').dblclick();
