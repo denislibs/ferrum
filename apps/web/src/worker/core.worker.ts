@@ -2,7 +2,7 @@
 // Кадр: забрать ввод (из кольца SAB или из сообщения кадра) → `input` → `frame`
 // (рисует, только если нужно) → живое состояние → события.
 
-import init, { WasmCore } from '../wasm/ferrum_wasm.js';
+import init, { WasmCore, WasmSurface } from '../wasm/ferrum_wasm.js';
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import { Ctrl, CTRL_BYTES, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET } from '../core/layout.gen';
 import { decodeText, encodeText, MAX_CLIPBOARD_BYTES } from '../core/clipboard-text';
@@ -34,6 +34,47 @@ let started = false;
 /** Асинхронный API не умеет свой формат: событие `clipboard` несёт и готовый текст
  * с меткой (base64 кодирует worker, не основной поток). */
 let clipboardText = false;
+/** Тестовый режим страницы (`init.test`): принимаются тестовые сообщения. */
+let testHooks = false;
+/** Холст и атлас ядра — для новой поверхности после потери GPU. */
+let surfaceCanvas: OffscreenCanvas | null = null;
+let atlasSide: number | null = null;
+/** Паузы перед попытками создать потерянную поверхность заново: контекст WebGL2
+ * браузер возвращает не сразу. */
+const SURFACE_RETRY_MS = [0, 1000];
+
+/** Потерянная поверхность GPU — заново на том же холсте (спека 11): не вышло — ядро
+ * сообщает `surfaceFailed`, и интерфейс перезапускает его с запасным бэкендом. */
+async function recoverSurface(backend: string, lost: string): Promise<void> {
+  let reason = '';
+  for (const wait of SURFACE_RETRY_MS) {
+    await new Promise((r) => setTimeout(r, wait));
+    if (!core || !surfaceCanvas) return;
+    try {
+      const [w, h] = core.deviceSize();
+      const surface = await WasmSurface.create(surfaceCanvas, backend, w, h, atlasSide);
+      if (!core) return;
+      core.replaceSurface(surface);
+      surface.free();
+      sendEvents();
+      return;
+    } catch (e) {
+      reason = e instanceof Error ? e.message : String(e);
+    }
+  }
+  if (!core) return;
+  try {
+    core.surfaceFailed(`${lost}; пересоздать не удалось: ${reason}`);
+    sendEvents();
+  } catch (e) {
+    fatal(e);
+  }
+}
+/** Текст паники Rust: обработчик паники отдаёт его до остановки wasm (`web/mod.rs`). */
+let panicText: string | null = null;
+(self as unknown as { __ferrumPanic?: (m: string) => void }).__ferrumPanic = (m) => {
+  panicText = m;
+};
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
   scope.postMessage(msg, transfer);
@@ -43,7 +84,9 @@ function fatal(e: unknown): void {
   if (dead) return;
   dead = true;
   early.length = 0;
-  post({ t: 'fatal', message: e instanceof Error ? e.message : String(e) });
+  // После паники wasm бросает «unreachable»: причина — текст самой паники.
+  const message = panicText !== null ? `паника в ядре: ${panicText}` : e instanceof Error ? e.message : String(e);
+  post({ t: 'fatal', message });
   core = null;
 }
 
@@ -134,13 +177,15 @@ function sendEvents(): void {
   if (!core) return;
   let events: CoreEvent[] = core.takeEvents();
   if (events.length === 0) return;
+  for (const e of events) if (e.type === 'surfaceLost') void recoverSurface(e.backend, e.message);
   if (events.some((e) => e.type === 'clipboard')) {
     const cut = events.some((e) => e.type === 'document');
     events = events.map((e) => (e.type === 'clipboard' ? clipboardEvent(e, cut) : e));
   }
   const transfer: Transferable[] = [];
   for (const e of events) {
-    if ('bytes' in e) transfer.push(e.bytes.buffer);
+    // У пустой пачки журнала байтов нет (`bytes` — undefined).
+    if ('bytes' in e && e.bytes) transfer.push(e.bytes.buffer);
     if (e.type === 'pixels') transfer.push(e.rgba.buffer);
     // Снимок для хранилища: превью уходит вместе с байтами файла, тоже без копии.
     if (e.type === 'snapshot' && e.thumbnail) transfer.push(e.thumbnail.buffer);
@@ -265,6 +310,11 @@ function handle(msg: ToWorker): void {
       case 'tick':
         step(msg.input instanceof ArrayBuffer ? new Uint8Array(msg.input) : sab ? drain() : null);
         break;
+      case 'testPanic':
+        // Паника бросает исключение: его ловит общий обработчик ниже (`fatal`).
+        if (testHooks) core.panicForTests();
+        else postError('Неверное сообщение для ядра');
+        break;
       case 'init':
         break;
     }
@@ -305,6 +355,12 @@ scope.onmessage = async (e: MessageEvent<unknown>) => {
   }
   started = true;
   clipboardText = msg.clipboardText === true;
+  testHooks = msg.test === true;
+  surfaceCanvas = msg.canvas;
+  atlasSide = msg.atlas;
+  // Потерянный контекст WebGL2 браузер возвращает, только если потерю «приняли»
+  // (preventDefault в `webglcontextlost`); иначе пересоздать его нельзя никогда.
+  msg.canvas.addEventListener('webglcontextlost', (e) => e.preventDefault());
   try {
     await init();
     core = await WasmCore.create(msg.canvas, msg.platform, msg.width, msg.height, msg.dpr, msg.backend, msg.atlas);

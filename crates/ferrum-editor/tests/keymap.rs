@@ -479,3 +479,63 @@ fn mac_reserves_ctrl_tab() {
     assert!(mac.contains(&sc("Ctrl+Shift+Tab")));
     assert!(mac.contains(&sc("Meta+Tab")));
 }
+
+/// Платформа в файле экспорта (этап 6): файл с macOS на Windows меняет Cmd на Ctrl,
+/// обратно — Ctrl на Cmd; та же группа платформ и старый файл без поля — как есть.
+#[test]
+fn import_from_another_platform_swaps_ctrl_and_cmd() {
+    let mut mac = Keymap::new(Platform::Mac);
+    mac.import_json(r#"{"format":"ferrum-keymap","version":1,"overrides":{"tool.rect":["Meta+KeyK","Ctrl+KeyJ"]}}"#)
+        .unwrap();
+    let exported = mac.export_json();
+    let v: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(v["platform"], "mac");
+
+    let mut win = Keymap::new(Platform::Windows);
+    let warnings = win.import_json(&exported).unwrap();
+    assert_eq!(
+        warnings,
+        vec!["Раскладка с macOS: Cmd заменён на Ctrl".to_string()]
+    );
+    let back: serde_json::Value = serde_json::from_str(&win.export_json()).unwrap();
+    assert_eq!(back["platform"], "windows");
+    assert_eq!(
+        back["overrides"]["tool.rect"],
+        serde_json::json!(["Ctrl+KeyK", "Meta+KeyJ"])
+    );
+
+    // Linux — та же группа, что Windows: без замены и без предупреждения.
+    let mut linux = Keymap::new(Platform::Linux);
+    assert!(linux.import_json(&win.export_json()).unwrap().is_empty());
+    // Обратно на macOS: Ctrl → Cmd.
+    let mut mac2 = Keymap::new(Platform::Mac);
+    assert_eq!(
+        mac2.import_json(&win.export_json()).unwrap(),
+        vec!["Раскладка с Windows/Linux: Ctrl заменён на Cmd".to_string()]
+    );
+    let again: serde_json::Value = serde_json::from_str(&mac2.export_json()).unwrap();
+    assert_eq!(
+        again["overrides"]["tool.rect"],
+        serde_json::json!(["Meta+KeyK", "Ctrl+KeyJ"])
+    );
+}
+
+#[test]
+fn import_without_or_with_unknown_platform() {
+    let old = r#"{"format":"ferrum-keymap","version":1,"overrides":{"tool.rect":["Meta+KeyK"]}}"#;
+    let mut win = Keymap::new(Platform::Windows);
+    assert!(
+        win.import_json(old).unwrap().is_empty(),
+        "старый файл — как есть"
+    );
+    let v: serde_json::Value = serde_json::from_str(&win.export_json()).unwrap();
+    assert_eq!(
+        v["overrides"]["tool.rect"],
+        serde_json::json!(["Meta+KeyK"])
+    );
+    let odd = r#"{"format":"ferrum-keymap","version":1,"platform":"amiga","overrides":{}}"#;
+    assert_eq!(
+        win.import_json(odd).unwrap(),
+        vec!["Неизвестная платформа раскладки — сочетания как в файле".to_string()]
+    );
+}

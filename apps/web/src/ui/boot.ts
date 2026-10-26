@@ -80,8 +80,11 @@ export interface BootOptions {
   isClipboardKey?: (e: KeyboardEvent) => boolean;
   /** Перед документом: настройки пользователя (тема, раскладка, привязка) — до первого кадра. */
   beforeDocument?: (editor: Editor) => void;
-  /** Байты файла (читаются, пока запускается ядро); `null` — новый файл. */
-  document?: Promise<ArrayBuffer | null>;
+  /** Бэкенд рендера (после потери GPU — запасной); без него — из адреса или автовыбор. */
+  backend?: Backend;
+  /** Байты файла и пачки журнала после них (читаются, пока запускается ядро);
+   * `null` — новый файл. */
+  document?: Promise<{ bytes: ArrayBuffer; journal: ArrayBuffer[] } | null>;
 }
 
 /** Тестовый режим страницы (`__ferrumTest` или `?debug`). */
@@ -111,7 +114,8 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   let unguard = () => {};
   const core = await Core.start(canvas, {
     platform,
-    backend: choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
+    backend: opts.backend ?? choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
+    test,
     transport: choice<TransportMode>(params, 'transport', ['sab', 'message']),
     keyFilter: (e) => forwardKey(e, isClipboardKey),
     // Свой формат не поддерживается: текст с меткой для буфера готовит worker.
@@ -174,8 +178,11 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     },
   };
   opts.beforeDocument?.(editor);
-  const bytes = (await opts.document) ?? null;
-  if (bytes) core.send({ type: 'open', bytes: new Uint8Array(bytes) });
+  const doc = (await opts.document) ?? null;
+  if (doc && doc.journal.length > 0) {
+    // Правки после файла (сбой, закрытая вкладка): ядро применит их поверх него.
+    core.send({ type: 'openWithJournal', bytes: new Uint8Array(doc.bytes), journal: doc.journal.map((b) => new Uint8Array(b)) });
+  } else if (doc) core.send({ type: 'open', bytes: new Uint8Array(doc.bytes) });
   else core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 0) });
   return editor;
 }

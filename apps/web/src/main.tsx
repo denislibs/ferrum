@@ -13,5 +13,8 @@ import './ui/styles/properties.css';
 import './ui/styles/files.css';
 import { render } from 'solid-js/web';
 import { Root } from './ui/root';
+import { runSmoke } from './ui/tauri';
 
 render(() => <Root />, document.getElementById('app')!);
+// Десктоп с `FERRUM_SMOKE=1`: проверка запуска (вне Tauri ничего не делает).
+void runSmoke();

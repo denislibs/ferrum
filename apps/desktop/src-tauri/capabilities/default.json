@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Окно редактора: разрешений ядра Tauri не нужно — интерфейс вызывает только команды приложения (они разрешены без списка).",
+  "windows": [
+    "main"
+  ],
+  "permissions": []
+}

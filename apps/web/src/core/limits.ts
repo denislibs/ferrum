@@ -18,6 +18,8 @@ export const MAX_KEYMAP_BYTES = 64 * 1024;
 export const MAX_SETTINGS_BYTES = 80 * 1024;
 /** Наибольшая длина имени слоя, страницы и файла в символах. */
 export const MAX_NAME_CHARS = 256;
+/** Пачек журнала изменений при открытии файла — как `MAX_JOURNAL_BATCHES` ядра. */
+export const MAX_JOURNAL_ENTRIES = 100_000;
 
 /** Мегабайты с округлением вверх: «предел 64 МБ, получено 64 МБ» сбивало бы с толку. */
 export const mb = (bytes: number): number => Math.ceil(bytes / MIB);

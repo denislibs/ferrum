@@ -4,13 +4,16 @@
 // передаются (transfer): основной поток их не копирует и не читает.
 // Следующие реализации того же интерфейса — File System Access и Tauri (этап 6).
 
-import type { FileMeta, FromIo, IoOp, IoResults, Section, ToIo } from '../core/file-list';
+import type { FileMeta, FromIo, IoOp, IoResults, JournalMark, Section, ToIo } from '../core/file-list';
 import { nameFromFile } from '../core/file-list';
 import { mb } from '../core/limits';
 import { MAX_COMMAND_BYTES } from '../core/messages';
 import { FERRUM_FILE, pickFile } from './files';
+import type { Settings } from './settings';
+import type { SettingsBackend } from './settings-store';
+import { createDiskFiles, fsaSupported, type DiskFiles, type DiskIo } from './disk';
 
-export type { FileMeta, Section } from '../core/file-list';
+export type { FileMeta, JournalMark, Section } from '../core/file-list';
 
 export interface FileStore {
   /** Окно списка раздела (не больше 200 строк) и общее число записей в нём. */
@@ -19,14 +22,29 @@ export interface FileStore {
   /** Новая запись (сразу видна в списке); `bytes` — содержимое импортированного
    * файла (`File` с диска читает worker). */
   create(name: string, bytes?: Blob): Promise<FileMeta>;
-  /** Байты файла; `null` — новый файл, ещё не сохранённый. */
-  read(id: string): Promise<{ meta: FileMeta; bytes: ArrayBuffer | null }>;
+  /** Байты файла (`null` — новый файл, ещё не сохранённый) и пачки журнала,
+   * записанные после них, по порядку записи; `session` — наибольший сеанс среди
+   * пачек файла (`null` — пачек нет): новый сеанс берётся после него.
+   * `journalTooLarge` — журнал сверх пределов не прочитан (файл открывается без него,
+   * с уведомлением). Метаданные, байты и журнал — одним снимком: запись между ними
+   * не встаёт. */
+  read(id: string): Promise<IoResults['read']>;
   /** Содержимое и превью (буферы передаются и здесь больше не доступны); имя
    * записи не меняется — для него `rename`. `thumb`:
    * `null` — убрать превью, `'keep'` — оставить прежнее. `base` — поколение файла
    * (`FileMeta.version`), на котором основана запись; файл с тех пор записали —
-   * отказ `CONFLICT`. */
-  write(id: string, bytes: ArrayBuffer, thumb: ArrayBuffer | null | 'keep', base: number): Promise<FileMeta>;
+   * отказ `CONFLICT`. `journal` — пачки этого сеанса до `upTo` и прежних сеансов
+   * вошли в снимок: стереть их вместе с записью; `null` — журнала ещё нет.
+   * `warning` — файл записан, но не всё (превью в десктопе): текст для пользователя. */
+  write(
+    id: string,
+    bytes: ArrayBuffer,
+    thumb: ArrayBuffer | null | 'keep',
+    base: number,
+    journal: { session: number; upTo: number } | null,
+  ): Promise<FileMeta & { warning?: string }>;
+  /** Дописать пачку журнала изменений (буфер передаётся). */
+  appendJournal(id: string, mark: JournalMark, bytes: ArrayBuffer): Promise<void>;
   /** Байты файла `Blob`'ом («Скачать копию»); `null` — новый файл без байтов. */
   blob(id: string): Promise<Blob | null>;
   rename(id: string, name: string): Promise<FileMeta>;
@@ -40,6 +58,8 @@ export interface FileStore {
   thumbnail(id: string): Promise<Blob | null>;
   /** Список изменился (здесь или в другой вкладке); возвращает отписку. */
   onChange(listener: () => void): () => void;
+  /** Файлы на диске (File System Access, Tauri); нет — пунктов «с диска» нет. */
+  readonly disk?: DiskFiles;
   dispose(): void;
 }
 
@@ -47,9 +67,18 @@ export interface FileStore {
 export interface FileStoreTestHooks {
   seed(count: number): Promise<void>;
   failWrites(on: boolean): Promise<void>;
+  /** Записи настроек не отвечают и не пишутся (worker уничтожен раньше записи). */
+  holdSettings(on: boolean): Promise<void>;
+  /** Пачек журнала файла в базе. */
+  journalCount(id: string): Promise<number>;
+  /** Поля настроек в базе и запись полей (как у `SettingsBackend`). */
+  settings(): Promise<Record<string, unknown>>;
+  setSettings(patch: Partial<Settings>): Promise<void>;
 }
 
-export class IdbFileStore implements FileStore, FileStoreTestHooks {
+export class IdbFileStore implements FileStore, FileStoreTestHooks, SettingsBackend, DiskIo {
+  private readonly settingsListeners = new Set<(patch: Record<string, unknown>) => void>();
+  readonly disk: DiskFiles | undefined = fsaSupported() ? createDiskFiles(this) : undefined;
   private readonly worker: Worker;
   private seq = 0;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -83,6 +112,10 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks {
       for (const l of this.listeners) l();
       return;
     }
+    if (m.t === 'settings') {
+      for (const l of this.settingsListeners) l(m.patch);
+      return;
+    }
     if (m.t !== 'res') return;
     const p = this.pending.get(m.id);
     if (!p) return;
@@ -112,8 +145,20 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks {
   read(file: string) {
     return this.call({ op: 'read', file });
   }
-  write(file: string, bytes: ArrayBuffer, thumb: ArrayBuffer | null | 'keep', base: number) {
-    return this.call({ op: 'write', file, bytes, thumb, base }, thumb instanceof ArrayBuffer ? [bytes, thumb] : [bytes]);
+  write(
+    file: string,
+    bytes: ArrayBuffer,
+    thumb: ArrayBuffer | null | 'keep',
+    base: number,
+    journal: { session: number; upTo: number } | null,
+  ) {
+    return this.call({ op: 'write', file, bytes, thumb, base, journal }, thumb instanceof ArrayBuffer ? [bytes, thumb] : [bytes]);
+  }
+  async appendJournal(file: string, mark: JournalMark, bytes: ArrayBuffer) {
+    await this.call({ op: 'appendJournal', file, session: mark.session, batch: mark.batch, bytes }, [bytes]);
+  }
+  journalCount(file: string) {
+    return this.call({ op: 'journalCount', file });
   }
   blob(file: string) {
     return this.call({ op: 'blob', file });
@@ -144,6 +189,28 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks {
   }
   async failWrites(on: boolean) {
     await this.call({ op: 'failWrites', on });
+  }
+  async holdSettings(on: boolean) {
+    await this.call({ op: 'holdSettings', on });
+  }
+  createFromDisk(handle: FileSystemFileHandle) {
+    return this.call({ op: 'createFromDisk', handle });
+  }
+  attachDisk(file: string, handle: FileSystemFileHandle) {
+    return this.call({ op: 'attachDisk', file, handle });
+  }
+  handle(file: string) {
+    return this.call({ op: 'handle', file });
+  }
+  settings() {
+    return this.call({ op: 'settings' });
+  }
+  async setSettings(patch: Partial<Settings>) {
+    await this.call({ op: 'setSettings', patch });
+  }
+  onSettings(listener: (patch: Record<string, unknown>) => void) {
+    this.settingsListeners.add(listener);
+    return () => this.settingsListeners.delete(listener);
   }
   onChange(listener: () => void) {
     this.listeners.add(listener);

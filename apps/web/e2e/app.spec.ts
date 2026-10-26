@@ -144,7 +144,15 @@ test('замер (__ferrumPerf): ядро доступно, журнала и з
 
 test('сбой ядра после запуска виден пользователю один раз', async ({ page }) => {
   await openApp(page);
-  // Сбой worker'а после `ready` — тот же путь, что `fatal` от worker'а.
+  // Сбой worker'а после `ready` — тот же путь, что `fatal` от worker'а. Первые два —
+  // перезапуск редактора (этап 6), третий за минуту оставляет плашку.
+  for (let i = 0; i < 2; i++) {
+    await page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
+    await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
+    await expect(page.locator('.fe-toast', { hasText: 'Редактор перезапущен' })).toHaveCount(1);
+    await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
+    await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0);
+  }
   await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
   await expect(page.getByRole('alert')).toHaveText('Ядро остановлено: проверка. Правки больше не принимаются — перезагрузите страницу');
   // Команды после остановки — без новых окон и без вечной очереди.
@@ -153,8 +161,9 @@ test('сбой ядра после запуска виден пользоват�
   // Ни уведомлений, ни нового окна на каждую команду после остановки.
   await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'edit.redo' }));
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
-  await expect(page.locator('.fe-toast')).toHaveCount(0);
-  expect(await page.evaluate(() => window.__ferrum!.ui!.toasts.length)).toBe(0);
+  // Новых уведомлений нет: осталось только «Редактор перезапущен…» последнего перезапуска.
+  await expect(page.locator('.fe-toast', { hasText: 'Ядро остановлено' })).toHaveCount(0);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.toasts.filter((t) => !t.text.startsWith('Редактор перезапущен')).length)).toBe(0);
 });
 
 test('экран запуска виден до загрузки приложения и уходит после готовности ядра', async ({ page }) => {

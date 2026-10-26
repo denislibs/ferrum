@@ -4,7 +4,11 @@
 // чистые функции, общие для него и модульных тестов. Всё, что пересекает границу
 // потоков, не доверенное: проверки — `requestError`.
 
-import { MAX_NAME_CHARS, MAX_OPEN_BYTES, tooLarge } from './limits';
+import { MAX_NAME_CHARS, MAX_OPEN_BYTES, MAX_SETTINGS_BYTES, tooLarge } from './limits';
+
+/** Поля настроек пользователя в хранилище `settings` — по ключу на поле: вкладки
+ * пишут только свои изменения и не затирают чужие. Значения проверяет интерфейс. */
+export const SETTINGS_FIELDS = ['theme', 'pixelSnap', 'keymap', 'leftWidth', 'rightWidth', 'pagesOpen', 'filesView'] as const;
 
 /** Запись о файле — без байтов: список читает только метаданные. Время — мс эпохи. */
 export interface FileMeta {
@@ -24,12 +28,32 @@ export interface FileMeta {
   /** Поколение содержимого: растёт с каждой записью байтов. Запись несёт поколение,
    * на котором основана, и не проходит, если файл с тех пор записали (другая вкладка). */
   version: number;
+  /** Запись связана с файлом на диске (File System Access): его имя. Байты — в нём,
+   * а не в базе. */
+  disk?: string;
 }
+
+/** Файл на диске записала другая программа после нашего чтения или записи. */
+export const DISK_CHANGED = 'Файл на диске изменён другой программой — сохраните копию на диск или откройте файл заново';
+/** Файла на диске нет: перемещён или удалён. */
+export const DISK_MISSING = 'Файл на диске не найден — он перемещён или удалён';
+/** «Сохранить на диск…» в файл, связанный с другой записью: две записи на одном файле
+ * затирали бы друг друга (тот же текст — в десктопе). */
+export const DISK_TAKEN = 'Этот файл принадлежит другой записи Ferrum — выберите другое имя';
+/** Браузер не дал доступ к файлу на диске. */
+export const DISK_ACCESS = 'Нет доступа к файлу на диске';
 
 /** Запись основана на устаревшем поколении: файл записали в другой вкладке. */
 export const CONFLICT = 'Файл изменён в другой вкладке — сохраните копию на диск или откройте файл заново';
 /** Записи нет: файл удалили навсегда (другая вкладка), пока он был открыт. */
 export const GONE = 'Файл удалён в другой вкладке — сохраните копию на диск';
+
+/** Пачка журнала изменений: сеанс редактора (число из времени открытия — сеансы
+ * одного файла упорядочены по времени) и номер пачки ядра в этом сеансе. */
+export interface JournalMark {
+  session: number;
+  batch: number;
+}
 /** Наибольшая длина строки в запросе, байты UTF-8. */
 export const MAX_TEXT_BYTES = 4096;
 
@@ -92,8 +116,31 @@ export type IoOp =
   | { op: 'create'; name: string; bytes: ArrayBuffer | Blob | null }
   | { op: 'read'; file: string }
   /** `thumb`: PNG, `null` — убрать (страница пуста), `'keep'` — оставить прежнее.
-   * `base` — поколение, на котором основана запись. */
-  | { op: 'write'; file: string; bytes: ArrayBuffer; thumb: ArrayBuffer | null | 'keep'; base: number }
+   * `base` — поколение, на котором основана запись. `journal` — снимок вобрал пачки
+   * этого сеанса до `upTo` включительно и все пачки прежних сеансов: они стираются в
+   * той же транзакции; `null` — журнала у файла ещё нет. */
+  | {
+      op: 'write';
+      file: string;
+      bytes: ArrayBuffer;
+      thumb: ArrayBuffer | null | 'keep';
+      base: number;
+      journal: { session: number; upTo: number } | null;
+    }
+  /** Пачка журнала изменений (байты передаются). */
+  | { op: 'appendJournal'; file: string; session: number; batch: number; bytes: ArrayBuffer }
+  /** Тесты: пачек журнала у файла. */
+  | { op: 'journalCount'; file: string }
+  /** Новая запись, связанная с файлом на диске (тот же файл — его прежняя запись). */
+  | { op: 'createFromDisk'; handle: FileSystemFileHandle }
+  /** Связать запись с файлом на диске: записать в него её байты, дальше — писать туда. */
+  | { op: 'attachDisk'; file: string; handle: FileSystemFileHandle }
+  /** Дескриптор файла на диске (запрос доступа — в окне); `null` — запись не на диске. */
+  | { op: 'handle'; file: string }
+  /** Все поля настроек (не доверенные). */
+  | { op: 'settings' }
+  /** Записать только эти поля настроек; другие вкладки получат их событием. */
+  | { op: 'setSettings'; patch: Record<string, unknown> }
   /** Байты файла `Blob`'ом, собранным в worker'е («Скачать копию»). */
   | { op: 'blob'; file: string }
   | { op: 'rename'; file: string; name: string }
@@ -106,7 +153,10 @@ export type IoOp =
   /** Тесты: засеять `count` пустых записей (только в тестовом режиме). */
   | { op: 'seed'; count: number }
   /** Тесты: следующие записи содержимого отказывают, как при нехватке места. */
-  | { op: 'failWrites'; on: boolean };
+  | { op: 'failWrites'; on: boolean }
+  /** Тесты: записи настроек не отвечают и не пишутся — как worker, уничтоженный
+   * вместе со страницей раньше, чем запись дошла до базы. */
+  | { op: 'holdSettings'; on: boolean };
 
 export type IoRequest = { id: number } & IoOp;
 
@@ -115,8 +165,19 @@ export interface IoResults {
   list: { total: number; rows: FileMeta[] };
   get: FileMeta | null;
   create: FileMeta;
-  read: { meta: FileMeta; bytes: ArrayBuffer | null };
+  /** `journal` — пачки, записанные после байтов файла, по порядку (без байтов — пусто);
+   * `session` — наибольший сеанс среди всех пачек файла (`null` — пачек нет);
+   * `journalTooLarge` — журнал сверх пределов (больше `MAX_JOURNAL_ENTRIES` пачек или
+   * файл вместе с ним больше `MAX_OPEN_BYTES`) не прочитан: файл открывается без него. */
+  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[]; session: number | null; journalTooLarge?: boolean };
   write: FileMeta;
+  appendJournal: null;
+  journalCount: number;
+  settings: Record<string, unknown>;
+  setSettings: null;
+  createFromDisk: FileMeta;
+  attachDisk: FileMeta;
+  handle: FileSystemFileHandle | null;
   blob: Blob | null;
   rename: FileMeta;
   touch: FileMeta;
@@ -127,6 +188,7 @@ export interface IoResults {
   thumb: Blob | null;
   seed: null;
   failWrites: null;
+  holdSettings: null;
 }
 
 export type ToIo = { t: 'init'; test: boolean } | ({ t: 'req' } & IoRequest);
@@ -135,7 +197,9 @@ export type FromIo =
   | { t: 'res'; id: number; ok: true; value: unknown }
   | { t: 'res'; id: number; ok: false; message: string }
   /** Список изменился (здесь или в другой вкладке): экрану файлов — перечитать окно. */
-  | { t: 'changed' };
+  | { t: 'changed' }
+  /** Другая вкладка записала поля настроек. */
+  | { t: 'settings'; patch: Record<string, unknown> };
 
 const BAD = 'Неверный запрос к хранилищу файлов';
 const utf8 = new TextEncoder();
@@ -154,12 +218,41 @@ function isCount(v: unknown, max: number): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max;
 }
 
+/** Настоящий дескриптор файла (где File System Access нет — никакой не настоящий). */
+function isHandle(v: unknown): v is FileSystemFileHandle {
+  return typeof FileSystemFileHandle === 'function' && v instanceof FileSystemFileHandle;
+}
+
+/** Целое ≥ 0 не больше `Number.MAX_SAFE_INTEGER` (сеанс, номер пачки). */
+function isWhole(v: unknown): v is number {
+  return isCount(v, Number.MAX_SAFE_INTEGER) && Number.isInteger(v);
+}
+
+/** Отметка журнала у записи файла: `null` или `{ session, upTo }` целыми. */
+function isJournalUpTo(v: unknown): boolean {
+  if (v === null) return true;
+  if (typeof v !== 'object') return false;
+  const j = v as Record<string, unknown>;
+  return isWhole(j.session) && isWhole(j.upTo);
+}
+
 /** Байты не того вида, лежат в общей памяти или больше предела — текст ошибки. */
 function bytesError(v: unknown, max: number): string | null {
   const size = v instanceof ArrayBuffer ? v.byteLength : typeof Blob === 'function' && v instanceof Blob ? v.size : -1;
   if (size < 0) return BAD;
   if (size > max) return tooLarge(max, size);
   return null;
+}
+
+/** Поля настроек к записи: непустой объект известных полей с простыми значениями,
+ * весь — не больше предела записи настроек. */
+function settingsPatchError(v: unknown): string | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return BAD;
+  const keys = Object.keys(v);
+  if (keys.length === 0 || keys.some((k) => !(SETTINGS_FIELDS as readonly string[]).includes(k))) return BAD;
+  if (Object.values(v).some((x) => !['string', 'number', 'boolean'].includes(typeof x))) return BAD;
+  const size = utf8.encode(JSON.stringify(v)).length;
+  return size > MAX_SETTINGS_BYTES ? tooLarge(MAX_SETTINGS_BYTES, size) : null;
 }
 
 /** Текст ошибки, если запрос к worker'у не годится; `null` — можно выполнять.
@@ -184,22 +277,37 @@ export function requestError(r: unknown): string | null {
     case 'restore':
     case 'delete':
     case 'thumb':
+    case 'journalCount':
+    case 'handle':
       return isId(m.file) ? null : BAD;
+    case 'createFromDisk':
+      return isHandle(m.handle) ? null : BAD;
+    case 'attachDisk':
+      return isId(m.file) && isHandle(m.handle) ? null : BAD;
+    case 'appendJournal':
+      if (!isId(m.file) || !isWhole(m.session) || !isWhole(m.batch)) return BAD;
+      if (!(m.bytes instanceof ArrayBuffer)) return BAD;
+      return bytesError(m.bytes, MAX_OPEN_BYTES);
     case 'create':
       if (!isName(m.name)) return BAD;
       return m.bytes === null ? null : bytesError(m.bytes, MAX_OPEN_BYTES);
     case 'write':
       if (!isId(m.file) || !isCount(m.base, Number.MAX_SAFE_INTEGER)) return BAD;
+      if (!isJournalUpTo(m.journal)) return BAD;
       if (!(m.bytes instanceof ArrayBuffer)) return BAD;
       if (!(m.thumb === null || m.thumb === 'keep' || m.thumb instanceof ArrayBuffer)) return BAD;
       return bytesError(m.bytes, MAX_OPEN_BYTES) ?? (m.thumb instanceof ArrayBuffer ? bytesError(m.thumb, MAX_THUMB_BYTES) : null);
     case 'rename':
       return isId(m.file) && isName(m.name) ? null : BAD;
     case 'emptyTrash':
+    case 'settings':
       return null;
+    case 'setSettings':
+      return settingsPatchError(m.patch);
     case 'seed':
       return isCount(m.count, MAX_SEED) ? null : BAD;
     case 'failWrites':
+    case 'holdSettings':
       return typeof m.on === 'boolean' ? null : BAD;
     default:
       return BAD;

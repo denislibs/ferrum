@@ -99,7 +99,8 @@ fn corrupted_image_is_skipped_with_warning() {
         opened
             .warnings
             .iter()
-            .any(|w| w.contains("изображений — 1")),
+            .any(|w| w
+                == "Файл повреждён: не удалось прочитать секцию изображений. Документ открыт без 1 картинки"),
         "{:?}",
         opened.warnings
     );
@@ -208,7 +209,8 @@ fn image_with_mismatched_id_is_skipped_with_warning() {
         opened
             .warnings
             .iter()
-            .any(|w| w.contains("изображений — 1")),
+            .any(|w| w
+                == "Файл повреждён: не удалось прочитать секцию изображений. Документ открыт без 1 картинки"),
         "{:?}",
         opened.warnings
     );
@@ -265,10 +267,8 @@ fn corrupted_page_opens_empty_while_others_survive() {
     bytes[pos] ^= 0xff;
     let mut opened = decode(&bytes).unwrap();
     assert!(
-        opened
-            .warnings
-            .iter()
-            .any(|w| w.contains("повреждена и открыта пустой")),
+        opened.warnings.iter().any(|w| w
+            == "Файл повреждён: не удалось прочитать страницу «Страница 1». Она открыта пустой"),
         "{:?}",
         opened.warnings
     );
@@ -505,4 +505,42 @@ fn scene_cache_roundtrips_every_field() {
         opened.document.cached_scene(page),
         Some(expected.as_slice())
     );
+}
+
+/// Сообщение о потерянных картинках (спека 11): сколько именно и в нужном падеже;
+/// узлы остаются на месте — без картинок.
+#[test]
+fn lost_images_are_counted_in_the_warning() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let hashes: Vec<String> = (0..2u8).map(|i| doc.images.add(vec![i; 64])).collect();
+    doc.transact(page, vec![], |p| {
+        for h in &hashes {
+            let n = p.create_node(None, None, NodeKind::Rect)?;
+            p.set_props(
+                n,
+                &PropsPatch {
+                    fills: Some(vec![Fill::image(h.clone())]),
+                    ..Default::default()
+                },
+            )?;
+        }
+        Ok(vec![])
+    })
+    .unwrap();
+    let bytes = encode(&doc).unwrap();
+    // Обе секции изображений испорчены «тихо»: данные другие, сумма пересчитана.
+    let broken = ferrum_doc::container::testing::map_sections(&bytes, |kind, _, data| {
+        if kind == 4 {
+            data[0] ^= 0xff;
+        }
+    });
+    let opened = decode(&broken).unwrap();
+    assert_eq!(
+        opened.warnings,
+        vec!["Файл повреждён: не удалось прочитать секцию изображений. Документ открыт без 2 картинок".to_string()]
+    );
+    let mut d = opened.document;
+    assert_eq!(d.page(page).unwrap().children(None).len(), 2);
+    assert_eq!(d.images.len(), 0);
 }

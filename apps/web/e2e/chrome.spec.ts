@@ -425,7 +425,8 @@ const fileMenu = async (page: Page, item: string | RegExp) => {
 };
 
 test('правки вне истории (страница, имя файла) — «изменён» и запись в хранилище; копия на диск признак не снимает', async ({ page }) => {
-  await openApp(page);
+  // Полный файл в простое — через 3 с (по умолчанию 30 с): правка имени записывается им.
+  await openApp(page, 1000, '&fullSave=3000');
   const modified = () => page.evaluate(() => window.__ferrum!.ui!.modified);
   // Переименование страницы в историю отмены не попадает, но документ изменился.
   const pages = page.getByRole('listbox', { name: 'Страницы' });
@@ -442,7 +443,7 @@ test('правки вне истории (страница, имя файла) �
   await page.waitForTimeout(300);
   expect(await modified()).toBe(true);
   // «Сохранить» — запись в хранилище снимает признак.
-  await fileMenu(page, /^Сохранить(?! копию)/);
+  await fileMenu(page, /^Сохранить(?! копию| на диск)/);
   await expect.poll(modified).toBe(false);
   // Имя документа — тоже правка вне истории; запись в хранилище — с новым именем.
   await page.locator('.fe-panel-head__name').dblclick();
@@ -452,7 +453,7 @@ test('правки вне истории (страница, имя файла) �
   await expect.poll(modified).toBe(true);
   const id = /#\/file\/([\w-]+)$/.exec(page.url())![1];
   await expect.poll(() => page.evaluate((i) => window.__ferrumFiles!.store.get(i).then((m) => m?.name), id)).toBe('Новое имя');
-  // Отложенное сохранение снимает признак само.
+  // Полный файл в простое снимает признак сам.
   await expect.poll(modified, { timeout: 10_000 }).toBe(false);
 });
 

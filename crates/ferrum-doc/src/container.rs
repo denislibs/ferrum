@@ -49,7 +49,7 @@ pub struct Opened {
     pub warnings: Vec<String>,
 }
 
-fn push_section(out: &mut Vec<u8>, kind: u8, id: &str, data: &[u8]) {
+pub(crate) fn push_section(out: &mut Vec<u8>, kind: u8, id: &str, data: &[u8]) {
     out.push(kind);
     out.extend_from_slice(&(id.len() as u32).to_le_bytes());
     out.extend_from_slice(id.as_bytes());
@@ -86,14 +86,15 @@ pub fn encode(doc: &Document) -> DocResult<Vec<u8>> {
         }
         used.extend(payload.image_refs);
     }
-    let mut used: Vec<String> = used.into_iter().collect();
-    used.sort();
-    for hash in used {
-        if let Some(bytes) = doc.images.get(&hash) {
-            push_section(&mut sections, IMAGE, &hash, bytes);
+    let mut sorted: Vec<&String> = used.iter().collect();
+    sorted.sort();
+    for hash in sorted {
+        if let Some(bytes) = doc.images.get(hash) {
+            push_section(&mut sections, IMAGE, hash, bytes);
             count += 1;
         }
     }
+    doc.images.mark_unsaved(&used);
     let mut out = Vec::with_capacity(16 + sections.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -172,11 +173,6 @@ pub fn decode(bytes: &[u8]) -> DocResult<Opened> {
             _ => {} // секции из будущих версий формата пропускаем
         }
     }
-    if bad_images > 0 {
-        warnings.push(format!(
-            "Файл повреждён: не удалось прочитать изображений — {bad_images}"
-        ));
-    }
     let root = root.ok_or_else(|| {
         DocError::Corrupted("не удалось прочитать структуру документа".to_string())
     })?;
@@ -213,9 +209,35 @@ pub fn decode(bytes: &[u8]) -> DocResult<Opened> {
             },
         );
     }
+    // Испорченные секции картинок: сколько картинок, на которые ссылаются страницы,
+    // из-за них потеряно (документ открывается без них — на их месте заглушка).
+    // Ссылки без картинки в целом файле — не потеря: её не было и в документе.
+    if bad_images > 0 {
+        let missing: HashSet<&str> = unloaded
+            .values()
+            .flat_map(|u: &UnloadedPage| u.image_refs.iter().map(String::as_str))
+            .filter(|h| images.get(h).is_none())
+            .collect();
+        if !missing.is_empty() {
+            warnings.push(format!(
+                "Файл повреждён: не удалось прочитать секцию изображений. Документ открыт без {}",
+                pictures(missing.len())
+            ));
+        }
+    }
     let (document, mut doc_warnings) = Document::from_parts(&root, unloaded, images)?;
     warnings.append(&mut doc_warnings);
     Ok(Opened { document, warnings })
+}
+
+/// «1 картинки», «2 картинок», «21 картинки» — число после «без».
+fn pictures(n: usize) -> String {
+    let word = if n % 10 == 1 && n % 100 != 11 {
+        "картинки"
+    } else {
+        "картинок"
+    };
+    format!("{n} {word}")
 }
 
 /// Помощники для тестов других модулей и крейтов. Не для продакшен-кода.

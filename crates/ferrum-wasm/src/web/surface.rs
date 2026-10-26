@@ -220,6 +220,32 @@ impl Surface {
         }
     }
 
+    /// Та же поверхность заново после потери (этап 6): у холста уже есть контекст
+    /// этого бэкенда, `getContext` вернёт его же. Потерянный контекст WebGL2 до
+    /// восстановления браузером не годится — рендерер vello читает его пределы и на
+    /// потерянном контексте падает (`getParameter` даёт `null`), поэтому сначала
+    /// проверка. Программный GPU годится: этот бэкенд уже выбран при запуске.
+    pub async fn recreate(
+        backend: Backend,
+        canvas: &OffscreenCanvas,
+        w: u16,
+        h: u16,
+        atlas_side: Option<u16>,
+    ) -> Result<Surface, String> {
+        if backend == Backend::Webgl {
+            let gl: WebGl2RenderingContext = canvas
+                .get_context("webgl2")
+                .map_err(js_err)?
+                .ok_or_else(|| "контекст WebGL2 недоступен".to_string())?
+                .dyn_into()
+                .map_err(|_| "у холста не WebGL2".to_string())?;
+            if gl.is_context_lost() {
+                return Err("контекст WebGL2 не восстановлен".into());
+            }
+        }
+        Surface::create(backend, canvas, w, h, true, atlas_side).await
+    }
+
     pub fn kind(&self) -> Backend {
         match self {
             Surface::WebGpu(_) => Backend::Webgpu,

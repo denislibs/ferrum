@@ -17,8 +17,10 @@ import { Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { RenameInput } from './rename-input';
 import type { Route } from './router';
-import { loadSettings, resolveTheme, storage, updateSettings, type FilesView } from './settings';
+import { resolveTheme, type FilesView } from './settings';
+import type { SettingsStore } from './settings-store';
 import { createUiStore } from './store';
+import { isTauri } from './tauri';
 import { Toasts } from './toasts';
 
 /** Задержка открытия по щелчку на имени: успеть распознать двойной щелчок. */
@@ -32,6 +34,8 @@ const SECTIONS: { id: Section; title: string; icon: IconName }[] = [
 
 export interface FilesScreenProps {
   files: FileStore;
+  /** Настройки пользователя (вид списка, тема). */
+  settings: SettingsStore;
   section: Section;
   /** Сообщение (файл не найден, не открылся); `seq` — чтобы то же сообщение показалось снова. */
   notice: { text: string; seq: number } | null;
@@ -42,11 +46,12 @@ type Confirm = { kind: 'delete'; file: FileMeta } | { kind: 'empty' };
 
 export function FilesScreen(props: FilesScreenProps) {
   const ui = createUiStore();
-  const saved = loadSettings(storage());
+  const saved = props.settings.current;
   // Тему до первого рисования ставит theme-init.js, после редактора она уже на
-  // <html>; здесь — только «как в системе», которая следует за системой на лету.
+  // <html>; здесь — «как в системе» на лету и тема, сменённая в другой вкладке.
   const media = matchMedia('(prefers-color-scheme: dark)');
-  const applyTheme = () => (document.documentElement.dataset.theme = resolveTheme(loadSettings(storage()).theme, media.matches));
+  const applyTheme = () => (document.documentElement.dataset.theme = resolveTheme(props.settings.current.theme, media.matches));
+  applyTheme();
   media.addEventListener('change', applyTheme);
   onCleanup(() => media.removeEventListener('change', applyTheme));
 
@@ -206,6 +211,11 @@ export function FilesScreen(props: FilesScreenProps) {
   const act = (what: string, p: Promise<unknown>) => p.catch((e: unknown) => ui.toast(errorText(what, e), 'error'));
   const download = async (f: FileMeta) => {
     try {
+      // Десктоп: копия родным диалогом (скачивание ссылкой в окне Tauri ненадёжно).
+      if (props.files.disk?.saveCopy) {
+        if (await props.files.disk.saveCopy(f.id, fileName(f.name, '.ferrum'))) ui.toast('Копия сохранена');
+        return;
+      }
       // Blob собирает worker: основной поток байты не копирует.
       const blob = await props.files.blob(f.id);
       if (blob) downloadBlob(fileName(f.name, '.ferrum'), blob);
@@ -220,6 +230,14 @@ export function FilesScreen(props: FilesScreenProps) {
     const meta = await importFromDisk(props.files, (t) => ui.toast(t, 'error'));
     if (meta) open(meta);
   };
+  const openLinked = async () => {
+    try {
+      const meta = await props.files.disk?.open();
+      if (meta) open(meta);
+    } catch (e) {
+      ui.toast(errorText('Не удалось открыть файл', e), 'error');
+    }
+  };
   const menuItems = (f: FileMeta): MenuItem[] =>
     props.section === 'trash'
       ? [
@@ -228,7 +246,8 @@ export function FilesScreen(props: FilesScreenProps) {
         ]
       : [
           { label: 'Открыть', onSelect: () => open(f) },
-          { label: 'Открыть в новой вкладке', onSelect: () => openInNewTab(f) },
+          // Десктоп: окно одно, вкладок нет.
+          ...(isTauri() ? [] : [{ label: 'Открыть в новой вкладке', onSelect: () => openInNewTab(f) }]),
           { separator: true },
           { label: 'Переименовать', onSelect: () => setRenaming(f.id) },
           { label: 'Скачать копию (.ferrum)', disabled: f.size === 0, onSelect: () => void download(f) },
@@ -348,13 +367,22 @@ export function FilesScreen(props: FilesScreenProps) {
 
   const chooseView = (v: FilesView) => {
     setView(v);
-    updateSettings(storage(), { filesView: v });
+    props.settings.update({ filesView: v });
   };
+  const offRemote = props.settings.onChange((p) => {
+    if (p.theme) applyTheme();
+    if (p.filesView) setView(p.filesView);
+  });
+  const offErrors = props.settings.onError((m) => ui.toast(m, 'error'));
+  onCleanup(() => {
+    offRemote();
+    offErrors();
+  });
 
   const sub = (f: FileMeta) =>
     props.section === 'trash'
       ? `Удалён ${relativeTime(f.trashedAt ?? 0, now())}`
-      : `Изменён ${relativeTime(f.editedAt, now())}`;
+      : `${f.disk ? 'На диске · ' : ''}Изменён ${relativeTime(f.editedAt, now())}`;
 
   const empty = () =>
     loaded() && total() === 0 ? (query().trim() ? 'Ничего не найдено' : props.section === 'trash' ? 'Корзина пуста' : 'Здесь пока нет файлов') : '';
@@ -468,6 +496,12 @@ export function FilesScreen(props: FilesScreenProps) {
                   <Icon name="upload" />
                   Импорт…
                 </button>
+                <Show when={props.files.disk}>
+                  <button class="fe-btn fe-btn--secondary" onClick={() => void openLinked()}>
+                    <Icon name="upload" />
+                    Открыть с диска…
+                  </button>
+                </Show>
                 <button class="fe-btn fe-btn--primary" onClick={() => props.navigate({ kind: 'new' })}>
                   <Icon name="plus" />
                   Новый файл
@@ -603,7 +637,11 @@ export function FilesScreen(props: FilesScreenProps) {
           return v.kind === 'delete' ? (
             <ConfirmDialog
               title="Удалить файл навсегда?"
-              text={`Файл «${v.file.name}» будет удалён без возможности восстановления`}
+              text={
+                v.file.disk
+                  ? `Запись «${v.file.name}» будет удалена из списка; файл «${v.file.disk}» на диске останется`
+                  : `Файл «${v.file.name}» будет удалён без возможности восстановления`
+              }
               confirm="Удалить"
               cancel="Отмена"
               onCancel={() => setConfirm(null)}

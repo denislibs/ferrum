@@ -16,13 +16,39 @@ use web_sys::OffscreenCanvas;
 use crate::core::Core;
 use crate::present::{Action, PresentWatch, Soft, SoftErrors};
 use crate::protocol::{Backend, Command, CoreEvent};
+use crate::recover::{OnLost, Recovery};
 pub use clock::PerformanceClock;
 use surface::{Pixels, Readback, Surface};
 
 #[wasm_bindgen(start)]
 pub fn start() {
-    // Паника в Rust — в консоль worker'а с текстом и стеком, а не «unreachable».
-    console_error_panic_hook::set_once();
+    // Паника в Rust — в консоль worker'а с текстом и стеком (а не «unreachable»), и
+    // её текст — worker'у до остановки wasm: «Ядро остановлено: …» несёт причину.
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        report_panic(&panic_text(info));
+    }));
+}
+
+/// Текст паники без места в коде: его увидит пользователь.
+fn panic_text(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "без описания".into())
+}
+
+/// Отдаёт текст `globalThis.__ferrumPanic`, если worker его ждёт (в тестах wasm в
+/// Node его нет — тогда только консоль).
+fn report_panic(message: &str) {
+    let global = js_sys::global();
+    if let Ok(f) = js_sys::Reflect::get(&global, &JsValue::from_str("__ferrumPanic")) {
+        if let Some(f) = f.dyn_ref::<js_sys::Function>() {
+            let _ = f.call1(&global, &JsValue::from_str(message));
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -40,6 +66,34 @@ pub struct WasmCore {
     watch: PresentWatch,
     /// Ошибки WebGPU вне вызовов: каждый текст — один раз, слишком много — стоп.
     soft: SoftErrors,
+    /// Потери устройства GPU: пересоздать поверхность или перейти на запасную.
+    recovery: Recovery,
+}
+
+/// Поверхность, созданная заново после потери устройства или контекста GPU (этап 6):
+/// создаётся асинхронно на том же холсте и отдаётся ядру `replaceSurface`.
+#[wasm_bindgen]
+pub struct WasmSurface {
+    surface: Option<Surface>,
+}
+
+#[wasm_bindgen]
+impl WasmSurface {
+    /// Поверхность бэкенда `backend` заново на холсте `width × height` пикселей
+    /// устройства (`Surface::recreate`).
+    pub async fn create(
+        canvas: OffscreenCanvas,
+        backend: String,
+        width: u16,
+        height: u16,
+        atlas_side: Option<u16>,
+    ) -> Result<WasmSurface, JsError> {
+        let b = Backend::parse(&backend).ok_or_else(|| JsError::new("неизвестный бэкенд"))?;
+        let s = Surface::recreate(b, &canvas, width.max(1), height.max(1), atlas_side)
+            .await
+            .map_err(|e| JsError::new(&e))?;
+        Ok(WasmSurface { surface: Some(s) })
+    }
 }
 
 /// Команда из JS-объекта. Неверная форма — текст ошибки, не паника.
@@ -129,7 +183,52 @@ impl WasmCore {
             atlas_reported: false,
             watch: PresentWatch::default(),
             soft: SoftErrors::default(),
+            recovery: Recovery::default(),
         })
+    }
+
+    /// Размер кадра в пикселях устройства, `[ширина, высота]` — для новой поверхности.
+    #[wasm_bindgen(js_name = deviceSize)]
+    pub fn device_size(&self) -> Vec<u16> {
+        let (w, h) = self.core.device_size();
+        vec![w, h]
+    }
+
+    /// Новая поверхность вместо потерянной: кадры идут снова, атлас и кэши GPU — с
+    /// нуля (новый `GpuBackend`), счётчики ошибок показа сброшены.
+    #[wasm_bindgen(js_name = replaceSurface)]
+    pub fn replace_surface(&mut self, surface: &mut WasmSurface) -> Result<(), JsError> {
+        let s = surface
+            .surface
+            .take()
+            .ok_or_else(|| JsError::new("поверхность уже отдана ядру"))?;
+        self.surface = s;
+        self.dead = false;
+        self.awaiting = false;
+        self.atlas_reported = false;
+        self.watch = PresentWatch::default();
+        self.soft = SoftErrors::default();
+        self.recovery.restored();
+        let backend = self.surface.kind();
+        self.core.set_backend(backend);
+        self.core.push_event(CoreEvent::SurfaceRestored { backend });
+        Ok(())
+    }
+
+    /// Пересоздать поверхность не удалось: интерфейс перезапустит ядро с запасным
+    /// бэкендом (`SurfaceFailed { next }`).
+    #[wasm_bindgen(js_name = surfaceFailed)]
+    pub fn surface_failed(&mut self, message: String) {
+        let next = crate::recover::next_backend(self.surface.kind());
+        self.core
+            .push_event(CoreEvent::SurfaceFailed { next, message });
+    }
+
+    /// Только для тестов (worker зовёт её лишь в тестовом режиме): настоящая паника
+    /// ядра — проверка перехвата и перезапуска.
+    #[wasm_bindgen(js_name = panicForTests)]
+    pub fn panic_for_tests(&mut self) {
+        panic!("тестовая паника ядра");
     }
 
     /// Активный бэкенд: `webgpu`, `webgl` или `cpu`.
@@ -189,11 +288,17 @@ impl WasmCore {
                 }
             }
         }
-        // Потерянный контекст WebGL2 остаётся потерянным: `take_errors` отдаёт его
-        // каждый кадр, а сообщение нужно одно.
+        // Потеря устройства или контекста: поверхность больше не рисует. Worker создаёт
+        // её заново (`replaceSurface`), а не выйдет или потери повторяются — интерфейс
+        // перезапускает ядро с запасным бэкендом. Событие одно: потерянный контекст
+        // WebGL2 `take_errors` отдаёт каждый кадр.
         if let Some(message) = fatal.filter(|_| !self.dead) {
             self.dead = true;
-            self.core.push_event(CoreEvent::Error { message });
+            let backend = self.surface.kind();
+            self.core.push_event(match self.recovery.lost(backend) {
+                OnLost::Recreate => CoreEvent::SurfaceLost { backend, message },
+                OnLost::Fallback(next) => CoreEvent::SurfaceFailed { next, message },
+            });
         }
         if !self.atlas_reported {
             if let Some(message) = self.surface.atlas_error().map(str::to_string) {

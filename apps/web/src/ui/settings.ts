@@ -1,8 +1,9 @@
 
 // Настройки пользователя: тема, привязка к пикселям, отличия раскладки клавиш,
-// ширина панелей, вид экрана файлов (сетка или список). Хранятся в localStorage (полноценное хранилище — этап 6);
-// доступ к нему может бросить (закрытые cookie, приватный режим) или вернуть
-// мусор — тогда настройки по умолчанию, а запись тихо не удаётся.
+// ширина панелей, вид экрана файлов (сетка или список). С этапа 6 хранятся в
+// IndexedDB по полю (`settings-store.ts`); здесь — поля, их разбор (значения из
+// хранилища не доверенные: неверное поле — умолчание) и прежняя запись
+// `localStorage`, из которой настройки переносятся при первом запуске.
 
 export type ThemeChoice = 'dark' | 'light' | 'system';
 
@@ -23,7 +24,13 @@ export type FilesView = 'grid' | 'list';
 
 import { MAX_KEYMAP_BYTES, MAX_SETTINGS_BYTES } from '../core/limits';
 
+/** Прежняя запись настроек в `localStorage` (до этапа 6): переносится и удаляется. */
 export const SETTINGS_KEY = 'ferrum.settings.v1';
+/** Зеркало темы в `localStorage` для `theme-init.js` (тема до первого рисования). */
+export const THEME_KEY = 'ferrum.theme';
+/** Поля, ещё не записанные в базу (запись идёт через worker, а его уничтожают вместе
+ * со страницей раньше, чем она дойдёт): при следующем запуске — поверх базы и в неё. */
+export const PENDING_KEY = 'ferrum.settings.pending';
 
 /** Пределы ширины боковых панелей. */
 export const PANEL_MIN = 200;
@@ -52,9 +59,48 @@ export function storage(): Storage | null {
   }
 }
 
+const utf8 = new TextEncoder();
 const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
-/** Читает настройки; неверные поля заменяются умолчаниями поодиночке. */
+/** Проверка каждого поля: верное значение или `undefined`. */
+const FIELDS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined } = {
+  theme: (v) => (v === 'light' || v === 'system' || v === 'dark' ? v : undefined),
+  pixelSnap: (v) => (typeof v === 'boolean' ? v : undefined),
+  // Предел — в байтах UTF-8, как у записи настроек в worker'е (80 КБ на запись).
+  keymap: (v) => (typeof v === 'string' && v.length <= MAX_KEYMAP_BYTES && utf8.encode(v).length <= MAX_KEYMAP_BYTES ? v : undefined),
+  // Ширина из хранилища — в пределах края панели (как при перетаскивании).
+  leftWidth: (v) => (isNumber(v) ? clampPanel(v) : undefined),
+  rightWidth: (v) => (isNumber(v) ? clampPanel(v) : undefined),
+  pagesOpen: (v) => (typeof v === 'boolean' ? v : undefined),
+  filesView: (v) => (v === 'list' || v === 'grid' ? v : undefined),
+};
+
+/** Только верные известные поля (чужое изменение из другой вкладки, запись базы). */
+export function parseSettingsPatch(o: Record<string, unknown>): Partial<Settings> {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(FIELDS) as (keyof Settings)[]) {
+    if (!(k in o)) continue;
+    const v = FIELDS[k](o[k]);
+    if (v !== undefined) out[k] = v;
+  }
+  return out as Partial<Settings>;
+}
+
+/** Все поля: неверные и отсутствующие — умолчания поодиночке. */
+export function parseSettings(o: Record<string, unknown>): Settings {
+  return { ...DEFAULT_SETTINGS, ...parseSettingsPatch(o) };
+}
+
+/** Поля `patch`, отличные от `base` (`undefined` — не трогать). */
+export function diffSettings(base: Settings, patch: Partial<Settings>): Partial<Settings> {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(patch) as (keyof Settings)[]) {
+    if (patch[k] !== undefined && patch[k] !== base[k]) out[k] = patch[k];
+  }
+  return out as Partial<Settings>;
+}
+
+/** Читает прежнюю запись `localStorage`; неверные поля заменяются умолчаниями поодиночке. */
 export function loadSettings(store: Pick<Storage, 'getItem'> | null): Settings {
   let raw: unknown = null;
   try {
@@ -63,17 +109,7 @@ export function loadSettings(store: Pick<Storage, 'getItem'> | null): Settings {
   } catch {
     raw = null;
   }
-  const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
-  return {
-    theme: o.theme === 'light' || o.theme === 'system' || o.theme === 'dark' ? o.theme : DEFAULT_SETTINGS.theme,
-    pixelSnap: typeof o.pixelSnap === 'boolean' ? o.pixelSnap : DEFAULT_SETTINGS.pixelSnap,
-    keymap: typeof o.keymap === 'string' && o.keymap.length <= MAX_KEYMAP_BYTES ? o.keymap : DEFAULT_SETTINGS.keymap,
-    // Ширина из хранилища — в пределах края панели (как при перетаскивании).
-    leftWidth: isNumber(o.leftWidth) ? clampPanel(o.leftWidth) : DEFAULT_SETTINGS.leftWidth,
-    rightWidth: isNumber(o.rightWidth) ? clampPanel(o.rightWidth) : DEFAULT_SETTINGS.rightWidth,
-    pagesOpen: typeof o.pagesOpen === 'boolean' ? o.pagesOpen : DEFAULT_SETTINGS.pagesOpen,
-    filesView: o.filesView === 'list' || o.filesView === 'grid' ? o.filesView : DEFAULT_SETTINGS.filesView,
-  };
+  return parseSettings((typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>);
 }
 
 /** Записывает часть настроек поверх сохранённых: экран файлов и редактор пишут

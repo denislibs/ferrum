@@ -24,6 +24,8 @@ export interface CoreOptions {
   /** Асинхронный Clipboard API не умеет свой формат: worker сам кодирует байты
    * буфера обмена текстом с меткой (событие `clipboard` несёт `text`). */
   clipboardText?: boolean;
+  /** Тестовый режим страницы: worker принимает тестовые сообщения (`testPanic`). */
+  test?: boolean;
   /** Пересылать ли клавишу редактору. По умолчанию — все, кроме сочетаний браузера;
    * интерфейс оставляет себе клавиши полей ввода, меню и диалогов и сочетания
    * буфера обмена (их ведут события `copy`/`cut`/`paste`). */
@@ -166,6 +168,7 @@ export class Core {
         backend: opts.backend ?? null,
         atlas: opts.atlasSide ?? null,
         clipboardText: opts.clipboardText ?? false,
+        test: opts.test ?? false,
       },
       [offscreen],
     );
@@ -226,6 +229,12 @@ export class Core {
     }
     const error = this.transport.post({ t: 'pasteText', text });
     if (error) this.emit({ type: 'error', message: error });
+  }
+
+  /** Только тестовый режим: настоящая паника в ядре — проверка перезапуска. Вне него
+   * worker отвечает «Неверное сообщение для ядра». */
+  testPanic(): void {
+    this.transport.post({ t: 'testPanic' });
   }
 
   /** Текст с меткой для байтов буфера обмена — кодирует worker (base64 десятков

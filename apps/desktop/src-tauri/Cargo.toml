@@ -1,0 +1,33 @@
+# Десктоп Ferrum на Tauri 2 (этап 6): оборачивает сборку apps/web. Свой workspace —
+# не часть корневого: Tauri тянет сотни крейтов и системные библиотеки окна, а
+# `cargo test --workspace` ядра не должен их собирать.
+[workspace]
+members = [".", "store"]
+resolver = "2"
+
+[package]
+name = "ferrum-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "UNLICENSED"
+
+[lib]
+name = "ferrum_desktop"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
+
+[dependencies]
+ferrum-desktop-store = { path = "store" }
+tauri = { version = "=2.12.1", features = [] }
+tauri-plugin-dialog = "=2.8.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.152"
+
+[features]
+# Сборка с ресурсами из frontendDist (так собирает `tauri build`); без неё debug-сборка
+# ждала бы dev-сервер.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

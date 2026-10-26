@@ -15,7 +15,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use loro::{ExportMode, LoroDoc, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer};
+use loro::{
+    ExportMode, LoroDoc, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer, VersionVector,
+};
 
 use crate::codec;
 use crate::error::{DocError, DocResult};
@@ -279,6 +281,32 @@ impl PageDoc {
 
     pub(crate) fn commit(&self) {
         self.doc.commit();
+    }
+
+    /// Версия операций страницы — отметка журнала.
+    pub(crate) fn oplog_vv(&self) -> VersionVector {
+        self.doc.oplog_vv()
+    }
+
+    /// Обновления Loro с версии `from` — секция пачки журнала.
+    pub(crate) fn export_updates(&self, from: &VersionVector) -> DocResult<Vec<u8>> {
+        Ok(self.doc.export(ExportMode::updates(from))?)
+    }
+
+    /// Применяет обновления журнала и строит индекс и зеркало заново из Loro: кэш
+    /// сцены файла их уже не описывает. `false` — часть обновлений не применена
+    /// (повреждена или ей не хватает предыдущих).
+    pub(crate) fn import_updates(&self, batches: &[&[u8]]) -> DocResult<bool> {
+        let mut complete = true;
+        for data in batches {
+            match self.doc.import(data) {
+                Ok(status) => complete &= status.pending.is_none(),
+                Err(_) => complete = false,
+            }
+        }
+        self.from_cache.set(false);
+        self.rebuild_from_loro()?;
+        Ok(complete)
     }
 
     #[doc(hidden)]

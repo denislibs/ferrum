@@ -26,8 +26,8 @@ use crate::input::{decode_all, Record};
 use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
-    Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, SELECTION_IDS_MAX,
-    THUMB_HEIGHT, THUMB_WIDTH,
+    Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, MAX_JOURNAL_BATCHES,
+    SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -88,6 +88,8 @@ pub struct Core {
     /// Ревизия правок: растёт с каждой правкой и заменой документа. Снимок несёт её,
     /// а `MarkSaved` снимает `modified`, только если с тех пор она не сменилась.
     revision: u64,
+    /// Номер последней непустой пачки журнала изменений (этап 6).
+    journal_batch: u64,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -197,6 +199,7 @@ impl Core {
             modified: false,
             modified_sent: Some(false),
             revision: 0,
+            journal_batch: 0,
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -264,8 +267,44 @@ impl Core {
         self.revision += 1;
     }
 
-    /// Снимок для хранилища: байты, ревизия, имя и превью первой страницы.
+    /// Пачка журнала: правки с прошлой пачки. `reply` — ответить и без правок
+    /// (команда `FlushJournal`: интерфейс по ответу знает, что всё отдано); перед
+    /// снимком — только если есть что записать.
+    fn flush_journal(&mut self, reply: bool) {
+        match self.editor.take_journal() {
+            Ok(Some(bytes)) => {
+                self.journal_batch += 1;
+                self.events.push(CoreEvent::Journal {
+                    batch: self.journal_batch as f64,
+                    bytes: Some(ByteBuf::from(bytes)),
+                    failed: false,
+                });
+            }
+            Ok(None) if reply => self.events.push(CoreEvent::Journal {
+                batch: self.journal_batch as f64,
+                bytes: None,
+                failed: false,
+            }),
+            Ok(None) => {}
+            // Перед снимком ошибка не нужна: те же правки уйдут в файл снимка, а
+            // не выйдет и он — об этом скажет его ошибка.
+            Err(_) if !reply => {}
+            Err(e) => {
+                self.error(format!("Не удалось записать журнал изменений: {e}"));
+                self.events.push(CoreEvent::Journal {
+                    batch: self.journal_batch as f64,
+                    bytes: None,
+                    failed: true,
+                });
+            }
+        }
+    }
+
+    /// Снимок для хранилища: байты, ревизия, имя и превью первой страницы. Сначала
+    /// — пачка журнала с правками до снимка: не запишется снимок — они останутся в
+    /// журнале, запишется — пачки до его номера больше не нужны.
     fn snapshot(&mut self, thumbnail: bool) {
+        self.flush_journal(false);
         let bytes = match container::encode(self.editor.document()) {
             Ok(b) => b,
             Err(e) => {
@@ -285,6 +324,7 @@ impl Core {
             bytes: ByteBuf::from(bytes),
             thumbnail: thumbnail.map(ByteBuf::from),
             keep_thumbnail: keep,
+            journal: self.journal_batch as f64,
         });
     }
 
@@ -374,13 +414,40 @@ impl Core {
 
     /// Открывает файл `.ferrum`. При ошибке текущий документ остаётся как был.
     pub fn open(&mut self, bytes: &[u8]) {
-        match container::decode(bytes) {
-            Ok(opened) => match self.replace_document(opened.document) {
-                Ok(()) => self.push_opened(opened.warnings),
-                Err(e) => self.error(format!("Не удалось открыть файл: {e}")),
-            },
-            Err(e) => self.error(format!("Не удалось открыть файл: {e}")),
+        self.open_with_journal(bytes, &[]);
+    }
+
+    /// Открывает файл и применяет поверх него пачки журнала, записанные после него
+    /// (восстановление после сбоя). Повреждённое в журнале — предупреждение в
+    /// `Opened`; восстановленное ещё не в файле — документ изменён.
+    pub fn open_with_journal(&mut self, bytes: &[u8], journal: &[ByteBuf]) {
+        if journal.len() > MAX_JOURNAL_BATCHES {
+            self.error(format!(
+                "Не удалось открыть файл: в журнале изменений больше {MAX_JOURNAL_BATCHES} записей"
+            ));
+            return;
         }
+        let mut opened = match container::decode(bytes) {
+            Ok(o) => o,
+            Err(e) => {
+                self.error(format!("Не удалось открыть файл: {e}"));
+                return;
+            }
+        };
+        let batches: Vec<&[u8]> = journal.iter().map(|b| b.as_slice()).collect();
+        let replayed = opened.document.apply_journal(&batches);
+        opened.warnings.extend(replayed.warnings);
+        if let Err(e) = self.replace_document(opened.document) {
+            self.error(format!("Не удалось открыть файл: {e}"));
+            return;
+        }
+        if replayed.applied > 0 {
+            self.touch();
+            self.events.push(CoreEvent::Recovered {
+                batches: replayed.applied as u32,
+            });
+        }
+        self.push_opened(opened.warnings);
     }
 
     /// Новый документ — страница-пример из `nodes` узлов (генератор бенчмарков:
@@ -404,6 +471,8 @@ impl Core {
             self.error(e);
             return;
         }
+        // Пример — как только что открытый файл: журнал пишет только правки после него.
+        self.editor.mark_journal();
         let mut cam = self.editor.camera().clone();
         cam.set_zoom(0.5);
         cam.set_center(Point::new(720.0, 512.0));
@@ -444,6 +513,8 @@ impl Core {
         match cmd {
             Command::Open { bytes } => self.open(&bytes),
             Command::Demo { nodes } => self.demo(nodes),
+            Command::OpenWithJournal { bytes, journal } => self.open_with_journal(&bytes, &journal),
+            Command::FlushJournal => self.flush_journal(true),
             Command::Execute { command } => match CommandId::from_key(&command) {
                 Some(id) => self.editor.execute(id),
                 None => self.error(format!("Неизвестная команда «{}»", clip(&command))),

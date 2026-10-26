@@ -3,12 +3,15 @@
 
 use std::collections::HashMap;
 
-use loro::{LoroDoc, LoroTree, LoroValue, TreeParentId, ValueOrContainer};
+use loro::{
+    ExportMode, LoroDoc, LoroTree, LoroValue, TreeParentId, ValueOrContainer, VersionVector,
+};
 
 use crate::changes::Changes;
 use crate::error::{DocError, DocResult};
 use crate::history::{History, HistoryEntry};
 use crate::images::ImageStore;
+use crate::journal::{self, BatchWriter, Replayed};
 use crate::page::{Inverse, PageDoc, Tx};
 use crate::scene_cache::SceneRow;
 use crate::types::{Color, NodeId, PageId};
@@ -57,6 +60,10 @@ pub struct Document {
     changes: HashMap<PageId, Changes>,
     pub images: ImageStore,
     read_only: bool,
+    /// Журнал (этап 6): версии Loro корня и загруженных страниц, до которых правки
+    /// уже отданы в журнал (`take_journal`). Страница получает версию при загрузке.
+    journaled_root: VersionVector,
+    journaled_pages: HashMap<PageId, VersionVector>,
 }
 
 impl Document {
@@ -79,6 +86,7 @@ impl Document {
     ) -> Document {
         let pages_tree = root.get_tree(PAGES);
         pages_tree.enable_fractional_index(0);
+        let journaled_root = root.oplog_vv();
         Document {
             root,
             pages_tree,
@@ -88,6 +96,8 @@ impl Document {
             changes: HashMap::new(),
             images,
             read_only: false,
+            journaled_root,
+            journaled_pages: HashMap::new(),
         }
     }
 
@@ -107,10 +117,18 @@ impl Document {
                 "Файл создан в более новой версии Ferrum (схема {version}). Он открыт только для чтения"
             ));
         }
-        for (id, _) in doc.pages() {
+        for (id, name) in doc.pages() {
             if !doc.unloaded.contains_key(&id) {
-                warnings.push(format!("Страница {id} повреждена и открыта пустой"));
+                let name = if name.is_empty() {
+                    "без названия"
+                } else {
+                    &name
+                };
+                warnings.push(format!(
+                    "Файл повреждён: не удалось прочитать страницу «{name}». Она открыта пустой"
+                ));
                 doc.loaded.insert(id, PageDoc::new());
+                doc.journaled_pages.insert(id, VersionVector::default());
             }
         }
         Ok((doc, warnings))
@@ -194,6 +212,8 @@ impl Document {
         self.root.commit();
         let id = PageId(t);
         self.loaded.insert(id, PageDoc::new());
+        // Новая страница целиком попадёт в следующую пачку журнала.
+        self.journaled_pages.insert(id, VersionVector::default());
         Ok(id)
     }
 
@@ -218,6 +238,7 @@ impl Document {
         self.unloaded.remove(&id);
         self.history.forget_page(id);
         self.changes.remove(&id);
+        self.journaled_pages.remove(&id);
         Ok(())
     }
 
@@ -266,6 +287,8 @@ impl Document {
                 self.read_only = true;
             }
             self.unloaded.remove(&id);
+            // Загруженное из файла уже в нём: журнал пишет правки после загрузки.
+            self.journaled_pages.insert(id, page.oplog_vv());
             self.loaded.insert(id, page);
         }
         self.loaded
@@ -353,6 +376,152 @@ impl Document {
     /// шаблон), открывается как только что прочитанный файл — без шага «создать всё».
     pub fn clear_history(&mut self) {
         self.history = History::default();
+    }
+
+    /// Правки с прошлого вызова одной пачкой журнала: обновления Loro корня и
+    /// загруженных страниц и новые изображения. `None` — изменений нет. Версии
+    /// журнала сдвигаются, только когда собрана вся пачка: ошибка ничего не теряет.
+    pub fn take_journal(&mut self) -> DocResult<Option<Vec<u8>>> {
+        let mut batch = BatchWriter::new();
+        let mut next_root = None;
+        let vv = self.root.oplog_vv();
+        if vv != self.journaled_root {
+            batch.push(
+                journal::ROOT,
+                "",
+                &self
+                    .root
+                    .export(ExportMode::updates(&self.journaled_root))?,
+            );
+            next_root = Some(vv);
+        }
+        let mut ids: Vec<PageId> = self.loaded.keys().copied().collect();
+        ids.sort_by_key(|id| id.to_string());
+        let mut next_pages = Vec::new();
+        for id in ids {
+            let page = &self.loaded[&id];
+            let vv = page.oplog_vv();
+            let base = self.journaled_pages.get(&id).cloned().unwrap_or_default();
+            if vv != base {
+                batch.push(journal::PAGE, &id.to_string(), &page.export_updates(&base)?);
+                next_pages.push((id, vv));
+            }
+        }
+        if let Some(vv) = next_root {
+            self.journaled_root = vv;
+        }
+        self.journaled_pages.extend(next_pages);
+        for (hash, bytes) in self.images.take_fresh() {
+            batch.push(journal::IMAGE, &hash, &bytes);
+        }
+        Ok(batch.finish())
+    }
+
+    /// Всё нынешнее считается уже в журнале: после открытия примера или
+    /// восстановления журнал пишет только новые правки.
+    pub fn mark_journal(&mut self) {
+        self.journaled_root = self.root.oplog_vv();
+        self.journaled_pages = self
+            .loaded
+            .iter()
+            .map(|(id, p)| (*id, p.oplog_vv()))
+            .collect();
+        self.images.take_fresh();
+    }
+
+    /// Применяет пачки журнала, записанные после файла, из которого открыт документ,
+    /// в порядке записи, и считает их уже в журнале. Повреждённая пачка
+    /// пропускается целиком; обновления, которым не хватает предыдущих, Loro не
+    /// применяет. Обо всём, что не восстановлено, — одно предупреждение.
+    pub fn apply_journal(&mut self, batches: &[&[u8]]) -> Replayed {
+        let mut out = Replayed::default();
+        if batches.is_empty() {
+            return out;
+        }
+        if self.read_only {
+            out.warnings
+                .push("Несохранённые изменения не применены: файл открыт только для чтения".into());
+            return out;
+        }
+        let mut lost = false;
+        let mut skipped_read_only = false;
+        let (mut root, mut pages, mut images) = (Vec::new(), Vec::new(), Vec::new());
+        for bytes in batches {
+            match journal::parse(bytes) {
+                Some(b) => {
+                    out.applied += 1;
+                    root.extend(b.root);
+                    pages.extend(b.pages);
+                    images.extend(b.images);
+                }
+                None => lost = true,
+            }
+        }
+        for data in &root {
+            match self.root.import(data) {
+                Ok(status) => lost |= status.pending.is_some(),
+                Err(_) => lost = true,
+            }
+        }
+        // Страницы, созданные и удалённые журналом корня.
+        let listed: Vec<PageId> = self.pages().into_iter().map(|(id, _)| id).collect();
+        for id in &listed {
+            if !self.loaded.contains_key(id) && !self.unloaded.contains_key(id) {
+                self.loaded.insert(*id, PageDoc::new());
+            }
+        }
+        self.loaded.retain(|id, _| listed.contains(id));
+        self.unloaded.retain(|id, _| listed.contains(id));
+        for (id, list) in journal::group_pages(pages) {
+            // Страницу удалили позже в том же журнале — её правки не нужны.
+            if !listed.contains(&id) {
+                continue;
+            }
+            if self.page(id).is_err() {
+                lost = true;
+                continue;
+            }
+            if self.read_only {
+                // Страница с неизвестными узлами (найдена при загрузке) — только чтение,
+                // как в ветке раннего выхода: правки этой и следующих страниц не применяем.
+                skipped_read_only = true;
+                continue;
+            }
+            let page = self.loaded.get(&id).expect("загружена выше");
+            let refs: Vec<&[u8]> = list.iter().map(Vec::as_slice).collect();
+            match page.import_updates(&refs) {
+                Ok(complete) => lost |= !complete,
+                Err(_) => lost = true,
+            }
+            if page.has_unknown_nodes() {
+                self.read_only = true;
+            }
+        }
+        for (hash, bytes) in images {
+            self.images.insert_verified(hash, bytes);
+        }
+        if skipped_read_only {
+            out.warnings
+                .push("Несохранённые изменения не применены: файл открыт только для чтения".into());
+        }
+        if lost {
+            out.warnings.push(
+                "Не все несохранённые изменения удалось восстановить: журнал изменений повреждён"
+                    .into(),
+            );
+        }
+        // Ничего не изменилось (журнал от другого файла, всё «ждёт» предыдущих
+        // обновлений) — ничего и не применено.
+        let changed = self.root.oplog_vv() != self.journaled_root
+            || self
+                .loaded
+                .iter()
+                .any(|(id, p)| self.journaled_pages.get(id) != Some(&p.oplog_vv()));
+        if !changed {
+            out.applied = 0;
+        }
+        self.mark_journal();
+        out
     }
 
     pub fn can_undo(&self) -> bool {

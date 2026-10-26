@@ -18,6 +18,11 @@ fn commands() -> Vec<Command> {
             bytes: bytes(b"FERRUM"),
         },
         Command::Demo { nodes: 100_000 },
+        Command::OpenWithJournal {
+            bytes: bytes(b"FERRUM"),
+            journal: vec![bytes(b"FERRUMJ"), bytes(b"")],
+        },
+        Command::FlushJournal,
         Command::Execute {
             command: "edit.undo".into(),
         },
@@ -193,6 +198,7 @@ fn events() -> Vec<CoreEvent> {
             bytes: bytes(b"f"),
             thumbnail: Some(bytes(b"t")),
             keep_thumbnail: false,
+            journal: 4.0,
         },
         CoreEvent::Snapshot {
             revision: 3.0,
@@ -200,7 +206,24 @@ fn events() -> Vec<CoreEvent> {
             bytes: bytes(b"f"),
             thumbnail: None,
             keep_thumbnail: true,
+            journal: 0.0,
         },
+        CoreEvent::Journal {
+            batch: 5.0,
+            bytes: Some(bytes(b"j")),
+            failed: false,
+        },
+        CoreEvent::Journal {
+            batch: 5.0,
+            bytes: None,
+            failed: false,
+        },
+        CoreEvent::Journal {
+            batch: 5.0,
+            bytes: None,
+            failed: true,
+        },
+        CoreEvent::Recovered { batches: 2 },
         CoreEvent::SaveRequested,
         CoreEvent::Pixels {
             backend: Backend::Cpu,
@@ -210,6 +233,17 @@ fn events() -> Vec<CoreEvent> {
         },
         CoreEvent::Error {
             message: "ой".into(),
+        },
+        CoreEvent::SurfaceLost {
+            backend: Backend::Webgl,
+            message: "Контекст WebGL2 потерян".into(),
+        },
+        CoreEvent::SurfaceRestored {
+            backend: Backend::Webgpu,
+        },
+        CoreEvent::SurfaceFailed {
+            next: Backend::Cpu,
+            message: "не вышло".into(),
         },
         CoreEvent::Layers {
             start: 0,

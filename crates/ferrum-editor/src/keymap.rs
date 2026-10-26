@@ -508,6 +508,7 @@ impl Keymap {
         let doc = json!({
             "format": FORMAT,
             "version": VERSION,
+            "platform": platform_key(self.platform),
             "overrides": overrides,
         });
         serde_json::to_string_pretty(&doc).expect("JSON из строк всегда сериализуется")
@@ -540,6 +541,30 @@ impl Keymap {
             .and_then(Value::as_object)
             .ok_or_else(|| KeymapError::BadFormat("нет поля overrides".into()))?;
         let mut warnings = Vec::new();
+        // Файл другой группы платформ: Ctrl и Cmd меняются местами (этап 6).
+        let swap = match obj.get("platform").and_then(Value::as_str) {
+            None => false,
+            Some(p) => match platform_from_key(p) {
+                Some(from) => {
+                    let swap = (from == Platform::Mac) != (self.platform == Platform::Mac);
+                    if swap {
+                        warnings.push(
+                            if from == Platform::Mac {
+                                "Раскладка с macOS: Cmd заменён на Ctrl"
+                            } else {
+                                "Раскладка с Windows/Linux: Ctrl заменён на Cmd"
+                            }
+                            .to_string(),
+                        );
+                    }
+                    swap
+                }
+                None => {
+                    warnings.push("Неизвестная платформа раскладки — сочетания как в файле".into());
+                    false
+                }
+            },
+        };
         let mut parsed = BTreeMap::new();
         for (key, value) in overrides {
             let Some(id) = CommandId::from_key(key) else {
@@ -559,7 +584,10 @@ impl Keymap {
             let mut list: Vec<Shortcut> = Vec::new();
             for item in items {
                 match item.as_str().map(Shortcut::parse) {
-                    Some(Ok(s)) => {
+                    Some(Ok(mut s)) => {
+                        if swap {
+                            std::mem::swap(&mut s.mods.ctrl, &mut s.mods.meta);
+                        }
                         if !list.contains(&s) {
                             list.push(s);
                         }
@@ -590,5 +618,23 @@ impl Keymap {
         }
         self.reindex();
         Ok(warnings)
+    }
+}
+
+/// Платформа в файле раскладки.
+fn platform_key(p: Platform) -> &'static str {
+    match p {
+        Platform::Mac => "mac",
+        Platform::Windows => "windows",
+        Platform::Linux => "linux",
+    }
+}
+
+fn platform_from_key(s: &str) -> Option<Platform> {
+    match s {
+        "mac" => Some(Platform::Mac),
+        "windows" => Some(Platform::Windows),
+        "linux" => Some(Platform::Linux),
+        _ => None,
     }
 }
