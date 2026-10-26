@@ -20,8 +20,9 @@ export interface FileStore {
    * файла (`File` с диска читает worker). */
   create(name: string, bytes?: Blob): Promise<FileMeta>;
   /** Байты файла (`null` — новый файл, ещё не сохранённый) и пачки журнала,
-   * записанные после них, по порядку записи. */
-  read(id: string): Promise<{ meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[] }>;
+   * записанные после них, по порядку записи; `session` — наибольший сеанс среди
+   * пачек файла (`null` — пачек нет): новый сеанс берётся после него. */
+  read(id: string): Promise<{ meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[]; session: number | null }>;
   /** Содержимое и превью (буферы передаются и здесь больше не доступны); имя
    * записи не меняется — для него `rename`. `thumb`:
    * `null` — убрать превью, `'keep'` — оставить прежнее. `base` — поколение файла

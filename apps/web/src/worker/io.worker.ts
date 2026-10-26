@@ -214,13 +214,17 @@ async function readFile(id: string): Promise<{ value: IoResults['read']; transfe
   const m = meta(id);
   const d = await open();
   const tx = d.transaction(['bytes', 'journal']);
-  const [raw, entries] = await Promise.all([
+  const [raw, entries, last] = await Promise.all([
     request(tx.objectStore('bytes').get(id)) as Promise<unknown>,
     request(tx.objectStore('journal').getAll(journalRange(id))) as Promise<unknown[]>,
+    // Последний ключ `[id, сеанс, номер]` — наибольший сеанс (ключи упорядочены).
+    request(tx.objectStore('journal').openKeyCursor(journalRange(id), 'prev')).then((c) => c?.key),
   ]);
   const bytes = raw instanceof ArrayBuffer ? raw : null;
   const journal = bytes ? entries.filter((b): b is ArrayBuffer => b instanceof ArrayBuffer) : [];
-  return { value: { meta: m, bytes, journal }, transfer: [...(bytes ? [bytes] : []), ...journal] };
+  const s = Array.isArray(last) ? last[1] : null;
+  const session = typeof s === 'number' && Number.isSafeInteger(s) && s >= 0 ? s : null;
+  return { value: { meta: m, bytes, journal, session }, transfer: [...(bytes ? [bytes] : []), ...journal] };
 }
 
 async function readBytes(id: string): Promise<ArrayBuffer | null> {

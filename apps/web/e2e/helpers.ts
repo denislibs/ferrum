@@ -156,3 +156,19 @@ export async function drawRect(page: Page, dx = 0): Promise<void> {
 export function journalCount(page: Page, id: string): Promise<number> {
   return page.evaluate((i) => window.__ferrumFiles!.store.journalCount(i), id);
 }
+
+/** Новый файл в хранилище, уже записанный полным файлом (в нём один прямоугольник):
+ * дальше правки идут в журнал. `query` — параметры адреса (`&fullSave=…`). */
+export async function storedFile(page: Page, query = ''): Promise<string> {
+  await testMode(page);
+  await page.goto(`/?nodes=0${query}#/new`);
+  await editorReady(page);
+  const id = fileId(page);
+  await drawRect(page);
+  // Новый файл без байтов: первая запись — полным файлом через 2 с после правки.
+  await expect
+    .poll(() => page.evaluate((i) => window.__ferrumFiles!.store.get(i).then((m) => m?.size ?? 0), id), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  return id;
+}

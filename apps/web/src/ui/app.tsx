@@ -6,7 +6,8 @@
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { detectPlatform } from '../core/core';
-import { boot, dismissSplash } from './boot';
+import { MAX_OPEN_BYTES } from '../core/limits';
+import { boot, dismissSplash, isTestMode } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
@@ -19,7 +20,7 @@ import { SettingsDialog } from './settings-dialog';
 import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import type { Route } from './router';
-import { createSaver, type Saver } from './saver';
+import { createSaver, type Saver, type SaverOptions } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
 import { installClipboard } from './system-clipboard';
 import { createUiStore } from './store';
@@ -35,6 +36,17 @@ export interface AppProps {
   /** Файл из хранилища не открылся (испорчен): к экрану файлов с этим сообщением. */
   onOpenFailed: (message: string) => void;
   navigate: (r: Route) => void;
+}
+
+/** Тестовый режим: интервалы журнала и полного файла из адреса (`?journal=`, `?fullSave=`). */
+function testIntervals(): SaverOptions {
+  if (!isTestMode()) return {};
+  const p = new URLSearchParams(location.search);
+  const ms = (k: string) => {
+    const v = Number(p.get(k));
+    return p.has(k) && Number.isFinite(v) && v > 0 ? v : undefined;
+  };
+  return { journalMs: ms('journal'), fullIdleMs: ms('fullSave') };
 }
 
 export function App(props: AppProps) {
@@ -121,8 +133,23 @@ export function App(props: AppProps) {
   let stored = false;
   /** Поколение файла при открытии: с него начинается проверка записи. */
   let version = props.file.version;
+  /** Наибольший сеанс пачек журнала файла: сеанс этого редактора — после него. */
+  let journalSession: number | null = null;
   const bytes = props.files.read(id).then(
-    (r) => ((stored = r.bytes !== null), (version = r.meta.version), r.bytes),
+    (r) => {
+      stored = r.bytes !== null;
+      version = r.meta.version;
+      journalSession = r.session;
+      if (!r.bytes) return null;
+      let journal = r.journal;
+      const total = journal.reduce((n, b) => n + b.byteLength, r.bytes.byteLength);
+      if (total > MAX_OPEN_BYTES) {
+        // Файл с журналом больше предела открытия: открыть хотя бы файл.
+        store.toast('Журнал изменений слишком большой — файл открыт без несохранённых правок', 'error');
+        journal = [];
+      }
+      return { bytes: r.bytes, journal };
+    },
     (e: unknown) => {
       props.onOpenFailed(`Не удалось открыть файл: ${e instanceof Error ? e.message : String(e)}`);
       return null;
@@ -179,7 +206,7 @@ export function App(props: AppProps) {
         setEditor(ed);
         canvas.focus();
         uninstall = installClipboard(ed);
-        saver = createSaver(ed, props.files, id, version);
+        saver = createSaver(ed, props.files, id, version, stored, { ...testIntervals(), journalSession });
         // Ctrl/Cmd+S, пока фокус в поле панели (клавиша не ушла ядру): тоже
         // «Сохранить», и браузер не открывает диалог сохранения страницы.
         const onSaveKey = (e: KeyboardEvent) => {
@@ -194,9 +221,12 @@ export function App(props: AppProps) {
         // Открытие файла из хранилища: отказ самого открытия (а не, скажем, раскладки)
         // до `opened` — файл испорчен; запись остаётся, пользователь — на экране файлов.
         let opening = true;
+        let recovered = false;
         ed.core.on((e) => {
+          if (e.type === 'recovered') recovered = true;
           if (opening && e.type === 'opened') {
             opening = false;
+            if (recovered) store.toast('Восстановлены изменения, не записанные в файл');
             void props.files.touch(id).catch(() => {});
             // Имя файла — из хранилища (его могли переименовать на экране файлов);
             // тихо: открытие — не правка, файл из-за него не пересохраняется.

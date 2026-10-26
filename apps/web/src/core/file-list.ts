@@ -135,8 +135,9 @@ export interface IoResults {
   list: { total: number; rows: FileMeta[] };
   get: FileMeta | null;
   create: FileMeta;
-  /** `journal` — пачки, записанные после байтов файла, по порядку (без байтов — пусто). */
-  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[] };
+  /** `journal` — пачки, записанные после байтов файла, по порядку (без байтов — пусто);
+   * `session` — наибольший сеанс среди всех пачек файла (`null` — пачек нет). */
+  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[]; session: number | null };
   write: FileMeta;
   appendJournal: null;
   journalCount: number;
