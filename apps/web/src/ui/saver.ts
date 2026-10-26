@@ -23,7 +23,8 @@
 // `flushJournal` отвечает `false`, `pending` — `true`). Пачку, которую не удалось
 // дописать в хранилище, ядро уже отдало: её правки — только в памяти, пока их не
 // заберёт полный файл. Пока журнал неполон (пачка не собрана или потеряна), правки
-// не отодвигают полный файл дальше `FULL_MAX_MS` от прошлого.
+// не отодвигают полный файл дальше `FULL_MAX_MS` от прошлого. После неудачной
+// полной записи следующая сама по себе — не раньше чем через `FULL_IDLE_MS`.
 
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import type { Editor } from './context';
@@ -97,6 +98,14 @@ export function createSaver(
   let journalTimer = 0;
   let fullTimer = 0;
   let lastFull = performance.now();
+  /** Последняя неудачная попытка полного файла (снимок или запись). */
+  let failedAt = -Infinity;
+  /** Срок следующего полного файла сам по себе (без просьбы пользователя): не реже
+   * `FULL_MAX_MS` от прошлого и, после неудачи, не раньше чем через `fullIdleMs` от
+   * неё. Причина отказа (место, другая вкладка, кодирование) за секунды не проходит,
+   * а каждая попытка — снимок всего документа (≈0,45 с на 100 000 узлах): чаще
+   * обычного шага полных файлов повторять незачем. Ctrl/Cmd+S и уход пробуют сразу. */
+  const fullDue = () => Math.max(lastFull + FULL_MAX_MS, failedAt + fullIdleMs);
   let running: Promise<boolean> | null = null;
   let again: Promise<boolean> | null = null;
   /** Последняя показанная ошибка записи: повтор не показываем, пока запись не удастся. */
@@ -117,10 +126,10 @@ export function createSaver(
   const unjournaled = () => lost > covered;
   /** Последняя пачка не собрана ядром: правки ждут следующей. */
   let unbuilt = false;
-  /** Полный файл в простое; пока журнал неполон — не позже `FULL_MAX_MS` от прошлого. */
+  /** Полный файл в простое; пока журнал неполон — не позже срока `fullDue`. */
   const armFull = () => {
     clearTimeout(fullTimer);
-    const left = unbuilt || unjournaled() ? lastFull + FULL_MAX_MS - performance.now() : fullIdleMs;
+    const left = unbuilt || unjournaled() ? fullDue() - performance.now() : fullIdleMs;
     fullTimer = window.setTimeout(() => void save(), Math.max(0, Math.min(fullIdleMs, left)));
   };
   /** Ждут ответа ядра на `flushJournal`. */
@@ -225,10 +234,10 @@ export function createSaver(
     fullIfLong();
   }
 
-  /** Долгая работа без пауз: полный файл не реже `FULL_MAX_MS`. Пачка перед снимком
-   * идущей записи второй снимок не просит. */
+  /** Долгая работа без пауз: полный файл не реже `FULL_MAX_MS` (после неудачи — по
+   * `fullDue`). Пачка перед снимком идущей записи второй снимок не просит. */
   function fullIfLong(): void {
-    if (stored && modified && !running && performance.now() - lastFull > FULL_MAX_MS) void save();
+    if (stored && modified && !running && performance.now() > fullDue()) void save();
   }
 
   function flushJournal(): Promise<boolean> {
@@ -256,7 +265,10 @@ export function createSaver(
     });
     waiting = null;
     failWaiting = null;
-    if (!snap) return false;
+    if (!snap) {
+      failedAt = performance.now();
+      return false;
+    }
     const seen = snapSeq;
     const wasStored = stored;
     // У нового файла журнала нет: правки до снимка вберёт запись (отказ вернёт признак).
@@ -277,6 +289,7 @@ export function createSaver(
       return true;
     } catch (err) {
       if (!wasStored) dirty = true;
+      failedAt = performance.now();
       fail(`Не удалось сохранить файл: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }

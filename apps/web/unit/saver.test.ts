@@ -88,6 +88,7 @@ function harness(stored: boolean, journalSession?: number | null) {
   const marks: JournalMark[] = [];
   const writes: ({ session: number; upTo: number } | null)[] = [];
   let failAppend = false;
+  let failWrite = false;
   const files = {
     appendJournal: async (_id: string, mark: JournalMark) => {
       if (failAppend) throw new Error('нет места');
@@ -95,6 +96,7 @@ function harness(stored: boolean, journalSession?: number | null) {
     },
     write: async (_id: string, _b: ArrayBuffer, _t: unknown, base: number, journal: { session: number; upTo: number } | null) => {
       writes.push(journal);
+      if (failWrite) throw new Error('недостаточно места в хранилище браузера');
       return { version: base + 1 };
     },
   } as unknown as FileStore;
@@ -113,6 +115,7 @@ function harness(stored: boolean, journalSession?: number | null) {
     advance,
     now: () => now,
     failAppends: (on: boolean) => void (failAppend = on),
+    failWrites: (on: boolean) => void (failWrite = on),
     stop: () => void ((ed.store as unknown as { state: { stopped: boolean } }).state.stopped = true),
     batch: (batch: number) => emit({ type: 'journal', batch, bytes: new Uint8Array([1, 2]), failed: false }),
     snapshot: (journal: number) =>
@@ -165,6 +168,37 @@ test('пачка — не позже JOURNAL_MS после первой прав
   expect(h.sent.filter((c) => c.type === 'flushJournal')).toHaveLength(0);
   h.advance(100);
   expect(h.sent.filter((c) => c.type === 'flushJournal')).toHaveLength(1);
+});
+
+test('хранилище полно (пачка и файл не пишутся): правки каждые 100 мс не гонят снимки подряд', async () => {
+  const h = harness(true);
+  h.failAppends(true);
+  h.failWrites(true);
+  // Ядро отвечает сразу: на просьбу пачки — пачкой, на снимок — снимком.
+  let answered = 0;
+  let batch = 0;
+  const answer = () => {
+    for (; answered < h.sent.length; answered++) {
+      const c = h.sent[answered];
+      if (c.type === 'flushJournal') h.batch(++batch);
+      if (c.type === 'snapshot') h.snapshot(batch);
+    }
+  };
+  h.emit({ type: 'modified', modified: true });
+  const end = FULL_MAX_MS + 30_000;
+  while (h.now() < end) {
+    h.emit({ type: 'document', canUndo: true, canRedo: false, steps: 1 });
+    h.advance(100);
+    answer();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    answer();
+  }
+  const snaps = h.sent.filter((c) => c.type === 'snapshot').length;
+  // Журнал неполон: первая попытка — к 5 минутам; после неудачи следующая — не раньше
+  // чем через FULL_IDLE_MS (у 330-й секунды — граница окна), а не на каждую правку.
+  expect(snaps).toBeGreaterThanOrEqual(1);
+  expect(snaps).toBeLessThanOrEqual(2);
+  expect(h.toasts.filter((t) => t.startsWith('Не удалось сохранить файл'))).toHaveLength(1);
 });
 
 test('5-минутная проверка не запускает второй снимок, пока идёт запись', async () => {
