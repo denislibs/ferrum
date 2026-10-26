@@ -284,13 +284,15 @@ fn smoke_done(report: Value, app: AppHandle) -> Res<()> {
         return Err("Команда доступна только при проверке запуска".into());
     }
     println!("smoke: {report}");
-    // Ядро запустилось, круг ввода-вывода через IPC прошёл (`io: true`), CSP действует
+    // Ядро запустилось, круг ввода-вывода через IPC прошёл (`io: true`), экран файлов
+    // показал превью и редкие символы со своими шрифтами (`screen: true`), CSP действует
     // (`cspActive`) и страница его не нарушила (`csp: []`), главный поток во время
     // долгой записи отвечал (`pingMs` меньше половины `writeMs`: команда, ждущая
     // библиотеку в главном потоке, задержала бы ответ почти на всю запись).
     let num = |k: &str| report.get(k).and_then(Value::as_f64).unwrap_or(-1.0);
     let ok = report.get("ready").and_then(Value::as_bool) == Some(true)
         && report.get("io").and_then(Value::as_bool) == Some(true)
+        && report.get("screen").and_then(Value::as_bool) == Some(true)
         && report.get("cspActive").and_then(Value::as_bool) == Some(true)
         && report
             .get("csp")

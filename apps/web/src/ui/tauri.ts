@@ -218,9 +218,50 @@ function cspActive(): boolean {
   }
 }
 
+/** PNG 1 × 1 — превью карточки на экране файлов проверки. */
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+/** Текст из подмножеств шрифтов, встроенных в CSS как `data:`: кириллица-доп.
+ * (ѣ U+0463, ӕ U+04D5 — `data:` и woff2, и woff) и вьетнамский (ệ U+1EC7 — `data:` woff2). */
+const RARE_GLYPHS = 'ѣ ӕ ệ';
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Экран файлов под CSP: карточка с превью (`blob:`) и именем с редкими символами,
+ * шрифты этих символов (моноширинный встроен `data:`). `true` — превью показано и
+ * шрифты загружены; иначе — что не так. */
+async function filesScreen(s: TauriFileStore): Promise<true | string> {
+  const m = await s.create(`Проверка ${RARE_GLYPHS}`);
+  const png = Uint8Array.from(atob(PNG_1PX), (c) => c.charCodeAt(0));
+  await s.write(m.id, new Uint8Array([1, 2, 3]).buffer, png.buffer, m.version, null);
+  location.hash = '#/';
+  const shown = () =>
+    [...document.querySelectorAll('img')].some((i) => i.src.startsWith('blob:') && i.complete && i.naturalWidth > 0);
+  const t0 = performance.now();
+  while (performance.now() - t0 < 15_000 && !shown()) await sleep(100);
+  if (!shown()) return 'превью на экране файлов не показано';
+  if (!document.body.textContent?.includes(RARE_GLYPHS)) return 'имя файла не показано';
+  // Моноширинный шрифт для тех же символов: подмножества — `data:` в CSS.
+  const probe = document.createElement('span');
+  probe.style.fontFamily = 'var(--font-mono)';
+  probe.textContent = RARE_GLYPHS;
+  document.body.append(probe);
+  try {
+    for (const weight of [400, 500]) {
+      const faces = await document.fonts.load(`${weight} 16px "JetBrains Mono"`, RARE_GLYPHS);
+      if (faces.length === 0 || faces.some((f) => f.status !== 'loaded')) return `шрифт ${weight} не загружен`;
+    }
+  } catch (e) {
+    return `шрифт: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    probe.remove();
+  }
+  return true;
+}
+
 /** Проверка запуска десктопа (`FERRUM_SMOKE=1`, `apps/desktop`): новый файл, ядро
- * готово, круг ввода-вывода через IPC, нарушения CSP — отчёт приложению, оно печатает
- * его и выходит. */
+ * готово, круг ввода-вывода через IPC, экран файлов с превью и редкими символами,
+ * нарушения CSP — отчёт приложению, оно печатает его и выходит. */
 export async function runSmoke(): Promise<void> {
   if (!isTauri()) return;
   // Нарушения CSP страницы — с первого кадра (до ответа `smoke_mode`).
@@ -244,7 +285,16 @@ export async function runSmoke(): Promise<void> {
   } catch (e) {
     round = { io: e instanceof Error ? e.message : String(e), writeMs: -1, pingMs: -1 };
   }
+  const isReady = ready();
+  let screen: true | string;
+  try {
+    screen = await filesScreen(s);
+  } catch (e) {
+    screen = e instanceof Error ? e.message : String(e);
+  }
+  // События нарушений CSP приходят асинхронно — дать им дойти.
+  await sleep(300);
   await invoke<null>('smoke_done', {
-    report: { ready: ready(), isolated: crossOriginIsolated, files, ...round, csp, cspActive: cspActive(), ms: Math.round(performance.now() - t0) },
+    report: { ready: isReady, isolated: crossOriginIsolated, files, ...round, screen, csp, cspActive: cspActive(), ms: Math.round(performance.now() - t0) },
   });
 }
