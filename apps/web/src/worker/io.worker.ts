@@ -236,8 +236,10 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 
 interface DiskRecord {
   handle: FileSystemFileHandle;
-  /** `lastModified` файла после нашего последнего чтения или записи. */
-  lastModified: number;
+  /** `lastModified` файла после нашего последнего чтения или записи; `null` — не
+   * известно (файл записан, а прочитать его после записи не удалось): проверка чужой
+   * правки пропускается до следующего чтения или записи, которые его узнают. */
+  lastModified: number | null;
 }
 
 /** Ошибка File System Access — словами для пользователя. */
@@ -252,9 +254,21 @@ async function diskOf(id: string): Promise<DiskRecord | null> {
   const d = await open();
   const v = (await request(d.transaction('handles').objectStore('handles').get(id))) as unknown;
   const r = v as Partial<DiskRecord> | undefined;
-  return r && r.handle instanceof FileSystemFileHandle && typeof r.lastModified === 'number'
+  return r && r.handle instanceof FileSystemFileHandle && (typeof r.lastModified === 'number' || r.lastModified === null)
     ? { handle: r.handle, lastModified: r.lastModified }
     : null;
+}
+
+/** Записи нет (удалена в другой вкладке): убрать и её строку дескриптора — в той же
+ * транзакции, где проверено, что записи нет. */
+async function dropOrphan(id: string): Promise<void> {
+  const d = await open();
+  const tx = rw(d, ['meta', 'handles']);
+  const req = tx.objectStore('meta').get(id);
+  req.onsuccess = () => {
+    if (!validMeta(req.result)) tx.objectStore('handles').delete(id);
+  };
+  await done(tx);
 }
 
 async function fileOf(handle: FileSystemFileHandle): Promise<File> {
@@ -265,8 +279,10 @@ async function fileOf(handle: FileSystemFileHandle): Promise<File> {
   }
 }
 
-/** Записать байты в файл на диске: браузер пишет во временный и подменяет им файл при `close`. */
-async function writeDisk(handle: FileSystemFileHandle, bytes: ArrayBuffer): Promise<number> {
+/** Записать байты в файл на диске: браузер пишет во временный и подменяет им файл при
+ * `close`. Ответ — `lastModified` записанного файла; `null` — запись удалась (`close`
+ * прошёл), а прочитать файл после неё не вышло: это не отказ записи. */
+async function writeDisk(handle: FileSystemFileHandle, bytes: ArrayBuffer): Promise<number | null> {
   let w: FileSystemWritableFileStream;
   try {
     w = await handle.createWritable();
@@ -280,7 +296,11 @@ async function writeDisk(handle: FileSystemFileHandle, bytes: ArrayBuffer): Prom
     await w.abort().catch(() => {});
     throw diskError(e);
   }
-  return (await fileOf(handle)).lastModified;
+  try {
+    return (await handle.getFile()).lastModified;
+  } catch {
+    return null;
+  }
 }
 
 /** Все пачки журнала файла: ключи `[id, сеанс, номер]`, массив больше любого числа. */
@@ -406,13 +426,21 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
       const { bytes, thumb, base, journal } = r;
       // Файл на диске: сначала он (атомарно), затем метаданные и журнал в базе. Сбой
       // между ними оставит пачки, уже вошедшие в файл, — их повтор безвреден.
-      let disk: { handle: FileSystemFileHandle; lastModified: number } | null = null;
-      const known = metas.get(r.file);
-      if (known?.disk) {
+      let disk: DiskRecord | null = null;
+      if (metas.get(r.file)?.disk) {
         const rec = await diskOf(r.file);
         if (rec) {
-          if (known.version !== base) throw new Error(CONFLICT);
-          if ((await fileOf(rec.handle)).lastModified !== rec.lastModified) throw new Error(DISK_CHANGED);
+          // Поколение — из базы, а не из памяти: другая вкладка могла записать файл, а
+          // этот worker ещё не перечитал список. Иначе её запись на диске была бы затёрта
+          // раньше, чем отказ `CONFLICT` из транзакции ниже.
+          const d = await open();
+          const cur = validMeta(await request(d.transaction('meta').objectStore('meta').get(r.file)));
+          if (!cur) {
+            await dropOrphan(r.file).catch(() => {});
+            throw new Error(GONE);
+          }
+          if (cur.version !== base) throw new Error(CONFLICT);
+          if (rec.lastModified !== null && (await fileOf(rec.handle)).lastModified !== rec.lastModified) throw new Error(DISK_CHANGED);
           disk = { handle: rec.handle, lastModified: await writeDisk(rec.handle, bytes) };
         }
       }
@@ -443,7 +471,10 @@ async function mutate(r: IoRequest): Promise<{ value: unknown }> {
         // Файл на диске уже записан, а база — нет: его новое `lastModified` всё равно
         // запомнить, иначе своя же запись выглядела бы чужой правкой (`DISK_CHANGED`)
         // при каждой следующей. Поколение прежнее — следующая запись пройдёт.
-        if (disk) {
+        if (e instanceof Error && e.message === GONE) {
+          // Записи больше нет: строку дескриптора не возвращать, а убрать.
+          await dropOrphan(r.file).catch(() => {});
+        } else if (disk) {
           const written = disk;
           await open()
             .then((d) => {

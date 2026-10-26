@@ -213,6 +213,8 @@ test('файл на диске изменён другой программой:
   expect(fileId(page)).toBe(id);
   expect(await page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
   expect(await diskSize(page, 'проект.ferrum')).toBe(3);
+  // Неудачная запись на диск журнал не стёрла.
+  expect(await page.evaluate((i) => window.__ferrumFiles!.store.journalCount(i), id)).toBeGreaterThan(0);
 });
 
 test('запись на диске: из корзины — снова «Открыть с диска…»; «Удалить навсегда» файл не трогает', async ({ page }) => {
@@ -322,4 +324,131 @@ test('база версии 3 обновляется до 4: файлы, бай�
     id,
   );
   expect(db).toEqual({ version: 4, bytes: 8, thumb: 5, journal: 1, view: 'list', handles: 0 });
+});
+
+/** Открытый с диска «проект.ferrum» (5 узлов); id записи. */
+async function openLinked(page: Page): Promise<string> {
+  await testMode(page);
+  await stubPickers(page);
+  await page.goto(newFileUrl(5));
+  await editorReady(page);
+  await writeDocToDisk(page, 'проект.ferrum');
+  await nextEditor(page, () => fileMenu(page, 'Открыть с диска…'));
+  return fileId(page);
+}
+
+/** Правка записи прямо в базе — как другая вкладка, о которой этот worker ещё не знает. */
+const editDb = (page: Page, id: string, how: 'bump' | 'delete') =>
+  page.evaluate(
+    ([i, h]) =>
+      new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open('ferrum');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const d = req.result;
+          const tx = d.transaction(['meta', 'handles'], 'readwrite');
+          const meta = tx.objectStore('meta');
+          const get = meta.get(i);
+          get.onsuccess = () => {
+            if (h === 'bump') meta.put({ ...get.result, version: get.result.version + 1 });
+            // Удаление дошло до записи, а до строки дескриптора — ещё нет (гонка).
+            else meta.delete(i);
+          };
+          tx.oncomplete = () => (d.close(), resolve());
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+    [id, how] as const,
+  );
+
+const handleRows = (page: Page, id: string) =>
+  page.evaluate(
+    (i) =>
+      new Promise<number>((resolve, reject) => {
+        const req = indexedDB.open('ferrum');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const d = req.result;
+          const r = d.transaction('handles').objectStore('handles').count(i);
+          r.onsuccess = () => (d.close(), resolve(r.result));
+        };
+      }),
+    id,
+  );
+
+test('файл на диске: поколение сверяется с базой до записи файла — чужая запись в нём не затирается', async ({ page }) => {
+  const id = await openLinked(page);
+  const before = await diskSize(page, 'проект.ferrum');
+  await editDb(page, id, 'bump');
+  await drawRect(page);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect(
+    toast(page, 'Не удалось сохранить файл: Файл изменён в другой вкладке — сохраните копию на диск или откройте файл заново'),
+  ).toHaveCount(1);
+  expect(await diskSize(page, 'проект.ferrum')).toBe(before);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+});
+
+test('файл на диске: запись удалена в другой вкладке — файл не тронут, осиротевшей строки дескриптора нет', async ({ page }) => {
+  const id = await openLinked(page);
+  const before = await diskSize(page, 'проект.ferrum');
+  await editDb(page, id, 'delete');
+  await drawRect(page);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect(toast(page, 'Не удалось сохранить файл: Файл удалён в другой вкладке — сохраните копию на диск')).toHaveCount(1);
+  expect(await diskSize(page, 'проект.ferrum')).toBe(before);
+  expect(await handleRows(page, id)).toBe(0);
+});
+
+test('файл на диске удалён: «не найден», документ изменён, журнал на месте', async ({ page }) => {
+  const id = await openLinked(page);
+  await page.evaluate(async () => (await navigator.storage.getDirectory()).removeEntry('проект.ferrum'));
+  await drawRect(page);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect(toast(page, 'Не удалось сохранить файл: Файл на диске не найден — он перемещён или удалён')).toHaveCount(1);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  expect(await page.evaluate((i) => window.__ferrumFiles!.store.journalCount(i), id)).toBeGreaterThan(0);
+});
+
+test('файл записан, а чтение после записи не удалось: запись удачна, следующая — без ложного «изменён другой программой»', async ({
+  page,
+}) => {
+  // Пролог worker'а ввода-вывода: после удачного `close()` следующее `getFile()` отказывает.
+  const prelude = `(() => {
+  const P = FileSystemFileHandle.prototype;
+  const get = P.getFile;
+  const create = P.createWritable;
+  let failNext = false;
+  P.createWritable = async function (...a) {
+    const w = await create.apply(this, a);
+    const close = w.close.bind(w);
+    w.close = async () => {
+      await close();
+      failNext = true;
+    };
+    return w;
+  };
+  P.getFile = function (...a) {
+    if (failNext) {
+      failNext = false;
+      return Promise.reject(new DOMException('сбой чтения', 'NotReadableError'));
+    }
+    return get.apply(this, a);
+  };
+})();
+`;
+  await page.context().route('**/assets/io.worker-*.js', async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: prelude + (await response.text()) });
+  });
+  await openLinked(page);
+  await drawRect(page);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  const after = await diskSize(page, 'проект.ferrum');
+  await drawRect(page, 150);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect.poll(() => diskSize(page, 'проект.ferrum')).not.toBe(after);
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  await expect(page.locator('.fe-toast', { hasText: 'Не удалось сохранить файл' })).toHaveCount(0);
 });
