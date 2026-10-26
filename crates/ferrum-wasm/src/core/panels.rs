@@ -467,6 +467,8 @@ impl Core {
             // новая команда без ветки здесь — ошибка сборки, а не молчаливый пропуск.
             Command::Open { .. }
             | Command::Demo { .. }
+            | Command::OpenWithJournal { .. }
+            | Command::FlushJournal
             | Command::Execute { .. }
             | Command::SetTool { .. }
             | Command::SetTheme { .. }

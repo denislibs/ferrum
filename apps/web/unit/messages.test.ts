@@ -52,3 +52,36 @@ test('тексты отказов — по голосу дизайн-систе�
   expect(big.length).toBeGreaterThanOrEqual(2);
   for (const t of big) expect(t).toMatch(/^Слишком большой объём данных: (\d+ МБ, )?предел — \d+ МБ$/);
 });
+
+test('openWithJournal: файл и журнал вместе — не больше 512 МБ, пачки — байтами, буферы передаются', async () => {
+  const { prepareCommand } = await import('../src/core/messages');
+  const { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } = await import('../src/core/limits');
+  const file = new Uint8Array(16);
+  const ok = { type: 'openWithJournal' as const, bytes: file, journal: [new Uint8Array(8), new Uint8Array(4)] };
+  expect(commandSizeError(ok)).toBeNull();
+  const half = new Uint8Array(MAX_OPEN_BYTES / 2 + 1);
+  expect(commandSizeError({ type: 'openWithJournal', bytes: half, journal: [half] })).toBe(
+    'Слишком большой объём данных: 513 МБ, предел — 512 МБ',
+  );
+  expect(commandSizeError({ type: 'openWithJournal', bytes: file, journal: ['x' as unknown as Uint8Array] })).toBe(
+    'Неверная команда: данные не в виде байтов',
+  );
+  expect(commandSizeError({ type: 'openWithJournal', bytes: file, journal: 'x' as unknown as Uint8Array[] })).toBe(
+    'Неверная команда: данные не в виде байтов',
+  );
+  const many = new Array<Uint8Array>(MAX_JOURNAL_ENTRIES + 1).fill(new Uint8Array(1));
+  expect(commandSizeError({ type: 'openWithJournal', bytes: file, journal: many })).toBe(
+    'Неверная команда: в журнале изменений больше 100000 записей',
+  );
+  // Буферы передаются: файл, каждая пачка один раз (общий буфер — одной записью),
+  // часть чужого буфера — копией.
+  const shared = new Uint8Array(32);
+  const part = new Uint8Array(new ArrayBuffer(64), 8, 8);
+  const p = prepareCommand({ type: 'openWithJournal', bytes: file, journal: [shared, shared, part] });
+  expect('error' in p).toBe(false);
+  if ('error' in p) return;
+  expect(p.transfer).toHaveLength(3);
+  const cmd = p.cmd as { journal: Uint8Array[] };
+  expect(cmd.journal[2].byteLength).toBe(8);
+  expect(cmd.journal[2].buffer.byteLength).toBe(8);
+});

@@ -4,7 +4,7 @@
 
 import type { Command, CoreEvent } from '../wasm/ferrum_wasm';
 import { MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from './clipboard-text';
-import { MAX_DATA_BYTES, MAX_OPEN_BYTES, mb, tooLarge } from './limits';
+import { MAX_DATA_BYTES, MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, mb, tooLarge } from './limits';
 
 export type ToWorker =
   | {
@@ -38,6 +38,8 @@ export type ToWorker =
  * ограничена 4 ГБ, а копия байтов в ней — ещё и вторая). */
 export const MAX_COMMAND_BYTES = {
   open: MAX_OPEN_BYTES,
+  /** Файл вместе со всеми пачками журнала. */
+  openWithJournal: MAX_OPEN_BYTES,
   paste: MAX_DATA_BYTES,
   placeImage: MAX_DATA_BYTES,
   pasteImage: MAX_DATA_BYTES,
@@ -54,13 +56,38 @@ const SHARED_BYTES = 'Неверная команда: данные не мог�
  * `null`: форму целиком проверяет разбор команды в ядре («Неверная команда»). */
 export function commandSizeError(cmd: Command): string | null {
   if (typeof cmd !== 'object' || cmd === null) return null;
+  if (cmd.type === 'openWithJournal') return journalCommandError(cmd);
   if (cmd.type !== 'open' && cmd.type !== 'paste' && cmd.type !== 'placeImage' && cmd.type !== 'pasteImage') return null;
   const bytes = (cmd as { bytes: unknown }).bytes;
+  const kind = bytesKindError(bytes);
+  if (kind) return kind;
+  const max = MAX_COMMAND_BYTES[cmd.type];
+  const size = (bytes as Uint8Array).byteLength;
+  if (size > max) return tooLarge(max, size);
+  return null;
+}
+
+/** Байты не того вида или в общей памяти — текст ошибки; годятся — `null`. */
+function bytesKindError(bytes: unknown): string | null {
   if (!(bytes instanceof Uint8Array)) return BAD_BYTES;
   if (typeof SharedArrayBuffer === 'function' && bytes.buffer instanceof SharedArrayBuffer) return SHARED_BYTES;
-  const max = MAX_COMMAND_BYTES[cmd.type];
-  if (bytes.byteLength > max) return tooLarge(max, bytes.byteLength);
   return null;
+}
+
+/** Файл с журналом: каждая пачка — байтами, их не больше предела, а файл вместе с
+ * журналом — не больше предела открытия. */
+function journalCommandError(cmd: { bytes: unknown; journal: unknown }): string | null {
+  const own = bytesKindError(cmd.bytes);
+  if (own) return own;
+  if (!Array.isArray(cmd.journal)) return BAD_BYTES;
+  if (cmd.journal.length > MAX_JOURNAL_ENTRIES) return `Неверная команда: в журнале изменений больше ${MAX_JOURNAL_ENTRIES} записей`;
+  let total = (cmd.bytes as Uint8Array).byteLength;
+  for (const b of cmd.journal) {
+    const e = bytesKindError(b);
+    if (e) return e;
+    total += (b as Uint8Array).byteLength;
+  }
+  return total > MAX_OPEN_BYTES ? tooLarge(MAX_OPEN_BYTES, total) : null;
 }
 
 /** Текст ошибки, если текст вставки не годится (не строка или длиннее предела —
@@ -102,8 +129,14 @@ export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transfer
   const error = commandSizeError(cmd);
   if (error) return { error };
   if (typeof cmd !== 'object' || cmd === null || !('bytes' in cmd)) return { cmd, transfer: [] };
-  let bytes = cmd.bytes as unknown as Uint8Array;
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) bytes = bytes.slice();
+  const own = (b: Uint8Array) => (b.byteOffset !== 0 || b.byteLength !== b.buffer.byteLength ? b.slice() : b);
+  const bytes = own(cmd.bytes as unknown as Uint8Array);
+  if (cmd.type === 'openWithJournal') {
+    const journal = cmd.journal.map(own);
+    // Один буфер в списке передачи дважды — DataCloneError: общий буфер — одной записью.
+    const transfer = [...new Set([bytes.buffer, ...journal.map((j) => j.buffer)])] as ArrayBuffer[];
+    return { cmd: { ...cmd, bytes, journal }, transfer };
+  }
   return { cmd: { ...cmd, bytes } as Command, transfer: [bytes.buffer as ArrayBuffer] };
 }
 

@@ -140,7 +140,8 @@ function sendEvents(): void {
   }
   const transfer: Transferable[] = [];
   for (const e of events) {
-    if ('bytes' in e) transfer.push(e.bytes.buffer);
+    // У пустой пачки журнала байтов нет (`bytes` — undefined).
+    if ('bytes' in e && e.bytes) transfer.push(e.bytes.buffer);
     if (e.type === 'pixels') transfer.push(e.rgba.buffer);
     // Снимок для хранилища: превью уходит вместе с байтами файла, тоже без копии.
     if (e.type === 'snapshot' && e.thumbnail) transfer.push(e.thumbnail.buffer);

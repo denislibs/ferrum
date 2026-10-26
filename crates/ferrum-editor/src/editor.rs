@@ -217,6 +217,17 @@ impl Editor {
         &self.doc
     }
 
+    /// Правки документа с прошлого вызова одной пачкой журнала автосохранения
+    /// (этап 6); `None` — правок нет.
+    pub fn take_journal(&mut self) -> DocResult<Option<Vec<u8>>> {
+        self.doc.take_journal()
+    }
+
+    /// Всё нынешнее — уже в журнале (пример, только что собранный документ).
+    pub fn mark_journal(&mut self) {
+        self.doc.mark_journal();
+    }
+
     /// Текущая страница документа (для чтения панелями и тестами).
     pub fn page_doc(&mut self) -> &PageDoc {
         self.doc

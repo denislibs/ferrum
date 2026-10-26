@@ -6,6 +6,7 @@ import { expect, test } from '@playwright/test';
 import {
   MAX_DATA_BYTES,
   MAX_IMAGE_SIDE,
+  MAX_JOURNAL_ENTRIES,
   MAX_KEYMAP_BYTES,
   MAX_NAME_CHARS,
   MAX_SETTINGS_BYTES,
@@ -34,6 +35,7 @@ test('пределы совпадают с константами ядра', () 
   expect(rustConst(`${CRATES}ferrum-render/src/image.rs`, 'MAX_IMAGE_SIDE')).toBe(MAX_IMAGE_SIDE);
   expect(rustConst(`${CRATES}ferrum-editor/src/keymap.rs`, 'MAX_KEYMAP_JSON')).toBe(MAX_KEYMAP_BYTES);
   expect(rustConst(`${CRATES}ferrum-editor/src/pages.rs`, 'MAX_NAME_CHARS')).toBe(MAX_NAME_CHARS);
+  expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_JOURNAL_BATCHES')).toBe(MAX_JOURNAL_ENTRIES);
 });
 
 test('theme-init.js читает настройки с тем же пределом', () => {
