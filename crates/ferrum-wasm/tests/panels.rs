@@ -789,6 +789,7 @@ fn page_and_document_names_are_cleaned_and_capped() {
     assert_eq!(name_of(&ev), "я".repeat(256), "имя прежнее");
     core.command(Command::SetDocumentName {
         name: "\u{7}Лендинг\r\n".into(),
+        quiet: None,
     });
     assert!(core.take_events().contains(&CoreEvent::DocumentName {
         name: "Лендинг".into()
@@ -924,6 +925,7 @@ fn panel_command_and_event_caps() {
         },
         Command::SetDocumentName {
             name: "я".repeat(3000),
+            quiet: None,
         },
         Command::Unbind {
             command: "tool.rect".into(),
@@ -1202,6 +1204,20 @@ fn modified(ev: &[CoreEvent]) -> Option<bool> {
     })
 }
 
+/// Сохранение в хранилище: снимок, затем `MarkSaved` с его ревизией (запись удалась).
+fn save(core: &mut Core) {
+    core.command(Command::Snapshot { thumbnail: false });
+    let revision = core
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Snapshot { revision, .. } => Some(revision),
+            _ => None,
+        })
+        .expect("нет снимка");
+    core.command(Command::MarkSaved { revision });
+}
+
 /// «Документ изменён» — и правками вне истории (страницы, фон, имя файла);
 /// новый документ, открытие и сохранение снимают признак.
 #[test]
@@ -1222,13 +1238,14 @@ fn modified_tracks_changes_outside_history_and_clears_on_open_new_save() {
         }),
         Box::new(|_| Command::SetDocumentName {
             name: "План".into(),
+            quiet: None,
         }),
         Box::new(|_| Command::Execute {
             command: "edit.select_all".into(),
         }),
     ];
     for (i, change) in changes.iter().enumerate() {
-        core.command(Command::Save);
+        save(&mut core);
         assert_eq!(modified(&core.take_events()), None, "{i}: уже сохранён");
         let cmd = change(&core);
         let select = matches!(cmd, Command::Execute { .. });
@@ -1240,7 +1257,7 @@ fn modified_tracks_changes_outside_history_and_clears_on_open_new_save() {
             continue;
         }
         assert_eq!(modified(&ev), Some(true), "{i}");
-        core.command(Command::Save);
+        save(&mut core);
         assert_eq!(modified(&core.take_events()), Some(false), "{i}: сохранён");
     }
     // Превью фона и пустое имя — не изменения.
@@ -1252,7 +1269,10 @@ fn modified_tracks_changes_outside_history_and_clears_on_open_new_save() {
         color: None,
         phase: EditPhase::Cancel,
     });
-    core.command(Command::SetDocumentName { name: "  ".into() });
+    core.command(Command::SetDocumentName {
+        name: "  ".into(),
+        quiet: None,
+    });
     assert_eq!(modified(&core.take_events()), None);
     // Правка из истории (на первой странице: «Добавить страницу» перешла на новую,
     // пустую). Переход между страницами — не изменение.
@@ -1267,6 +1287,135 @@ fn modified_tracks_changes_outside_history_and_clears_on_open_new_save() {
     assert_eq!(modified(&core.take_events()), Some(true));
     core.command(Command::Demo { nodes: 0 });
     assert_eq!(modified(&core.take_events()), Some(false), "«Создать»");
+}
+
+/// Снимок не снимает «изменён» сам: только `MarkSaved` с той же ревизией. Правка
+/// между снимком и записью оставляет документ изменённым; копия на диск (`Save`)
+/// признак не трогает.
+#[test]
+fn mark_saved_clears_modified_only_for_the_latest_revision() {
+    let mut core = demo(10);
+    core.take_events();
+    let delete = Command::Execute {
+        command: "edit.delete".into(),
+    };
+    core.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    core.command(delete.clone());
+    assert_eq!(modified(&core.take_events()), Some(true));
+    core.command(Command::Save);
+    assert_eq!(modified(&core.take_events()), None, "копия на диск");
+    core.command(Command::Snapshot { thumbnail: false });
+    let snap = core.take_events();
+    let Some(CoreEvent::Snapshot { revision, name, .. }) = snap
+        .iter()
+        .find(|e| matches!(e, CoreEvent::Snapshot { .. }))
+        .cloned()
+    else {
+        panic!("нет снимка: {snap:?}");
+    };
+    assert_eq!(name, "Без названия");
+    assert_eq!(modified(&snap), None, "снимок сам признак не снимает");
+    // Правка после снимка: запись старого снимка не делает документ сохранённым.
+    core.command(Command::Execute {
+        command: "edit.undo".into(),
+    });
+    core.command(Command::MarkSaved { revision });
+    assert_eq!(modified(&core.take_events()), None, "устаревшая ревизия");
+    // Не доверенные ревизии — тоже мимо.
+    for r in [f64::NAN, f64::INFINITY, -1.0, revision + 0.5] {
+        core.command(Command::MarkSaved { revision: r });
+        assert_eq!(modified(&core.take_events()), None, "{r}");
+    }
+    save(&mut core);
+    assert_eq!(modified(&core.take_events()), Some(false));
+}
+
+/// Имя из хранилища при открытии (`quiet`) документ изменённым не делает.
+#[test]
+fn quiet_document_name_does_not_mark_modified() {
+    let mut core = demo(10);
+    core.take_events();
+    core.command(Command::SetDocumentName {
+        name: "Из хранилища".into(),
+        quiet: Some(true),
+    });
+    let ev = core.take_events();
+    assert!(ev.contains(&CoreEvent::DocumentName {
+        name: "Из хранилища".into()
+    }));
+    assert_eq!(modified(&ev), None);
+    assert_eq!(core.editor().document().name(), "Из хранилища");
+    core.command(Command::SetDocumentName {
+        name: "Правка".into(),
+        quiet: Some(false),
+    });
+    assert_eq!(modified(&core.take_events()), Some(true));
+}
+
+/// Превью не просили — прежнее оставить; пустая страница — убрать.
+#[test]
+fn snapshot_says_whether_to_keep_the_old_thumbnail() {
+    let keep = |core: &mut Core, thumbnail| {
+        core.command(Command::Snapshot { thumbnail });
+        core.take_events().into_iter().find_map(|e| match e {
+            CoreEvent::Snapshot {
+                keep_thumbnail,
+                thumbnail,
+                ..
+            } => Some((keep_thumbnail, thumbnail.is_some())),
+            _ => None,
+        })
+    };
+    let mut empty = demo(0);
+    assert_eq!(keep(&mut empty, true), Some((false, false)));
+    assert_eq!(keep(&mut empty, false), Some((true, false)));
+    let mut full = demo(10);
+    assert_eq!(keep(&mut full, true), Some((false, true)));
+}
+
+fn thumbnail_of(core: &mut Core) -> Option<Vec<u8>> {
+    core.command(Command::Snapshot { thumbnail: true });
+    core.take_events().into_iter().find_map(|e| match e {
+        CoreEvent::Snapshot { thumbnail, .. } => Some(thumbnail.map(|t| t.into_vec())),
+        _ => None,
+    })?
+}
+
+/// Превью — первой страницы, даже если открыта другая; пустая страница превью не даёт.
+#[test]
+fn snapshot_thumbnail_shows_the_first_page() {
+    let mut empty = demo(0);
+    empty.take_events();
+    assert_eq!(thumbnail_of(&mut empty), None, "пустая страница");
+    let mut core = demo(100);
+    core.take_events();
+    let png = thumbnail_of(&mut core).expect("превью");
+    let img = ferrum_render::decode_png(&png).unwrap();
+    assert_eq!((img.width(), img.height()), (480, 320));
+    // Перешли на новую пустую страницу: превью по-прежнему первой.
+    core.command(Command::AddPage);
+    core.take_events();
+    assert_eq!(core.editor().page(), core.editor().document().pages()[1].0);
+    assert_eq!(thumbnail_of(&mut core), Some(png.clone()));
+    // Открытый файл, текущая — вторая: сцена первой строится из её данных, вид тот же.
+    core.command(Command::Save);
+    let bytes = core
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Saved { bytes } => Some(bytes),
+            _ => None,
+        })
+        .unwrap();
+    let mut other = Core::new(Platform::Windows, VIEW, 1.0, Backend::Cpu);
+    other.command(Command::Open { bytes });
+    other.take_events();
+    let second = other.editor().document().pages()[1].0.to_string();
+    other.command(Command::SetPage { id: second });
+    other.take_events();
+    assert_eq!(thumbnail_of(&mut other), Some(png));
 }
 
 /// Превью фона страницы не переживает замену документа.

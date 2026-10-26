@@ -324,7 +324,7 @@ impl Core {
             },
             Command::AddPage => {
                 match self.editor.create_page() {
-                    Ok(_) => self.modified = true,
+                    Ok(_) => self.touch(),
                     Err(e) => self.error(e.to_string()),
                 }
                 self.ui.pages = true;
@@ -334,7 +334,11 @@ impl Core {
                     if let Some(id) = self.page_id(&id) {
                         let before = self.editor.document().pages();
                         match self.editor.rename_page(id, &name) {
-                            Ok(()) => self.modified |= self.editor.document().pages() != before,
+                            Ok(()) => {
+                                if self.editor.document().pages() != before {
+                                    self.touch();
+                                }
+                            }
                             Err(e) => self.error(e.to_string()),
                         }
                     }
@@ -344,7 +348,7 @@ impl Core {
             Command::DeletePage { id } => {
                 if let Some(id) = self.page_id(&id) {
                     match self.editor.delete_page(id) {
-                        Ok(()) => self.modified = true,
+                        Ok(()) => self.touch(),
                         Err(e) => self.error(e.to_string()),
                     }
                 }
@@ -380,19 +384,25 @@ impl Core {
                         let page = self.editor.page();
                         let before = self.editor.page_background();
                         match self.editor.set_page_background(page, parsed) {
-                            Ok(()) => self.modified |= self.editor.page_background() != before,
+                            Ok(()) => {
+                                if self.editor.page_background() != before {
+                                    self.touch();
+                                }
+                            }
                             Err(e) => self.error(e.to_string()),
                         }
                         self.ui.pages = true;
                     }
                 }
             }
-            Command::SetDocumentName { name } => {
+            Command::SetDocumentName { name, quiet } => {
                 if self.text(&name) {
                     let before = self.editor.document().name();
                     match self.editor.set_document_name(&name) {
                         Ok(name) => {
-                            self.modified |= name != before;
+                            if name != before && quiet != Some(true) {
+                                self.touch();
+                            }
                             self.events.push(CoreEvent::DocumentName {
                                 name: event_name(&name),
                             });
@@ -463,6 +473,8 @@ impl Core {
             | Command::Paste { .. }
             | Command::PlaceImage { .. }
             | Command::Save
+            | Command::Snapshot { .. }
+            | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements => {
                 debug_assert!(false, "команда этапа 4 — в `Core::command`");

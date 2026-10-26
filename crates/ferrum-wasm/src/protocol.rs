@@ -26,6 +26,10 @@ pub const SELECTION_IDS_MAX: usize = 1000;
 pub const MAX_TEXT_BYTES: usize = 4096;
 /// Масштабы экспорта PNG (раздел 8.7 спеки).
 pub const EXPORT_SCALES: [f64; 3] = [1.0, 2.0, 3.0];
+/// Размер превью файла для экрана файлов (пиксели): вдвое больше карточки, чтобы
+/// на экранах с плотностью 2 оно оставалось чётким.
+pub const THUMB_WIDTH: u16 = 480;
+pub const THUMB_HEIGHT: u16 = 320;
 
 /// Инструмент.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
@@ -207,8 +211,20 @@ pub enum Command {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
     },
-    /// Сохранить документ: ответ — событие `Saved`.
+    /// Байты документа для «Сохранить копию на диск…»: ответ — событие `Saved`.
+    /// Признак `modified` не сбрасывает: копия на диске — не файл в хранилище.
     Save,
+    /// Снимок для хранилища: байты документа и (`thumbnail`) превью первой
+    /// страницы — ответ `Snapshot`. Признак `modified` снимает только `MarkSaved`
+    /// после удачной записи.
+    Snapshot {
+        thumbnail: bool,
+    },
+    /// Снимок с ревизией `revision` записан в хранилище: `modified` снимается, если
+    /// после снимка правок не было (иначе документ остаётся изменённым).
+    MarkSaved {
+        revision: f64,
+    },
     /// Прочитать пиксели текущего кадра (для тестов): ответ — `Pixels`.
     /// `reference` — тот же кадр, нарисованный `vello_cpu`, для сравнения с GPU.
     ReadPixels {
@@ -293,6 +309,10 @@ pub enum Command {
     },
     SetDocumentName {
         name: String,
+        /// Имя из хранилища при открытии: не правка пользователя — документ не
+        /// становится изменённым (файл не пересохраняется только из-за открытия).
+        #[serde(default)]
+        quiet: Option<bool>,
     },
     /// Фрейм из пресета (номер в списке события `Presets`).
     AddFramePreset {
@@ -439,6 +459,21 @@ pub enum CoreEvent {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
     },
+    /// Снимок для хранилища: ревизия правок, имя документа, байты `.ferrum` и
+    /// PNG превью первой страницы (нет — нечего показать или превью не просили).
+    Snapshot {
+        revision: f64,
+        name: String,
+        #[tsify(type = "Uint8Array")]
+        bytes: ByteBuf,
+        #[tsify(type = "Uint8Array | undefined")]
+        thumbnail: Option<ByteBuf>,
+        /// Превью не строили или не смогли построить: прежнее в хранилище оставить
+        /// (без превью и без этого признака — страница пуста, превью убрать).
+        keep_thumbnail: bool,
+    },
+    /// Команда «Сохранить» (Ctrl/Cmd+S): записать файл в хранилище.
+    SaveRequested,
     /// Измерения с Alt в оверлее: значения расстояний по порядку и число
     /// пунктирных направляющих.
     Measurements {

@@ -1,0 +1,228 @@
+/* Экран файлов: боковая панель (знак, поиск, разделы) и область со списком —
+   карточки сеткой или строки. Цвета и размеры — токены дизайн-системы; панель
+   отделена линией line, превью лежит на холсте темы (canvas). */
+
+.fe-files {
+  display: grid;
+  grid-template-columns: var(--panel-width) minmax(0, 1fr);
+  height: 100%;
+  background: var(--surface);
+}
+
+.fe-files__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: 0 var(--space-3) var(--space-3);
+  border-right: 1px solid var(--line);
+  min-width: 0;
+}
+.fe-files__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--toolbar-height);
+  font-size: 13px;
+}
+.fe-files__search {
+  flex: none;
+}
+.fe-files__nav {
+  display: grid;
+  gap: 2px;
+}
+.fe-files__nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+.fe-files__nav-item:hover {
+  background: var(--surface-hover);
+}
+.fe-files__nav-item .fe-ico {
+  color: var(--ink-muted);
+}
+.fe-files__nav-item[aria-selected='true'] {
+  background: var(--select-soft);
+  font-weight: 600;
+}
+.fe-files__nav-item[aria-selected='true'] .fe-ico {
+  color: var(--ink);
+}
+
+.fe-files__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.fe-files__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--toolbar-height);
+  padding: var(--space-2) var(--space-8);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.fe-files__title {
+  margin: 0;
+}
+.fe-files__views {
+  display: flex;
+  gap: 2px;
+  margin-left: var(--space-2);
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--line);
+}
+.fe-files__views .fe-tool[aria-checked='true'] {
+  background: var(--select-soft);
+}
+
+.fe-files__scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-8);
+}
+.fe-files__list {
+  position: relative;
+  /* Высоту задаёт число записей: прокрутка — по всему списку, DOM — только окно. */
+  min-height: 1px;
+}
+.fe-files__empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  padding-top: var(--space-8);
+  font-size: 13px;
+}
+.fe-files__empty p {
+  margin: 0;
+}
+
+/* Карточка сетки: превью 3:2 на холсте темы, под ним имя и «Изменён …». */
+.fe-card,
+.fe-file-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  user-select: none;
+}
+.fe-card__thumb {
+  display: grid;
+  place-items: center;
+  height: var(--thumb-h);
+  border-radius: var(--radius-lg);
+  background: var(--canvas);
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+.fe-card__thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.fe-card__placeholder {
+  color: var(--ink-faint);
+}
+.fe-card:hover .fe-card__thumb {
+  box-shadow: inset 0 0 0 1px var(--line-control);
+}
+.fe-card[aria-selected='true'] .fe-card__thumb {
+  box-shadow: inset 0 0 0 2px var(--select);
+}
+.fe-card:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+}
+.fe-card__meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  padding: var(--space-2) var(--space-6) 0 var(--space-1);
+}
+.fe-card__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fe-card__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fe-card__more {
+  position: absolute;
+  right: 0;
+  bottom: 20px;
+  color: var(--ink-muted);
+  opacity: 0;
+}
+.fe-card:hover .fe-card__more,
+.fe-card[aria-selected='true'] .fe-card__more,
+.fe-file-row:hover .fe-card__more,
+.fe-file-row[aria-selected='true'] .fe-card__more,
+.fe-card__more:hover {
+  opacity: 1;
+}
+.fe-card .fe-rename,
+.fe-file-row .fe-rename {
+  height: 20px;
+}
+
+/* Строка списка: маленькое превью, имя, «Изменён …», размер. */
+.fe-file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: calc(var(--row-height) + 16px);
+  padding: 0 var(--space-2);
+}
+.fe-file-row:hover {
+  background: var(--surface-hover);
+}
+.fe-file-row[aria-selected='true'] {
+  background: var(--select-soft);
+}
+.fe-file-row:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.fe-file-row .fe-card__thumb {
+  width: 48px;
+  height: 32px;
+  flex: none;
+  border-radius: var(--radius-sm);
+}
+.fe-file-row .fe-card__meta {
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) 180px 80px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0;
+}
+.fe-file-row__size {
+  text-align: right;
+}
+.fe-file-row .fe-card__more {
+  position: static;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fe-files * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

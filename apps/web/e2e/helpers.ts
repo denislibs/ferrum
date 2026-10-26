@@ -94,11 +94,17 @@ export async function drag(page: Page, from: { x: number; y: number }, dx: numbe
   await page.mouse.up();
 }
 
-/** Редактор (index.html) со страницей-примером из `nodes` узлов. */
+/** Адрес нового файла в редакторе: `#/new` создаёт запись в хранилище и открывает
+ * её; у нового файла документ — страница-пример из `nodes` узлов. */
+export function newFileUrl(nodes = 1000, query = ''): string {
+  return `/?nodes=${nodes}${query}#/new`;
+}
+
+/** Редактор (index.html) с новым файлом — страницей-примером из `nodes` узлов. */
 export async function openApp(page: Page, nodes = 1000, query = ''): Promise<void> {
   // Тестовый режим интерфейса: журнал событий (без байтов) и защита чтений layout.
   await page.addInitScript(() => ((window as { __ferrumTest?: boolean }).__ferrumTest = true));
-  await page.goto(`/?nodes=${nodes}${query}`);
+  await page.goto(newFileUrl(nodes, query));
   await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true, null, {
     timeout: 90_000,
   });

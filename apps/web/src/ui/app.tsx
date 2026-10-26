@@ -1,22 +1,25 @@
 // Редактор: холст под управлением worker'а и панели вокруг него (раскладка UI3).
 // Настройки пользователя (тема, привязка к пикселям, раскладка клавиш, ширина
-// панелей) читаются при запуске и сохраняются при каждом изменении.
+// панелей) читаются при запуске и сохраняются при каждом изменении. Документ —
+// файл из хранилища (`file`): байты читает worker ввода-вывода, сохраняет `saver`;
+// уход к экрану файлов или другому файлу сначала сохраняет текущий (`onLeave`).
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
 import { detectPlatform } from '../core/core';
-import { mb } from '../core/limits';
-import { MAX_COMMAND_BYTES } from '../core/messages';
-import { boot } from './boot';
+import { boot, dismissSplash } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
-import { ConfirmDialog } from './dialog';
 import { EditorContext, type Editor } from './context';
+import { ConfirmDialog } from './dialog';
 import { Menu, type MenuItem } from './menu';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
-import { loadSettings, resolveTheme, saveSettings, storage, type Settings, type ThemeChoice } from './settings';
+import { loadSettings, resolveTheme, storage, updateSettings, type Settings, type ThemeChoice } from './settings';
 import { SettingsDialog } from './settings-dialog';
-import { downloadBytes, FERRUM_FILE, fileBytes, fileName, pickFile } from './files';
+import { downloadBytes, fileName } from './files';
+import { importFromDisk, type FileMeta, type FileStore } from './file-store';
+import type { Route } from './router';
+import { createSaver, type Saver } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
 import { installClipboard } from './system-clipboard';
 import { createUiStore } from './store';
@@ -24,19 +27,17 @@ import { Toasts } from './toasts';
 import { Toolbar } from './toolbar';
 import { TooltipLayer } from './tooltip';
 
-/** Убирает экран запуска из index.html: плавно гасит и удаляет из DOM. Безопасно
- *  вызывать много раз и без экрана (стенд, тесты). */
-function dismissSplash() {
-  const el = document.getElementById('fe-splash');
-  if (!el || el.classList.contains('fe-splash--done')) return;
-  el.classList.add('fe-splash--done');
-  el.removeAttribute('role');
-  const remove = () => el.remove();
-  el.addEventListener('transitionend', remove, { once: true });
-  setTimeout(remove, 400); // без перехода (prefers-reduced-motion) transitionend не придёт
+export interface AppProps {
+  file: FileMeta;
+  files: FileStore;
+  /** Уход с редактора: сохранить и остановить ядро; `false` — запись не удалась, остаться. */
+  onLeave: (leave: () => Promise<boolean>) => void;
+  /** Файл из хранилища не открылся (испорчен): к экрану файлов с этим сообщением. */
+  onOpenFailed: (message: string) => void;
+  navigate: (r: Route) => void;
 }
 
-export function App() {
+export function App(props: AppProps) {
   const store = createUiStore();
   const saved = loadSettings(storage());
   const [editor, setEditor] = createSignal<Editor>();
@@ -67,7 +68,8 @@ export function App() {
   // (пропущенное в нём уже отброшено, предупреждение не повторится при запуске).
   // Экран запуска уходит, когда ядро готово или запуск не удался (тогда видна ошибка).
   createEffect(() => {
-    if (store.state.ready || failure() || store.state.stopped) dismissSplash();
+    if (failure() || store.state.stopped) dismissSplash(true);
+    else if (store.state.ready) dismissSplash();
   });
 
   const [keymap, setKeymap] = createSignal(saved.keymap);
@@ -85,11 +87,12 @@ export function App() {
   createEffect(() => editor()?.send({ type: 'setSettings', pixelSnap: pixelSnap() }));
   // Запись — не чаще раза в четверть секунды (края панелей тянутся каждый кадр), и
   // сразу при уходе со страницы.
-  let pending: Settings | null = null;
+  let pending: Partial<Settings> | null = null;
   let writeTimer = 0;
   const flush = () => {
     clearTimeout(writeTimer);
-    if (pending) saveSettings(storage(), pending);
+    // Поверх сохранённых: поля экрана файлов (вид списка) редактор не трогает.
+    if (pending) updateSettings(storage(), pending);
     pending = null;
   };
   createEffect(() => {
@@ -110,8 +113,39 @@ export function App() {
     flush();
   });
 
+  const id = props.file.id;
+  let saver: Saver | undefined;
+  let offSaveKey: (() => void) | undefined;
+  let disposed = false;
+  // Байты файла читаются, пока запускается ядро. Не прочитались — к экрану файлов.
+  let stored = false;
+  /** Поколение файла при открытии: с него начинается проверка записи. */
+  let version = props.file.version;
+  const bytes = props.files.read(id).then(
+    (r) => ((stored = r.bytes !== null), (version = r.meta.version), r.bytes),
+    (e: unknown) => {
+      props.onOpenFailed(`Не удалось открыть файл: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    },
+  );
+  // Сохранить не удалось (ядро остановлено, снимок или запись не прошли): уйти
+  // можно, но только с вопросом — причина в тексте, «Остаться» — по умолчанию.
+  const [askLeave, setAskLeave] = createSignal<{ reason: string; answer: (go: boolean) => void } | null>(null);
+  props.onLeave(async () => {
+    if (!saver) return true;
+    if (await saver.save()) return true;
+    const reason = saver.failure() ?? 'Изменения не записаны в хранилище';
+    return new Promise<boolean>((answer) => setAskLeave({ reason, answer }));
+  });
+  const answerLeave = (go: boolean) => {
+    const a = askLeave();
+    setAskLeave(null);
+    a?.answer(go);
+  };
+
   onMount(() => {
     boot(canvas, store, {
+      document: bytes,
       // До документа: тема (первый кадр сразу в цвете темы), привязка и сохранённая раскладка.
       beforeDocument: (ed) => {
         ed.send({ type: 'setTheme', theme: theme() });
@@ -138,15 +172,47 @@ export function App() {
       },
     })
       .then((ed) => {
+        if (disposed) {
+          ed.dispose();
+          return;
+        }
         setEditor(ed);
         canvas.focus();
         uninstall = installClipboard(ed);
+        saver = createSaver(ed, props.files, id, version);
+        // Ctrl/Cmd+S, пока фокус в поле панели (клавиша не ушла ядру): тоже
+        // «Сохранить», и браузер не открывает диалог сохранения страницы.
+        const onSaveKey = (e: KeyboardEvent) => {
+          const s = eventShortcut(e);
+          if (e.defaultPrevented || !s) return;
+          if (!store.state.keymap.commands.find((c) => c.key === 'file.save')?.bindings.includes(s)) return;
+          e.preventDefault();
+          void saver?.save();
+        };
+        window.addEventListener('keydown', onSaveKey);
+        offSaveKey = () => window.removeEventListener('keydown', onSaveKey);
+        // Открытие файла из хранилища: отказ самого открытия (а не, скажем, раскладки)
+        // до `opened` — файл испорчен; запись остаётся, пользователь — на экране файлов.
+        let opening = true;
         ed.core.on((e) => {
+          if (opening && e.type === 'opened') {
+            opening = false;
+            void props.files.touch(id).catch(() => {});
+            // Имя файла — из хранилища (его могли переименовать на экране файлов);
+            // тихо: открытие — не правка, файл из-за него не пересохраняется.
+            if (e.name !== props.file.name) ed.send({ type: 'setDocumentName', name: props.file.name, quiet: true });
+          } else if (opening && stored && e.type === 'error' && e.message.startsWith('Не удалось открыть файл')) {
+            opening = false;
+            props.onOpenFailed(e.message);
+          } else if (e.type === 'documentName') {
+            // Переименовали в редакторе — запись в хранилище тоже (без ожидания снимка).
+            props.files.rename(id, e.name).catch((err: unknown) => store.toast(`Не удалось переименовать файл: ${err instanceof Error ? err.message : String(err)}`, 'error'));
+          }
           if (e.type === 'exported') {
             downloadBytes(e.name, e.bytes, 'image/png');
             store.toast(`Экспортировано: ${e.name}`);
           } else if (e.type === 'saved') {
-            // Байты готовит worker и передаёт без копии; здесь — только скачивание.
+            // «Сохранить копию на диск…»: байты готовит worker и передаёт без копии.
             downloadBytes(fileName(store.state.documentName, '.ferrum'), e.bytes, 'application/octet-stream');
           }
         });
@@ -155,50 +221,32 @@ export function App() {
       .catch((e: unknown) => setFailure(e instanceof Error ? e.message : `Ядро не запустилось: ${String(e)}`));
   });
   onCleanup(() => {
+    disposed = true;
+    offSaveKey?.();
     uninstall?.();
-    editor()?.core.dispose();
+    saver?.dispose();
+    editor()?.dispose();
   });
 
-  // Выбор файла и байты — worker'у; разбор (и отказ испорченного файла одной
-  // ошибкой с текущим документом на месте) — в ядре.
-  const openFile = async (ed: Editor) => {
-    try {
-      const f = await pickFile(FERRUM_FILE);
-      if (!f) return;
-      // Размер — до чтения: файл больше предела не копируется в память ради отказа.
-      if (f.size > MAX_COMMAND_BYTES.open) {
-        store.toast(`Не удалось открыть файл: больше ${mb(MAX_COMMAND_BYTES.open)} МБ`, 'error');
-        return;
-      }
-      ed.send({ type: 'open', bytes: await fileBytes(f) });
-    } catch (e) {
-      store.toast(`Не удалось открыть файл: ${e instanceof Error ? e.message : String(e)}`, 'error');
-    }
-  };
-
-  // «Создать» и «Открыть…» заменяют документ: пока автосохранения нет, при правках
-  // с открытия, создания или сохранения (и вне истории отмены: страницы, фон, имя
-  // файла) — с вопросом; «Отмена» оставляет текущий документ.
-  const REPLACE = {
-    new: { title: 'Создать новый файл?', confirm: 'Создать', run: (ed: Editor) => ed.send({ type: 'demo', nodes: 0 }) },
-    open: { title: 'Открыть другой файл?', confirm: 'Открыть', run: (ed: Editor) => void openFile(ed) },
-  } as const;
-  const [confirmReplace, setConfirmReplace] = createSignal<keyof typeof REPLACE | null>(null);
-  const replaceDocument = (ed: Editor, kind: keyof typeof REPLACE) => {
-    if (store.state.modified) setConfirmReplace(kind);
-    else REPLACE[kind].run(ed);
+  // «Новый файл» и «Открыть…» не спрашивают о несохранённом: смена маршрута сначала
+  // сохраняет текущий файл в хранилище, затем открывает другой.
+  const openFromDisk = async () => {
+    const meta = await importFromDisk(props.files, (t) => store.toast(t, 'error'));
+    if (meta) props.navigate({ kind: 'file', id: meta.id });
   };
   const fileItems = (ed: Editor): MenuItem[] => [
-    { label: 'Создать', onSelect: () => replaceDocument(ed, 'new') },
-    { label: 'Открыть…', onSelect: () => replaceDocument(ed, 'open') },
-    { label: 'Сохранить как…', onSelect: () => ed.send({ type: 'save' }) },
+    { label: 'Новый файл', onSelect: () => props.navigate({ kind: 'new' }) },
+    { label: 'Открыть…', onSelect: () => void openFromDisk() },
+    { label: 'Сохранить', command: 'file.save', onSelect: () => void saver?.save() },
+    { label: 'Сохранить копию на диск…', onSelect: () => ed.send({ type: 'save' }) },
     { separator: true },
+    { label: 'Все файлы', onSelect: () => props.navigate({ kind: 'files', section: 'recent' }) },
     { label: 'Настройки…', onSelect: () => setSettingsOpen(true) },
   ];
 
   return (
     <ErrorBoundary
-      fallback={(err: unknown) => (dismissSplash(),
+      fallback={(err: unknown) => (dismissSplash(true),
         <div class="fe-boot fe-boot--error" role="alert">
           Ошибка интерфейса: {err instanceof Error ? err.message : String(err)}. Перезагрузите страницу
         </div>
@@ -243,7 +291,7 @@ export function App() {
         {(ed) => (
           <EditorContext.Provider value={ed()}>
             <aside class="fe-side fe-side--left" aria-label="Страницы и слои">
-              <FileHeader items={() => fileItems(ed())} />
+              <FileHeader items={() => fileItems(ed())} onBack={() => props.navigate({ kind: 'files', section: 'recent' })} />
               <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} />
               <LayersPanel />
               <ResizeEdge side="left" width={left()} onWidth={setLeft} />
@@ -254,22 +302,6 @@ export function App() {
               <ResizeEdge side="right" width={right()} onWidth={setRight} />
             </aside>
             <TooltipLayer />
-            <Show when={confirmReplace()}>
-              {(kind) => (
-                <ConfirmDialog
-                  title={REPLACE[kind()].title}
-                  text="Несохранённые изменения будут потеряны"
-                  confirm={REPLACE[kind()].confirm}
-                  cancel="Отмена"
-                  onCancel={() => setConfirmReplace(null)}
-                  onConfirm={() => {
-                    const run = REPLACE[kind()].run;
-                    setConfirmReplace(null);
-                    run(ed());
-                  }}
-                />
-              )}
-            </Show>
             <Show when={settingsOpen()}>
               <SettingsDialog
                 theme={themeChoice()}
@@ -290,6 +322,18 @@ export function App() {
               )}
             </Show>
           </EditorContext.Provider>
+        )}
+      </Show>
+      <Show when={askLeave()}>
+        {(a) => (
+          <ConfirmDialog
+            title="Изменения не сохранены — уйти?"
+            text={a().reason}
+            confirm="Уйти"
+            cancel="Остаться"
+            onCancel={() => answerLeave(false)}
+            onConfirm={() => answerLeave(true)}
+          />
         )}
       </Show>
       <Toasts store={store} />

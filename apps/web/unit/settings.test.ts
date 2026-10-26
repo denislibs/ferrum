@@ -18,6 +18,7 @@ import {
   saveSettings,
   SETTINGS_KEY,
   THEME_CANVAS,
+  updateSettings,
 } from '../src/ui/settings';
 
 function memory(): Storage {
@@ -31,6 +32,16 @@ function memory(): Storage {
     length: 0,
   };
 }
+
+test('старые настройки без вида экрана файлов читаются: вид — сетка; запись части не затирает остальное', () => {
+  const s = memory();
+  s.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'light', pixelSnap: false, keymap: '', leftWidth: 300, rightWidth: 248, pagesOpen: false }));
+  expect(loadSettings(s)).toEqual({ ...DEFAULT_SETTINGS, theme: 'light', pixelSnap: false, leftWidth: 300, pagesOpen: false, filesView: 'grid' });
+  expect(updateSettings(s, { filesView: 'list' })).toBe(true);
+  expect(loadSettings(s)).toMatchObject({ theme: 'light', leftWidth: 300, filesView: 'list' });
+  s.setItem(SETTINGS_KEY, JSON.stringify({ filesView: 'плитка' }));
+  expect(loadSettings(s).filesView).toBe('grid');
+});
 
 test('настройки: запись и чтение, мусор и отказ хранилища', () => {
   const s = memory();

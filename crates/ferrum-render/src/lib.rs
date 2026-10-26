@@ -294,4 +294,79 @@ impl Renderer {
         painter.draw(&mut backend, &ctx, &slots);
         Ok(backend.render())
     }
+
+    /// Превью страницы для экрана файлов: всё содержимое (границы корней с полем
+    /// `THUMB_PADDING` с каждой стороны), вписанное по центру в картинку
+    /// `width`×`height` на фоне `background` (без фона — прозрачная: под ней
+    /// интерфейс кладёт холст своей темы). Масштаб не больше `THUMB_MAX_SCALE`:
+    /// одинокая маленькая фигура не раздувается во весь кадр. LOD включён, как на
+    /// экране: на сотне тысяч узлов мелочь рисуется цветными прямоугольниками или
+    /// пропускается, и время превью ограничено числом видимых в нём узлов.
+    /// `Ok(None)` — на странице нечего показать (пусто или всё скрыто).
+    pub fn thumbnail_png(
+        &mut self,
+        scene: &Scene,
+        width: u16,
+        height: u16,
+        background: Option<Rgba>,
+        images: &dyn ImageProvider,
+    ) -> Result<Option<Vec<u8>>, ExportError> {
+        let area = scene
+            .roots()
+            .iter()
+            .filter_map(|&s| scene.at(s).subtree_bounds)
+            .filter(|r| r.is_finite())
+            .reduce(|a, b| a.union(b));
+        let Some(area) = area else {
+            return Ok(None);
+        };
+        if width == 0 || height == 0 {
+            return Err(ExportError::Empty);
+        }
+        let (w, h) = (width as f64, height as f64);
+        let inner_w = (w - 2.0 * THUMB_PADDING).max(1.0);
+        let inner_h = (h - 2.0 * THUMB_PADDING).max(1.0);
+        // Линия без толщины по одной оси даёт нулевую сторону: делим на не меньше единицы.
+        let scale = (inner_w / area.width().max(1.0))
+            .min(inner_h / area.height().max(1.0))
+            .min(THUMB_MAX_SCALE);
+        if !(scale.is_finite() && scale > 0.0) {
+            return Err(ExportError::Empty);
+        }
+        let center = area.center();
+        let transform = Affine::translate((w / 2.0, h / 2.0))
+            * Affine::scale(scale)
+            * Affine::translate(-center.to_vec2());
+        let mut backend = CpuBackend::new(width, height);
+        backend.begin_frame(width, height);
+        if let Some(bg) = background {
+            backend.set_transform(Affine::IDENTITY);
+            backend.set_color(bg);
+            backend.fill_rect(&Rect::new(0.0, 0.0, w, h));
+        }
+        let ctx = DrawContext {
+            scene,
+            images,
+            transform,
+            scale,
+            cull: None,
+            lod: true,
+            raster: false,
+            retain: false,
+        };
+        // Свой рисовальщик, как у экспорта: превью не трогает кэши и счётчики экрана.
+        let mut painter = Painter::with_raster_limit(0);
+        painter.begin_frame();
+        painter.draw(&mut backend, &ctx, scene.roots());
+        backend
+            .render()
+            .into_png()
+            .map(Some)
+            .map_err(|e| ExportError::Encode(e.to_string()))
+    }
 }
+
+/// Поле вокруг содержимого в превью, пиксели.
+pub const THUMB_PADDING: f64 = 16.0;
+/// Наибольший масштаб превью: мелкое содержимое не растягивается сверх этого.
+pub const THUMB_MAX_SCALE: f64 = 4.0;

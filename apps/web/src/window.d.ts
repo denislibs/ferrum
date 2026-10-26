@@ -4,9 +4,12 @@ import type { Core } from './core/core';
 import type { Scheduler } from './ui/scheduler';
 import type { CoreEvent } from './wasm/ferrum_wasm';
 import type { UiState } from './ui/store';
+import type { FileStore, FileStoreTestHooks } from './ui/file-store';
 
 declare global {
   interface Window {
+    /** Тестовый режим: хранилище файлов (и хуки worker'а ввода-вывода — засев, отказ записи). */
+    __ferrumFiles?: { store: FileStore & FileStoreTestHooks };
     __ferrum?: {
       /** Только в тестовом режиме (`__ferrumTest`, `?debug`), на стенде и с
        * `__ferrumPerf` (замеры); в обычном режиме редактора — нет. E2E проверяет

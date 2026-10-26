@@ -32,6 +32,8 @@ fn commands() -> Vec<Command> {
             bytes: bytes(&[0x89, b'P']),
         },
         Command::Save,
+        Command::Snapshot { thumbnail: true },
+        Command::MarkSaved { revision: 3.0 },
         Command::ReadPixels { reference: true },
         Command::ReadMeasurements,
         Command::LayersWindow {
@@ -128,6 +130,7 @@ fn commands() -> Vec<Command> {
         },
         Command::SetDocumentName {
             name: "Лендинг".into(),
+            quiet: None,
         },
         Command::AddFramePreset { index: 3 },
         Command::SetZoom { zoom: 2.0 },
@@ -184,6 +187,21 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::RequestImage,
         CoreEvent::ToggleUi,
         CoreEvent::Saved { bytes: bytes(b"s") },
+        CoreEvent::Snapshot {
+            revision: 2.0,
+            name: "План".into(),
+            bytes: bytes(b"f"),
+            thumbnail: Some(bytes(b"t")),
+            keep_thumbnail: false,
+        },
+        CoreEvent::Snapshot {
+            revision: 3.0,
+            name: "".into(),
+            bytes: bytes(b"f"),
+            thumbnail: None,
+            keep_thumbnail: true,
+        },
+        CoreEvent::SaveRequested,
         CoreEvent::Pixels {
             backend: Backend::Cpu,
             width: 1,

@@ -53,6 +53,8 @@ pub enum CommandId {
     FlipHorizontal,
     /// Отразить выделение по вертикали.
     FlipVertical,
+    /// Сохранить файл в хранилище (интерфейс получает `EditorEvent::SaveRequested`).
+    Save,
 }
 
 /// Строка таблицы команд.
@@ -296,6 +298,7 @@ pub const COMMANDS: &[Command] = &[
         "Отразить по вертикали",
         &["Shift+KeyV"],
     ),
+    cmd(C::Save, "file.save", "Сохранить", &["Mod+KeyS"]),
 ];
 
 impl CommandId {

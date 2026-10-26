@@ -2,7 +2,7 @@
 // состоянии интерфейса, шрифты и токены дизайн-системы.
 
 import { expect, test } from '@playwright/test';
-import { live, liveWhen, openApp } from './helpers';
+import { live, liveWhen, newFileUrl, openApp } from './helpers';
 
 test('редактор запускает ядро и получает раскладку, пресеты и документ', async ({ page }) => {
   await openApp(page);
@@ -18,7 +18,7 @@ test('редактор запускает ядро и получает раск�
       errors: f.uiEvents!.filter((e) => e.type === 'error'),
     };
   });
-  expect(info).toEqual({ mode: 'sab', commands: 43, presets: 11, pages: 1, total: 10, name: 'Без названия', errors: [] });
+  expect(info).toEqual({ mode: 'sab', commands: 44, presets: 11, pages: 1, total: 10, name: 'Без названия', errors: [] });
 });
 
 test('шрифты и цвета — из дизайн-системы', async ({ page }) => {
@@ -121,7 +121,7 @@ test('защита layout: чтения самого Core не предупре�
 });
 
 test('в обычном режиме журнал событий не ведётся и данные не копятся', async ({ page }) => {
-  await page.goto('/?nodes=10');
+  await page.goto(newFileUrl(10));
   await page.waitForFunction(() => window.__ferrum?.ui?.ready === true);
   expect(await page.evaluate(() => [window.__ferrum!.events.length, window.__ferrum!.uiEvents])).toEqual([0, undefined]);
   // Ядро и планировщик в обычном режиме не раскрыты.
@@ -135,7 +135,7 @@ test('в обычном режиме журнал событий не ведёт
 
 test('замер (__ferrumPerf): ядро доступно, журнала и защиты layout нет', async ({ page }) => {
   await page.addInitScript(() => ((window as { __ferrumPerf?: boolean }).__ferrumPerf = true));
-  await page.goto('/?nodes=10');
+  await page.goto(newFileUrl(10));
   await page.waitForFunction(() => window.__ferrum?.ui?.ready === true);
   expect(await page.evaluate(() => [typeof window.__ferrum!.core?.send, window.__ferrum!.uiEvents])).toEqual(['function', undefined]);
   await page.evaluate(() => document.querySelector('canvas')!.getBoundingClientRect());
@@ -186,4 +186,16 @@ test('экран запуска без анимаций при prefers-reduced-m
   // Готовая картинка: фрейм с ручками и заливкой видна целиком.
   const fill = await page.evaluate(() => getComputedStyle(document.querySelector('.fe-splash__fill')!).opacity);
   expect(fill).toBe('1');
+});
+
+test('заставка держится минимум MIN_SPLASH_MS, даже если ядро готово раньше', async ({ page }) => {
+  // Обычный режим (без __ferrumTest): анимация успевает доиграть.
+  await page.goto(newFileUrl(10));
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 90_000 });
+  const t = await page.evaluate(() => performance.now());
+  const splash = page.locator('#fe-splash');
+  if (t < 1800) await expect(splash).toBeVisible();
+  await expect(splash).toHaveCount(0, { timeout: 5_000 });
+  const gone = await page.evaluate(() => performance.now());
+  expect(gone).toBeGreaterThanOrEqual(2000);
 });

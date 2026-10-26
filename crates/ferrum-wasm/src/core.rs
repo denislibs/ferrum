@@ -17,6 +17,7 @@ use ferrum_doc::{container, fixture, Document, NodeId};
 use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{CommandId, Cursor, Editor, EditorEvent, Input, Platform, ToolKind};
 use ferrum_render::{decode_png, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba};
+use ferrum_scene::Scene;
 use kurbo::{Point, Size};
 use serde_bytes::ByteBuf;
 
@@ -26,6 +27,7 @@ use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
     Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, SELECTION_IDS_MAX,
+    THUMB_HEIGHT, THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -83,6 +85,9 @@ pub struct Core {
     /// и что о нём сообщено последним (`None` — документ заменён: сообщить).
     modified: bool,
     modified_sent: Option<bool>,
+    /// Ревизия правок: растёт с каждой правкой и заменой документа. Снимок несёт её,
+    /// а `MarkSaved` снимает `modified`, только если с тех пор она не сменилась.
+    revision: u64,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -191,6 +196,7 @@ impl Core {
             // сообщать нечего. Замена документа сбрасывает это (`None`) — сообщить.
             modified: false,
             modified_sent: Some(false),
+            revision: 0,
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -247,8 +253,67 @@ impl Core {
         self.background_preview = None;
         self.modified = false;
         self.modified_sent = None;
+        self.revision += 1;
         self.dirty = true;
         Ok(())
+    }
+
+    /// Документ изменён: признак `modified` и новая ревизия.
+    pub(crate) fn touch(&mut self) {
+        self.modified = true;
+        self.revision += 1;
+    }
+
+    /// Снимок для хранилища: байты, ревизия, имя и превью первой страницы.
+    fn snapshot(&mut self, thumbnail: bool) {
+        let bytes = match container::encode(self.editor.document()) {
+            Ok(b) => b,
+            Err(e) => {
+                // Свой текст: интерфейс отличает отказ снимка от отказа копии на диск.
+                self.error(format!("Не удалось сохранить файл: {e}"));
+                return;
+            }
+        };
+        let (thumbnail, keep) = match thumbnail.then(|| self.thumbnail()) {
+            None => (None, true),
+            Some(Ok(png)) => (png, false),
+            Some(Err(())) => (None, true),
+        };
+        self.events.push(CoreEvent::Snapshot {
+            revision: self.revision as f64,
+            name: panels::event_name(&self.editor.document().name()),
+            bytes: ByteBuf::from(bytes),
+            thumbnail: thumbnail.map(ByteBuf::from),
+            keep_thumbnail: keep,
+        });
+    }
+
+    /// PNG превью первой страницы (`THUMB_WIDTH`×`THUMB_HEIGHT`) на её фоне. Сцена —
+    /// текущая, если открыта первая страница; иначе из уже загруженной страницы или
+    /// кэша сцены файла (Loro ради превью не раскодируется). `Ok(None)` — показать
+    /// нечего (страница пуста); `Err` — превью не построить (нет сцены, сбой
+    /// рендера): файл записывается, а прежнее превью остаётся.
+    fn thumbnail(&mut self) -> Result<Option<Vec<u8>>, ()> {
+        let doc = self.editor.document();
+        let first = doc.pages().first().ok_or(())?.0;
+        let built;
+        let scene = if first == self.editor.page() {
+            self.editor.scene()
+        } else if let Some(page) = doc.loaded_page(first) {
+            built = Scene::from_page(page);
+            &built
+        } else {
+            built = Scene::from_rows(doc.cached_scene(first).ok_or(())?);
+            &built
+        };
+        let background = doc.page_background(first).map(|c| {
+            let k = |v: u8| v as f32 / 255.0;
+            Rgba::new([k(c.r), k(c.g), k(c.b), k(c.a)])
+        });
+        let provider = self.images.export_provider(&doc.images);
+        self.renderer
+            .thumbnail_png(scene, THUMB_WIDTH, THUMB_HEIGHT, background, &provider)
+            .map_err(|_| ())
     }
 
     fn push_opened(&mut self, warnings: Vec<String>) {
@@ -312,7 +377,7 @@ impl Core {
         match container::decode(bytes) {
             Ok(opened) => match self.replace_document(opened.document) {
                 Ok(()) => self.push_opened(opened.warnings),
-                Err(e) => self.error(e),
+                Err(e) => self.error(format!("Не удалось открыть файл: {e}")),
             },
             Err(e) => self.error(format!("Не удалось открыть файл: {e}")),
         }
@@ -394,14 +459,18 @@ impl Core {
             }
             Command::PlaceImage { bytes } => self.place_image(bytes.into_vec()),
             Command::Save => match container::encode(self.editor.document()) {
-                Ok(bytes) => {
-                    self.events.push(CoreEvent::Saved {
-                        bytes: ByteBuf::from(bytes),
-                    });
-                    self.modified = false;
-                }
+                Ok(bytes) => self.events.push(CoreEvent::Saved {
+                    bytes: ByteBuf::from(bytes),
+                }),
                 Err(e) => self.error(format!("Не удалось сохранить: {e}")),
             },
+            Command::Snapshot { thumbnail } => self.snapshot(thumbnail),
+            Command::MarkSaved { revision } => {
+                // Ревизия не доверенная: только точное совпадение с текущей.
+                if revision == self.revision as f64 {
+                    self.modified = false;
+                }
+            }
             Command::ReadPixels { reference } => {
                 self.pixels = Some(reference);
                 self.dirty = true;
@@ -454,7 +523,7 @@ impl Core {
                 EditorEvent::NeedsRedraw => self.dirty = true,
                 EditorEvent::DocumentChanged => {
                     document = true;
-                    self.modified = true;
+                    self.touch();
                     self.ui.layers = true;
                     self.ui.properties = true;
                 }
@@ -482,6 +551,7 @@ impl Core {
                 EditorEvent::ExportPng(ids) => self.copy_png(&ids),
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),
                 EditorEvent::ToggleUi => self.events.push(CoreEvent::ToggleUi),
+                EditorEvent::SaveRequested => self.events.push(CoreEvent::SaveRequested),
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
             }
         }

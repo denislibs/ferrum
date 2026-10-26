@@ -1,6 +1,6 @@
 
 // Настройки пользователя: тема, привязка к пикселям, отличия раскладки клавиш,
-// ширина панелей. Хранятся в localStorage (полноценное хранилище — этап 6);
+// ширина панелей, вид экрана файлов (сетка или список). Хранятся в localStorage (полноценное хранилище — этап 6);
 // доступ к нему может бросить (закрытые cookie, приватный режим) или вернуть
 // мусор — тогда настройки по умолчанию, а запись тихо не удаётся.
 
@@ -14,7 +14,12 @@ export interface Settings {
   leftWidth: number;
   rightWidth: number;
   pagesOpen: boolean;
+  /** Экран файлов: карточки сеткой или строки списком (поле появилось в этапе 6;
+   * в старых записях его нет — тогда сетка). */
+  filesView: FilesView;
 }
+
+export type FilesView = 'grid' | 'list';
 
 import { MAX_KEYMAP_BYTES, MAX_SETTINGS_BYTES } from '../core/limits';
 
@@ -35,6 +40,7 @@ export const DEFAULT_SETTINGS: Settings = {
   leftWidth: 248,
   rightWidth: 248,
   pagesOpen: true,
+  filesView: 'grid',
 };
 
 /** Хранилище: `localStorage`, если доступ к нему не бросает. */
@@ -66,7 +72,14 @@ export function loadSettings(store: Pick<Storage, 'getItem'> | null): Settings {
     leftWidth: isNumber(o.leftWidth) ? clampPanel(o.leftWidth) : DEFAULT_SETTINGS.leftWidth,
     rightWidth: isNumber(o.rightWidth) ? clampPanel(o.rightWidth) : DEFAULT_SETTINGS.rightWidth,
     pagesOpen: typeof o.pagesOpen === 'boolean' ? o.pagesOpen : DEFAULT_SETTINGS.pagesOpen,
+    filesView: o.filesView === 'list' || o.filesView === 'grid' ? o.filesView : DEFAULT_SETTINGS.filesView,
   };
+}
+
+/** Записывает часть настроек поверх сохранённых: экран файлов и редактор пишут
+ * каждый свои поля и не затирают чужие. */
+export function updateSettings(store: Pick<Storage, 'getItem' | 'setItem'> | null, patch: Partial<Settings>): boolean {
+  return saveSettings(store, { ...loadSettings(store), ...patch });
 }
 
 /** Записывает настройки; `false` — не удалось (нет места, запрещено). */

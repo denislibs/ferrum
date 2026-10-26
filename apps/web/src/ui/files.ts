@@ -1,11 +1,17 @@
-// Файлы в браузере (этап 5 — минимум): выбрать файл («Открыть…», изображение) —
+// Файлы в браузере: выбрать файл («Открыть…», «Импорт…», изображение) —
 // `showOpenFilePicker`, где он есть, иначе `<input type=file>`; скачать байты
-// («Сохранить как…», экспорт PNG). Байты сразу уходят в worker. Недавние файлы,
-// IndexedDB, автосохранение и экран файлов — этап 6.
+// («Сохранить копию на диск…», экспорт PNG). Байты сразу уходят в worker. Подписи
+// экрана файлов: «Изменён 5 минут назад», размер «1,2 МБ». Хранилище файлов —
+// `file-store.ts`.
 
 /** Скачивает байты файлом `name` (ссылка с `download`, адрес освобождается). */
 export function downloadBytes(name: string, bytes: Uint8Array, type: string): void {
-  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+  downloadBlob(name, new Blob([bytes as BlobPart], { type }));
+}
+
+/** Скачивает готовый `Blob` (собранный в worker'е: основной поток байты не копирует). */
+export function downloadBlob(name: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
@@ -68,4 +74,37 @@ export async function pickFile(kind: FileKind): Promise<File | null> {
 /** Байты файла (передаются worker'у без копии). */
 export async function fileBytes(file: Blob): Promise<Uint8Array> {
   return new Uint8Array(await file.arrayBuffer());
+}
+
+const RELATIVE = new Intl.RelativeTimeFormat('ru', { numeric: 'auto' });
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/** Время относительно `now`: «только что» до минуты, затем минуты, часы, дни,
+ * месяцы и годы назад («5 минут назад», «вчера»). Будущее (часы другой вкладки
+ * спешат) — тоже «только что». */
+export function relativeTime(at: number, now: number): string {
+  const d = now - at;
+  if (!Number.isFinite(d) || d < MINUTE) return 'только что';
+  if (d < HOUR) return RELATIVE.format(-Math.floor(d / MINUTE), 'minute');
+  if (d < DAY) return RELATIVE.format(-Math.floor(d / HOUR), 'hour');
+  if (d < 30 * DAY) return RELATIVE.format(-Math.floor(d / DAY), 'day');
+  if (d < 365 * DAY) return RELATIVE.format(-Math.floor(d / (30 * DAY)), 'month');
+  return RELATIVE.format(-Math.floor(d / (365 * DAY)), 'year');
+}
+
+const SIZE = new Intl.NumberFormat('ru', { maximumFractionDigits: 1 });
+
+/** Размер файла: «512 Б», «12 КБ», «1,2 МБ»; новый (0 байт) — «—». */
+export function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '—';
+  const units = ['Б', 'КБ', 'МБ', 'ГБ'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${SIZE.format(i === 0 ? v : Math.round(v * 10) / 10)} ${units[i]}`;
 }

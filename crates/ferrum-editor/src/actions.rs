@@ -132,6 +132,7 @@ impl Editor {
                 },
             ),
             C::ToggleUi => self.out.events.push(EditorEvent::ToggleUi),
+            C::Save => self.out.events.push(EditorEvent::SaveRequested),
             C::FlipHorizontal => self.mirror(Vec2::new(-1.0, 1.0)),
             C::FlipVertical => self.mirror(Vec2::new(1.0, -1.0)),
         }

@@ -273,6 +273,11 @@ impl Document {
             .ok_or_else(|| DocError::PageNotFound(id.to_string()))
     }
 
+    /// Уже загруженная страница — без загрузки (`None`, если её ещё не открывали).
+    pub fn loaded_page(&self, id: PageId) -> Option<&PageDoc> {
+        self.loaded.get(&id)
+    }
+
     /// Кэш сцены незагруженной страницы: по нему холст рисуется до загрузки Loro.
     pub fn cached_scene(&self, id: PageId) -> Option<&[SceneRow]> {
         self.unloaded.get(&id)?.scene.as_deref()
