@@ -4,7 +4,7 @@
 // к экрану файлов стирают журнал.
 
 import { expect, test, type Page } from '@playwright/test';
-import { drawRect, editorReady, journalCount, liveWhen, storedFile } from './helpers';
+import { drawRect, editorReady, journalCount, live, liveWhen, storedFile } from './helpers';
 
 const meta = (page: Page, id: string) => page.evaluate((i) => window.__ferrumFiles!.store.get(i), id);
 const toast = (page: Page, text: string) => page.locator('.fe-toast', { hasText: text });
@@ -38,6 +38,26 @@ test('правка — в журнал за 2 с, файл не переписа
   await editorReady(page);
   await liveWhen(page, 'l.nodes === 2');
   await expect(toast(page, 'Восстановлены')).toHaveCount(0);
+});
+
+test('первая пачка — за 2 с после первой правки, хотя правки продолжаются', async ({ page }) => {
+  const id = await storedFile(page, '&fullSave=600000');
+  await drawRect(page, 150);
+  // Первая правка уже сделана (прямоугольник); дальше — сдвиг стрелкой каждые 250 мс.
+  const start = Date.now();
+  const steps = (await live(page)).steps;
+  let nudges = 0;
+  while ((await journalCount(page, id)) === 0 && Date.now() - start < 8000) {
+    await page.keyboard.press('ArrowRight');
+    nudges++;
+    await page.waitForTimeout(250);
+  }
+  const elapsed = Date.now() - start;
+  expect(await journalCount(page, id), 'пачка записана').toBeGreaterThan(0);
+  // 2 с таймера и запас под нагрузку машины; правки подряд пачку не откладывают.
+  expect(elapsed).toBeLessThan(4000);
+  await liveWhen(page, `l.steps >= ${steps + nudges}`);
+  expect(nudges, 'правки шли и во время ожидания').toBeGreaterThan(3);
 });
 
 test('журнал пишется раньше файла: отказ записи файла правку не теряет', async ({ page }) => {

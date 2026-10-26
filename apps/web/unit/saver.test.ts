@@ -39,17 +39,44 @@ test('сеанс журнала: часы ушли назад — номер в�
 
 type Listener = (e: CoreEvent) => void;
 
+// Подменённые глобальные объекты возвращаются после каждого теста.
+const g = globalThis as Record<string, unknown>;
+const saved = ['window', 'document', 'performance', 'clearTimeout'].map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)] as const);
+test.afterEach(() => {
+  for (const [k, d] of saved) {
+    if (d) Object.defineProperty(globalThis, k, d);
+    else delete g[k];
+  }
+});
+
 function harness(stored: boolean, journalSession?: number | null) {
-  const timers = new Map<number, () => void>();
+  /** Поддельные часы: таймеры `window` и `performance.now()`. */
+  let now = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
   let seq = 0;
-  const g = globalThis as Record<string, unknown>;
   g.window = {
-    setTimeout: (fn: () => void) => (timers.set(++seq, fn), seq),
+    setTimeout: (fn: () => void, ms = 0) => (timers.set(++seq, { at: now + ms, fn }), seq),
     clearTimeout: (n: number) => timers.delete(n),
     addEventListener() {},
     removeEventListener() {},
   };
+  // В браузере `clearTimeout` и `window.clearTimeout` — одно; сохранитель зовёт и так.
+  const realClear = clearTimeout;
+  g.clearTimeout = (n: unknown) => (typeof n === 'number' ? void timers.delete(n) : realClear(n as NodeJS.Timeout));
   g.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+  Object.defineProperty(globalThis, 'performance', { value: { now: () => now }, configurable: true, writable: true });
+  /** Часы вперёд на `ms`: срабатывают таймеры, чей срок настал, по порядку срока. */
+  const advance = (ms: number) => {
+    const end = now + ms;
+    for (;;) {
+      const due = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      timers.delete(due[0]);
+      now = due[1].at;
+      due[1].fn();
+    }
+    now = end;
+  };
   const listeners: Listener[] = [];
   const sent: { type: string }[] = [];
   const toasts: string[] = [];
@@ -83,49 +110,86 @@ function harness(stored: boolean, journalSession?: number | null) {
     marks,
     writes,
     timers,
+    advance,
+    now: () => now,
     failAppends: (on: boolean) => void (failAppend = on),
+    stop: () => void ((ed.store as unknown as { state: { stopped: boolean } }).state.stopped = true),
     batch: (batch: number) => emit({ type: 'journal', batch, bytes: new Uint8Array([1, 2]), failed: false }),
     snapshot: (journal: number) =>
       emit({ type: 'snapshot', revision: 1, name: 'f', bytes: new Uint8Array(4), thumbnail: undefined, keepThumbnail: true, journal }),
   };
 }
 
-test('пачка не собралась (failed): flushJournal — false без зависания, правки — полным файлом', async () => {
+test('пачка не собралась (failed): flushJournal — false без зависания, правки — в следующей пачке', async () => {
   const h = harness(true);
   h.emit({ type: 'modified', modified: true });
   const flushed = h.saver.flushJournal();
   expect(h.sent.at(-1)?.type).toBe('flushJournal');
   h.emit({ type: 'journal', batch: 0, bytes: undefined, failed: true });
   expect(await flushed).toBe(false);
-  expect(h.saver.pending(), 'правки только в памяти').toBe(true);
-  // Следующая пачка удалась, но правок из несобранной в журнале нет: всё ещё не в журнале.
-  h.emit({ type: 'document', canUndo: true, canRedo: false, steps: 1 });
+  expect(h.saver.pending(), 'правки ещё не в журнале').toBe(true);
+  // Ядро не сдвинуло начало пачки: следующая удачная несёт те же правки — журнал полон
+  // без полного файла.
   const again = h.saver.flushJournal();
   h.batch(1);
-  expect(await again).toBe(false);
-  expect(h.saver.pending()).toBe(true);
-  // Полный файл в простое забирает их: после записи журнал снова полон.
-  const saved = h.saver.save();
-  expect(h.sent.at(-1)?.type).toBe('snapshot');
-  h.batch(2);
-  h.snapshot(3);
-  expect(await saved).toBe(true);
-  expect(h.writes.at(-1)?.upTo).toBe(3);
+  expect(await again).toBe(true);
   expect(h.saver.pending()).toBe(false);
+  expect(h.writes).toHaveLength(0);
 });
 
-test('несобранная пачка после снимка не снимается записью файла', async () => {
+test('пачки не собираются при непрерывных правках: полный файл не позже FULL_MAX_MS', async () => {
   const h = harness(true);
   h.emit({ type: 'modified', modified: true });
-  const saved = h.saver.save();
-  // Пачка перед снимком дописана — правок вне журнала нет.
+  const snapshotAt = () => h.sent.findIndex((c) => c.type === 'snapshot');
+  // Правка каждую секунду; на каждую просьбу пачки ядро отвечает `failed`.
+  while (snapshotAt() < 0 && h.now() < 2 * FULL_MAX_MS) {
+    h.emit({ type: 'document', canUndo: true, canRedo: false, steps: 1 });
+    const asked = h.sent.length;
+    h.advance(1000);
+    if (h.sent.slice(asked).some((c) => c.type === 'flushJournal')) {
+      h.emit({ type: 'journal', batch: 0, bytes: undefined, failed: true });
+    }
+    await h.tick();
+  }
+  expect(snapshotAt(), 'полный файл запрошен').toBeGreaterThan(-1);
+  expect(h.now()).toBeLessThanOrEqual(FULL_MAX_MS);
+});
+
+test('пачка — не позже JOURNAL_MS после первой правки, правки подряд её не откладывают', () => {
+  const h = harness(true);
+  h.emit({ type: 'modified', modified: true });
+  h.advance(1500);
+  h.emit({ type: 'document', canUndo: true, canRedo: false, steps: 1 });
+  h.advance(400);
+  h.emit({ type: 'document', canUndo: true, canRedo: false, steps: 2 });
+  expect(h.sent.filter((c) => c.type === 'flushJournal')).toHaveLength(0);
+  h.advance(100);
+  expect(h.sent.filter((c) => c.type === 'flushJournal')).toHaveLength(1);
+});
+
+test('5-минутная проверка не запускает второй снимок, пока идёт запись', async () => {
+  const h = harness(true);
+  h.emit({ type: 'modified', modified: true });
+  h.advance(FULL_MAX_MS + 1);
+  // Запись по таймеру простоя уже идёт; пачка перед её снимком приходит после 5 минут.
+  const snaps = () => h.sent.filter((c) => c.type === 'snapshot').length;
+  expect(snaps()).toBe(1);
   h.batch(1);
   h.snapshot(1);
-  // Правка после снимка, её пачка не собралась, пока файл пишется.
-  h.emit({ type: 'journal', batch: 1, bytes: undefined, failed: true });
-  expect(await saved).toBe(true);
-  expect(h.writes.at(-1)?.upTo).toBe(1);
-  expect(h.saver.pending()).toBe(true);
+  await h.tick();
+  await h.tick();
+  expect(snaps()).toBe(1);
+});
+
+test('ядро остановлено: flushJournal не говорит «всё в журнале» при потерянной пачке', async () => {
+  const h = harness(true);
+  h.emit({ type: 'modified', modified: true });
+  h.failAppends(true);
+  const first = h.saver.flushJournal();
+  h.batch(1);
+  expect(await first).toBe(false);
+  h.stop();
+  expect(await h.saver.flushJournal()).toBe(false);
 });
 
 test('отказ записи пачки: уведомление одно, правки — полным файлом', async () => {

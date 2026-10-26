@@ -18,10 +18,12 @@
 // файла или журнала — одно уведомление, пока запись снова не удастся; документ
 // остаётся открытым. Запись несёт поколение файла, прочитанное при открытии: файл
 // записали в другой вкладке — отказ, а не тихая перезапись.
-// Пачка, которую ядро не собрало (`journal` с `failed`) или которую не удалось
-// дописать, потеряна для журнала (ядро уже сдвинуло её начало): её правки — только в
-// памяти, пока их не заберёт полный файл (по таймеру простоя); до тех пор
-// `flushJournal` отвечает `false`, а `pending` — `true`.
+// Пачка, которую ядро не собрало (`journal` с `failed`), не потеряна: начало журнала
+// ядро не сдвинуло, те же правки уйдут следующей удачной пачкой (до неё
+// `flushJournal` отвечает `false`, `pending` — `true`). Пачку, которую не удалось
+// дописать в хранилище, ядро уже отдало: её правки — только в памяти, пока их не
+// заберёт полный файл. Пока журнал неполон (пачка не собрана или потеряна), правки
+// не отодвигают полный файл дальше `FULL_MAX_MS` от прошлого.
 
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import type { Editor } from './context';
@@ -106,13 +108,21 @@ export function createSaver(
   /** Пачки дописываются по порядку прихода; запись файла ждёт последнюю. */
   let appended: Promise<boolean> = Promise.resolve(true);
   /** Пачки журнала по порядку прихода (номера с 1); `lost` — последняя пачка,
-   * потерянная для журнала (не собрана или не дописана), `covered` — последняя,
+   * потерянная для журнала (не дописана в хранилище), `covered` — последняя,
    * вошедшая в записанный полный файл (пришла раньше его снимка). */
   let journalSeq = 0;
   let lost = 0;
   let covered = 0;
   let snapSeq = 0;
   const unjournaled = () => lost > covered;
+  /** Последняя пачка не собрана ядром: правки ждут следующей. */
+  let unbuilt = false;
+  /** Полный файл в простое; пока журнал неполон — не позже `FULL_MAX_MS` от прошлого. */
+  const armFull = () => {
+    clearTimeout(fullTimer);
+    const left = unbuilt || unjournaled() ? lastFull + FULL_MAX_MS - performance.now() : fullIdleMs;
+    fullTimer = window.setTimeout(() => void save(), Math.max(0, Math.min(fullIdleMs, left)));
+  };
   /** Ждут ответа ядра на `flushJournal`. */
   const journalWaiters: ((done: Promise<boolean>) => void)[] = [];
 
@@ -125,7 +135,7 @@ export function createSaver(
     }
     // Пачка — не позже `journalMs` после первой правки: правки подряд её не откладывают.
     if (!journalTimer) journalTimer = window.setTimeout(() => void flushJournal(), journalMs);
-    fullTimer = window.setTimeout(() => void save(), fullIdleMs);
+    armFull();
   };
 
   const off = ed.core.on((e) => {
@@ -174,18 +184,21 @@ export function createSaver(
    * не нужна: её вберёт первая запись полного файла. */
   function onJournal(e: Journal): void {
     const seq = stored ? ++journalSeq : 0;
-    /** Правки до этой пачки — только в памяти: заберёт их полный файл в простое. */
+    /** Правки до этой пачки — только в памяти: заберёт их полный файл. */
     const lose = () => {
       lost = Math.max(lost, seq);
-      clearTimeout(fullTimer);
-      fullTimer = window.setTimeout(() => void save(), fullIdleMs);
+      armFull();
     };
     if (stored && e.failed) {
-      // Ядро не собрало пачку (его ошибка уже показана); номер пачки не сдвинут.
-      lose();
+      // Ядро не собрало пачку (его ошибка уже показана) и начало не сдвинуло: правки
+      // уйдут следующей пачкой, а не выйдет и она — полным файлом не позже `FULL_MAX_MS`.
+      unbuilt = true;
+      armFull();
       for (const w of journalWaiters.splice(0)) w(Promise.resolve(false));
+      fullIfLong();
       return;
     }
+    if (stored) unbuilt = false;
     if (stored && e.bytes) {
       const bytes = ownBuffer(e.bytes);
       const p = files.appendJournal(id, { session, batch: e.batch }, bytes).then(
@@ -209,14 +222,19 @@ export function createSaver(
     if (stored) dirty = false;
     const done = appended;
     for (const w of journalWaiters.splice(0)) w(done);
-    // Долгая работа без пауз: полный файл не реже `FULL_MAX_MS`.
-    if (stored && modified && performance.now() - lastFull > FULL_MAX_MS) void save();
+    fullIfLong();
+  }
+
+  /** Долгая работа без пауз: полный файл не реже `FULL_MAX_MS`. Пачка перед снимком
+   * идущей записи второй снимок не просит. */
+  function fullIfLong(): void {
+    if (stored && modified && !running && performance.now() - lastFull > FULL_MAX_MS) void save();
   }
 
   function flushJournal(): Promise<boolean> {
     clearTimeout(journalTimer);
     journalTimer = 0;
-    if (!stored || ed.store.state.stopped) return Promise.resolve(!dirty);
+    if (!stored || ed.store.state.stopped) return Promise.resolve(!dirty && !unjournaled());
     return new Promise<boolean>((resolve) => {
       journalWaiters.push((done) => void done.then((ok) => resolve(ok && !dirty && !unjournaled())));
       ed.send({ type: 'flushJournal' });
