@@ -444,6 +444,7 @@ impl Document {
             return out;
         }
         let mut lost = false;
+        let mut skipped_read_only = false;
         let (mut root, mut pages, mut images) = (Vec::new(), Vec::new(), Vec::new());
         for bytes in batches {
             match journal::parse(bytes) {
@@ -480,6 +481,12 @@ impl Document {
                 lost = true;
                 continue;
             }
+            if self.read_only {
+                // Страница с неизвестными узлами (найдена при загрузке) — только чтение,
+                // как в ветке раннего выхода: правки этой и следующих страниц не применяем.
+                skipped_read_only = true;
+                continue;
+            }
             let page = self.loaded.get(&id).expect("загружена выше");
             let refs: Vec<&[u8]> = list.iter().map(Vec::as_slice).collect();
             match page.import_updates(&refs) {
@@ -492,6 +499,10 @@ impl Document {
         }
         for (hash, bytes) in images {
             self.images.insert_verified(hash, bytes);
+        }
+        if skipped_read_only {
+            out.warnings
+                .push("Несохранённые изменения не применены: файл открыт только для чтения".into());
         }
         if lost {
             out.warnings.push(

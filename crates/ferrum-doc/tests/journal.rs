@@ -15,11 +15,19 @@ type PageState = (
     Vec<(NodeId, Option<NodeId>, Props)>,
 );
 
+/// Изображения, на которые ссылаются страницы, с байтами (если они есть).
+type Images = Vec<(String, Option<Vec<u8>>)>;
+
 /// Всё, что видит пользователь: имя, страницы с фоном, узлы с родителями и свойствами.
-fn state(doc: &mut Document) -> (String, Vec<PageState>) {
+fn state(doc: &mut Document) -> (String, Vec<PageState>, Images) {
     let mut pages = Vec::new();
+    let mut images = Vec::new();
     for (id, name) in doc.pages() {
         let bg = doc.page_background(id);
+        let page = doc.page(id).unwrap();
+        for hash in page.image_refs().unwrap() {
+            images.push((hash.clone(), doc.images.get(&hash).map(<[u8]>::to_vec)));
+        }
         let page = doc.page(id).unwrap();
         let nodes = page
             .walk()
@@ -28,7 +36,23 @@ fn state(doc: &mut Document) -> (String, Vec<PageState>) {
             .collect();
         pages.push((id, name, bg, nodes));
     }
-    (doc.name(), pages)
+    images.sort();
+    images.dedup();
+    (doc.name(), pages, images)
+}
+
+fn fill_image(doc: &mut Document, page: PageId, id: NodeId, hash: &str) {
+    doc.transact(page, vec![], |tx| {
+        tx.set_props(
+            id,
+            &PropsPatch {
+                fills: Some(vec![Fill::image(hash.to_string())]),
+                ..Default::default()
+            },
+        )?;
+        Ok(vec![id])
+    })
+    .unwrap();
 }
 
 fn rect(doc: &mut Document, page: PageId, x: f64) -> NodeId {
@@ -196,6 +220,45 @@ fn deleted_page_and_its_edits_are_dropped() {
 }
 
 #[test]
+fn image_dropped_by_a_full_save_returns_to_the_journal() {
+    let (file0, mut doc) = opened();
+    let _ = file0;
+    let page = doc.pages()[0].0;
+    let r = rect(&mut doc, page, 1.0);
+    let hash = doc.images.add(vec![9; 64]);
+    fill_image(&mut doc, page, r, &hash);
+    doc.take_journal().unwrap().unwrap();
+    doc.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[r])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    doc.take_journal().unwrap();
+    // Полное сохранение: картинка без ссылок в файл не попадает, пачки стираются.
+    let file = encode(&doc).unwrap();
+    doc.undo().unwrap();
+    let b = doc.take_journal().unwrap().unwrap();
+    let (mut back, replayed) = recover(&file, &[&b]);
+    assert!(replayed.warnings.is_empty(), "{:?}", replayed.warnings);
+    assert_eq!(back.images.get(&hash), Some(&[9u8; 64][..]));
+    assert_eq!(state(&mut back), state(&mut doc));
+}
+
+#[test]
+fn loading_a_page_from_the_file_is_not_a_change() {
+    let mut doc = Document::new();
+    let p1 = doc.pages()[0].0;
+    rect(&mut doc, p1, 1.0);
+    let p2 = doc.add_page("Вторая").unwrap();
+    rect(&mut doc, p2, 2.0);
+    let mut doc = decode(&encode(&doc).unwrap()).unwrap().document;
+    for (id, _) in doc.pages() {
+        doc.page(id).unwrap();
+    }
+    assert_eq!(doc.take_journal().unwrap(), None);
+}
+
+#[test]
 fn mark_journal_skips_what_is_already_there() {
     let mut doc = Document::new();
     let page = doc.pages()[0].0;
@@ -269,7 +332,15 @@ proptest! {
                 Op::Redo => { let _ = doc.redo(); }
                 Op::AddPage => { doc.add_page("Ещё").unwrap(); }
                 Op::RenamePage(n) => doc.rename_page(page, &format!("Страница {n}")).unwrap(),
-                Op::Image(n) => { doc.images.add(vec![n; 16]); }
+                Op::Image(n) => {
+                    let hash = doc.images.add(vec![n; 16]);
+                    // Чётные ссылаются на добавленную картинку заливкой первого узла.
+                    if n % 2 == 0 {
+                        if let Some(&id) = doc.page(page).unwrap().children(None).first() {
+                            fill_image(&mut doc, page, id, &hash);
+                        }
+                    }
+                }
                 Op::Flush => {
                     if let Some(b) = doc.take_journal().unwrap() { batches.push(b); }
                 }

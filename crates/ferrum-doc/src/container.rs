@@ -86,14 +86,15 @@ pub fn encode(doc: &Document) -> DocResult<Vec<u8>> {
         }
         used.extend(payload.image_refs);
     }
-    let mut used: Vec<String> = used.into_iter().collect();
-    used.sort();
-    for hash in used {
-        if let Some(bytes) = doc.images.get(&hash) {
-            push_section(&mut sections, IMAGE, &hash, bytes);
+    let mut sorted: Vec<&String> = used.iter().collect();
+    sorted.sort();
+    for hash in sorted {
+        if let Some(bytes) = doc.images.get(hash) {
+            push_section(&mut sections, IMAGE, hash, bytes);
             count += 1;
         }
     }
+    doc.images.mark_unsaved(&used);
     let mut out = Vec::with_capacity(16 + sections.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
