@@ -22,7 +22,11 @@ export type ToWorker =
       atlas: number | null;
       /** Асинхронный API не умеет свой формат: событие `clipboard` несёт и текст с меткой. */
       clipboardText: boolean;
+      /** Тестовый режим страницы: доступны тестовые сообщения (`testPanic`). */
+      test: boolean;
     }
+  /** Только тестовый режим: настоящая паника в ядре (проверка перезапуска). */
+  | { t: 'testPanic' }
   | { t: 'cmd'; cmd: Command }
   /** Вставка текста с меткой из буфера обмена: base64 декодирует worker (основной
    * поток только переносит текст), затем — команда `paste`. */
@@ -141,7 +145,7 @@ export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transfer
 }
 
 /** Виды сообщений worker'у: остальное — неверный конверт. */
-export const TO_WORKER_KINDS: ReadonlySet<string> = new Set(['init', 'cmd', 'pasteText', 'encodeClipboard', 'tick']);
+export const TO_WORKER_KINDS: ReadonlySet<string> = new Set(['init', 'cmd', 'pasteText', 'encodeClipboard', 'tick', 'testPanic']);
 
 /** Конверт сообщения worker'у: объект известного вида. Содержимое команды
  * проверяет ядро. */

@@ -21,8 +21,33 @@ use surface::{Pixels, Readback, Surface};
 
 #[wasm_bindgen(start)]
 pub fn start() {
-    // Паника в Rust — в консоль worker'а с текстом и стеком, а не «unreachable».
-    console_error_panic_hook::set_once();
+    // Паника в Rust — в консоль worker'а с текстом и стеком (а не «unreachable»), и
+    // её текст — worker'у до остановки wasm: «Ядро остановлено: …» несёт причину.
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        report_panic(&panic_text(info));
+    }));
+}
+
+/// Текст паники без места в коде: его увидит пользователь.
+fn panic_text(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "без описания".into())
+}
+
+/// Отдаёт текст `globalThis.__ferrumPanic`, если worker его ждёт (в тестах wasm в
+/// Node его нет — тогда только консоль).
+fn report_panic(message: &str) {
+    let global = js_sys::global();
+    if let Ok(f) = js_sys::Reflect::get(&global, &JsValue::from_str("__ferrumPanic")) {
+        if let Some(f) = f.dyn_ref::<js_sys::Function>() {
+            let _ = f.call1(&global, &JsValue::from_str(message));
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -130,6 +155,13 @@ impl WasmCore {
             watch: PresentWatch::default(),
             soft: SoftErrors::default(),
         })
+    }
+
+    /// Только для тестов (worker зовёт её лишь в тестовом режиме): настоящая паника
+    /// ядра — проверка перехвата и перезапуска.
+    #[wasm_bindgen(js_name = panicForTests)]
+    pub fn panic_for_tests(&mut self) {
+        panic!("тестовая паника ядра");
     }
 
     /// Активный бэкенд: `webgpu`, `webgl` или `cpu`.

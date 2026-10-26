@@ -569,6 +569,15 @@ test('ядро остановилось с несохранёнными прав
   const id = fileId(page);
   await drawRect(page);
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  // Два перезапуска за минуту исчерпывают предел (этап 6): третья остановка остаётся.
+  for (let i = 0; i < 2; i++) {
+    await page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
+    await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
+    await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
+    await editorReady(page);
+    await drawRect(page);
+    await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  }
   await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
   await expect(page.getByRole('alert')).toContainText('Ядро остановлено: проверка');
   const ask = page.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' });

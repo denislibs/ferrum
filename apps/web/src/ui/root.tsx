@@ -10,12 +10,16 @@ import { App } from './app';
 import { isTestMode } from './boot';
 import { FilesScreen } from './files-screen';
 import { IdbFileStore, type FileMeta, type Section } from './file-store';
+import type { Backend } from '../wasm/ferrum_wasm';
+import { allowRestart, type Restart } from './restart';
 import { historyIndex, parseRoute, routeHash, routeUrl, type Route } from './router';
 
 type View =
   | { kind: 'wait' }
   | { kind: 'files'; section: Section; notice: { text: string; seq: number } | null }
-  | { kind: 'editor'; file: FileMeta };
+  /** `restart` — редактор запущен заново после сбоя; `backend` — бэкенд рендера
+   * (после потери GPU — запасной, и для следующих перезапусков тоже). */
+  | { kind: 'editor'; file: FileMeta; restart?: Restart; backend?: Backend };
 
 /** Сколько ждать блокировку файла, прежде чем сказать «открыт в другой вкладке»:
  * своя прежняя блокировка (F5, файлы → тот же файл) снимается не мгновенно. */
@@ -87,6 +91,31 @@ export function Root() {
     current = { kind: 'files', section: 'recent' };
     replace(current);
     showFiles('recent', notice);
+  };
+
+  /** Моменты перезапусков редактора — для предела `allowRestart`. */
+  const restarts: number[] = [];
+  /** Тот же файл — в новом редакторе (сбой ядра, потеря GPU). Блокировка файла
+   * остаётся за вкладкой; метаданные — заново (имя могли сменить). `false` —
+   * перезапусков слишком много. */
+  const restart = (file: FileMeta, r: Restart, backend: Backend | undefined): boolean => {
+    if (!allowRestart(restarts, performance.now())) return false;
+    // Ядро остановлено: прежний уход (сохранить и остановить) больше не нужен.
+    leave = null;
+    const my = ++seq;
+    const show = (m: FileMeta) => setView({ kind: 'editor', file: m, restart: r, backend: r.backend ?? backend });
+    files.get(file.id).then(
+      (m) => {
+        if (my !== seq) return;
+        if (m) show(m);
+        else {
+          release();
+          toFiles('Файл не найден');
+        }
+      },
+      () => my === seq && show(file),
+    );
+    return true;
   };
 
   /** Открыть файл в редакторе: занят другой вкладкой — к экрану файлов. */
@@ -204,6 +233,9 @@ export function Root() {
           <App
             file={v.file}
             files={files}
+            restart={v.restart}
+            backend={v.backend}
+            onRestart={(r) => restart(v.file, r, v.backend)}
             navigate={navigate}
             onLeave={(fn) => (leave = fn)}
             onOpenFailed={(message) => {

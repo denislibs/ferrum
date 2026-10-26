@@ -81,7 +81,7 @@ function harness(stored: boolean, journalSession?: number | null) {
   const sent: { type: string }[] = [];
   const toasts: string[] = [];
   const ed = {
-    core: { on: (l: Listener) => (listeners.push(l), () => {}) },
+    core: { on: (l: Listener) => (listeners.push(l), () => void listeners.splice(listeners.indexOf(l) >>> 0, 1)) },
     store: { toast: (m: string) => void toasts.push(m), state: { stopped: false } },
     send: (c: { type: string }) => void sent.push(c),
   } as unknown as Editor;
@@ -251,6 +251,36 @@ test('ядро остановлено: ожидающие flushJournal — false
   const flushed = h.saver.flushJournal();
   h.emit({ type: 'error', message: 'Ядро остановлено: сбой' });
   expect(await flushed).toBe(false);
+});
+
+test('перезапуск после сбоя ядра: ожидающие flushJournal — false, снятый сохранитель молчит', async () => {
+  const h = harness(true);
+  h.emit({ type: 'modified', modified: true });
+  const flushed = h.saver.flushJournal();
+  const saving = h.saver.save();
+  // Ядро остановлено, редактор снят (перезапуск): ответа ядра не будет никому.
+  h.emit({ type: 'error', message: 'Ядро остановлено: паника в ядре: тестовая паника ядра' });
+  h.saver.dispose();
+  expect(await flushed).toBe(false);
+  expect(await saving).toBe(false);
+  // Ожидающий без события остановки (снят раньше ответа ядра) — тоже false, без зависания.
+  const k = harness(true);
+  k.emit({ type: 'modified', modified: true });
+  const late = k.saver.flushJournal();
+  k.saver.dispose();
+  expect(await late).toBe(false);
+  // Снятый сохранитель не слушает ядро и не держит таймеров: пачки и правки нового
+  // ядра (тот же файл) пишет только новый сохранитель.
+  const sent = k.sent.length;
+  k.emit({ type: 'modified', modified: true });
+  k.batch(5);
+  k.emit({ type: 'saveRequested' });
+  await k.tick();
+  k.advance(FULL_MAX_MS * 2);
+  expect(k.timers.size).toBe(0);
+  expect(k.sent.length).toBe(sent);
+  expect(k.marks).toEqual([]);
+  expect(k.writes).toEqual([]);
 });
 
 test('сеанс сохранителя — после наибольшего сеанса журнала файла', async () => {

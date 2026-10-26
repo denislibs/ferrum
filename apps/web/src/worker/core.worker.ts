@@ -34,6 +34,13 @@ let started = false;
 /** Асинхронный API не умеет свой формат: событие `clipboard` несёт и готовый текст
  * с меткой (base64 кодирует worker, не основной поток). */
 let clipboardText = false;
+/** Тестовый режим страницы (`init.test`): принимаются тестовые сообщения. */
+let testHooks = false;
+/** Текст паники Rust: обработчик паники отдаёт его до остановки wasm (`web/mod.rs`). */
+let panicText: string | null = null;
+(self as unknown as { __ferrumPanic?: (m: string) => void }).__ferrumPanic = (m) => {
+  panicText = m;
+};
 
 function post(msg: FromWorker, transfer: Transferable[] = []): void {
   scope.postMessage(msg, transfer);
@@ -43,7 +50,9 @@ function fatal(e: unknown): void {
   if (dead) return;
   dead = true;
   early.length = 0;
-  post({ t: 'fatal', message: e instanceof Error ? e.message : String(e) });
+  // После паники wasm бросает «unreachable»: причина — текст самой паники.
+  const message = panicText !== null ? `паника в ядре: ${panicText}` : e instanceof Error ? e.message : String(e);
+  post({ t: 'fatal', message });
   core = null;
 }
 
@@ -266,6 +275,11 @@ function handle(msg: ToWorker): void {
       case 'tick':
         step(msg.input instanceof ArrayBuffer ? new Uint8Array(msg.input) : sab ? drain() : null);
         break;
+      case 'testPanic':
+        // Паника бросает исключение: его ловит общий обработчик ниже (`fatal`).
+        if (testHooks) core.panicForTests();
+        else postError('Неверное сообщение для ядра');
+        break;
       case 'init':
         break;
     }
@@ -306,6 +320,7 @@ scope.onmessage = async (e: MessageEvent<unknown>) => {
   }
   started = true;
   clipboardText = msg.clipboardText === true;
+  testHooks = msg.test === true;
   try {
     await init();
     core = await WasmCore.create(msg.canvas, msg.platform, msg.width, msg.height, msg.dpr, msg.backend, msg.atlas);

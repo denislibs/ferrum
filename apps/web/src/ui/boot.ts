@@ -80,6 +80,8 @@ export interface BootOptions {
   isClipboardKey?: (e: KeyboardEvent) => boolean;
   /** Перед документом: настройки пользователя (тема, раскладка, привязка) — до первого кадра. */
   beforeDocument?: (editor: Editor) => void;
+  /** Бэкенд рендера (после потери GPU — запасной); без него — из адреса или автовыбор. */
+  backend?: Backend;
   /** Байты файла и пачки журнала после них (читаются, пока запускается ядро);
    * `null` — новый файл. */
   document?: Promise<{ bytes: ArrayBuffer; journal: ArrayBuffer[] } | null>;
@@ -112,7 +114,8 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   let unguard = () => {};
   const core = await Core.start(canvas, {
     platform,
-    backend: choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
+    backend: opts.backend ?? choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
+    test,
     transport: choice<TransportMode>(params, 'transport', ['sab', 'message']),
     keyFilter: (e) => forwardKey(e, isClipboardKey),
     // Свой формат не поддерживается: текст с меткой для буфера готовит worker.

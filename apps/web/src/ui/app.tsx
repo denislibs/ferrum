@@ -19,6 +19,8 @@ import { loadSettings, resolveTheme, storage, updateSettings, type Settings, typ
 import { SettingsDialog } from './settings-dialog';
 import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
+import type { Backend } from '../wasm/ferrum_wasm';
+import { restartText, type Restart } from './restart';
 import type { Route } from './router';
 import { createSaver, type Saver, type SaverOptions } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
@@ -35,6 +37,13 @@ export interface AppProps {
   onLeave: (leave: () => Promise<boolean>) => void;
   /** Файл из хранилища не открылся (испорчен): к экрану файлов с этим сообщением. */
   onOpenFailed: (message: string) => void;
+  /** Редактор запущен заново после сбоя ядра или потери GPU: что сказать пользователю. */
+  restart?: Restart;
+  /** Бэкенд рендера (после потери GPU — запасной). */
+  backend?: Backend;
+  /** Ядро остановилось (или GPU недоступен): открыть этот же файл в новом редакторе.
+   * `false` — перезапусков слишком много, остаётся плашка остановки. */
+  onRestart: (r: Restart) => boolean;
   navigate: (r: Route) => void;
 }
 
@@ -161,6 +170,9 @@ export function App(props: AppProps) {
   props.onLeave(async () => {
     if (!saver) return true;
     if (await saver.save()) return true;
+    // Редактор уже снят (перезапуск после сбоя ядра во время ухода): спросить
+    // некому — остаться, иначе уход корня ждал бы ответа вечно.
+    if (disposed) return false;
     const reason = saver.failure() ?? 'Изменения не записаны в хранилище';
     return new Promise<boolean>((answer) => setAskLeave({ reason, answer }));
   });
@@ -173,6 +185,7 @@ export function App(props: AppProps) {
   onMount(() => {
     boot(canvas, store, {
       document: bytes,
+      backend: props.backend,
       // До документа: тема (первый кадр сразу в цвете темы), привязка и сохранённая раскладка.
       beforeDocument: (ed) => {
         ed.send({ type: 'setTheme', theme: theme() });
@@ -226,7 +239,8 @@ export function App(props: AppProps) {
           if (e.type === 'recovered') recovered = true;
           if (opening && e.type === 'opened') {
             opening = false;
-            if (recovered) store.toast('Восстановлены изменения, не записанные в файл');
+            if (props.restart) store.toast(restartText(props.restart), props.restart.lost ? 'error' : 'info');
+            else if (recovered) store.toast('Восстановлены изменения, не записанные в файл');
             void props.files.touch(id).catch(() => {});
             // Имя файла — из хранилища (его могли переименовать на экране файлов);
             // тихо: открытие — не правка, файл из-за него не пересохраняется.
@@ -237,6 +251,13 @@ export function App(props: AppProps) {
           } else if (e.type === 'documentName') {
             // Переименовали в редакторе — запись в хранилище тоже (без ожидания снимка).
             props.files.rename(id, e.name).catch((err: unknown) => store.toast(`Не удалось переименовать файл: ${err instanceof Error ? err.message : String(err)}`, 'error'));
+          }
+          if (!opening && e.type === 'error' && e.message.startsWith('Ядро остановлено:')) {
+            // Сбой ядра после открытия (паника, исключение в worker'е): тот же файл — в
+            // новом редакторе, правки — из файла и журнала. Сбой во время открытия
+            // перезапуска не вызывает: испорченный журнал крутил бы его вечно.
+            console.error(e.message);
+            props.onRestart({ reason: 'crash', lost: saver?.pending() ?? false, message: e.message });
           }
           if (e.type === 'exported') {
             downloadBytes(e.name, e.bytes, 'image/png');
@@ -252,6 +273,8 @@ export function App(props: AppProps) {
   });
   onCleanup(() => {
     disposed = true;
+    // Открытый вопрос об уходе (редактор снят перезапуском) — «Остаться».
+    answerLeave(false);
     offSaveKey?.();
     uninstall?.();
     saver?.dispose();
