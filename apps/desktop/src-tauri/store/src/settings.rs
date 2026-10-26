@@ -35,7 +35,14 @@ impl Settings {
             Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into_iter()
+                // Только известные поля с простыми значениями: чужое не раздувает файл.
+                .filter(|(k, v)| {
+                    SETTINGS_FIELDS.contains(&k.as_str())
+                        && (v.is_string() || v.is_number() || v.is_boolean())
+                })
+                .collect(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Map::new(),
             Err(e) => return Err(e),
         };

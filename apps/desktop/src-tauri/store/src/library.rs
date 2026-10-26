@@ -94,6 +94,8 @@ pub struct Library {
     root: PathBuf,
     docs: PathBuf,
     entries: HashMap<String, Entry>,
+    /// Блокировка `library.lock`: один экземпляр на каталог данных (снимается при drop).
+    _lock: fs::File,
 }
 
 fn now_ms() -> f64 {
@@ -128,6 +130,8 @@ pub fn clean_name(name: &str) -> String {
 
 /// Имя файла на диске из имени записи — как `fileName` интерфейса.
 fn file_stem(name: &str) -> String {
+    // Не больше 120 знаков и 200 байт: имя файла (и временного рядом) — не длиннее 255 байт.
+    let mut bytes = 0;
     let clean: String = name
         .chars()
         .map(|c| {
@@ -138,6 +142,10 @@ fn file_stem(name: &str) -> String {
             }
         })
         .take(120)
+        .take_while(|c| {
+            bytes += c.len_utf8();
+            bytes <= 200
+        })
         .collect();
     let clean = clean.trim_matches(|c: char| c == '.' || c.is_whitespace());
     if clean.is_empty() {
@@ -148,6 +156,31 @@ fn file_stem(name: &str) -> String {
 }
 
 /// id записи — UUID (интерфейс не доверенный: id идёт в пути превью и журнала).
+/// Один и тот же файл (а не только одинаково записанный путь): на APFS регистр и
+/// нормализация Unicode меняют запись пути, не файл.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    if let (Ok(x), Ok(y)) = (fs::metadata(a), fs::metadata(b)) {
+        use std::os::unix::fs::MetadataExt;
+        return x.dev() == y.dev() && x.ino() == y.ino();
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Убирает `.<имя>.ferrum-tmp-*` — следы прерванной атомарной записи.
+fn sweep_temp(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for d in rd.filter_map(|d| d.ok()) {
+        let name = d.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && name.contains(".ferrum-tmp-") {
+            let _ = fs::remove_file(d.path());
+        }
+    }
+}
+
 fn valid_id(id: &str) -> bool {
     id.len() == 36 && uuid::Uuid::parse_str(id).is_ok()
 }
@@ -173,6 +206,27 @@ impl Library {
     pub fn open(root: &Path, docs: &Path) -> io::Result<(Library, Vec<String>)> {
         fs::create_dir_all(root.join("thumbs"))?;
         fs::create_dir_all(root.join("journal"))?;
+        // Один экземпляр на библиотеку: второй переписал бы список из своей памяти.
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("library.lock"))?;
+        lock.try_lock().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Ferrum уже запущен: библиотека файлов открыта в другом экземпляре",
+            )
+        })?;
+        // Недописанные временные файлы прерванной записи (сбой между созданием и переименованием).
+        sweep_temp(root);
+        sweep_temp(&root.join("thumbs"));
+        sweep_temp(docs);
+        if let Ok(dir) = fs::read_dir(root.join("journal")) {
+            for d in dir.filter_map(|d| d.ok()) {
+                sweep_temp(&d.path());
+            }
+        }
         let mut warnings = Vec::new();
         let index = root.join("library.json");
         let mut entries = HashMap::new();
@@ -201,6 +255,7 @@ impl Library {
                 root: root.to_path_buf(),
                 docs: docs.to_path_buf(),
                 entries,
+                _lock: lock,
             },
             warnings,
         ))
@@ -211,6 +266,31 @@ impl Library {
         list.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
         let json = serde_json::to_vec_pretty(&list).map_err(|e| e.to_string())?;
         atomic_write(&self.root.join("library.json"), &json).map_err(|e| e.to_string())
+    }
+
+    /// Меняет запись и сохраняет список; при отказе сохранения запись в памяти — прежняя
+    /// (как в web-хранилище: что не записано, того в памяти нет).
+    fn commit(&mut self, id: &str, f: impl FnOnce(&mut Entry)) -> Result<FileMeta, String> {
+        let e = self.entry_mut(id)?;
+        let old = e.clone();
+        f(e);
+        let meta = e.meta.clone();
+        if let Err(err) = self.save_index() {
+            self.entries.insert(id.to_string(), old);
+            return Err(err);
+        }
+        Ok(meta)
+    }
+
+    /// Добавляет новую запись и сохраняет список; при отказе записи нет.
+    fn insert(&mut self, entry: Entry) -> Result<FileMeta, String> {
+        let meta = entry.meta.clone();
+        self.entries.insert(meta.id.clone(), entry);
+        if let Err(err) = self.save_index() {
+            self.entries.remove(&meta.id);
+            return Err(err);
+        }
+        Ok(meta)
     }
 
     fn entry(&self, id: &str) -> Result<&Entry, String> {
@@ -296,24 +376,25 @@ impl Library {
                 .file_name()
                 .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
         };
-        self.entries.insert(
-            meta.id.clone(),
-            Entry {
-                meta: meta.clone(),
-                path,
-                disk_modified: 0.0,
-                owned: true,
-            },
-        );
-        self.save_index()?;
-        Ok(meta)
+        self.insert(Entry {
+            meta,
+            path,
+            disk_modified: 0.0,
+            owned: true,
+        })
     }
 
     /// Запись для файла, выбранного в диалоге «Открыть…» (тот же файл — прежняя запись).
     pub fn add_existing(&mut self, path: &Path) -> Result<FileMeta, String> {
         let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
-        if let Some(e) = self.entries.values().find(|e| e.path == path) {
-            return Ok(e.meta.clone());
+        if let Some(id) = self
+            .entries
+            .values()
+            .find(|e| same_file(&e.path, &path))
+            .map(|e| e.meta.id.clone())
+        {
+            // Открыли файл из корзины — он возвращается (иначе «Очистить корзину» стёрла бы его).
+            return self.commit(&id, |e| e.meta.trashed_at = None);
         }
         let md = fs::metadata(&path).map_err(|e| e.to_string())?;
         if md.len() > MAX_OPEN_BYTES {
@@ -337,17 +418,12 @@ impl Library {
                 .file_name()
                 .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
         };
-        self.entries.insert(
-            meta.id.clone(),
-            Entry {
-                meta: meta.clone(),
-                disk_modified: mtime(&path).unwrap_or(0.0),
-                path,
-                owned: false,
-            },
-        );
-        self.save_index()?;
-        Ok(meta)
+        self.insert(Entry {
+            meta,
+            disk_modified: mtime(&path).unwrap_or(0.0),
+            path,
+            owned: false,
+        })
     }
 
     /// Байты файла и наибольший сеанс журнала одним вызовом (как `read` веб-хранилища).
@@ -373,10 +449,13 @@ impl Library {
         }
         let bytes = fs::read(&e.path).map_err(|e| e.to_string())?;
         let modified = mtime(&e.path).map_err(|e| e.to_string())?;
+        let size = bytes.len() as f64;
         let e = self.entry_mut(id)?;
-        if e.disk_modified != modified {
+        if e.disk_modified != modified || e.meta.size != size {
+            // Прочитанное — новая основа сравнения; не записался список — чтение всё равно удалось.
             e.disk_modified = modified;
-            self.save_index()?;
+            e.meta.size = size;
+            let _ = self.save_index();
         }
         Ok((!bytes.is_empty()).then_some(bytes))
     }
@@ -407,7 +486,10 @@ impl Library {
         if e.meta.version != base {
             return Err(CONFLICT.to_string());
         }
-        if e.path.exists() && e.meta.size > 0.0 {
+        if e.meta.size > 0.0 {
+            if !e.path.exists() {
+                return Err(DISK_MISSING.to_string());
+            }
             let now = mtime(&e.path).map_err(|e| e.to_string())?;
             if now != e.disk_modified {
                 return Err(DISK_CHANGED.to_string());
@@ -419,15 +501,23 @@ impl Library {
         atomic_write(&e.path, bytes).map_err(|e| e.to_string())?;
         let modified = mtime(&e.path).map_err(|e| e.to_string())?;
         let e = self.entry_mut(id)?;
+        let old = e.meta.clone();
+        // Файл уже заменён: его новое время изменения запоминаем при любом исходе, иначе
+        // своя же запись выглядела бы чужой (DISK_CHANGED).
         e.disk_modified = modified;
         e.meta.size = bytes.len() as f64;
         e.meta.edited_at = now_ms();
         e.meta.version += 1.0;
         let meta = e.meta.clone();
+        if let Err(err) = self.save_index() {
+            // Список не записан: поколение прежнее, следующая запись проходит; журнал цел
+            // (его повтор безвреден).
+            self.entry_mut(id)?.meta = old;
+            return Err(err);
+        }
         if let Some((session, up_to)) = journal {
             self.drop_journal(id, |s, b| s < session || (s == session && b <= up_to));
         }
-        self.save_index()?;
         Ok(meta)
     }
 
@@ -444,11 +534,7 @@ impl Library {
                 let _ = fs::remove_file(&path);
             }
         }
-        let e = self.entry_mut(id)?;
-        e.meta.thumb_version += 1.0;
-        let meta = e.meta.clone();
-        self.save_index()?;
-        Ok(meta)
+        self.commit(id, |e| e.meta.thumb_version += 1.0)
     }
 
     pub fn thumb(&self, id: &str) -> Option<Vec<u8>> {
@@ -558,29 +644,22 @@ impl Library {
     }
 
     pub fn rename(&mut self, id: &str, name: &str) -> Result<FileMeta, String> {
-        let e = self.entry_mut(id)?;
         let name = clean_name(name);
-        if e.meta.name != name {
-            e.meta.name = name;
-            e.meta.edited_at = now_ms();
-        }
-        let meta = e.meta.clone();
-        self.save_index()?;
-        Ok(meta)
+        self.commit(id, |e| {
+            if e.meta.name != name {
+                e.meta.name = name;
+                e.meta.edited_at = now_ms();
+            }
+        })
     }
 
     pub fn touch(&mut self, id: &str) -> Result<FileMeta, String> {
-        let e = self.entry_mut(id)?;
-        e.meta.opened_at = now_ms();
-        let meta = e.meta.clone();
-        self.save_index()?;
-        Ok(meta)
+        self.commit(id, |e| e.meta.opened_at = now_ms())
     }
 
     pub fn trash(&mut self, id: &str, on: bool) -> Result<(), String> {
-        let e = self.entry_mut(id)?;
-        e.meta.trashed_at = on.then(now_ms);
-        self.save_index()
+        self.commit(id, |e| e.meta.trashed_at = on.then(now_ms))
+            .map(|_| ())
     }
 
     /// Удалить навсегда: запись, превью и журнал; файл — только созданный Ferrum
@@ -590,12 +669,17 @@ impl Library {
             .entries
             .remove(id)
             .ok_or_else(|| NOT_FOUND.to_string())?;
+        // Сначала список: не записался — запись и файлы на месте.
+        if let Err(err) = self.save_index() {
+            self.entries.insert(id.to_string(), e);
+            return Err(err);
+        }
         if e.owned {
             let _ = fs::remove_file(&e.path);
         }
         let _ = fs::remove_file(self.root.join("thumbs").join(format!("{id}.png")));
         let _ = fs::remove_dir_all(self.journal_dir(id));
-        self.save_index()
+        Ok(())
     }
 
     pub fn empty_trash(&mut self) -> Result<(), String> {
@@ -615,24 +699,34 @@ impl Library {
     /// автосохранение пишет туда. Прежний файл в папке Ferrum удаляется.
     pub fn move_to(&mut self, id: &str, path: &Path) -> Result<FileMeta, String> {
         let e = self.entry(id)?.clone();
-        if path != e.path && e.path.exists() {
+        // Файл другой записи не занять: две записи на одном файле затирали бы друг друга.
+        if self
+            .entries
+            .values()
+            .any(|o| o.meta.id != e.meta.id && same_file(&o.path, path))
+        {
+            return Err("Этот файл принадлежит другой записи Ferrum — выберите другое имя".into());
+        }
+        // Тот же файл (регистр, нормализация, жёсткая ссылка) — не копировать и не удалять.
+        let same = same_file(path, &e.path);
+        if !same && e.path.exists() {
             let bytes = fs::read(&e.path).map_err(|e| e.to_string())?;
             atomic_write(path, &bytes).map_err(|e| e.to_string())?;
-            if e.owned {
-                let _ = fs::remove_file(&e.path);
-            }
         }
         let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let modified = mtime(&path).unwrap_or(0.0);
-        let entry = self.entry_mut(id)?;
-        entry.meta.disk = path
-            .file_name()
-            .map_or(String::new(), |n| n.to_string_lossy().into_owned());
-        entry.path = path;
-        entry.owned = false;
-        entry.disk_modified = modified;
-        let meta = entry.meta.clone();
-        self.save_index()?;
+        let meta = self.commit(id, |entry| {
+            entry.meta.disk = path
+                .file_name()
+                .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            entry.path = path;
+            entry.owned = false;
+            entry.disk_modified = modified;
+        })?;
+        // Прежний файл в папке Ferrum — после того, как список указывает на новый.
+        if e.owned && !same {
+            let _ = fs::remove_file(&e.path);
+        }
         Ok(meta)
     }
 

@@ -11,6 +11,34 @@ use ferrum_desktop_store::*;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    static LAST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Убирает каталог теста при выходе из теста (в том числе при панике).
+struct Cleanup(Option<PathBuf>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            // Каталог мог остаться только для чтения после проверки отказа записи.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                for sub in ["data", "docs"] {
+                    let _ = fs::set_permissions(p.join(sub), fs::Permissions::from_mode(0o755));
+                }
+            }
+            let _ = fs::remove_dir_all(p);
+        }
+    }
+}
+
+/// Охранник каталога, созданного последним `dirs()` этого теста.
+fn cleanup() -> Cleanup {
+    Cleanup(LAST.with(|l| l.borrow_mut().take()))
+}
+
 /// Свой пустой каталог на тест: данные приложения и документы.
 fn dirs() -> (PathBuf, PathBuf) {
     let base = std::env::temp_dir().join(format!(
@@ -19,6 +47,7 @@ fn dirs() -> (PathBuf, PathBuf) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = fs::remove_dir_all(&base);
+    LAST.with(|l| *l.borrow_mut() = Some(base.clone()));
     (base.join("data"), base.join("docs"))
 }
 
@@ -41,6 +70,7 @@ fn files_in(dir: &Path) -> Vec<String> {
 #[test]
 fn new_file_is_written_atomically_into_docs() {
     let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Макет").unwrap();
     assert_eq!(
         (m.version, m.size, m.disk.as_str()),
@@ -63,6 +93,7 @@ fn new_file_is_written_atomically_into_docs() {
 fn failed_write_keeps_the_old_file() {
     use std::os::unix::fs::PermissionsExt;
     let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Макет").unwrap();
     lib.write(&m.id, b"OLD", 0.0, None).unwrap();
     // Каталог только для чтения: временный файл не создать.
@@ -81,6 +112,7 @@ fn failed_write_keeps_the_old_file() {
 #[test]
 fn stale_generation_and_foreign_program_are_refused() {
     let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Макет").unwrap();
     lib.write(&m.id, b"A", 0.0, None).unwrap();
     assert_eq!(lib.write(&m.id, b"B", 0.0, None), Err(CONFLICT.to_string()));
@@ -102,6 +134,7 @@ fn stale_generation_and_foreign_program_are_refused() {
 #[test]
 fn journal_is_ordered_and_dropped_by_the_snapshot() {
     let (mut lib, ..) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Журнал").unwrap();
     lib.journal_append(&m.id, 20, 1, b"a").unwrap();
     assert!(
@@ -133,6 +166,7 @@ fn journal_is_ordered_and_dropped_by_the_snapshot() {
 #[test]
 fn sections_search_and_window() {
     let (mut lib, ..) = lib();
+    let _cleanup = cleanup();
     let a = lib.create("Альфа").unwrap();
     let b = lib.create("Бета").unwrap();
     lib.create("альфа два").unwrap();
@@ -151,6 +185,7 @@ fn sections_search_and_window() {
 #[test]
 fn delete_removes_own_files_but_not_foreign_ones() {
     let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
     let own = lib.create("Свой").unwrap();
     lib.write(&own.id, b"F", 0.0, None).unwrap();
     let outside = docs.parent().unwrap().join("чужой.ferrum");
@@ -173,6 +208,7 @@ fn delete_removes_own_files_but_not_foreign_ones() {
 #[test]
 fn move_to_disk_and_copy() {
     let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Макет").unwrap();
     lib.write(&m.id, b"F", 0.0, None).unwrap();
     let target = docs.parent().unwrap().join("на диске.ferrum");
@@ -194,6 +230,7 @@ fn move_to_disk_and_copy() {
 #[test]
 fn library_survives_restart_and_damage() {
     let (data, docs) = dirs();
+    let _cleanup = cleanup();
     let id = {
         let (mut lib, _) = Library::open(&data, &docs).unwrap();
         lib.create("Остаётся").unwrap().id
@@ -201,6 +238,7 @@ fn library_survives_restart_and_damage() {
     let (lib, warnings) = Library::open(&data, &docs).unwrap();
     assert!(warnings.is_empty());
     assert_eq!(lib.get(&id).unwrap().name, "Остаётся");
+    drop(lib);
     fs::write(data.join("library.json"), b"{ not json").unwrap();
     let (lib, warnings) = Library::open(&data, &docs).unwrap();
     assert_eq!(warnings.len(), 1);
@@ -211,6 +249,7 @@ fn library_survives_restart_and_damage() {
 #[test]
 fn settings_are_written_by_field_and_checked() {
     let (data, _) = dirs();
+    let _cleanup = cleanup();
     let path = data.join("settings.json");
     let mut s = Settings::open(&path).unwrap();
     let patch = |v: serde_json::Value| v.as_object().unwrap().clone();
@@ -238,6 +277,7 @@ fn settings_are_written_by_field_and_checked() {
 #[test]
 fn compaction_keeps_later_batches_and_reports_the_highest_session() {
     let (mut lib, ..) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Сжатие").unwrap();
     assert_eq!(lib.read_file(&m.id).unwrap().session, None);
     lib.write(&m.id, b"F", 0.0, None).unwrap();
@@ -265,6 +305,7 @@ fn compaction_keeps_later_batches_and_reports_the_highest_session() {
 #[test]
 fn untrusted_input_is_refused_not_panicking() {
     let (mut lib, ..) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Ввод").unwrap();
     lib.write(&m.id, b"F", 0.0, None).unwrap();
     for bad in ["", "../x", "not-a-uuid", &"a".repeat(36), &"-".repeat(36)] {
@@ -301,6 +342,7 @@ fn untrusted_input_is_refused_not_panicking() {
 #[test]
 fn journal_reads_are_capped() {
     let (mut lib, data, _) = lib();
+    let _cleanup = cleanup();
     let m = lib.create("Пределы").unwrap();
     lib.write(&m.id, b"F", 0.0, None).unwrap();
     let dir = data.join("journal").join(&m.id);
@@ -326,4 +368,192 @@ fn journal_reads_are_capped() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("мусор.txt"), b"x").unwrap();
     assert!(lib.journal_names(&m.id).unwrap().is_empty());
+}
+
+/// Каталог данных только для чтения (unix): индекс не сохранить.
+#[cfg(unix)]
+fn set_mode(p: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_index_save_does_not_advance_the_generation() {
+    let (mut lib, data, docs) = lib();
+    let _cleanup = cleanup();
+    let m = lib.create("Индекс").unwrap();
+    lib.write(&m.id, b"A", 0.0, None).unwrap();
+    lib.journal_append(&m.id, 1, 1, b"j").unwrap();
+    set_mode(&data, 0o555);
+    let err = lib.write(&m.id, b"BB", 1.0, Some((1, 1)));
+    assert!(err.is_err(), "индекс не записан — отказ");
+    assert_eq!(fs::read(docs.join("Индекс.ferrum")).unwrap(), b"BB");
+    assert_eq!(lib.get(&m.id).unwrap().version, 1.0, "поколение прежнее");
+    assert_eq!(lib.journal_names(&m.id).unwrap().len(), 1, "журнал цел");
+    // Другие изменения при том же отказе не остаются в памяти.
+    assert!(lib.rename(&m.id, "Другое").is_err());
+    assert_eq!(lib.get(&m.id).unwrap().name, "Индекс");
+    assert!(lib.trash(&m.id, true).is_err());
+    assert!(lib.get(&m.id).unwrap().trashed_at.is_none());
+    set_mode(&data, 0o755);
+    // Следующая запись проходит: ни CONFLICT, ни DISK_CHANGED.
+    let w = lib.write(&m.id, b"CCC", 1.0, Some((1, 1))).unwrap();
+    assert_eq!(w.version, 2.0);
+    assert!(lib.journal_names(&m.id).unwrap().is_empty());
+}
+
+#[test]
+fn move_to_the_same_file_keeps_it() {
+    let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
+    let m = lib.create("Макет").unwrap();
+    lib.write(&m.id, b"F", 0.0, None).unwrap();
+    // Тот же файл под другим именем (жёсткая ссылка): копия на себя и удаление «прежнего»
+    // стёрли бы единственный файл.
+    let alias = docs.join("алиас.ferrum");
+    fs::hard_link(docs.join("Макет.ferrum"), &alias).unwrap();
+    lib.move_to(&m.id, &alias).unwrap();
+    assert_eq!(fs::read(&alias).unwrap(), b"F");
+    assert_eq!(fs::read(docs.join("Макет.ferrum")).unwrap(), b"F");
+    // Регистр: на файловой системе без учёта регистра (APFS) — тот же файл.
+    let upper = docs.join("МАКЕТ.ferrum");
+    if upper.exists() {
+        lib.move_to(&m.id, &upper).unwrap();
+        assert_eq!(fs::read(&upper).unwrap(), b"F");
+    }
+}
+
+#[test]
+fn move_to_another_records_file_is_refused() {
+    let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
+    let a = lib.create("А").unwrap();
+    let b = lib.create("Б").unwrap();
+    lib.write(&a.id, b"A", 0.0, None).unwrap();
+    lib.write(&b.id, b"B", 0.0, None).unwrap();
+    let err = lib.move_to(&a.id, &docs.join("Б.ferrum")).unwrap_err();
+    assert!(err.contains("другой записи"), "{err}");
+    assert_eq!(fs::read(docs.join("Б.ferrum")).unwrap(), b"B");
+    assert_eq!(lib.get(&a.id).unwrap().disk, "А.ferrum");
+}
+
+#[test]
+fn reopening_a_trashed_file_restores_it() {
+    let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
+    let m = lib.create("Корзина").unwrap();
+    lib.write(&m.id, b"F", 0.0, None).unwrap();
+    lib.trash(&m.id, true).unwrap();
+    let again = lib.add_existing(&docs.join("Корзина.ferrum")).unwrap();
+    assert_eq!(again.id, m.id);
+    assert!(again.trashed_at.is_none());
+    lib.empty_trash().unwrap();
+    assert!(
+        docs.join("Корзина.ferrum").exists(),
+        "открытый файл не стёрт"
+    );
+}
+
+#[test]
+fn open_sweeps_stale_temp_files() {
+    let (data, docs) = dirs();
+    let _cleanup = cleanup();
+    let (mut lib, _) = Library::open(&data, &docs).unwrap();
+    let m = lib.create("Х").unwrap();
+    lib.write(&m.id, b"F", 0.0, None).unwrap();
+    drop(lib);
+    let stale = [
+        docs.join(".Х.ferrum.ferrum-tmp-1-1"),
+        data.join(".library.json.ferrum-tmp-1-1"),
+        data.join("thumbs").join(".x.png.ferrum-tmp-1-1"),
+    ];
+    for p in &stale {
+        fs::write(p, b"half").unwrap();
+    }
+    fs::write(docs.join(".скрытый"), b"mine").unwrap();
+    let _ = Library::open(&data, &docs).unwrap();
+    for p in &stale {
+        assert!(!p.exists(), "{p:?}");
+    }
+    assert!(docs.join(".скрытый").exists(), "чужое не трогаем");
+    assert!(docs.join("Х.ferrum").exists());
+}
+
+#[test]
+fn long_names_keep_file_and_temp_names_within_255_bytes() {
+    let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
+    for ch in ["я", "𝒳"] {
+        let m = lib.create(&ch.repeat(200)).unwrap();
+        assert!(
+            m.disk.len() + ".ferrum-tmp-99999-99999".len() < 255,
+            "{}",
+            m.disk.len()
+        );
+        lib.write(&m.id, b"F", 0.0, None).unwrap();
+        assert!(docs.join(&m.disk).exists());
+    }
+}
+
+#[test]
+fn external_changes_update_size_and_vanished_file_is_reported() {
+    let (mut lib, _, docs) = lib();
+    let _cleanup = cleanup();
+    let m = lib.create("Внешний").unwrap();
+    lib.write(&m.id, b"ABC", 0.0, None).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(docs.join("Внешний.ferrum"), b"LONGER-BYTES").unwrap();
+    assert!(lib.read(&m.id).unwrap().is_some());
+    assert_eq!(lib.get(&m.id).unwrap().size, 12.0);
+    // Другая программа сделала файл пустым: читаем как есть, запись затем не тихая.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(docs.join("Внешний.ferrum"), b"").unwrap();
+    assert_eq!(lib.read(&m.id).unwrap(), None);
+    assert_eq!(lib.get(&m.id).unwrap().size, 0.0);
+    // Файл исчез: запись не пересоздаёт его молча.
+    lib.write(&m.id, b"XY", 1.0, None).unwrap();
+    fs::remove_file(docs.join("Внешний.ferrum")).unwrap();
+    assert_eq!(
+        lib.write(&m.id, b"Z", 2.0, None),
+        Err(DISK_MISSING.to_string())
+    );
+    assert!(!docs.join("Внешний.ferrum").exists());
+}
+
+#[test]
+fn second_instance_on_the_same_library_is_refused() {
+    let (data, docs) = dirs();
+    let _cleanup = cleanup();
+    let (first, _) = Library::open(&data, &docs).unwrap();
+    let err = Library::open(&data, &docs).err().expect("второй экземпляр");
+    assert!(err.to_string().contains("уже"), "{err}");
+    drop(first);
+    assert!(Library::open(&data, &docs).is_ok());
+}
+
+#[test]
+fn settings_open_drops_unknown_and_non_simple_fields() {
+    let (data, _) = dirs();
+    let _cleanup = cleanup();
+    fs::create_dir_all(&data).unwrap();
+    let path = data.join("settings.json");
+    fs::write(
+        &path,
+        serde_json::json!({"theme": "dark", "чужое": "x".repeat(100_000), "keymap": {"a": 1}, "leftWidth": 300})
+            .to_string(),
+    )
+    .unwrap();
+    let mut s = Settings::open(&path).unwrap();
+    assert_eq!(
+        serde_json::Value::Object(s.all()),
+        serde_json::json!({"theme": "dark", "leftWidth": 300})
+    );
+    s.set(
+        serde_json::json!({"filesView": "grid"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
 }

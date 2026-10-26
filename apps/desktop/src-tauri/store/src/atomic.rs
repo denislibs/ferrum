@@ -14,10 +14,16 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "у файла нет каталога"))?;
-    let name = path
+    let full = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "у файла нет имени"))?
         .to_string_lossy();
+    // Имя временного файла — не длиннее 255 байт: берём не больше 200 байт имени.
+    let mut cut = full.len().min(200);
+    while !full.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let name = &full[..cut];
     let tmp = dir.join(format!(
         ".{name}.ferrum-tmp-{}-{}",
         std::process::id(),
@@ -30,8 +36,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         drop(f);
         fs::rename(&tmp, path)?;
         // Переименование — запись в каталог: без его fsync новое имя может не пережить сбой.
+        // Файл уже заменён, поэтому отказ fsync каталога — не отказ записи.
         #[cfg(unix)]
-        fs::File::open(dir)?.sync_all()?;
+        let _ = fs::File::open(dir).and_then(|d| d.sync_all());
         Ok(())
     })();
     if result.is_err() {
