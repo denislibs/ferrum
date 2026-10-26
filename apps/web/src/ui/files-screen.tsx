@@ -20,6 +20,7 @@ import type { Route } from './router';
 import { resolveTheme, type FilesView } from './settings';
 import type { SettingsStore } from './settings-store';
 import { createUiStore } from './store';
+import { isTauri } from './tauri';
 import { Toasts } from './toasts';
 
 /** Задержка открытия по щелчку на имени: успеть распознать двойной щелчок. */
@@ -245,7 +246,8 @@ export function FilesScreen(props: FilesScreenProps) {
         ]
       : [
           { label: 'Открыть', onSelect: () => open(f) },
-          { label: 'Открыть в новой вкладке', onSelect: () => openInNewTab(f) },
+          // Десктоп: окно одно, вкладок нет.
+          ...(isTauri() ? [] : [{ label: 'Открыть в новой вкладке', onSelect: () => openInNewTab(f) }]),
           { separator: true },
           { label: 'Переименовать', onSelect: () => setRenaming(f.id) },
           { label: 'Скачать копию (.ferrum)', disabled: f.size === 0, onSelect: () => void download(f) },

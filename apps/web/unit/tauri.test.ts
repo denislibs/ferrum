@@ -98,3 +98,42 @@ test('отказ Rust — ошибка с тем же текстом; списо
   await s.trash(ID);
   expect(changed).toBe(1);
 });
+
+test('отказ превью после записи файла — запись удалась, предупреждение на русском', async () => {
+  const calls = fakeIpc({
+    files_write: () => ({ id: ID, version: 2 }),
+    files_write_thumb: () => {
+      throw 'Слишком большой объём данных: 9 МБ, предел — 8 МБ';
+    },
+  });
+  const s = new TauriFileStore();
+  let changed = 0;
+  s.onChange(() => changed++);
+  const m = await s.write(ID, new ArrayBuffer(4), new ArrayBuffer(1), 1, null);
+  expect(calls.map((c) => c.cmd)).toEqual(['files_write', 'files_write_thumb']);
+  // Поколение — от записи файла: следующая запись не получит ложный CONFLICT.
+  expect(m).toEqual({
+    id: ID,
+    version: 2,
+    warning: 'Превью файла не записано: Слишком большой объём данных: 9 МБ, предел — 8 МБ',
+  });
+  expect(changed).toBe(1);
+});
+
+test('отказы самого Tauri (аргументы, состояние) — по-русски', async () => {
+  fakeIpc({
+    files_get: () => {
+      throw 'invalid args `id` for command `files_get`: invalid type: integer `1`, expected a string';
+    },
+    files_list: () => {
+      throw 'state not managed for field `desk` on command `files_list`. You must call `.manage()` before using this command';
+    },
+    files_touch: () => {
+      throw 'command files_touch not found';
+    },
+  });
+  const s = new TauriFileStore();
+  await expect(s.get(ID)).rejects.toThrow(/^Неверный запрос к хранилищу файлов$/);
+  await expect(s.list('drafts', '', 0, 10)).rejects.toThrow(/^Хранилище файлов не открыто$/);
+  await expect(s.touch(ID)).rejects.toThrow(/^Неверный запрос к хранилищу файлов$/);
+});

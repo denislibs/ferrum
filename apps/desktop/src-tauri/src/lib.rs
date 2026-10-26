@@ -7,16 +7,20 @@
 //! Интерфейс не доверенный: id — только UUID из библиотеки, пути — только из родных
 //! диалогов (интерфейс их не передаёт), имена пачек журнала — только своего вида.
 //!
-//! Библиотека и настройки — по одному на процесс, за `Mutex`. Команды с вводом-выводом
-//! (запись с `fsync`, чтение файлов) — `async`: они идут в потоках Tauri, не в главном
-//! потоке окна. Второй экземпляр приложения библиотеку не откроет (`library.lock`):
-//! он показывает причину родным окном сообщения и выходит.
+//! Библиотека и настройки — по одному на процесс, за `Mutex`. Все команды, которые
+//! берут `Mutex` или трогают диск, — `async`: они идут в потоках Tauri, а не в главном
+//! потоке окна (синхронная команда Tauri выполняется в нём и, ожидая `Mutex` под
+//! записью с `fsync`, остановила бы окно). Синхронна только `smoke_mode` — по ней
+//! проверка запуска и меряет, свободен ли главный поток во время долгой записи.
+//! Второй экземпляр приложения библиотеку не откроет (`library.lock`): он показывает
+//! причину родным окном сообщения и выходит.
 //!
 //! Проверка запуска (`FERRUM_SMOKE=1`): интерфейс открывает новый файл, дожидается
 //! ядра, проходит круг ввода-вывода через IPC и сообщает итог командой `smoke_done`;
 //! приложение печатает его, убирает свой временный каталог и выходит (код 0 — ядро
 //! запустилось и круг прошёл), без ответа за 90 с — выход с кодом 1.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -24,7 +28,7 @@ use ferrum_desktop_store::{FileMeta, Library, ListResult, Section, Settings};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use tauri::ipc::{InvokeBody, Request, Response};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 struct Desk {
@@ -35,6 +39,8 @@ struct Desk {
 type Res<T> = Result<T, String>;
 
 const BAD: &str = "Неверный запрос к хранилищу файлов";
+/// Диалог вернул не путь в файловой системе (например, ссылку).
+const NOT_A_PATH: &str = "Выбранный файл недоступен: это не файл на диске";
 
 impl Desk {
     fn lib(&self) -> MutexGuard<'_, Library> {
@@ -45,9 +51,9 @@ impl Desk {
     }
 }
 
-/// Сырое тело запроса и параметры из заголовка `x-ferrum` (JSON только из ASCII:
-/// id — UUID, числа).
-fn raw<T: for<'de> Deserialize<'de>>(request: &Request<'_>) -> Res<(Vec<u8>, T)> {
+/// Сырое тело запроса (без копии: до 512 МБ) и параметры из заголовка `x-ferrum`
+/// (JSON только из ASCII: id — UUID, числа).
+fn raw<'r, T: for<'de> Deserialize<'de>>(request: &'r Request<'_>) -> Res<(&'r [u8], T)> {
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err(BAD.into());
     };
@@ -57,7 +63,7 @@ fn raw<T: for<'de> Deserialize<'de>>(request: &Request<'_>) -> Res<(Vec<u8>, T)>
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| BAD.to_string())?;
     let args = serde_json::from_str(args).map_err(|_| BAD.to_string())?;
-    Ok((bytes.clone(), args))
+    Ok((bytes, args))
 }
 
 #[derive(Deserialize)]
@@ -81,20 +87,20 @@ struct JournalArgs {
     batch: u64,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn files_list(
     section: Section,
     query: String,
     start: usize,
     count: usize,
     desk: State<'_, Desk>,
-) -> ListResult {
-    desk.lib().list(section, &query, start, count)
+) -> Res<ListResult> {
+    Ok(desk.lib().list(section, &query, start, count))
 }
 
-#[tauri::command]
-fn files_get(id: String, desk: State<'_, Desk>) -> Option<FileMeta> {
-    desk.lib().get(&id)
+#[tauri::command(async)]
+fn files_get(id: String, desk: State<'_, Desk>) -> Res<Option<FileMeta>> {
+    Ok(desk.lib().get(&id))
 }
 
 #[tauri::command(async)]
@@ -116,17 +122,17 @@ fn files_journal_session(id: String, desk: State<'_, Desk>) -> Res<Option<u64>> 
 
 #[tauri::command(async)]
 fn files_write(request: Request<'_>, desk: State<'_, Desk>) -> Res<FileMeta> {
-    let (bytes, a): (Vec<u8>, WriteArgs) = raw(&request)?;
+    let (bytes, a): (&[u8], WriteArgs) = raw(&request)?;
     let journal = a.session.zip(a.up_to);
-    desk.lib().write(&a.id, &bytes, a.base, journal)
+    desk.lib().write(&a.id, bytes, a.base, journal)
 }
 
 /// Превью: пустое тело — убрать.
 #[tauri::command(async)]
 fn files_write_thumb(request: Request<'_>, desk: State<'_, Desk>) -> Res<FileMeta> {
-    let (bytes, a): (Vec<u8>, ThumbArgs) = raw(&request)?;
+    let (bytes, a): (&[u8], ThumbArgs) = raw(&request)?;
     desk.lib()
-        .write_thumb(&a.id, (!bytes.is_empty()).then_some(&bytes[..]))
+        .write_thumb(&a.id, (!bytes.is_empty()).then_some(bytes))
 }
 
 #[tauri::command(async)]
@@ -136,8 +142,8 @@ fn files_thumb(id: String, desk: State<'_, Desk>) -> Res<Response> {
 
 #[tauri::command(async)]
 fn files_journal_append(request: Request<'_>, desk: State<'_, Desk>) -> Res<()> {
-    let (bytes, a): (Vec<u8>, JournalArgs) = raw(&request)?;
-    desk.lib().journal_append(&a.id, a.session, a.batch, &bytes)
+    let (bytes, a): (&[u8], JournalArgs) = raw(&request)?;
+    desk.lib().journal_append(&a.id, a.session, a.batch, bytes)
 }
 
 #[tauri::command(async)]
@@ -177,16 +183,21 @@ fn files_empty_trash(desk: State<'_, Desk>) -> Res<()> {
 
 /// «Открыть с диска…»: родной диалог; запись для выбранного файла. `None` — отказ.
 #[tauri::command]
-async fn files_open_dialog(app: AppHandle, desk: State<'_, Desk>) -> Res<Option<FileMeta>> {
+async fn files_open_dialog(
+    app: AppHandle,
+    window: WebviewWindow,
+    desk: State<'_, Desk>,
+) -> Res<Option<FileMeta>> {
     let Some(picked) = app
         .dialog()
         .file()
+        .set_parent(&window)
         .add_filter("Файл Ferrum", &["ferrum"])
         .blocking_pick_file()
     else {
         return Ok(None);
     };
-    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let path = picked.into_path().map_err(|_| NOT_A_PATH.to_string())?;
     desk.lib().add_existing(&path).map(Some)
 }
 
@@ -196,18 +207,20 @@ async fn files_save_dialog(
     id: String,
     name: String,
     app: AppHandle,
+    window: WebviewWindow,
     desk: State<'_, Desk>,
 ) -> Res<Option<FileMeta>> {
     let Some(picked) = app
         .dialog()
         .file()
+        .set_parent(&window)
         .set_file_name(&name)
         .add_filter("Файл Ferrum", &["ferrum"])
         .blocking_save_file()
     else {
         return Ok(None);
     };
-    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let path = picked.into_path().map_err(|_| NOT_A_PATH.to_string())?;
     desk.lib().move_to(&id, &path).map(Some)
 }
 
@@ -217,24 +230,26 @@ async fn files_copy_dialog(
     id: String,
     name: String,
     app: AppHandle,
+    window: WebviewWindow,
     desk: State<'_, Desk>,
 ) -> Res<bool> {
     let Some(picked) = app
         .dialog()
         .file()
+        .set_parent(&window)
         .set_file_name(&name)
         .add_filter("Файл Ferrum", &["ferrum"])
         .blocking_save_file()
     else {
         return Ok(false);
     };
-    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let path = picked.into_path().map_err(|_| NOT_A_PATH.to_string())?;
     desk.lib().copy_to(&id, &path).map(|()| true)
 }
 
-#[tauri::command]
-fn settings_get(desk: State<'_, Desk>) -> Map<String, Value> {
-    desk.settings().all()
+#[tauri::command(async)]
+fn settings_get(desk: State<'_, Desk>) -> Res<Map<String, Value>> {
+    Ok(desk.settings().all())
 }
 
 #[tauri::command(async)]
@@ -261,14 +276,31 @@ fn smoke_mode() -> bool {
     smoke()
 }
 
+/// Итог проверки запуска; вне режима проверки — отказ (страница не может закрыть
+/// приложение).
 #[tauri::command]
-fn smoke_done(report: Value, app: AppHandle) {
+fn smoke_done(report: Value, app: AppHandle) -> Res<()> {
+    if !smoke() {
+        return Err("Команда доступна только при проверке запуска".into());
+    }
     println!("smoke: {report}");
-    // Ядро запустилось, и круг ввода-вывода через IPC прошёл (`io: true`).
+    // Ядро запустилось, круг ввода-вывода через IPC прошёл (`io: true`), CSP действует
+    // (`cspActive`) и страница его не нарушила (`csp: []`), главный поток во время
+    // долгой записи отвечал (`pingMs` меньше половины `writeMs`: команда, ждущая
+    // библиотеку в главном потоке, задержала бы ответ почти на всю запись).
+    let num = |k: &str| report.get(k).and_then(Value::as_f64).unwrap_or(-1.0);
     let ok = report.get("ready").and_then(Value::as_bool) == Some(true)
-        && report.get("io").and_then(Value::as_bool) == Some(true);
+        && report.get("io").and_then(Value::as_bool) == Some(true)
+        && report.get("cspActive").and_then(Value::as_bool) == Some(true)
+        && report
+            .get("csp")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        && num("pingMs") >= 0.0
+        && num("pingMs") < num("writeMs") / 2.0;
     smoke_cleanup();
     app.exit(if ok { 0 } else { 1 });
+    Ok(())
 }
 
 /// Библиотека и настройки: проверка запуска — во временном каталоге (библиотека
@@ -282,18 +314,37 @@ fn open_desk(app: &tauri::App) -> Result<Desk, String> {
             .clone();
         (tmp.join("data"), tmp.join("docs"), tmp.join("config"))
     } else {
+        // Отказ системы назвать каталог — без английского текста ошибки.
         let p = app.path();
+        let none = |what: &str| format!("Не найден {what}: система не назвала его");
         (
-            p.app_data_dir().map_err(|e| e.to_string())?,
-            p.document_dir().map_err(|e| e.to_string())?.join("Ferrum"),
-            p.app_config_dir().map_err(|e| e.to_string())?,
+            p.app_data_dir()
+                .map_err(|_| none("каталог данных приложения"))?,
+            p.document_dir()
+                .map_err(|_| none("каталог «Документы»"))?
+                .join("Ferrum"),
+            p.app_config_dir()
+                .map_err(|_| none("каталог настроек приложения"))?,
         )
     };
-    let (lib, warnings) = Library::open(&data, &docs).map_err(|e| e.to_string())?;
+    // Второй экземпляр — свой русский текст хранилища; прочее — с причиной от системы.
+    let (lib, warnings) = Library::open(&data, &docs).map_err(|e| match e.kind() {
+        ErrorKind::WouldBlock => e.to_string(),
+        _ => format!(
+            "Не удалось открыть библиотеку файлов ({}): {e}",
+            data.display()
+        ),
+    })?;
     for w in warnings {
         eprintln!("{w}");
     }
-    let settings = Settings::open(&config.join("settings.json")).map_err(|e| e.to_string())?;
+    let settings_path = config.join("settings.json");
+    let settings = Settings::open(&settings_path).map_err(|e| {
+        format!(
+            "Не удалось открыть настройки ({}): {e}",
+            settings_path.display()
+        )
+    })?;
     Ok(Desk {
         lib: Mutex::new(lib),
         settings: Mutex::new(settings),

@@ -90,6 +90,7 @@ function harness(stored: boolean, journalSession?: number | null) {
   let failAppend = false;
   let failWrite = false;
   let hangAppend = false;
+  let warning: string | undefined;
   const files = {
     appendJournal: async (_id: string, mark: JournalMark) => {
       if (hangAppend) await new Promise(() => {});
@@ -99,7 +100,7 @@ function harness(stored: boolean, journalSession?: number | null) {
     write: async (_id: string, _b: ArrayBuffer, _t: unknown, base: number, journal: { session: number; upTo: number } | null) => {
       writes.push(journal);
       if (failWrite) throw new Error('недостаточно места в хранилище браузера');
-      return { version: base + 1 };
+      return { version: base + 1, ...(warning ? { warning } : {}) };
     },
   } as unknown as FileStore;
   const saver = createSaver(ed, files, 'f', 1, stored, { journalSession });
@@ -119,6 +120,7 @@ function harness(stored: boolean, journalSession?: number | null) {
     failAppends: (on: boolean) => void (failAppend = on),
     hangAppends: (on: boolean) => void (hangAppend = on),
     failWrites: (on: boolean) => void (failWrite = on),
+    warnWrites: (text: string | undefined) => void (warning = text),
     stop: () => void ((ed.store as unknown as { state: { stopped: boolean } }).state.stopped = true),
     batch: (batch: number) => emit({ type: 'journal', batch, bytes: new Uint8Array([1, 2]), failed: false }),
     snapshot: (journal: number) =>
@@ -358,4 +360,33 @@ test('withTimeout: ответ раньше предела — он, и тайм�
   h.advance(1);
   await h.tick();
   expect(result).toBe(false);
+});
+
+test('запись удалась с предупреждением (превью не записано): одно уведомление, запись не ошибка', async () => {
+  const h = harness(true);
+  h.warnWrites('Превью файла не записано: нет места');
+  for (let i = 1; i <= 3; i++) {
+    h.emit({ type: 'modified', modified: true });
+    const saved = h.saver.save();
+    await h.tick();
+    h.snapshot(0);
+    expect(await saved).toBe(true);
+  }
+  expect(h.writes).toHaveLength(3);
+  expect(h.toasts).toEqual(['Превью файла не записано: нет места']);
+  expect(h.saver.failure()).toBeNull();
+  // Удачная запись без предупреждения — следующее предупреждение снова показывается.
+  h.warnWrites(undefined);
+  h.emit({ type: 'modified', modified: true });
+  let saved = h.saver.save();
+  await h.tick();
+  h.snapshot(0);
+  await saved;
+  h.warnWrites('Превью файла не записано: нет места');
+  h.emit({ type: 'modified', modified: true });
+  saved = h.saver.save();
+  await h.tick();
+  h.snapshot(0);
+  await saved;
+  expect(h.toasts).toHaveLength(2);
 });

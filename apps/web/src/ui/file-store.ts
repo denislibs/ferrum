@@ -31,14 +31,15 @@ export interface FileStore {
    * `null` — убрать превью, `'keep'` — оставить прежнее. `base` — поколение файла
    * (`FileMeta.version`), на котором основана запись; файл с тех пор записали —
    * отказ `CONFLICT`. `journal` — пачки этого сеанса до `upTo` и прежних сеансов
-   * вошли в снимок: стереть их вместе с записью; `null` — журнала ещё нет. */
+   * вошли в снимок: стереть их вместе с записью; `null` — журнала ещё нет.
+   * `warning` — файл записан, но не всё (превью в десктопе): текст для пользователя. */
   write(
     id: string,
     bytes: ArrayBuffer,
     thumb: ArrayBuffer | null | 'keep',
     base: number,
     journal: { session: number; upTo: number } | null,
-  ): Promise<FileMeta>;
+  ): Promise<FileMeta & { warning?: string }>;
   /** Дописать пачку журнала изменений (буфер передаётся). */
   appendJournal(id: string, mark: JournalMark, bytes: ArrayBuffer): Promise<void>;
   /** Байты файла `Blob`'ом («Скачать копию»); `null` — новый файл без байтов. */

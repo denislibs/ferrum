@@ -32,8 +32,16 @@ async function invoke<T>(cmd: string, args?: unknown, headers?: Record<string, s
   try {
     return (await call(cmd, args, headers ? { headers } : undefined)) as T;
   } catch (e) {
-    throw new Error(typeof e === 'string' ? e : e instanceof Error ? e.message : String(e));
+    throw new Error(russian(typeof e === 'string' ? e : e instanceof Error ? e.message : String(e)));
   }
+}
+
+/** Отказы самого Tauri (до кода команды) — английские: неверные аргументы, нет такой
+ * команды, хранилище не открыто. Свои отказы Rust — уже по-русски, без изменений. */
+function russian(message: string): string {
+  if (message.startsWith('state not managed')) return 'Хранилище файлов не открыто';
+  if (/^invalid args |^command \S+ not found/.test(message)) return 'Неверный запрос к хранилищу файлов';
+  return message;
 }
 
 /** Сырое тело запроса и параметры заголовком `x-ferrum` (ASCII: UUID и числа). */
@@ -97,14 +105,15 @@ export class TauriFileStore implements FileStore, SettingsBackend {
     journal: { session: number; upTo: number } | null,
   ) {
     const args = { id, base, ...(journal ? { session: journal.session, upTo: journal.upTo } : {}) };
-    let meta = await raw<FileMeta>('files_write', bytes, args);
+    let meta: FileMeta & { warning?: string } = await raw<FileMeta>('files_write', bytes, args);
     if (thumb !== 'keep') {
       // Файл уже записан (поколение выросло): отказ превью — не отказ записи, иначе
-      // следующая запись со старым поколением получила бы ложный CONFLICT.
+      // следующая запись со старым поколением получила бы ложный CONFLICT. Причину
+      // показывает сохранитель — предупреждением.
       try {
         meta = await raw<FileMeta>('files_write_thumb', thumb ?? new ArrayBuffer(0), { id });
       } catch (e) {
-        console.warn('Превью не записано:', e instanceof Error ? e.message : e);
+        meta = { ...meta, warning: `Превью файла не записано: ${e instanceof Error ? e.message : String(e)}` };
       }
     }
     for (const l of this.listeners) l();
@@ -162,25 +171,62 @@ export class TauriFileStore implements FileStore, SettingsBackend {
 const same = (b: ArrayBuffer | null | undefined, want: number[]) =>
   !!b && b.byteLength === want.length && new Uint8Array(b).every((v, i) => v === want[i]);
 
+/** Долгая запись для замера главного потока: 128 МБ (запись и `fsync` — сотни мс). */
+const LONG_WRITE_BYTES = 128 * 1024 * 1024;
+
 /** Круг через IPC во временной библиотеке проверки: запись сырым телом с заголовком,
- * превью, пачка журнала, чтение байтов (`ArrayBuffer`), сеанса и журнала. */
-async function ioRoundTrip(s: TauriFileStore): Promise<true | string> {
+ * превью, пачка журнала, чтение байтов (`ArrayBuffer`), сеанса и журнала. Затем долгая
+ * запись, а во время неё — `files_get` (ждёт библиотеку) и `smoke_mode` (синхронная:
+ * выполняется в главном потоке). Если бы команда, ждущая библиотеку, шла в главном
+ * потоке, `smoke_mode` ждала бы конца записи: `pingMs` — худшая задержка ответа. */
+async function ioRoundTrip(s: TauriFileStore): Promise<{ io: true | string; writeMs: number; pingMs: number }> {
   const m = await s.create('Проверка запуска');
   const w = await s.write(m.id, new Uint8Array([1, 2, 3]).buffer, new Uint8Array([9]).buffer, m.version, null);
-  if (w.version !== m.version + 1) return `поколение ${w.version}`;
+  const fail = (io: string) => ({ io, writeMs: -1, pingMs: -1 });
+  if (w.version !== m.version + 1) return fail(`поколение ${w.version}`);
   await s.appendJournal(m.id, { session: 7, batch: 1 }, new Uint8Array([4, 5]).buffer);
   const r = await s.read(m.id);
-  if (!same(r.bytes, [1, 2, 3])) return 'байты файла';
-  if (r.session !== 7 || r.journal.length !== 1 || !same(r.journal[0], [4, 5])) return 'журнал';
-  if ((await s.thumbnail(m.id))?.size !== 1) return 'превью';
+  if (!same(r.bytes, [1, 2, 3])) return fail('байты файла');
+  if (r.session !== 7 || r.journal.length !== 1 || !same(r.journal[0], [4, 5])) return fail('журнал');
+  if ((await s.thumbnail(m.id))?.size !== 1) return fail('превью');
+  const t0 = performance.now();
+  let writing = true;
+  const long = s.write(m.id, new ArrayBuffer(LONG_WRITE_BYTES), 'keep', w.version, null).finally(() => {
+    writing = false;
+  });
+  let pingMs = 0;
+  while (writing) {
+    const get = s.get(m.id);
+    const p0 = performance.now();
+    await invoke<boolean>('smoke_mode');
+    if (writing) pingMs = Math.max(pingMs, performance.now() - p0);
+    await get;
+  }
+  if ((await long).version !== w.version + 1) return fail('долгая запись');
+  const writeMs = Math.round(performance.now() - t0);
   await s.remove(m.id);
-  return true;
+  return { io: true, writeMs, pingMs: Math.round(pingMs) };
+}
+
+/** CSP действует: без `'unsafe-eval'` код из строки запрещён. */
+function cspActive(): boolean {
+  try {
+    new Function('return 1')();
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 /** Проверка запуска десктопа (`FERRUM_SMOKE=1`, `apps/desktop`): новый файл, ядро
- * готово, круг ввода-вывода через IPC — отчёт приложению, оно печатает его и выходит. */
+ * готово, круг ввода-вывода через IPC, нарушения CSP — отчёт приложению, оно печатает
+ * его и выходит. */
 export async function runSmoke(): Promise<void> {
-  if (!isTauri() || !(await invoke<boolean>('smoke_mode'))) return;
+  if (!isTauri()) return;
+  // Нарушения CSP страницы — с первого кадра (до ответа `smoke_mode`).
+  const csp: string[] = [];
+  document.addEventListener('securitypolicyviolation', (e) => csp.push(`${e.effectiveDirective} ${e.blockedURI}`));
+  if (!(await invoke<boolean>('smoke_mode'))) return;
   location.hash = '#/new';
   const t0 = performance.now();
   const ready = () => (window as { __ferrum?: { ready: boolean } }).__ferrum?.ready === true;
@@ -192,13 +238,13 @@ export async function runSmoke(): Promise<void> {
   } catch {
     files = -1;
   }
-  let io: true | string;
+  let round: { io: true | string; writeMs: number; pingMs: number };
   try {
-    io = await ioRoundTrip(s);
+    round = await ioRoundTrip(s);
   } catch (e) {
-    io = e instanceof Error ? e.message : String(e);
+    round = { io: e instanceof Error ? e.message : String(e), writeMs: -1, pingMs: -1 };
   }
   await invoke<null>('smoke_done', {
-    report: { ready: ready(), isolated: crossOriginIsolated, files, io, ms: Math.round(performance.now() - t0) },
+    report: { ready: ready(), isolated: crossOriginIsolated, files, ...round, csp, cspActive: cspActive(), ms: Math.round(performance.now() - t0) },
   });
 }

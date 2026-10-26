@@ -129,6 +129,8 @@ export function createSaver(
   /** Последняя показанная ошибка записи: повтор не показываем, пока запись не удастся. */
   let reported: string | null = null;
   let journalReported: string | null = null;
+  /** Последнее показанное предупреждение удачной записи (превью не записано). */
+  let warned: string | null = null;
   let failure: string | null = null;
   let waiting: ((e: Snapshot) => void) | null = null;
   let failWaiting: (() => void) | null = null;
@@ -304,6 +306,9 @@ export function createSaver(
       ed.send({ type: 'markSaved', revision: snap.revision });
       reported = null;
       failure = null;
+      // Файл записан, превью — нет: одно уведомление, пока запись не пройдёт без него.
+      if (meta.warning && warned !== meta.warning) ed.store.toast(meta.warning, 'error');
+      warned = meta.warning ?? null;
       return true;
     } catch (err) {
       if (!wasStored) dirty = true;
