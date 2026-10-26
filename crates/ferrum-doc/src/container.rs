@@ -49,7 +49,7 @@ pub struct Opened {
     pub warnings: Vec<String>,
 }
 
-fn push_section(out: &mut Vec<u8>, kind: u8, id: &str, data: &[u8]) {
+pub(crate) fn push_section(out: &mut Vec<u8>, kind: u8, id: &str, data: &[u8]) {
     out.push(kind);
     out.extend_from_slice(&(id.len() as u32).to_le_bytes());
     out.extend_from_slice(id.as_bytes());
