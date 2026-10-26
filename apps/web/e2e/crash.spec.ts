@@ -151,3 +151,50 @@ test('сбой во время ухода с вопросом: «Остатьс�
   await expect(page.locator('.fe-files')).toHaveCount(1);
   await expect.poll(() => locked(page, id)).toBe(false);
 });
+
+test('хранилище не отвечает после сбоя: перезапуск не ждёт вечно; ушли к другому файлу — старый не перезапускается поверх', async ({ page }) => {
+  const id = await storedFile(page, '&journal=100&fullSave=600000');
+  // Запись пачек журнала повисает: перезапуск ждёт её не дольше предела.
+  await page.evaluate(() => {
+    const store = window.__ferrumFiles!.store as unknown as { appendJournal: () => Promise<void>; hung?: boolean };
+    store.appendJournal = () => ((store.hung = true), new Promise<void>(() => {}));
+  });
+  await drawRect(page, 150);
+  await page.waitForFunction(() => (window.__ferrumFiles!.store as unknown as { hung?: boolean }).hung === true);
+  await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
+  // Пока перезапуск ждёт, пользователь уходит («Уйти» — правки не сохранены) к новому файлу.
+  await page.evaluate(() => (location.hash = '#/new'));
+  await page.getByRole('dialog').getByRole('button', { name: 'Уйти' }).click();
+  await expect.poll(() => /#\/file\//.test(page.url()) && fileId(page) !== id).toBe(true);
+  await editorReady(page);
+  const created = fileId(page);
+  // Уведомление о перезапуске исчезает само: ловим его появление.
+  await page.evaluate(() => {
+    const w = window as unknown as { restartShown?: boolean };
+    new MutationObserver(() => {
+      if (document.body.textContent?.includes('Редактор перезапущен')) w.restartShown = true;
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  // Предел ожидания прошёл: старый редактор снят — открыт по-прежнему новый (пустой) файл.
+  await page.waitForTimeout(3500);
+  expect(fileId(page)).toBe(created);
+  expect(await page.evaluate(() => (window as unknown as { restartShown?: boolean }).restartShown ?? false)).toBe(false);
+  expect(await page.evaluate(() => window.__ferrum!.core!.live!.nodes)).toBe(0);
+  expect(await locked(page, created)).toBe(true);
+  expect(await locked(page, id)).toBe(false);
+});
+
+test('хранилище не отвечает после сбоя: перезапуск через предел ожидания, правки — потерянными', async ({ page }) => {
+  await storedFile(page, '&journal=100&fullSave=600000');
+  await page.evaluate(() => {
+    const store = window.__ferrumFiles!.store as unknown as { appendJournal: () => Promise<void>; hung?: boolean };
+    store.appendJournal = () => ((store.hung = true), new Promise<void>(() => {}));
+  });
+  await drawRect(page, 150);
+  await page.waitForFunction(() => (window.__ferrumFiles!.store as unknown as { hung?: boolean }).hung === true);
+  await page.evaluate(() => ((window.__ferrum!.core as unknown as { old?: boolean }).old = true));
+  await page.evaluate(() => (window.__ferrum!.core! as unknown as { fail(m: string): void }).fail('проверка'));
+  await expect(toast(page, 'Редактор перезапущен. Правки последних секунд не сохранились')).toHaveCount(1, { timeout: 10_000 });
+  await page.waitForFunction(() => window.__ferrum?.ready === true && !(window.__ferrum.core as unknown as { old?: boolean }).old);
+  await editorReady(page);
+});

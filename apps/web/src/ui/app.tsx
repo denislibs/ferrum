@@ -259,8 +259,13 @@ export function App(props: AppProps) {
             console.error(e.message);
             // Потеряно ли что-то — когда пачки, отданные ядром до сбоя, дописаны (или нет).
             const s = saver;
-            const restart = (lost: boolean) => props.onRestart({ reason: 'crash', lost, message: e.message });
-            if (s) void s.settled().then(() => restart(s.pending()));
+            // Пока ждали пачки, редактор могли снять (ушли к другому файлу): перезапуск
+            // старого открыл бы его поверх нового.
+            const restart = (lost: boolean) => {
+              if (!disposed) props.onRestart({ reason: 'crash', lost, message: e.message });
+            };
+            // Хранилище не ответило — исход пачек неизвестен: честнее «не сохранились».
+            if (s) void s.settled().then((ok) => restart(!ok || s.pending()));
             else restart(false);
           }
           if (e.type === 'exported') {

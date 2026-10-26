@@ -39,6 +39,9 @@ export const JOURNAL_MS = 2000;
 export const FULL_IDLE_MS = 30_000;
 /** …и не реже этого при правках без пауз. */
 export const FULL_MAX_MS = 300_000;
+/** После сбоя ядра запись последних пачек ждём не дольше этого: хранилище не
+ * отвечает — перезапуск всё равно идёт, а правки считаются потерянными. */
+export const SETTLE_MS = 2500;
 
 export interface SaverOptions {
   /** Тесты: интервалы журнала и полного файла. */
@@ -57,8 +60,9 @@ export interface Saver {
   /** Есть правки, которых нет ни в журнале, ни в файле (сообщение после сбоя ядра). */
   pending(): boolean;
   /** Отданные ядром пачки дописаны (или не удались): после сбоя ядра `pending` —
-   * только после этого, иначе неудачная запись последней пачки прошла бы как «сохранено». */
-  settled(): Promise<void>;
+   * только после этого, иначе неудачная запись последней пачки прошла бы как «сохранено».
+   * `false` — хранилище не ответило за `SETTLE_MS`: исход пачек неизвестен. */
+  settled(): Promise<boolean>;
   /** Почему не удалась последняя запись (для вопроса при уходе); `null` — удалась. */
   failure(): string | null;
   dispose(): void;
@@ -328,7 +332,14 @@ export function createSaver(
     save,
     flushJournal,
     pending: () => dirty || unjournaled() || (!stored && modified),
-    settled: () => appended.then(() => {}),
+    settled: () =>
+      new Promise<boolean>((resolve) => {
+        const timer = window.setTimeout(() => resolve(false), SETTLE_MS);
+        void appended.then(() => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      }),
     failure: () => failure,
     dispose() {
       clearTimeout(journalTimer);

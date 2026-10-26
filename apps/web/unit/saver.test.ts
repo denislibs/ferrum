@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test';
 import type { CoreEvent } from '../src/wasm/ferrum_wasm';
 import type { Editor } from '../src/ui/context';
 import type { FileStore, JournalMark } from '../src/ui/file-store';
-import { createSaver, FULL_IDLE_MS, FULL_MAX_MS, JOURNAL_MS, newSession, sessionAfter } from '../src/ui/saver';
+import { createSaver, FULL_IDLE_MS, FULL_MAX_MS, JOURNAL_MS, newSession, sessionAfter, SETTLE_MS } from '../src/ui/saver';
 
 test('сеанс журнала: по времени, целый, безопасный', () => {
   const t = Date.UTC(2026, 9, 28, 12, 0, 0);
@@ -89,8 +89,10 @@ function harness(stored: boolean, journalSession?: number | null) {
   const writes: ({ session: number; upTo: number } | null)[] = [];
   let failAppend = false;
   let failWrite = false;
+  let hangAppend = false;
   const files = {
     appendJournal: async (_id: string, mark: JournalMark) => {
+      if (hangAppend) await new Promise(() => {});
       if (failAppend) throw new Error('нет места');
       marks.push(mark);
     },
@@ -115,6 +117,7 @@ function harness(stored: boolean, journalSession?: number | null) {
     advance,
     now: () => now,
     failAppends: (on: boolean) => void (failAppend = on),
+    hangAppends: (on: boolean) => void (hangAppend = on),
     failWrites: (on: boolean) => void (failWrite = on),
     stop: () => void ((ed.store as unknown as { state: { stopped: boolean } }).state.stopped = true),
     batch: (batch: number) => emit({ type: 'journal', batch, bytes: new Uint8Array([1, 2]), failed: false }),
@@ -292,7 +295,7 @@ test('сбой ядра, пока пишется пачка: settled ждёт з
   h.emit({ type: 'error', message: 'Ядро остановлено: паника в ядре: тестовая паника ядра' });
   // Сразу после сбоя правки выглядят «в журнале» — сообщение было бы ложным.
   expect(h.saver.pending()).toBe(false);
-  await h.saver.settled();
+  expect(await h.saver.settled()).toBe(true);
   expect(h.saver.pending()).toBe(true);
   // Удачная запись — правки в журнале.
   const k = harness(true);
@@ -300,6 +303,25 @@ test('сбой ядра, пока пишется пачка: settled ждёт з
   k.batch(0);
   await k.saver.settled();
   expect(k.saver.pending()).toBe(false);
+});
+
+test('хранилище не отвечает: settled — false через SETTLE_MS, не вечное ожидание', async () => {
+  expect(SETTLE_MS).toBeGreaterThanOrEqual(2000);
+  expect(SETTLE_MS).toBeLessThanOrEqual(3000);
+  const h = harness(true);
+  h.emit({ type: 'modified', modified: true });
+  h.hangAppends(true);
+  h.batch(0);
+  h.emit({ type: 'error', message: 'Ядро остановлено: паника в ядре: тестовая паника ядра' });
+  let result: boolean | undefined;
+  void h.saver.settled().then((ok) => (result = ok));
+  await h.tick();
+  h.advance(SETTLE_MS - 1);
+  await h.tick();
+  expect(result).toBeUndefined();
+  h.advance(1);
+  await h.tick();
+  expect(result).toBe(false);
 });
 
 test('сеанс сохранителя — после наибольшего сеанса журнала файла', async () => {
