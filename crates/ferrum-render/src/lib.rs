@@ -30,7 +30,8 @@ pub use draw::{
 pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, GPU_ATLAS_SIDE};
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use overlay::{
-    format_size, Overlay, OverlayTheme, HANDLE_SIZE, LABEL_SIZE, PIXEL_GRID_MIN_ZOOM,
+    format_size, Measure, MeasureKind, Overlay, OverlayTheme, HANDLE_SIZE, LABEL_SIZE,
+    MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM,
 };
 pub use text::{Label, TextEngine, ONEST};
 #[cfg(feature = "gpu")]

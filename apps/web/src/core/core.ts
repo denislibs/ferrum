@@ -365,18 +365,27 @@ export class Core {
       c.addEventListener(type, h);
       this.disposers.push(() => c.removeEventListener(type, h));
     }
+    const loneAlt = enc.createLoneAlt();
     this.add(window, 'keydown', (e) => {
+      loneAlt.down(e);
       // Клавишу, которую уже обработал элемент интерфейса (preventDefault), ядру не отдаём.
       if (e.defaultPrevented || browserKey(e) || !this.keyFilter(e)) return;
       e.preventDefault();
       enc.key(sink, Kind.KEY_DOWN, e);
     });
     this.add(window, 'keyup', (e) => {
-      // Отпускание — всегда: удержание (Space — рука) не должно залипнуть, если
-      // фокус ушёл в поле, пока клавиша была нажата.
+      // Одиночный Alt (измерения на холсте): на Windows его отпускание увело бы фокус
+      // в меню браузера. Только когда клавиши у холста — в поле Alt остаётся браузеру.
+      const active = document.activeElement;
+      if (loneAlt.up(e) && (active === c || active === document.body || active === null)) e.preventDefault();
+      // Отпускание — всегда: удержание (Space — рука, Alt — измерения) не должно
+      // залипнуть, если фокус ушёл в поле, пока клавиша была нажата.
       if (!browserKey(e)) enc.key(sink, Kind.KEY_UP, e);
     });
-    this.add(window, 'blur', () => enc.simple(sink, Kind.BLUR));
+    this.add(window, 'blur', () => {
+      loneAlt.reset();
+      enc.simple(sink, Kind.BLUR);
+    });
     // Размер холста и dpr: ResizeObserver и смена плотности экрана.
     const resize = () => {
       const r = c.getBoundingClientRect();

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ferrum_doc::fixture::fill;
 use ferrum_doc::{Document, NodeId, PropsPatch};
 use ferrum_editor::snap::SNAP_THRESHOLD_PX as SNAP_PX;
-use ferrum_editor::{CommandId, Editor, Input, Modifiers, Platform, PointerEvent};
+use ferrum_editor::{CommandId, Editor, Input, KeyEvent, Modifiers, Platform, PointerEvent};
 use ferrum_render::Camera;
 use kurbo::{Point, Size};
 
@@ -225,6 +225,41 @@ fn hover_moves(
     (times, hits)
 }
 
+/// Измерение расстояний: `n` движений с нажатым Alt; возвращает времена и число
+/// движений, после которых в оверлее есть измерения.
+fn measure_moves(
+    ed: &mut Editor,
+    clock: &mut Clock,
+    n: usize,
+    a: usize,
+    b: usize,
+) -> (Vec<Duration>, usize) {
+    let mut with = 0;
+    let times = (0..n)
+        .map(|i| {
+            let p = Point::new((i * a % 1900) as f64 + 7.0, (i * b % 1060) as f64 + 9.0);
+            let mut e = clock.at(p);
+            e.modifiers = Modifiers::ALT;
+            let d = timed(ed, Input::PointerMove(e));
+            if !ed.overlay().measurements.is_empty() {
+                with += 1;
+            }
+            d
+        })
+        .collect();
+    (times, with)
+}
+
+fn alt(ed: &mut Editor, down: bool) {
+    let (input, mods): (fn(KeyEvent) -> Input, _) = if down {
+        (Input::KeyDown, Modifiers::ALT)
+    } else {
+        (Input::KeyUp, Modifiers::NONE)
+    };
+    ed.handle(input(KeyEvent::new("AltLeft", mods)));
+    ed.take_events();
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -426,6 +461,25 @@ fn main() {
         format!("{hits_sel} из 400"),
         "> 0",
     );
+
+    // 4б'. Измерение расстояний с Alt при одном выделенном (ребёнок фрейма): на каждое
+    // движение — наведение и пересчёт отрезков до наведённого или до фрейма.
+    ed.select(&[one]);
+    alt(&mut ed, true);
+    let (measures, with) = measure_moves(&mut ed, &mut clock, 400, 47, 67);
+    report.gate_median(
+        "Измерение расстояний: обновление на движении указателя (Alt)",
+        &measures,
+        0.2,
+    );
+    report.info("То же, худшее движение", ms(worst(&measures)));
+    alt(&mut ed, false);
+    report.check(
+        "Измерение: движений с измерениями; после отпускания Alt их нет",
+        with > 0 && ed.overlay().measurements.is_empty(),
+        format!("{with} из 400"),
+        "> 0",
+    );
     ed.select(&[]);
 
     // 4в'. Выделение 10 000 узлов (дети ~100 фреймов): выбор из панели слоёв,
@@ -509,6 +563,33 @@ fn main() {
         restore_ok,
         format!("{}", ed.selection().len()),
         "10000",
+    );
+    // Измерение при 10 000 выделенных (дети фреймов за пределами экрана): рамка и
+    // родитель выделения — из кэша, на движение работа не растёт с выделением, а
+    // видимые фреймы с невыделенными детьми дают измерения почти на каждом движении.
+    let far: Vec<NodeId> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 100 != 0)
+        .map(|(_, id)| *id)
+        .skip(99 * 20)
+        .take(BIG_SELECTION)
+        .collect();
+    ed.select(&far);
+    alt(&mut ed, true);
+    let (measures_big, with_big) = measure_moves(&mut ed, &mut clock, 400, 47, 67);
+    alt(&mut ed, false);
+    report.gate_median(
+        "Измерение расстояний при 10 000 выделенных (Alt)",
+        &measures_big,
+        0.2,
+    );
+    report.info("То же, худшее движение", ms(worst(&measures_big)));
+    report.check(
+        "Измерение при 10 000 выделенных: движений с измерениями",
+        with_big > 0,
+        format!("{with_big} из 400"),
+        "> 0",
     );
     ed.select(&[]);
     ed.take_events();

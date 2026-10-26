@@ -463,7 +463,8 @@ impl Core {
             | Command::Paste { .. }
             | Command::PlaceImage { .. }
             | Command::Save
-            | Command::ReadPixels { .. } => {
+            | Command::ReadPixels { .. }
+            | Command::ReadMeasurements => {
                 debug_assert!(false, "команда этапа 4 — в `Core::command`");
             }
         }

@@ -406,6 +406,17 @@ impl Core {
                 self.pixels = Some(reference);
                 self.dirty = true;
             }
+            Command::ReadMeasurements => {
+                use ferrum_render::MeasureKind;
+                let all = self.editor.overlay().measurements;
+                let values = all
+                    .iter()
+                    .filter(|m| m.kind == MeasureKind::Distance)
+                    .map(|m| m.value)
+                    .collect();
+                let guides = all.iter().filter(|m| m.kind == MeasureKind::Guide).count() as u32;
+                self.events.push(CoreEvent::Measurements { values, guides });
+            }
             other => self.panel_command(other),
         }
         self.drain_editor();

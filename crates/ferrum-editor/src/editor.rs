@@ -12,13 +12,15 @@
 use std::collections::HashSet;
 
 use ferrum_doc::{Changes, DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
-use ferrum_render::{Camera, Overlay, OverlayTheme};
+use ferrum_render::{Camera, Measure, Overlay, OverlayTheme};
 use ferrum_scene::Scene;
 use kurbo::{Point, Size, Vec2};
 
 use crate::commands::CommandId;
-use crate::input::{Input, KeyEvent, Platform, PointerButton, PointerEvent, WheelEvent};
+use crate::geometry::world_box;
+use crate::input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 use crate::keymap::Keymap;
+use crate::measure::{measure, AltState, MeasureCache};
 use crate::panel::PanelGesture;
 use crate::tools::{
     sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, Tool,
@@ -114,6 +116,8 @@ struct FrameKey {
     tool: ToolOverlay,
     theme: OverlayTheme,
     pixel_grid: bool,
+    /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
+    measures: Vec<Measure>,
 }
 
 pub struct Editor {
@@ -139,6 +143,11 @@ pub struct Editor {
     seen: Seen,
     /// Жест панели свойств (перетаскивание поля, палитра): свойства на начало.
     pub(crate) panel: Option<PanelGesture>,
+    /// Нажат ли Alt для измерений расстояний.
+    alt: AltState,
+    /// Измерения для оверлея; пересчитываются в `emit`.
+    measures: Vec<Measure>,
+    measure_cache: Option<MeasureCache>,
 }
 
 impl Editor {
@@ -175,6 +184,7 @@ impl Editor {
                 tool: ToolOverlay::default(),
                 theme: theme.clone(),
                 pixel_grid: true,
+                measures: Vec::new(),
             },
         };
         Ok(Editor {
@@ -195,6 +205,9 @@ impl Editor {
             last_pointer: None,
             seen,
             panel: None,
+            alt: AltState::default(),
+            measures: Vec::new(),
+            measure_cache: None,
         })
     }
 
@@ -289,12 +302,14 @@ impl Editor {
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
         self.refresh_gesture();
+        self.rehover(None, None);
         self.emit();
     }
 
     pub fn set_viewport(&mut self, viewport: Size, dpr: f64) {
         self.camera.set_viewport(viewport);
         self.camera.set_dpr(dpr);
+        self.rehover(None, None);
         self.emit();
     }
 
@@ -318,6 +333,7 @@ impl Editor {
             snap_lines: t.snap_lines,
             frame_labels: true,
             pixel_grid: self.settings.pixel_grid,
+            measurements: self.measures.clone(),
         }
     }
 
@@ -376,6 +392,14 @@ impl Editor {
         ) {
             self.cancel_panel();
         }
+        match &input {
+            Input::PointerDown(e) | Input::PointerMove(e) | Input::PointerUp(e) => {
+                self.alt.pointer(e.modifiers)
+            }
+            Input::KeyDown(e) | Input::KeyUp(e) => self.alt.key(e, self.settings.platform),
+            Input::Blur => self.alt.clear(),
+            _ => {}
+        }
         match input {
             Input::PointerDown(e) => self.pointer_down(e),
             Input::PointerMove(e) => self.pointer_move(e),
@@ -385,6 +409,7 @@ impl Editor {
             Input::Pinch { point, scale } => {
                 self.camera.zoom_at(point, scale);
                 self.refresh_gesture();
+                self.rehover(Some(point), None);
             }
             Input::KeyDown(e) => self.key_down(e),
             Input::KeyUp(e) => self.key_up(e),
@@ -463,6 +488,7 @@ impl Editor {
             self.camera.pan_by(-d);
         }
         self.refresh_gesture();
+        self.rehover(Some(e.point), Some(e.modifiers));
     }
 
     /// Камера сдвинулась во время жеста: та же экранная точка теперь над другим
@@ -472,6 +498,30 @@ impl Editor {
             let (tool, mut cx) = self.split();
             tool.pointer_move(&mut cx, &e);
         }
+    }
+
+    /// Камера сменилась без жеста: под неподвижным указателем теперь другое место
+    /// мира — наведение (а с ним обводка и измерения с Alt) пересчитывается тем же
+    /// hit-test, что и при движении. Точка — из колеса или щипка, иначе последняя
+    /// точка указателя. Наведение есть только у «Перемещения».
+    fn rehover(&mut self, point: Option<Point>, modifiers: Option<Modifiers>) {
+        if self.is_busy() || self.tool.kind() != ToolKind::Move {
+            return;
+        }
+        let mut e = match (self.last_pointer, point) {
+            (Some(e), _) => e,
+            (None, Some(p)) => PointerEvent::new(p, Modifiers::NONE, 0.0),
+            (None, None) => return,
+        };
+        if let Some(p) = point {
+            e.point = p;
+        }
+        if let Some(m) = modifiers {
+            e.modifiers = m;
+        }
+        self.last_pointer = Some(e);
+        let (tool, mut cx) = self.split();
+        tool.pointer_move(&mut cx, &e);
     }
 
     fn key_down(&mut self, e: KeyEvent) {
@@ -700,12 +750,60 @@ impl Editor {
         }
     }
 
+    /// Измерения с Alt (раздел 7.3 спеки): от рамки выделения до наведённого
+    /// объекта, а без него или над родительским фреймом — до этого фрейма. Только
+    /// у «Перемещения» без жеста холста или панели и не над ручками рамки; над
+    /// выделенным — ничего.
+    /// На движение — O(1): выделение берётся из кэша, наведённый — по слоту.
+    fn update_measures(&mut self) {
+        let over_box = matches!(
+            self.tool.cursor(),
+            Cursor::Resize { .. } | Cursor::Rotate { .. }
+        );
+        if !self.alt.held()
+            || self.is_busy()
+            || self.panel.is_some()
+            || self.tool.kind() != ToolKind::Move
+            || self.selection.is_empty()
+            || over_box
+        {
+            self.measures.clear();
+            return;
+        }
+        let key = (
+            self.scene_epoch,
+            self.scene.change_counter(),
+            self.selection.version(),
+        );
+        if self.measure_cache.as_ref().is_none_or(|c| c.key() != key) {
+            self.measure_cache = Some(MeasureCache::new(key, &self.scene, &self.selection));
+        }
+        let cache = self
+            .measure_cache
+            .as_ref()
+            .expect("кэш только что заполнен");
+        let target = match self.hover {
+            None => cache.parent,
+            Some(h) if cache.selected.contains(&h) => None,
+            Some(h) => self
+                .scene
+                .slot(h)
+                .filter(|s| self.scene.is_visible(*s))
+                .and_then(|s| world_box(&self.scene, s)),
+        };
+        self.measures = match (cache.sbox, target) {
+            (Some(s), Some(t)) => measure(s, t),
+            _ => Vec::new(),
+        };
+    }
+
     /// Шлёт события об изменившемся выделении, инструменте, курсоре и кадре.
     pub(crate) fn emit(&mut self) {
         // Наведённый узел могли удалить правкой, отменой или повтором.
         if self.hover.is_some_and(|h| self.scene.slot(h).is_none()) {
             self.hover = None;
         }
+        self.update_measures();
         let now = Seen {
             selection: self.selection.version(),
             tool: self.tool.kind(),
@@ -719,6 +817,7 @@ impl Editor {
                 tool: self.tool.overlay(),
                 theme: self.theme.clone(),
                 pixel_grid: self.settings.pixel_grid,
+                measures: self.measures.clone(),
             },
         };
         if now.selection != self.seen.selection {

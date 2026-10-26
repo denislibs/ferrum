@@ -1,7 +1,7 @@
 //! Оверлеи поверх содержимого в экранных пикселях: пиксельная сетка, названия
 //! фреймов, подсветка наведения, рамка выделения мышью, линии привязки, рамка
-//! выделения с ручками и бейдж «W × H». Толщины и размеры задаются в CSS-пикселях
-//! и умножаются на `devicePixelRatio`.
+//! выделения с ручками, бейдж «W × H» и измерения расстояний с Alt. Толщины и
+//! размеры задаются в CSS-пикселях и умножаются на `devicePixelRatio`.
 
 use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::shape::Geometry;
@@ -11,7 +11,7 @@ use vello_cpu::peniko::Fill;
 
 use crate::backend::{RenderBackend, Rgba};
 use crate::camera::Camera;
-use crate::text::TextEngine;
+use crate::text::{Label, TextEngine};
 
 /// Сторона квадратной ручки выделения.
 pub const HANDLE_SIZE: f64 = 8.0;
@@ -21,6 +21,9 @@ pub const PIXEL_GRID_MIN_ZOOM: f64 = 8.0;
 const MAX_GRID_LINES: usize = 4096;
 /// Кегль подписей фреймов и бейджа.
 pub const LABEL_SIZE: f64 = 11.0;
+/// Штрих и промежуток пунктира направляющей измерения.
+pub const MEASURE_DASH: f64 = 4.0;
+pub const MEASURE_GAP: f64 = 3.0;
 
 /// Цвета оверлеев из дизайн-системы Ferrum.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +40,8 @@ pub struct OverlayTheme {
     /// Линии привязки.
     pub snap: Rgba,
     pub pixel_grid: Rgba,
+    /// Линии и плашки измерений с Alt (`danger`); текст плашки — `on_select`.
+    pub measure: Rgba,
 }
 
 fn hex(rgb: u32) -> Rgba {
@@ -53,6 +58,7 @@ impl OverlayTheme {
             frame_label: hex(0xa9a39c),
             snap: hex(0xf24822),
             pixel_grid: Rgba::from_rgba8(255, 255, 255, 26),
+            measure: hex(0xff7a7a),
         }
     }
 
@@ -65,8 +71,28 @@ impl OverlayTheme {
             frame_label: hex(0x655f58),
             snap: hex(0xf24822),
             pixel_grid: Rgba::from_rgba8(0, 0, 0, 20),
+            measure: hex(0xc22c2c),
         }
     }
+}
+
+/// Вид отрезка измерения.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasureKind {
+    /// Расстояние: сплошная линия и плашка со значением посередине.
+    Distance,
+    /// Направляющая: пунктир вдоль продолжения края, до которого мерили (у объекта,
+    /// который не перекрывается с выделением ни по одной оси). Без плашки.
+    Guide,
+}
+
+/// Отрезок измерения в мировых координатах. Значение — в единицах документа, уже
+/// округлённое до сотых (у направляющей не показывается).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Measure {
+    pub line: Line,
+    pub value: f64,
+    pub kind: MeasureKind,
 }
 
 /// Что показать поверх содержимого. Заполняет редактор (этап 3).
@@ -83,6 +109,8 @@ pub struct Overlay {
     pub frame_labels: bool,
     /// Пиксельная сетка (рисуется только с `PIXEL_GRID_MIN_ZOOM`).
     pub pixel_grid: bool,
+    /// Измерения расстояний с Alt (раздел 8.6 спеки).
+    pub measurements: Vec<Measure>,
 }
 
 impl Default for Overlay {
@@ -95,6 +123,7 @@ impl Default for Overlay {
             snap_lines: Vec::new(),
             frame_labels: true,
             pixel_grid: true,
+            measurements: Vec::new(),
         }
     }
 }
@@ -176,6 +205,7 @@ pub(crate) fn draw(
         backend.stroke_path(&path, &hairline);
     }
     selection(backend, text, scene, camera, overlay);
+    measurements(backend, text, camera, overlay);
 }
 
 /// Контур формы узла в пикселях устройства; у группы — рамка её границ.
@@ -393,16 +423,42 @@ fn selection(
     };
     let bottom = quad.iter().fold(f64::MIN, |m, p| m.max(p.y));
     let center_x = quad.iter().map(|p| p.x).sum::<f64>() / 4.0;
+    badge(
+        backend,
+        &label,
+        dpr,
+        center_x,
+        bottom + 6.0 * dpr,
+        theme.select,
+        theme.on_select,
+    );
+}
+
+/// Высота плашки с подписью `label` (поля 2 px сверху и снизу).
+fn badge_height(label: &Label, dpr: f64) -> f64 {
+    label.ascent + label.descent + 4.0 * dpr
+}
+
+/// Плашка с подписью: по центру `center_x`, верхний край — `top` (пиксели
+/// устройства). Та же у бейджа «W × H» и у значений измерений.
+fn badge(
+    backend: &mut impl RenderBackend,
+    label: &Label,
+    dpr: f64,
+    center_x: f64,
+    top: f64,
+    fill: Rgba,
+    ink: Rgba,
+) {
     let (pad_x, pad_y) = (4.0 * dpr, 2.0 * dpr);
-    let height = label.ascent + label.descent + 2.0 * pad_y;
     let pill = Rect::new(
         center_x - label.width / 2.0 - pad_x,
-        bottom + 6.0 * dpr,
+        top,
         center_x + label.width / 2.0 + pad_x,
-        bottom + 6.0 * dpr + height,
+        top + badge_height(label, dpr),
     );
     backend.set_transform(Affine::IDENTITY);
-    backend.set_color(theme.select);
+    backend.set_color(fill);
     backend.fill_path(
         &RoundedRect::from_rect(pill, 2.0 * dpr).to_path(0.1),
         Fill::NonZero,
@@ -410,8 +466,169 @@ fn selection(
     label.draw(
         backend,
         Point::new(pill.x0 + pad_x, pill.y0 + pad_y + label.ascent),
-        theme.on_select,
+        ink,
     );
+}
+
+/// Отрезок измерения в пикселях устройства. У горизонтального и вертикального
+/// по пикселям выравнивается поперечная координата: линия в 1 px не размывается,
+/// а концы остаются на краях объектов.
+fn device_segment(view: Affine, line: Line, width: f64) -> (Point, Point) {
+    let (mut a, mut b) = (view * line.p0, view * line.p1);
+    if a.y == b.y {
+        a.y = crisp(a.y, width);
+        b.y = a.y;
+    } else if a.x == b.x {
+        a.x = crisp(a.x, width);
+        b.x = a.x;
+    }
+    (a, b)
+}
+
+/// Наибольшее число штрихов пунктира одной направляющей (защита от огромных
+/// холстов; видимая часть отрезка короче).
+const MAX_DASHES: usize = 4096;
+
+/// Часть отрезка `a + dir·t`, `t ∈ [0, len]`, внутри `clip` (Лянг — Барски).
+fn clip_span(a: Point, dir: kurbo::Vec2, len: f64, clip: Rect) -> Option<(f64, f64)> {
+    let (mut t0, mut t1) = (0.0_f64, len);
+    for (p, d, lo, hi) in [
+        (a.x, dir.x, clip.x0, clip.x1),
+        (a.y, dir.y, clip.y0, clip.y1),
+    ] {
+        if d == 0.0 {
+            if p < lo || p > hi {
+                return None;
+            }
+        } else {
+            let (u, v) = ((lo - p) / d, (hi - p) / d);
+            t0 = t0.max(u.min(v));
+            t1 = t1.min(u.max(v));
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
+}
+
+/// Пунктир от `a` к `b`: штрихи `MEASURE_DASH` через `MEASURE_GAP` (CSS-пиксели),
+/// первый — от `a`; строятся только штрихи внутри `clip`, поэтому их число зависит
+/// от экрана, а не от длины направляющей в мире. Штрихи строит сам оверлей, а не
+/// узор обводки: так пунктир одинаков в `vello_cpu` и `vello_gpu`.
+fn dashes(a: Point, b: Point, dpr: f64, clip: Rect) -> BezPath {
+    let mut path = BezPath::new();
+    let v = b - a;
+    let len = v.hypot();
+    if !len.is_finite() || len <= 0.0 {
+        return path;
+    }
+    let dir = v / len;
+    let Some((lo, hi)) = clip_span(a, dir, len, clip) else {
+        return path;
+    };
+    let (dash, period) = (MEASURE_DASH * dpr, (MEASURE_DASH + MEASURE_GAP) * dpr);
+    let first = (lo / period).floor();
+    let count = (((hi / period).ceil() - first).max(0.0) as usize).min(MAX_DASHES);
+    for i in 0..count {
+        let t0 = (first + i as f64) * period;
+        let t1 = (t0 + dash).min(len);
+        if t1 <= t0 {
+            break;
+        }
+        path.move_to(a + dir * t0);
+        path.line_to(a + dir * t1);
+    }
+    path
+}
+
+/// Измерения расстояний с Alt: сплошные линии с плашкой значения посередине и
+/// пунктирные направляющие. Толщины и плашки — в экранных пикселях, от зума не
+/// зависят; значения — в единицах документа.
+fn measurements(
+    backend: &mut impl RenderBackend,
+    text: &mut TextEngine,
+    camera: &Camera,
+    overlay: &Overlay,
+) {
+    if overlay.measurements.is_empty() {
+        return;
+    }
+    let dpr = camera.effective_dpr();
+    let view = camera.view_transform();
+    let theme = &overlay.theme;
+    let hairline = Stroke::new(dpr);
+    let (w, h) = backend.size();
+    let screen = Rect::new(0.0, 0.0, w as f64, h as f64);
+    let clip = screen.inflate(8.0 * dpr, 8.0 * dpr);
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.measure);
+    // Сначала все линии, потом плашки: плашка не перекрывается чужой линией.
+    for m in &overlay.measurements {
+        let (a, b) = device_segment(view, m.line, dpr);
+        let path = match m.kind {
+            // Сплошная линия — только видимая часть: при большом зуме линия до
+            // дальнего края фрейма уходит за экран на тысячи пикселей.
+            MeasureKind::Distance => match visible(a, b, clip) {
+                Some((p, q)) => {
+                    let mut path = BezPath::new();
+                    path.move_to(p);
+                    path.line_to(q);
+                    path
+                }
+                None => continue,
+            },
+            MeasureKind::Guide => dashes(a, b, dpr, clip),
+        };
+        backend.stroke_path(&path, &hairline);
+    }
+    for m in &overlay.measurements {
+        if m.kind != MeasureKind::Distance {
+            continue;
+        }
+        let (a, b) = device_segment(view, m.line, dpr);
+        // Плашка — посередине видимой части линии и целиком на экране.
+        let Some((p, q)) = visible(a, b, screen) else {
+            continue;
+        };
+        let Some(label) = text.label(&format_size(m.value), LABEL_SIZE * dpr, 500, f64::MAX) else {
+            continue;
+        };
+        let (half_w, half_h) = (
+            label.width / 2.0 + 4.0 * dpr,
+            badge_height(&label, dpr) / 2.0,
+        );
+        let keep = |v: f64, half: f64, side: f64| {
+            if side >= 2.0 * half {
+                v.clamp(half, side - half)
+            } else {
+                v
+            }
+        };
+        let mid = p.midpoint(q);
+        let (cx, cy) = (
+            keep(mid.x, half_w, screen.x1),
+            keep(mid.y, half_h, screen.y1),
+        );
+        badge(
+            backend,
+            &label,
+            dpr,
+            cx,
+            cy - half_h,
+            theme.measure,
+            theme.on_select,
+        );
+    }
+}
+
+/// Видимая в `clip` часть отрезка `a → b` (пиксели устройства).
+fn visible(a: Point, b: Point, clip: Rect) -> Option<(Point, Point)> {
+    let v = b - a;
+    let len = v.hypot();
+    if !len.is_finite() || len <= 0.0 {
+        return None;
+    }
+    let dir = v / len;
+    let (t0, t1) = clip_span(a, dir, len, clip)?;
+    Some((a + dir * t0, a + dir * t1))
 }
 
 #[cfg(test)]
@@ -454,6 +671,71 @@ mod tests {
         let nodes: Vec<_> = ids.iter().map(|id| scene.node(*id).unwrap()).collect();
         assert_eq!(selection_size(&nodes[..1]), (40.0, 30.0));
         assert_eq!(selection_size(&nodes), (140.0, 80.0));
+    }
+
+    /// Штрихи пунктира: (начало, конец) каждого отрезка пути.
+    fn dash_spans(path: &BezPath) -> Vec<(Point, Point)> {
+        use kurbo::PathEl;
+        let mut out = Vec::new();
+        let mut start = Point::ZERO;
+        for el in path.elements() {
+            match el {
+                PathEl::MoveTo(p) => start = *p,
+                PathEl::LineTo(p) => out.push((start, *p)),
+                _ => panic!("в пунктире только отрезки"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn dashes_follow_pattern_and_stay_on_screen() {
+        let screen = Rect::new(0.0, 0.0, 100.0, 100.0);
+        // Штрихи 4 через 3 от начала; последний усечён концом отрезка.
+        let d = dash_spans(&dashes(
+            Point::new(10.0, 5.0),
+            Point::new(26.0, 5.0),
+            1.0,
+            screen,
+        ));
+        assert_eq!(
+            d,
+            [
+                (Point::new(10.0, 5.0), Point::new(14.0, 5.0)),
+                (Point::new(17.0, 5.0), Point::new(21.0, 5.0)),
+                (Point::new(24.0, 5.0), Point::new(26.0, 5.0)),
+            ]
+        );
+        // dpr 2: штрих и промежуток вдвое длиннее.
+        let d = dash_spans(&dashes(
+            Point::new(0.0, 5.0),
+            Point::new(0.0, 20.0),
+            2.0,
+            screen,
+        ));
+        assert_eq!(d[0], (Point::new(0.0, 5.0), Point::new(0.0, 13.0)));
+        assert_eq!(d[1].0, Point::new(0.0, 19.0));
+        // Направляющая в миллиард пикселей при большом зуме: строятся только штрихи у
+        // экрана, в той же фазе, что от начала, и видимая часть покрыта.
+        let d = dash_spans(&dashes(
+            Point::new(-1e9, 50.0),
+            Point::new(1e9, 50.0),
+            1.0,
+            screen,
+        ));
+        assert!(d.len() <= 20, "штрихов: {}", d.len());
+        assert!(d.first().unwrap().0.x <= 0.0 && d.last().unwrap().1.x >= 100.0);
+        for (a, _) in &d {
+            let phase = (a.x + 1e9).rem_euclid(7.0);
+            assert!(
+                phase.abs() < 1e-3 || (phase - 7.0).abs() < 1e-3,
+                "фаза {phase}"
+            );
+        }
+        // Вне экрана — ни одного штриха; вырожденный и нечисловой отрезок — тоже.
+        assert!(dashes(Point::new(0.0, 500.0), Point::new(90.0, 500.0), 1.0, screen).is_empty());
+        assert!(dashes(Point::new(5.0, 5.0), Point::new(5.0, 5.0), 1.0, screen).is_empty());
+        assert!(dashes(Point::new(f64::NAN, 5.0), Point::new(5.0, 5.0), 1.0, screen).is_empty());
     }
 
     #[test]
