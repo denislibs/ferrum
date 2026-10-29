@@ -14,15 +14,20 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::sync::Arc;
 
 use loro::{
-    ExportMode, LoroDoc, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer, VersionVector,
+    ExportMode, LoroDoc, LoroText, LoroTree, LoroValue, TextDelta, TreeID, TreeParentId,
+    ValueOrContainer, VersionVector,
 };
 
 use crate::codec;
 use crate::error::{DocError, DocResult};
 use crate::loro_ext;
 use crate::scene_cache::SceneRow;
+use crate::text::{AttrKey, TextAttrs, TextContent, MAX_TEXT_CHARS, MAX_TEXT_RUNS};
+use crate::text_codec;
 use crate::types::*;
 
 const TREE: &str = "nodes";
@@ -44,14 +49,19 @@ pub(crate) enum Inverse {
     Delete(NodeId),
     /// Отмена удаления: поддерево в порядке обхода, родители раньше детей.
     Restore(Vec<SavedNode>),
-    /// Отмена изменения свойств: прежние значения изменённых полей.
-    Props(NodeId, PropsPatch),
+    /// Отмена изменения свойств: прежние значения изменённых полей. За `Box`:
+    /// с текстом патч стал большим, а варианты журнала живут тысячами.
+    Props(NodeId, Box<PropsPatch>),
     /// Отмена перемещения.
     Move {
         id: NodeId,
         parent: Option<NodeId>,
         index: usize,
     },
+    /// Отмена правки текста: обратная дельта Loro (спека подсистемы 3, раздел 3).
+    /// Применяется к текущему `LoroText` узла, найденному по стабильному id, —
+    /// поэтому переживает удаление и восстановление узла под новым `TreeID`.
+    Text(NodeId, Vec<TextDelta>),
 }
 
 /// Индекс стабильных ID и зеркало свойств живых узлов.
@@ -175,6 +185,9 @@ impl PageDoc {
     }
 
     fn wrap(doc: LoroDoc) -> PageDoc {
+        // Расширение разметки текста на вставку не хранится в документе: его
+        // задаёт каждый `LoroDoc` страницы (новый, из снапшота, из журнала).
+        doc.config_text_style(text_codec::style_config());
         let tree = doc.get_tree(TREE);
         tree.enable_fractional_index(0);
         PageDoc {
@@ -381,6 +394,7 @@ impl PageDoc {
             }),
             Inverse::Props(id, patch) => self.set_props(*id, patch),
             Inverse::Move { id, parent, index } => self.move_node(*id, *parent, *index),
+            Inverse::Text(id, delta) => self.apply_text_delta(*id, delta),
         })
     }
 
@@ -481,6 +495,17 @@ impl PageDoc {
     pub(crate) fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
         let tid = self.tid(id)?;
         let before = self.props(id)?;
+        // Свойства текста есть только у текста: у остальных узлов их не пишем.
+        let stripped;
+        let patch = if before.text.is_none() && patch.text.is_some() {
+            stripped = PropsPatch {
+                text: None,
+                ..patch.clone()
+            };
+            &stripped
+        } else {
+            patch
+        };
         let mut after = before.clone();
         patch.apply_to(&mut after);
         if after == before {
@@ -490,8 +515,191 @@ impl PageDoc {
         if let Some(props) = self.state.borrow_mut().props.get_mut(&id) {
             patch.apply_to(props);
         }
-        self.record(Inverse::Props(id, patch.previous(&before)));
+        self.record(Inverse::Props(id, Box::new(patch.previous(&before))));
         Ok(())
+    }
+
+    /// Применяет дельту к тексту узла и записывает обратную для отмены.
+    pub(crate) fn apply_text_delta(&self, id: NodeId, delta: &[TextDelta]) -> DocResult<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        let mut grown: isize = 0;
+        for op in delta {
+            match op {
+                TextDelta::Insert { insert, .. } => grown += insert.chars().count() as isize,
+                TextDelta::Delete { delete } => grown -= *delete as isize,
+                TextDelta::Retain { .. } => {}
+            }
+        }
+        self.edit_text(id, grown, |text| {
+            let inverse = text_codec::invert(text, delta)?;
+            text.apply_delta(delta)?;
+            Ok(inverse)
+        })
+    }
+
+    /// Правка текста узла: `edit` меняет `LoroText` и возвращает обратную дельту.
+    /// Пределы (спека 3): длина — до правки (`grown` — на сколько символов текст
+    /// вырастет), участки со стилями — после (превышение откатывается обратной
+    /// дельтой). Зеркало получает содержимое заново, отмена — обратную дельту.
+    fn edit_text(
+        &self,
+        id: NodeId,
+        grown: isize,
+        edit: impl FnOnce(&LoroText) -> DocResult<Vec<TextDelta>>,
+    ) -> DocResult<()> {
+        let tid = self.tid(id)?;
+        if self.props(id)?.text.is_none() {
+            return Err(DocError::NotText(id.to_string()));
+        }
+        let text = text_codec::text_container(&self.tree.get_meta(tid)?)?;
+        // Последний перевод строки — не символ пользователя: предел без него.
+        if text.len_unicode() as isize + grown > MAX_TEXT_CHARS as isize + 1 {
+            return Err(DocError::TextTooLong);
+        }
+        let inverse = edit(&text)?;
+        let content = text_codec::read_content(&text);
+        if content.styled_runs() > MAX_TEXT_RUNS {
+            text.apply_delta(&inverse)?;
+            return Err(DocError::TooManyTextRuns);
+        }
+        if let Some(props) = self.state.borrow_mut().props.get_mut(&id) {
+            if let Some(t) = &mut props.text {
+                Arc::make_mut(t).content = content;
+            }
+        }
+        self.record(Inverse::Text(id, inverse));
+        Ok(())
+    }
+
+    /// Длина текста узла в символах (с последним переводом строки).
+    fn text_len(&self, id: NodeId) -> DocResult<usize> {
+        match &self.props(id)?.text {
+            Some(t) => Ok(t.content.char_len()),
+            None => Err(DocError::NotText(id.to_string())),
+        }
+    }
+
+    /// Вставка текста в позицию `at` (символы Unicode). `attrs`: `None` —
+    /// разметка наследуется слева (расширение `After`), `Some` — ровно эта.
+    /// После последнего перевода строки вставлять нельзя.
+    pub(crate) fn insert_text(
+        &self,
+        id: NodeId,
+        at: usize,
+        s: &str,
+        attrs: Option<&TextAttrs>,
+    ) -> DocResult<()> {
+        let len = self.text_len(id)?;
+        if at >= len {
+            return Err(DocError::TextRange(at, len));
+        }
+        if s.is_empty() {
+            return Ok(());
+        }
+        let mut delta = Vec::new();
+        if at > 0 {
+            delta.push(TextDelta::Retain {
+                retain: at,
+                attributes: None,
+            });
+        }
+        match attrs {
+            // Дельта вставляет с точной разметкой (без унаследованной слева).
+            Some(a) => {
+                delta.push(TextDelta::Insert {
+                    insert: s.to_string(),
+                    attributes: Some(text_codec::attrs_to_loro(a)),
+                });
+                self.apply_text_delta(id, &delta)
+            }
+            // Обычная вставка Loro: разметка расширяется по `style_config`.
+            None => {
+                let n = s.chars().count();
+                delta.push(TextDelta::Delete { delete: n });
+                self.edit_text(id, n as isize, |text| {
+                    text.insert(at, s)?;
+                    Ok(delta)
+                })
+            }
+        }
+    }
+
+    /// Удаление диапазона символов. Последний перевод строки не удаляется.
+    pub(crate) fn delete_text(&self, id: NodeId, range: Range<usize>) -> DocResult<()> {
+        let len = self.text_len(id)?;
+        if range.start > range.end || range.end >= len {
+            return Err(DocError::TextRange(range.end, len));
+        }
+        if range.is_empty() {
+            return Ok(());
+        }
+        let mut delta = Vec::new();
+        if range.start > 0 {
+            delta.push(TextDelta::Retain {
+                retain: range.start,
+                attributes: None,
+            });
+        }
+        delta.push(TextDelta::Delete {
+            delete: range.len(),
+        });
+        self.apply_text_delta(id, &delta)
+    }
+
+    /// Разметка диапазона: ключи из `set` задаются, ключи из `clear` снимаются.
+    pub(crate) fn format_text(
+        &self,
+        id: NodeId,
+        range: Range<usize>,
+        set: &TextAttrs,
+        clear: &[AttrKey],
+    ) -> DocResult<()> {
+        let len = self.text_len(id)?;
+        if range.start > range.end || range.end > len {
+            return Err(DocError::TextRange(range.end, len));
+        }
+        let mut attrs = text_codec::attrs_to_loro(set);
+        for k in clear {
+            if !set.has(*k) {
+                attrs.insert(k.as_str().to_string(), LoroValue::Null);
+            }
+        }
+        if range.is_empty() || attrs.is_empty() {
+            return Ok(());
+        }
+        let mut delta = Vec::new();
+        if range.start > 0 {
+            delta.push(TextDelta::Retain {
+                retain: range.start,
+                attributes: None,
+            });
+        }
+        delta.push(TextDelta::Retain {
+            retain: range.len(),
+            attributes: Some(attrs),
+        });
+        self.apply_text_delta(id, &delta)
+    }
+
+    /// Заменяет содержимое целиком (вставка из буфера, тесты). Текст без
+    /// перевода строки в конце его получает.
+    pub(crate) fn set_text_content(&self, id: NodeId, content: &TextContent) -> DocResult<()> {
+        let len = self.text_len(id)?;
+        let mut content = content.clone();
+        if !content.text().ends_with('\n') {
+            content.runs.push(crate::text::TextRun {
+                text: "\n".into(),
+                attrs: TextAttrs::default(),
+            });
+        }
+        if self.props(id)?.text.as_ref().map(|t| &t.content) == Some(&content) {
+            return Ok(());
+        }
+        let mut delta = vec![TextDelta::Delete { delete: len }];
+        delta.extend(text_codec::insert_delta(&content));
+        self.apply_text_delta(id, &delta)
     }
 
     /// Позицию узла среди детей его родителя за O(log n) (см. `loro_ext`).
@@ -848,6 +1056,39 @@ impl<'a> Tx<'a> {
     pub fn delete_nodes(&self, ids: &[NodeId]) -> DocResult<()> {
         self.page.delete_nodes(ids)
     }
+
+    /// Вставка в текст узла (позиции — символы Unicode). `attrs`: `None` —
+    /// разметка наследуется слева, `Some` — ровно эта.
+    pub fn insert_text(
+        &self,
+        id: NodeId,
+        at: usize,
+        text: &str,
+        attrs: Option<&TextAttrs>,
+    ) -> DocResult<()> {
+        self.page.insert_text(id, at, text, attrs)
+    }
+
+    /// Удаление символов текста (последний перевод строки не удаляется).
+    pub fn delete_text(&self, id: NodeId, range: Range<usize>) -> DocResult<()> {
+        self.page.delete_text(id, range)
+    }
+
+    /// Разметка диапазона текста: задать ключи `set`, снять ключи `clear`.
+    pub fn format_text(
+        &self,
+        id: NodeId,
+        range: Range<usize>,
+        set: &TextAttrs,
+        clear: &[AttrKey],
+    ) -> DocResult<()> {
+        self.page.format_text(id, range, set, clear)
+    }
+
+    /// Содержимое текста целиком.
+    pub fn set_text_content(&self, id: NodeId, content: &TextContent) -> DocResult<()> {
+        self.page.set_text_content(id, content)
+    }
 }
 
 impl std::ops::Deref for Tx<'_> {
@@ -1160,18 +1401,18 @@ mod tests {
         let ops = vec![
             Inverse::Props(
                 missing,
-                PropsPatch {
+                Box::new(PropsPatch {
                     x: Some(1.0),
                     ..Default::default()
-                },
+                }),
             ),
             Inverse::Delete(all[3]),
             Inverse::Props(
                 all[1],
-                PropsPatch {
+                Box::new(PropsPatch {
                     x: Some(5.0),
                     ..Default::default()
-                },
+                }),
             ),
             Inverse::Move {
                 id: all[2],

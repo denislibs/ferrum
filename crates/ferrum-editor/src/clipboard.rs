@@ -19,9 +19,10 @@
 //! неизвестного типа (из будущих версий) пропускаются вместе с поддеревом.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use ferrum_doc::{
-    Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign,
+    Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign, TextData,
 };
 use ferrum_scene::shape;
 use kurbo::Rect;
@@ -469,6 +470,8 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
         flip_y: n.flip_y,
         fills,
         strokes,
+        // Текст копии — пустой до этапа с форматом текста в буфере (Task 6).
+        text: (kind == NodeKind::Text).then(|| Arc::new(TextData::default())),
     };
     // Нечисловые и огромные значения — к допустимым, как у строк кэша сцены.
     shape::sanitize(&mut props);
@@ -526,5 +529,6 @@ pub fn full_patch(p: &Props) -> PropsPatch {
         flip_y: p.flip_y.then_some(true),
         fills: Some(p.fills.clone()),
         strokes: Some(p.strokes.clone()),
+        text: p.text.as_ref().map(|t| t.props.clone()),
     }
 }

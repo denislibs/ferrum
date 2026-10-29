@@ -434,6 +434,7 @@ fn scene_cache_roundtrips_every_field() {
         NodeKind::Ellipse,
         NodeKind::Line,
         NodeKind::Image,
+        NodeKind::Text,
     ];
     doc.transact(page, vec![], |p| {
         let mut parent = None;
@@ -487,8 +488,39 @@ fn scene_cache_roundtrips_every_field() {
                             align: StrokeAlign::Outside,
                         },
                     ]),
+                    // У не текста пропускается; у текста — не умолчания.
+                    text: Some(TextProps {
+                        sizing: TextSizing::Fixed,
+                        align_h: AlignH::Right,
+                        align_v: AlignV::Bottom,
+                        paragraph_spacing: f,
+                        paragraph_indent: 2.0 * f,
+                        truncate: true,
+                        max_lines: Some(3),
+                        style: TextStyle {
+                            font: FontName::new("PT Serif", "Bold Italic"),
+                            size: 17.5,
+                            line_height: LineHeight::Px(21.0),
+                            letter_spacing: LetterSpacing::Px(-0.25),
+                            decoration: Decoration::Strike,
+                            case: TextCase::SmallCaps,
+                        },
+                    }),
                 },
             )?;
+            if kind == NodeKind::Text {
+                p.set_text_content(id, &TextContent::plain("Строка\nвторая"))?;
+                p.format_text(
+                    id,
+                    0..3,
+                    &TextAttrs {
+                        size: Some(30.0),
+                        fill: Some(Fill::solid(Color::rgba(1, 2, 3, 255))),
+                        ..Default::default()
+                    },
+                    &[],
+                )?;
+            }
             // Вложенность через раз: и корень, и дети.
             if i % 2 == 0 {
                 parent = Some(id);

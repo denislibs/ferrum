@@ -46,6 +46,7 @@ pub enum NodeType {
     Ellipse,
     Line,
     Image,
+    Text,
 }
 
 impl From<NodeKind> for NodeType {
@@ -57,6 +58,7 @@ impl From<NodeKind> for NodeType {
             NodeKind::Ellipse => NodeType::Ellipse,
             NodeKind::Line => NodeType::Line,
             NodeKind::Image => NodeType::Image,
+            NodeKind::Text => NodeType::Text,
         }
     }
 }

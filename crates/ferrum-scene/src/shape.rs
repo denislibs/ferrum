@@ -95,6 +95,8 @@ pub fn geometry(p: &Props) -> Geometry {
         },
         NodeKind::Ellipse => Geometry::Ellipse(rect),
         NodeKind::Line => Geometry::Line(p.w),
+        // Рамка текста; попадание — по ней (спека подсистемы 3, раздел 5).
+        NodeKind::Text => Geometry::Rect { rect, radius: 0.0 },
     }
 }
 
@@ -267,9 +269,9 @@ pub fn hit(p: &Props, local: Point, tolerance: f64) -> bool {
     }
     // Изображение рисуется на всём прямоугольнике, поэтому попадает в него, как фрейм,
     // даже без заливок: у свежесозданного изображения заливок нет, и без этого клик
-    // по нему не попадал бы никуда.
-    let filled =
-        matches!(p.kind, NodeKind::Frame | NodeKind::Image) || p.fills.iter().any(|f| f.visible);
+    // по нему не попадал бы никуда. Текст ловит клик всей рамкой, как в Figma.
+    let filled = matches!(p.kind, NodeKind::Frame | NodeKind::Image | NodeKind::Text)
+        || p.fills.iter().any(|f| f.visible);
     if filled && geom.contains(local) {
         return true;
     }

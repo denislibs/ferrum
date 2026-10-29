@@ -1004,6 +1004,7 @@ fn looks_different(a: &Props, b: &Props) -> bool {
         || a.corner_radius != b.corner_radius
         || a.fills != b.fills
         || a.strokes != b.strokes
+        || a.text != b.text
 }
 
 fn aabb(r: Rect) -> AABB<[f64; 2]> {

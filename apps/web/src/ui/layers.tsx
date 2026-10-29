@@ -25,6 +25,7 @@ const KIND_ICON: Record<NodeType, IconName> = {
   ellipse: 'ellipse',
   line: 'line',
   image: 'image',
+  text: 'text',
 };
 
 /** Окно строк для прокрутки `scrollTop` и высоты `height`. */

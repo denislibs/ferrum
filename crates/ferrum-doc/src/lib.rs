@@ -13,6 +13,8 @@ pub mod journal;
 mod loro_ext;
 mod page;
 mod scene_cache;
+mod text;
+mod text_codec;
 mod types;
 
 pub use changes::Changes;
@@ -22,6 +24,7 @@ pub use images::ImageStore;
 pub use journal::Replayed;
 pub use page::{PageDoc, Tx};
 pub use scene_cache::SceneRow;
+pub use text::*;
 pub use types::*;
 
 #[doc(hidden)]

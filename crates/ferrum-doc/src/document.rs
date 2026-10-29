@@ -628,10 +628,10 @@ mod tests {
     fn missing_props_op() -> Inverse {
         Inverse::Props(
             missing_node(),
-            PropsPatch {
+            Box::new(PropsPatch {
                 x: Some(1.0),
                 ..Default::default()
-            },
+            }),
         )
     }
 
@@ -825,7 +825,7 @@ mod tests {
         };
         let err = rollback(
             &page,
-            &[Inverse::Props(missing_node(), patch)],
+            &[Inverse::Props(missing_node(), Box::new(patch))],
             DocError::CyclicMove,
         );
         match err {
