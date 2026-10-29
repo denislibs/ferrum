@@ -58,6 +58,8 @@ pub struct PlacedGlyph {
     pub id: u32,
     pub x: f32,
     pub y: f32,
+    /// Ширина глифа (шаг по базовой линии) — по ней ставится многоточие.
+    pub advance: f32,
 }
 
 /// Начертание прогона в коллекции шрифтов (для многоточия тем же шрифтом).
@@ -128,6 +130,14 @@ struct SpanStyle {
     decoration: Decoration,
     case: TextCase,
     color: Color,
+}
+
+/// Где в раскладке лежит абзац (для выравнивания текста «авто» по ширине).
+struct ParaSpan {
+    lines: Range<usize>,
+    runs: Range<usize>,
+    decos: Range<usize>,
+    width: f64,
 }
 
 struct Paragraph<'a> {
@@ -224,6 +234,9 @@ impl Fonts {
         let default_color = text_color(req.fills);
         let mut out = TextLayout::default();
         let mut y = 0.0f64;
+        // Абзацы без ширины рамки: (строки, прогоны, украшения, ширина) для
+        // выравнивания по самой широкой строке.
+        let mut spans: Vec<ParaSpan> = Vec::new();
         let mut counters = [0u32; MAX_LIST_INDENT as usize + 1];
         let paragraphs = split_paragraphs(req.text);
         for (pi, para) in paragraphs.iter().enumerate() {
@@ -297,12 +310,55 @@ impl Fonts {
                 AlignmentOptions::default(),
             );
             let first_line = out.lines.len();
+            let (first_run, first_deco) = (out.runs.len(), out.decorations.len());
             collect_lines(&layout, &styles, indent_x, y, &mut out);
             if let (Some(m), Some(line)) = (marker, out.lines.get(first_line).copied()) {
                 let x = level as f64 * LIST_INDENT_EM * first.size;
                 self.place_marker(&m, first, x, line.baseline, &mut out);
             }
+            if req.width.is_none() {
+                let w = out.lines[first_line..]
+                    .iter()
+                    .map(|l| l.rect.x1)
+                    .fold(0.0, f64::max);
+                spans.push(ParaSpan {
+                    lines: first_line..out.lines.len(),
+                    runs: first_run..out.runs.len(),
+                    decos: first_deco..out.decorations.len(),
+                    width: w,
+                });
+            }
             y += layout.height() as f64;
+        }
+        // `parley` выравнивает абзац внутри его собственной ширины, а у текста
+        // «авто» по ширине рамка — самая широкая строка: сдвиг вручную.
+        let k = match props.align_h {
+            AlignH::Center => 0.5,
+            AlignH::Right => 1.0,
+            AlignH::Left | AlignH::Justify => 0.0,
+        };
+        if k > 0.0 {
+            let widest = spans.iter().map(|s| s.width).fold(0.0, f64::max);
+            for ParaSpan {
+                lines,
+                runs,
+                decos,
+                width,
+            } in spans
+            {
+                let dx = (widest - width) * k;
+                for l in &mut out.lines[lines] {
+                    l.rect = l.rect + kurbo::Vec2::new(dx, 0.0);
+                }
+                for r in &mut out.runs[runs] {
+                    for g in &mut r.glyphs {
+                        g.x += dx as f32;
+                    }
+                }
+                for d in &mut out.decorations[decos] {
+                    d.rect = d.rect + kurbo::Vec2::new(dx, 0.0);
+                }
+            }
         }
         out.height = y;
         out.width = out.lines.iter().map(|l| l.rect.x1).fold(0.0, f64::max);
@@ -335,8 +391,6 @@ impl Fonts {
         let resolved = self.resolve(&font);
         match resolved.status {
             FontStatus::Loading | FontStatus::Pending => out.loading = true,
-            // Запасной Inter тоже может ещё грузиться.
-            FontStatus::Missing if !resolved.substituted => out.loading = true,
             _ => {}
         }
         if resolved.substituted {
@@ -441,18 +495,34 @@ impl Fonts {
         let limit = (avail - e_width) as f32;
         let mut end_x = last.rect.x0 as f32;
         for run in &mut out.runs {
-            let advances: Vec<f32> = advances_of(run);
-            let mut kept = Vec::with_capacity(run.glyphs.len());
-            for (g, adv) in run.glyphs.iter().zip(advances) {
-                if on_line(g) {
-                    if g.x + adv > limit {
-                        continue;
-                    }
-                    end_x = end_x.max(g.x + adv);
-                }
-                kept.push(*g);
+            run.glyphs
+                .retain(|g| !on_line(g) || g.x + g.advance <= limit);
+        }
+        // Пробелы в конце строки снимаются: «слово…», а не «слово …».
+        loop {
+            let tail = out
+                .runs
+                .iter()
+                .enumerate()
+                .flat_map(|(ri, r)| {
+                    r.glyphs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, g)| on_line(g))
+                        .map(move |(gi, g)| (ri, gi, g.x))
+                })
+                .max_by(|a, b| a.2.total_cmp(&b.2));
+            let Some((ri, gi, _)) = tail else { break };
+            let run = &out.runs[ri];
+            if !is_space(&run.font, run.glyphs[gi].id) {
+                break;
             }
-            run.glyphs = kept;
+            out.runs[ri].glyphs.remove(gi);
+        }
+        for run in &out.runs {
+            for g in run.glyphs.iter().filter(|g| on_line(g)) {
+                end_x = end_x.max(g.x + g.advance);
+            }
         }
         out.decorations.retain(|d| {
             (d.rect.y0 - last.baseline).abs() > last.rect.height() || d.rect.x0 < limit as f64
@@ -509,17 +579,12 @@ impl Fonts {
     }
 }
 
-/// Ширины глифов прогона: расстояние до следующего (у последнего — оценка по кеглю).
-fn advances_of(run: &GlyphRun) -> Vec<f32> {
-    let n = run.glyphs.len();
-    (0..n)
-        .map(|i| match run.glyphs.get(i + 1) {
-            Some(next) if (next.y - run.glyphs[i].y).abs() < 0.5 => {
-                (next.x - run.glyphs[i].x).max(0.0)
-            }
-            _ => run.size * 0.6,
-        })
-        .collect()
+/// Глиф пробела в шрифте прогона?
+fn is_space(font: &parley::FontData, glyph: u32) -> bool {
+    skrifa::FontRef::from_index(font.data.as_ref(), font.index)
+        .ok()
+        .and_then(|f| skrifa::MetadataProvider::charmap(&f).map(' '))
+        .is_some_and(|g| g.to_u32() == glyph)
 }
 
 /// Свойства `parley` стиля участка.
@@ -595,6 +660,7 @@ fn collect_lines(
                     id: g.id,
                     x: g.x + dx as f32,
                     y: g.y + dy as f32,
+                    advance: g.advance,
                 })
                 .collect();
             let fm = run.font_metrics();

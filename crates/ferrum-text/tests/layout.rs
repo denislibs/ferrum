@@ -399,3 +399,128 @@ fn eviction_unloads_fonts_not_on_the_page() {
         "вытесненный запрашивается снова"
     );
 }
+
+#[test]
+fn auto_width_aligns_each_paragraph_inside_the_widest_line() {
+    let mut fonts = fonts();
+    for (align, k) in [(AlignH::Center, 0.5), (AlignH::Right, 1.0)] {
+        let t = text("Длинная первая строка\nмир", |p| {
+            p.align_h = align
+        });
+        let l = lay(&mut fonts, &t, 0.0, 0.0);
+        assert_eq!(l.lines.len(), 2);
+        let (a, b) = (l.lines[0].rect, l.lines[1].rect);
+        let want = (a.width() - b.width()) * k;
+        assert!(a.x0.abs() < 0.5, "{a:?}");
+        assert!((b.x0 - want).abs() < 0.5, "{align:?}: {b:?} want x0 {want}");
+        // Глифы сдвинуты вместе со строкой.
+        let first_x = l.runs.last().unwrap().glyphs[0].x as f64;
+        assert!((first_x - b.x0).abs() < 2.0, "{first_x} {b:?}");
+    }
+}
+
+#[test]
+fn replacing_a_system_family_by_a_bundled_one_frees_its_fonts() {
+    let mut fonts = Fonts::new();
+    let base = fonts.memory();
+    let rels = [
+        "roboto/Roboto-Variable.ttf",
+        "roboto/Roboto-Italic-Variable.ttf",
+    ];
+    let faces: Vec<_> = rels
+        .iter()
+        .flat_map(|r| read_faces(&font_file(r), r))
+        .collect();
+    fonts.add_catalog(SourceKind::System, group(faces.clone()));
+    for r in rels {
+        fonts.load("Roboto", r, font_file(r)).unwrap();
+    }
+    assert!(fonts.memory() > base);
+    assert_eq!(
+        fonts.status(&FontName::new("Roboto", "Regular")),
+        FontStatus::Ready
+    );
+    fonts.add_catalog(SourceKind::Bundled, group(faces));
+    assert_eq!(fonts.memory(), base);
+    assert_eq!(
+        fonts.status(&FontName::new("Roboto", "Regular")),
+        FontStatus::Loading
+    );
+}
+
+#[test]
+fn oversized_file_over_a_loaded_slot_frees_it() {
+    let mut fonts = fonts();
+    let base = fonts.memory();
+    let big = vec![0u8; MAX_FONT_FILE + 1];
+    let err = fonts
+        .load("Inter", "inter/Inter-Variable.ttf", big)
+        .unwrap_err();
+    assert!(err.contains("64"), "{err}");
+    assert!(fonts.memory() < base);
+    assert_eq!(
+        fonts.status(&FontName::inter_regular()),
+        FontStatus::Missing
+    );
+}
+
+#[test]
+fn ellipsis_follows_the_real_advance_of_the_last_glyph() {
+    let mut fonts = fonts();
+    let t = text("ШШШШШШШШШШШШШШШШШШШШ", |p| {
+        p.sizing = TextSizing::Fixed;
+        p.truncate = true;
+    });
+    let l = lay(&mut fonts, &t, 160.0, 30.0);
+    assert!(l.truncated);
+    let ell = l.runs.last().unwrap().glyphs[0];
+    let line_glyphs: Vec<_> = l.runs[..l.runs.len() - 1]
+        .iter()
+        .flat_map(|r| r.glyphs.iter())
+        .filter(|g| (g.y - ell.y).abs() < 0.5)
+        .collect();
+    let adv = line_glyphs[1].x - line_glyphs[0].x;
+    let last = line_glyphs
+        .iter()
+        .max_by(|a, b| a.x.total_cmp(&b.x))
+        .unwrap();
+    assert!(
+        (ell.x - (last.x + adv)).abs() < 0.01,
+        "{} {} {}",
+        ell.x,
+        last.x,
+        adv
+    );
+}
+
+#[test]
+fn ellipsis_does_not_follow_a_trailing_space() {
+    let mut fonts = fonts();
+    let t = text(
+        "Съешь же ещё этих мягких французских булок да выпей чаю",
+        |p| {
+            p.sizing = TextSizing::Fixed;
+            p.truncate = true;
+        },
+    );
+    let l = lay(&mut fonts, &t, 160.0, 70.0);
+    assert!(l.truncated);
+    let ell = l.runs.last().unwrap().glyphs[0];
+    let run_font = &l.runs[0];
+    let mut best: Option<(f32, u32)> = None;
+    for r in &l.runs[..l.runs.len() - 1] {
+        for g in r.glyphs.iter().filter(|g| (g.y - ell.y).abs() < 0.5) {
+            if best.is_none_or(|(x, _)| g.x > x) {
+                best = Some((g.x, g.id));
+            }
+        }
+    }
+    let (_, id) = best.unwrap();
+    assert!(
+        !fonts
+            .outline(&run_font.font, id, &run_font.coords)
+            .elements()
+            .is_empty(),
+        "последний глиф перед многоточием — пробел"
+    );
+}

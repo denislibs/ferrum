@@ -195,12 +195,16 @@ impl Fonts {
             self.bundled_ready = true;
         }
         for info in list {
-            if info.family.is_empty()
-                || info.family.len() > MAX_FAMILY_NAME
-                || info.faces.is_empty()
-            {
+            if info.family.is_empty() || info.family.len() > MAX_FAMILY_NAME {
                 self.errors.push(format!(
                     "Шрифт пропущен: неверное имя семейства «{}»",
+                    clip(&info.family)
+                ));
+                continue;
+            }
+            if info.faces.is_empty() {
+                self.errors.push(format!(
+                    "Шрифт «{}» пропущен: в семействе нет начертаний",
                     clip(&info.family)
                 ));
                 continue;
@@ -210,6 +214,9 @@ impl Fonts {
                 if old.source >= source {
                     continue;
                 }
+                // Источник выше заменяет семейство: загруженное старое снимается
+                // из коллекции и из счёта памяти, иначе два набора под одним именем.
+                self.unload_family(&key);
             } else if self.families.len() >= MAX_FAMILIES {
                 self.errors.push(format!(
                     "Шрифт «{}» пропущен: семейств больше {MAX_FAMILIES}",
@@ -403,10 +410,23 @@ impl Fonts {
     /// файл не из списка, больше `MAX_FONT_FILE`, неразборчивый.
     pub fn load(&mut self, family: &str, file: &str, bytes: Vec<u8>) -> Result<(), String> {
         if bytes.len() > MAX_FONT_FILE {
+            // Слот мог быть уже загружен: его шрифты снимаются, а не остаются
+            // зарегистрированными в состоянии «отсутствует».
+            if let Some(slot) = self
+                .families
+                .get_mut(&family_key(family))
+                .and_then(|f| f.files.get_mut(file))
+            {
+                if slot.state == FileState::Loaded {
+                    Self::unload_slot(&mut self.fcx, &mut self.memory, slot);
+                    self.outlines.clear();
+                }
+            }
             self.fail(family, file);
             return Err(format!(
-                "Шрифт «{}» не загружен: файл больше 64 МБ",
-                clip(family)
+                "Шрифт «{}» не загружен: файл больше {} МБ",
+                clip(family),
+                MAX_FONT_FILE / (1024 * 1024)
             ));
         }
         let result = self.register(family, file, Blob::new(Arc::new(bytes)));
@@ -495,21 +515,32 @@ impl Fonts {
                 .min_by_key(|(_, f)| f.last_used)
                 .map(|(k, _)| k.clone());
             let Some(key) = victim else { break };
-            let fam = self.families.get_mut(&key).expect("найдено выше");
-            for slot in fam.files.values_mut() {
-                if slot.state != FileState::Loaded {
-                    continue;
-                }
-                for (id, w, s, wt) in slot.registered.drain(..) {
-                    self.fcx.collection.unregister_font(id, w, s, wt);
-                }
-                self.memory -= slot.bytes;
-                slot.bytes = 0;
-                slot.state = FileState::Idle;
-            }
-            self.outlines.clear();
-            self.generation += 1;
+            self.unload_family(&key);
         }
+    }
+
+    /// Снимает загруженные файлы семейства: из коллекции `fontique` и из счёта
+    /// памяти. Состояние файлов — `Idle` (нужны снова — запросятся заново).
+    fn unload_family(&mut self, key: &str) {
+        let Some(fam) = self.families.get_mut(key) else {
+            return;
+        };
+        for slot in fam.files.values_mut() {
+            if slot.state == FileState::Loaded {
+                Self::unload_slot(&mut self.fcx, &mut self.memory, slot);
+            }
+        }
+        self.outlines.clear();
+        self.generation += 1;
+    }
+
+    fn unload_slot(fcx: &mut FontContext, memory: &mut usize, slot: &mut FileSlot) {
+        for (id, w, s, wt) in slot.registered.drain(..) {
+            fcx.collection.unregister_font(id, w, s, wt);
+        }
+        *memory -= slot.bytes;
+        slot.bytes = 0;
+        slot.state = FileState::Idle;
     }
 
     /// Другой предел памяти — чтобы тест вытеснения не грузил 256 МБ шрифтов.
