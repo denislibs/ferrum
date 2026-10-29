@@ -254,6 +254,17 @@ impl Scene {
         self.by_id.len()
     }
 
+    /// Живые узлы документа (без черновиков жеста) в порядке слотов.
+    pub fn iter(&self) -> impl Iterator<Item = (Slot, &SceneNode)> + '_ {
+        self.nodes
+            .chunks
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(i, n)| Some((i as Slot, n.as_ref()?)))
+            .filter(|(s, _)| !self.draft_set.contains(s))
+    }
+
     /// Счётчик изменений: растёт при каждом непустом `apply` и каждом превью,
     /// которое что-то поменяло. Значение само по себе смысла не имеет — только
     /// сравнение с запомненным.

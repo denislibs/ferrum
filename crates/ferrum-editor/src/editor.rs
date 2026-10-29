@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use ferrum_doc::{Changes, DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
 use ferrum_render::{Camera, Measure, Overlay, OverlayTheme};
 use ferrum_scene::Scene;
+use ferrum_text::{Fonts, SharedFonts};
 use kurbo::{Point, Size, Vec2};
 
 use crate::commands::CommandId;
@@ -150,6 +151,8 @@ pub struct Editor {
     /// Измерения для оверлея; пересчитываются в `emit`.
     measures: Vec<Measure>,
     measure_cache: Option<MeasureCache>,
+    /// Реестр шрифтов для размера текста по раскладке (общий с рендером ядра).
+    pub(crate) fonts: SharedFonts,
 }
 
 impl Editor {
@@ -210,6 +213,7 @@ impl Editor {
             alt: AltState::default(),
             measures: Vec::new(),
             measure_cache: None,
+            fonts: Fonts::shared(),
         })
     }
 

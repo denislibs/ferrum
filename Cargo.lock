@@ -773,6 +773,7 @@ dependencies = [
  "ferrum-doc",
  "ferrum-render",
  "ferrum-scene",
+ "ferrum-text",
  "kurbo",
  "proptest",
  "serde",

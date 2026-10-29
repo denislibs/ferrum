@@ -108,6 +108,10 @@ struct JsonNode {
     flip_y: bool,
     fills: Vec<JsonFill>,
     strokes: Vec<JsonStroke>,
+    /// Текст узла (`TextData::to_json`) — только у текста. Сборка без текста поле
+    /// не знает и пропускает узел «text» как неизвестный (версия формата та же).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -234,6 +238,7 @@ impl ClipPayload {
                                 align: align(s.align).to_string(),
                             })
                             .collect(),
+                        text: p.text.as_ref().map(|t| t.to_json()),
                     }
                 })
                 .collect(),
@@ -470,8 +475,14 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
         flip_y: n.flip_y,
         fills,
         strokes,
-        // Текст копии — пустой до этапа с форматом текста в буфере (Task 6).
-        text: (kind == NodeKind::Text).then(|| Arc::new(TextData::default())),
+        // Текст — только у текстового узла; пределы проверяет `from_json`.
+        text: match (kind, n.text.as_deref()) {
+            (NodeKind::Text, Some(json)) => Some(Arc::new(
+                TextData::from_json(json).map_err(|e| corrupted(e.to_string()))?,
+            )),
+            (NodeKind::Text, None) => Some(Arc::new(TextData::default())),
+            _ => None,
+        },
     };
     // Нечисловые и огромные значения — к допустимым, как у строк кэша сцены.
     shape::sanitize(&mut props);

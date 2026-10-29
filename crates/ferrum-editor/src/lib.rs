@@ -18,6 +18,7 @@ pub mod panel;
 pub mod presets;
 pub mod selection;
 pub mod snap;
+pub mod text;
 pub mod tools;
 
 pub use actions::{FIT_PADDING_PX, PRESET_GAP};
@@ -30,4 +31,5 @@ pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,
 };
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
+pub use text::{fit_size, MissingFont, TextPending};
 pub use tools::{Cursor, Tool, ToolKind, ToolOverlay};
