@@ -781,12 +781,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum-fontmeta"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "skrifa",
+]
+
+[[package]]
 name = "ferrum-render"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "ferrum-doc",
  "ferrum-scene",
+ "ferrum-text",
  "kurbo",
  "parley",
  "skrifa",
@@ -804,6 +813,19 @@ dependencies = [
  "kurbo",
  "proptest",
  "rstar",
+]
+
+[[package]]
+name = "ferrum-text"
+version = "0.1.0"
+dependencies = [
+ "ferrum-doc",
+ "ferrum-fontmeta",
+ "kurbo",
+ "parley",
+ "serde",
+ "serde_json",
+ "skrifa",
 ]
 
 [[package]]

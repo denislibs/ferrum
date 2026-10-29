@@ -21,8 +21,9 @@ use vello_cpu::peniko::Fill;
 
 use crate::backend::{RenderBackend, Rgba};
 
-/// Onest (SIL Open Font License 1.1, лицензия — `assets/fonts/OFL.txt`).
-pub const ONEST: &[u8] = include_bytes!("../assets/fonts/Onest-wght.ttf");
+/// Onest (SIL Open Font License 1.1) — тот же файл, что вшитое семейство
+/// реестра шрифтов (`crates/ferrum-text/assets/fonts`).
+pub use ferrum_text::ONEST;
 
 /// Сколько записей держать в каждом кэше подписей; при переполнении вытесняется
 /// запись, которой не пользовались дольше всех.

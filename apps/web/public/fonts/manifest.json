@@ -1,0 +1,1203 @@
+{
+  "families": [
+    {
+      "faces": [
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Thin Italic",
+          "weight": 100.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraLight Italic",
+          "weight": 200.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Medium Italic",
+          "weight": 500.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "inter/Inter-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Black Italic",
+          "weight": 900.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Thin",
+          "weight": 100.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraLight",
+          "weight": 200.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Light",
+          "weight": 300.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Medium",
+          "weight": 500.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraBold",
+          "weight": 800.0
+        },
+        {
+          "file": "inter/Inter-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Black",
+          "weight": 900.0
+        }
+      ],
+      "family": "Inter"
+    },
+    {
+      "faces": [
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Thin Italic",
+          "weight": 100.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraLight Italic",
+          "weight": 200.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Medium Italic",
+          "weight": 500.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Thin",
+          "weight": 100.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraLight",
+          "weight": 200.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Light",
+          "weight": 300.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Medium",
+          "weight": 500.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "jetbrainsmono/JetBrainsMono-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraBold",
+          "weight": 800.0
+        }
+      ],
+      "family": "JetBrains Mono"
+    },
+    {
+      "faces": [
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Thin Italic",
+          "weight": 100.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraLight Italic",
+          "weight": 200.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Medium Italic",
+          "weight": 500.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "montserrat/Montserrat-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Black Italic",
+          "weight": 900.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Thin",
+          "weight": 100.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraLight",
+          "weight": 200.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Light",
+          "weight": 300.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Medium",
+          "weight": 500.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraBold",
+          "weight": 800.0
+        },
+        {
+          "file": "montserrat/Montserrat-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Black",
+          "weight": 900.0
+        }
+      ],
+      "family": "Montserrat"
+    },
+    {
+      "faces": [
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Thin Italic",
+          "weight": 100.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraLight Italic",
+          "weight": 200.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Medium Italic",
+          "weight": 500.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "notosans/NotoSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Black Italic",
+          "weight": 900.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Thin",
+          "weight": 100.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraLight",
+          "weight": 200.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Light",
+          "weight": 300.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Medium",
+          "weight": 500.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraBold",
+          "weight": 800.0
+        },
+        {
+          "file": "notosans/NotoSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Black",
+          "weight": 900.0
+        }
+      ],
+      "family": "Noto Sans"
+    },
+    {
+      "faces": [
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "opensans/OpenSans-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Light",
+          "weight": 300.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraBold",
+          "weight": 800.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Light",
+          "weight": 300.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "opensans/OpenSans-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed ExtraBold",
+          "weight": 800.0
+        }
+      ],
+      "family": "Open Sans"
+    },
+    {
+      "faces": [
+        {
+          "file": "ptsans/PTSans-Bold.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "ptsans/PTSans-BoldItalic.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "ptsans/PTSans-Italic.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "ptsans/PTSans-Regular.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        }
+      ],
+      "family": "PT Sans"
+    },
+    {
+      "faces": [
+        {
+          "file": "ptserif/PTSerif-Bold.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "ptserif/PTSerif-BoldItalic.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "ptserif/PTSerif-Italic.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "ptserif/PTSerif-Regular.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        }
+      ],
+      "family": "PT Serif"
+    },
+    {
+      "faces": [
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Medium Italic",
+          "weight": 500.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Black Italic",
+          "weight": 900.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Medium",
+          "weight": 500.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraBold",
+          "weight": 800.0
+        },
+        {
+          "file": "playfairdisplay/PlayfairDisplay-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Black",
+          "weight": 900.0
+        }
+      ],
+      "family": "Playfair Display"
+    },
+    {
+      "faces": [
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Thin Italic",
+          "weight": 100.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraLight Italic",
+          "weight": 200.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Medium Italic",
+          "weight": 500.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 1.0,
+          "style": "Black Italic",
+          "weight": 900.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Thin Italic",
+          "weight": 100.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed ExtraLight Italic",
+          "weight": 200.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Light Italic",
+          "weight": 300.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Italic",
+          "weight": 400.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Medium Italic",
+          "weight": 500.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed SemiBold Italic",
+          "weight": 600.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Bold Italic",
+          "weight": 700.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed ExtraBold Italic",
+          "weight": 800.0
+        },
+        {
+          "file": "roboto/Roboto-Italic-Variable.ttf",
+          "index": 0,
+          "italic": true,
+          "stretch": 0.75,
+          "style": "Condensed Black Italic",
+          "weight": 900.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Thin",
+          "weight": 100.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraLight",
+          "weight": 200.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Light",
+          "weight": 300.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Medium",
+          "weight": 500.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "ExtraBold",
+          "weight": 800.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 1.0,
+          "style": "Black",
+          "weight": 900.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Thin",
+          "weight": 100.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed ExtraLight",
+          "weight": 200.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Light",
+          "weight": 300.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Regular",
+          "weight": 400.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Medium",
+          "weight": 500.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed SemiBold",
+          "weight": 600.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Bold",
+          "weight": 700.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed ExtraBold",
+          "weight": 800.0
+        },
+        {
+          "file": "roboto/Roboto-Variable.ttf",
+          "index": 0,
+          "italic": false,
+          "stretch": 0.75,
+          "style": "Condensed Black",
+          "weight": 900.0
+        }
+      ],
+      "family": "Roboto"
+    }
+  ],
+  "license": "SIL Open Font License 1.1 (OFL.txt в каталоге семейства)",
+  "source": "https://github.com/google/fonts (коммит в apps/web/scripts/fetch-fonts.mjs)"
+}

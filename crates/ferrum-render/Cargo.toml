@@ -13,6 +13,7 @@ gpu = ["dep:vello_gpu", "dep:vello_common"]
 [dependencies]
 ferrum-doc = { path = "../ferrum-doc" }
 ferrum-scene = { path = "../ferrum-scene" }
+ferrum-text = { path = "../ferrum-text" }
 kurbo.workspace = true
 vello_cpu.workspace = true
 vello_gpu = { workspace = true, optional = true }
