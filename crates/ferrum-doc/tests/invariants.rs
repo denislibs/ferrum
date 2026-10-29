@@ -36,13 +36,31 @@ enum Op {
         node: usize,
         rgb: u8,
     },
+    /// Правки текста (подсистема 3): вставка буквы или перевода строки, удаление
+    /// диапазона, кегль диапазона. Узел не текст — правки нет.
+    TextInsert {
+        node: usize,
+        at: usize,
+        ch: u8,
+    },
+    TextDelete {
+        node: usize,
+        a: usize,
+        b: usize,
+    },
+    TextFormat {
+        node: usize,
+        a: usize,
+        b: usize,
+        size: u8,
+    },
     Undo,
     Redo,
 }
 
 fn edit_op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        (any::<usize>(), 0u8..6).prop_map(|(parent, kind)| Op::Create { parent, kind }),
+        (any::<usize>(), 0u8..7).prop_map(|(parent, kind)| Op::Create { parent, kind }),
         (any::<usize>(), any::<usize>(), 0usize..5).prop_map(|(node, parent, index)| Op::Move {
             node,
             parent,
@@ -58,6 +76,18 @@ fn edit_op() -> impl Strategy<Value = Op> {
         any::<usize>().prop_map(|node| Op::Delete { node }),
         (any::<usize>(), -1000i32..1000).prop_map(|(node, x)| Op::SetX { node, x }),
         (any::<usize>(), any::<u8>()).prop_map(|(node, rgb)| Op::Fill { node, rgb }),
+        (any::<usize>(), any::<usize>(), any::<u8>()).prop_map(|(node, at, ch)| Op::TextInsert {
+            node,
+            at,
+            ch
+        }),
+        (any::<usize>(), any::<usize>(), any::<usize>()).prop_map(|(node, a, b)| Op::TextDelete {
+            node,
+            a,
+            b
+        }),
+        (any::<usize>(), any::<usize>(), any::<usize>(), any::<u8>())
+            .prop_map(|(node, a, b, size)| Op::TextFormat { node, a, b, size }),
     ]
 }
 
@@ -69,14 +99,29 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-const KINDS: [NodeKind; 6] = [
+const KINDS: [NodeKind; 7] = [
     NodeKind::Frame,
     NodeKind::Group,
     NodeKind::Rect,
     NodeKind::Ellipse,
     NodeKind::Line,
     NodeKind::Image,
+    NodeKind::Text,
 ];
+
+/// Правка текста: шаг истории есть, только если текст изменился (кегль, уже
+/// стоящий на диапазоне, — не правка).
+fn is_text_op(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::TextInsert { .. } | Op::TextDelete { .. } | Op::TextFormat { .. }
+    )
+}
+
+/// Длина текста узла (с последним переводом строки); не текст — `None`.
+fn text_len(p: &Tx, n: NodeId) -> DocResult<Option<usize>> {
+    Ok(p.props(n)?.text.map(|t| t.content.char_len()))
+}
 
 /// `pick(i)` — живой узел или корень (None), чтобы операции попадали в существующие узлы.
 fn pick(alive: &[NodeId], i: usize) -> Option<NodeId> {
@@ -99,6 +144,7 @@ fn attempted(op: &Op, alive: &[NodeId]) -> bool {
         | Op::Delete { node }
         | Op::SetX { node, .. }
         | Op::Fill { node, .. } => pick(alive, node).is_some(),
+        Op::TextInsert { .. } | Op::TextDelete { .. } | Op::TextFormat { .. } => false,
         Op::Undo | Op::Redo => false,
     }
 }
@@ -149,7 +195,9 @@ fn apply_edit(p: &Tx, op: &Op, alive: &[NodeId]) -> DocResult<()> {
         }
         Op::Fill { node, rgb } => {
             if let Some(n) = pick(alive, node) {
-                let fills = vec![Fill::solid(Color::rgba(rgb, rgb, 0, 255))];
+                // Синий канал 1: такой заливки нет ни у одного узла по умолчанию (у
+                // текста — чёрная), и правка всегда что-то меняет.
+                let fills = vec![Fill::solid(Color::rgba(rgb, rgb, 1, 255))];
                 p.set_props(
                     n,
                     &PropsPatch {
@@ -157,6 +205,38 @@ fn apply_edit(p: &Tx, op: &Op, alive: &[NodeId]) -> DocResult<()> {
                         ..Default::default()
                     },
                 )?;
+            }
+        }
+        Op::TextInsert { node, at, ch } => {
+            if let Some(n) = pick(alive, node) {
+                if let Some(len) = text_len(p, n)? {
+                    let s = ["а", "б", "x", " ", "\n"][ch as usize % 5];
+                    p.insert_text(n, at % len, s, None)?;
+                }
+            }
+        }
+        Op::TextDelete { node, a, b } => {
+            if let Some(n) = pick(alive, node) {
+                if let Some(len) = text_len(p, n)? {
+                    // Последний перевод строки не удаляется.
+                    let body = len - 1;
+                    if body > 0 {
+                        let start = a % body;
+                        p.delete_text(n, start..start + 1 + b % (body - start))?;
+                    }
+                }
+            }
+        }
+        Op::TextFormat { node, a, b, size } => {
+            if let Some(n) = pick(alive, node) {
+                if let Some(len) = text_len(p, n)? {
+                    let start = a % len;
+                    let attrs = TextAttrs {
+                        size: Some(10.0 + (size % 3) as f64),
+                        ..Default::default()
+                    };
+                    p.format_text(n, start..start + 1 + b % (len - start), &attrs, &[])?;
+                }
             }
         }
         Op::Undo | Op::Redo => unreachable!("undo и redo не проходят через transact"),
@@ -333,8 +413,9 @@ proptest! {
                     });
                     match result {
                         Ok(_) => {
-                            if tried {
-                                let after = snapshot(doc.page(page).unwrap());
+                            let after = snapshot(doc.page(page).unwrap());
+                            let changed = if is_text_op(&edit) { after != m.cur } else { tried };
+                            if changed {
                                 m.past.push(replace(&mut m.cur, after));
                                 m.future.clear();
                                 applied += 1;

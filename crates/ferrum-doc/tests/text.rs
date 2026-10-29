@@ -1,6 +1,6 @@
 //! Текстовый узел (подсистема 3, этап 1): содержимое в `LoroText` с разметкой,
 //! расширение разметки на вставку, свойства текста в зеркале, отмена правок
-//! текста обратной дельтой, пределы, файл и кэш сцены.
+//! текста обратной дельтой, слияние ввода подряд, пределы, файл и кэш сцены.
 
 use ferrum_doc::container::{decode, encode};
 use ferrum_doc::*;
@@ -220,6 +220,104 @@ fn text_props_patch_writes_only_text_nodes() {
         p.props(id).unwrap().text_props(),
         Some(&TextProps::default())
     );
+}
+
+#[test]
+fn typing_in_a_row_is_one_undo_step() {
+    let (mut doc, page, id) = doc_with_text();
+    let before = content(&mut doc, page, id);
+    // Курсор с 11-го символа, правки через 300 мс.
+    for (i, ch) in ["!", "!", "?"].into_iter().enumerate() {
+        let caret = 11 + i;
+        let merge = TextMerge {
+            node: id,
+            before: caret,
+            after: caret + 1,
+            style: 0,
+            at_ms: 300.0 * i as f64,
+        };
+        doc.transact_merging(page, vec![id], merge, |tx| {
+            tx.insert_text(id, caret, ch, None)?;
+            Ok(vec![id])
+        })
+        .unwrap();
+    }
+    assert_eq!(content(&mut doc, page, id).text(), "Привет, мир!!?\n");
+    doc.undo().unwrap();
+    assert_eq!(content(&mut doc, page, id), before);
+    assert!(
+        !doc.can_undo() || {
+            // Создание узла — свой шаг раньше ввода.
+            doc.undo().unwrap();
+            !doc.can_undo()
+        }
+    );
+}
+
+#[test]
+fn pause_jump_or_style_change_starts_a_new_step() {
+    for (gap, jump, style) in [(1500.0, 0, 0), (100.0, 3, 0), (100.0, 0, 7)] {
+        let (mut doc, page, id) = doc_with_text();
+        let first = TextMerge {
+            node: id,
+            before: 0,
+            after: 1,
+            style: 0,
+            at_ms: 0.0,
+        };
+        doc.transact_merging(page, vec![], first, |tx| {
+            tx.insert_text(id, 0, "а", None)?;
+            Ok(vec![])
+        })
+        .unwrap();
+        let after_first = content(&mut doc, page, id);
+        let at = 1 + jump;
+        let second = TextMerge {
+            node: id,
+            before: at,
+            after: at + 1,
+            style,
+            at_ms: gap,
+        };
+        doc.transact_merging(page, vec![], second, |tx| {
+            tx.insert_text(id, at, "б", None)?;
+            Ok(vec![])
+        })
+        .unwrap();
+        doc.undo().unwrap();
+        assert_eq!(
+            content(&mut doc, page, id),
+            after_first,
+            "{gap} {jump} {style}"
+        );
+    }
+}
+
+#[test]
+fn undo_breaks_merging() {
+    let (mut doc, page, id) = doc_with_text();
+    let tag = |before: usize, at_ms: f64| TextMerge {
+        node: id,
+        before,
+        after: before + 1,
+        style: 0,
+        at_ms,
+    };
+    doc.transact_merging(page, vec![], tag(0, 0.0), |tx| {
+        tx.insert_text(id, 0, "а", None)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    doc.undo().unwrap();
+    let base = content(&mut doc, page, id);
+    // После отмены та же позиция не сливается с отменённым шагом.
+    doc.transact_merging(page, vec![], tag(1, 100.0), |tx| {
+        tx.insert_text(id, 0, "б", None)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    doc.undo().unwrap();
+    assert_eq!(content(&mut doc, page, id), base);
 }
 
 #[test]

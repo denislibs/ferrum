@@ -289,6 +289,77 @@ fn read_text_props_with(get: impl Fn(&str) -> Option<LoroValue>) -> TextProps {
     }
 }
 
+impl TextData {
+    /// Текст в JSON для буфера обмена (`web application/x-ferrum`): свойства —
+    /// те же ключи, что в карте узла, содержимое — дельта Quill с разметкой.
+    pub fn to_json(&self) -> String {
+        let props: std::collections::HashMap<String, LoroValue> = text_props_entries(&self.props)
+            .into_iter()
+            .filter_map(|(k, v)| Some((k.to_string(), v?)))
+            .collect();
+        let runs: Vec<LoroValue> = self
+            .content
+            .runs
+            .iter()
+            .map(|r| {
+                obj(vec![
+                    ("insert", r.text.as_str().into()),
+                    (
+                        "attributes",
+                        LoroValue::from(
+                            attrs_to_loro(&r.attrs)
+                                .into_iter()
+                                .collect::<std::collections::HashMap<_, _>>(),
+                        ),
+                    ),
+                ])
+            })
+            .collect();
+        let v = obj(vec![
+            ("props", LoroValue::from(props)),
+            ("runs", LoroValue::from(runs)),
+        ]);
+        serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    /// Текст из JSON буфера обмена. Данные не доверенные: неизвестные ключи и
+    /// неверные значения — умолчания, пределы — как у правки (спека 3).
+    pub fn from_json(s: &str) -> DocResult<TextData> {
+        let bad = || DocError::Corrupted("текст в буфере обмена".into());
+        let v: LoroValue = serde_json::from_str(s).map_err(|_| bad())?;
+        let props = match field(&v, "props") {
+            Some(LoroValue::Map(m)) => read_text_props_with(|k| m.get(k).cloned()),
+            _ => return Err(bad()),
+        };
+        let mut runs: Vec<TextRun> = Vec::new();
+        let Some(LoroValue::List(items)) = field(&v, "runs") else {
+            return Err(bad());
+        };
+        for item in items.iter() {
+            let text = field(item, "insert").and_then(as_str).ok_or_else(bad)?;
+            if text.is_empty() {
+                continue;
+            }
+            let attrs = match field(item, "attributes") {
+                Some(LoroValue::Map(m)) => attrs_from_loro(m.iter().map(|(k, v)| (k.as_str(), v))),
+                _ => TextAttrs::default(),
+            };
+            push_run(&mut runs, text, attrs);
+        }
+        let mut content = TextContent { runs };
+        if !content.text().ends_with('\n') {
+            push_run(&mut content.runs, "\n".to_string(), TextAttrs::default());
+        }
+        if content.char_len() > MAX_TEXT_CHARS + 1 {
+            return Err(DocError::TextTooLong);
+        }
+        if content.styled_runs() > MAX_TEXT_RUNS {
+            return Err(DocError::TooManyTextRuns);
+        }
+        Ok(TextData { props, content })
+    }
+}
+
 /// Разметка участка в атрибуты Loro (только заданные ключи).
 pub(crate) fn attrs_to_loro(a: &TextAttrs) -> FxHashMap<String, LoroValue> {
     let mut m = FxHashMap::default();

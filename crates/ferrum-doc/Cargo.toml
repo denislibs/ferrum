@@ -10,6 +10,8 @@ loro.workspace = true
 loro-internal.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
+# Текст узла в JSON для буфера обмена (`TextData::to_json`): значения Loro как есть.
+serde_json.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

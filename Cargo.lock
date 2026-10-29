@@ -761,6 +761,7 @@ dependencies = [
  "loro",
  "loro-internal",
  "proptest",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

@@ -430,6 +430,20 @@ impl PageDoc {
         Ok(id)
     }
 
+    /// Узел сразу со всеми свойствами — копия или вставка; у текста и
+    /// содержимое. `index = None` — поверх всех детей.
+    pub(crate) fn create_with_props(
+        &self,
+        parent: Option<NodeId>,
+        index: Option<usize>,
+        props: &Props,
+    ) -> DocResult<NodeId> {
+        let tid = self.create_tree_node(parent, index)?;
+        let id = NodeId(tid);
+        self.finish_create(id, tid, props.clone())?;
+        Ok(id)
+    }
+
     /// Восстанавливает узел под прежним стабильным ID (отмена удаления).
     fn create_with(
         &self,
@@ -1044,6 +1058,16 @@ impl<'a> Tx<'a> {
 
     pub fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
         self.page.set_props(id, patch)
+    }
+
+    /// Узел сразу со всеми свойствами (копия, вставка; у текста — с содержимым).
+    pub fn create_with_props(
+        &self,
+        parent: Option<NodeId>,
+        index: Option<usize>,
+        props: &Props,
+    ) -> DocResult<NodeId> {
+        self.page.create_with_props(parent, index, props)
     }
 
     /// См. [`Tx::move_nodes`]: перенос одного узла.
