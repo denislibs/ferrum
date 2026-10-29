@@ -7,7 +7,24 @@
 //! Текст всегда кончается переводом строки: на нём лежит разметка последнего
 //! абзаца (список, отступ), как в Quill; раскладка этот перевод строки не рисует.
 
+use crate::error::{DocError, DocResult};
 use crate::types::{Color, Fill};
+
+/// Предел символов: `len` — длина вместе с последним переводом строки.
+pub(crate) fn check_chars(len: usize) -> DocResult<()> {
+    if len > MAX_TEXT_CHARS + 1 {
+        return Err(DocError::TextTooLong);
+    }
+    Ok(())
+}
+
+/// Предел участков со стилями.
+pub(crate) fn check_runs(runs: usize) -> DocResult<()> {
+    if runs > MAX_TEXT_RUNS {
+        return Err(DocError::TooManyTextRuns);
+    }
+    Ok(())
+}
 
 /// Предел символов текста узла (спека 3).
 pub const MAX_TEXT_CHARS: usize = 100_000;
@@ -299,6 +316,13 @@ impl TextContent {
     /// Длина в символах Unicode.
     pub fn char_len(&self) -> usize {
         self.runs.iter().map(|r| r.text.chars().count()).sum()
+    }
+
+    /// Пределы текста (спека 3): символов не больше `MAX_TEXT_CHARS` (последний
+    /// перевод строки не считается) и участков со стилями не больше `MAX_TEXT_RUNS`.
+    pub fn check_limits(&self) -> DocResult<()> {
+        check_chars(self.char_len())?;
+        check_runs(self.styled_runs())
     }
 
     /// Участки с разметкой (для предела `MAX_TEXT_RUNS`).

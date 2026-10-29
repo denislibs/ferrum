@@ -468,3 +468,156 @@ fn text_edits_go_through_the_journal() {
         content(&mut doc, page, id)
     );
 }
+
+/// `n` участков со стилями, между ними обычные; кончается переводом строки.
+fn styled(n: usize) -> TextContent {
+    let mut runs: Vec<TextRun> = (0..n)
+        .flat_map(|i| {
+            [
+                TextRun {
+                    text: "а".into(),
+                    attrs: TextAttrs {
+                        size: Some(10.0 + i as f64),
+                        ..Default::default()
+                    },
+                },
+                TextRun {
+                    text: "б".into(),
+                    attrs: TextAttrs::default(),
+                },
+            ]
+        })
+        .collect();
+    if let Some(last) = runs.last_mut() {
+        last.text.push('\n');
+    }
+    TextContent { runs }
+}
+
+#[test]
+fn text_json_round_trip() {
+    let mut props = TextProps::default();
+    props.style.size = 20.0;
+    let data = TextData {
+        props,
+        content: {
+            let mut c = styled(2);
+            c.runs[0].attrs.style = Some("Bold".into());
+            c
+        },
+    };
+    let back = TextData::from_json(&data.to_json()).unwrap();
+    assert_eq!(back, data);
+}
+
+#[test]
+fn text_json_bad_input() {
+    assert!(TextData::from_json("не json").is_err());
+    assert!(TextData::from_json("{}").is_err());
+    assert!(TextData::from_json(r#"{"props":{}}"#).is_err());
+    assert!(TextData::from_json(r#"{"runs":[]}"#).is_err());
+    assert!(TextData::from_json(r#"{"props":{},"runs":[{"attributes":{}}]}"#).is_err());
+    // Неизвестные ключи свойств — умолчания.
+    let d = TextData::from_json(r#"{"props":{"zzz":1},"runs":[{"insert":"a"}]}"#).unwrap();
+    assert_eq!(d.props, TextProps::default());
+    assert_eq!(d.content.text(), "a\n");
+}
+
+#[test]
+fn text_json_adds_trailing_newline_and_refuses_over_limit() {
+    let d = TextData::from_json(r#"{"props":{},"runs":[{"insert":"абв"}]}"#).unwrap();
+    assert_eq!(d.content.text(), "абв\n");
+    let d = TextData::from_json(r#"{"props":{},"runs":[]}"#).unwrap();
+    assert_eq!(d.content.text(), "\n");
+
+    let chars = |n: usize| {
+        format!(
+            r#"{{"props":{{}},"runs":[{{"insert":"{}"}}]}}"#,
+            "a".repeat(n)
+        )
+    };
+    assert!(TextData::from_json(&chars(MAX_TEXT_CHARS)).is_ok());
+    assert!(matches!(
+        TextData::from_json(&chars(MAX_TEXT_CHARS + 1)),
+        Err(DocError::TextTooLong)
+    ));
+
+    let runs = |n: usize| {
+        let items: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"insert":"а","attributes":{{"size":{}}}}},{{"insert":"б"}}"#,
+                    10 + i
+                )
+            })
+            .collect();
+        format!(r#"{{"props":{{}},"runs":[{}]}}"#, items.join(","))
+    };
+    assert!(TextData::from_json(&runs(MAX_TEXT_RUNS)).is_ok());
+    assert!(matches!(
+        TextData::from_json(&runs(MAX_TEXT_RUNS + 1)),
+        Err(DocError::TooManyTextRuns)
+    ));
+}
+
+#[test]
+fn create_with_props_undo_redo() {
+    let (mut doc, page, id) = doc_with_text();
+    let mut props = doc.page(page).unwrap().props(id).unwrap();
+    props.name = "Копия".into();
+    let copy = doc
+        .transact(page, vec![], |tx| {
+            Ok(vec![tx.create_with_props(None, None, &props)?])
+        })
+        .unwrap()[0];
+    let want = props.text.clone();
+    let got = |doc: &mut Document| doc.page(page).unwrap().props(copy);
+    assert_eq!(got(&mut doc).unwrap().text, want);
+    assert_eq!(got(&mut doc).unwrap().name, "Копия");
+    doc.undo().unwrap();
+    assert!(got(&mut doc).is_err());
+    doc.redo().unwrap();
+    assert_eq!(got(&mut doc).unwrap().text, want);
+}
+
+#[test]
+fn create_with_props_refuses_over_limit_without_step() {
+    let (mut doc, page, id) = doc_with_text();
+    let base = doc.page(page).unwrap().props(id).unwrap();
+    for content in [
+        TextContent::plain(&"a".repeat(MAX_TEXT_CHARS + 1)),
+        styled(MAX_TEXT_RUNS + 1),
+    ] {
+        let mut props = base.clone();
+        props.text = Some(std::sync::Arc::new(TextData {
+            props: TextProps::default(),
+            content,
+        }));
+        let nodes = doc.page(page).unwrap().walk().len();
+        let r = doc.transact(page, vec![], |tx| {
+            Ok(vec![tx.create_with_props(None, None, &props)?])
+        });
+        assert!(matches!(
+            r,
+            Err(DocError::TextTooLong | DocError::TooManyTextRuns)
+        ));
+        assert_eq!(doc.page(page).unwrap().walk().len(), nodes);
+    }
+    // Отменяется только создание исходного узла: отказанные копии шагов не дали.
+    doc.undo().unwrap();
+    assert!(!doc.can_undo());
+}
+
+#[test]
+fn fill_texts_counts() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let ids = doc
+        .transact(page, vec![], |tx| fixture::fill_texts(tx, 250))
+        .unwrap();
+    assert_eq!(ids.len(), 250);
+    let p = doc.page(page).unwrap();
+    let walk = p.walk();
+    let count = |k| walk.iter().filter(|n| p.kind(**n).unwrap() == k).count();
+    assert_eq!((count(NodeKind::Text), count(NodeKind::Frame)), (250, 3));
+}

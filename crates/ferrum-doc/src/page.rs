@@ -438,6 +438,10 @@ impl PageDoc {
         index: Option<usize>,
         props: &Props,
     ) -> DocResult<NodeId> {
+        // Пределы текста — до создания узла: отказ не оставляет ни узла, ни шага.
+        if let Some(t) = &props.text {
+            t.content.check_limits()?;
+        }
         let tid = self.create_tree_node(parent, index)?;
         let id = NodeId(tid);
         self.finish_create(id, tid, props.clone())?;
@@ -572,6 +576,7 @@ impl PageDoc {
         if text.len_unicode() as isize + grown > MAX_TEXT_CHARS as isize + 1 {
             return Err(DocError::TextTooLong);
         }
+        // (Тот же предел, что `check_chars`; здесь длина считается до правки.)
         let inverse = edit(&text)?;
         let content = text_codec::read_content(&text);
         if content.styled_runs() > MAX_TEXT_RUNS {

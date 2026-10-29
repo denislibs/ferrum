@@ -350,12 +350,7 @@ impl TextData {
         if !content.text().ends_with('\n') {
             push_run(&mut content.runs, "\n".to_string(), TextAttrs::default());
         }
-        if content.char_len() > MAX_TEXT_CHARS + 1 {
-            return Err(DocError::TextTooLong);
-        }
-        if content.styled_runs() > MAX_TEXT_RUNS {
-            return Err(DocError::TooManyTextRuns);
-        }
+        content.check_limits()?;
         Ok(TextData { props, content })
     }
 }
