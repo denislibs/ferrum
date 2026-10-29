@@ -478,8 +478,13 @@ impl Core {
             | Command::Snapshot { .. }
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
-            | Command::ReadMeasurements => {
-                debug_assert!(false, "команда этапа 4 — в `Core::command`");
+            | Command::ReadMeasurements
+            | Command::DemoText { .. }
+            | Command::FontsAvailable { .. }
+            | Command::LoadFont { .. }
+            | Command::ReplaceMissingFont { .. }
+            | Command::TestCreateText { .. } => {
+                debug_assert!(false, "команда ядра — в `Core::command`");
             }
         }
     }

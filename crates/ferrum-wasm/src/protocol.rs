@@ -30,6 +30,14 @@ pub const EXPORT_SCALES: [f64; 3] = [1.0, 2.0, 3.0];
 /// на экранах с плотностью 2 оно оставалось чётким.
 pub const THUMB_WIDTH: u16 = 480;
 pub const THUMB_HEIGHT: u16 = 320;
+/// Наибольший текст тестовой команды `TestCreateText` (спека подсистемы 3, раздел 8:
+/// `data` ≤ 64 КБ за команду).
+pub const MAX_TEXT_DATA_BYTES: usize = 64 * 1024;
+/// Наибольшее число семейств в `FontsAvailable` и начертаний у семейства.
+pub const MAX_FONT_FAMILIES: usize = 4096;
+pub const MAX_FONT_FACES: usize = 1000;
+/// Наибольший пример с текстами (`Demo { texts }`).
+pub const MAX_DEMO_TEXTS: u32 = 100_000;
 /// Наибольшее число пачек журнала изменений при открытии (этап 6): пачка пишется
 /// не чаще раза в 2 с, а полный файл — хотя бы раз в 5 минут правок, так что столько
 /// набирается, только если полное сохранение много часов не удаётся.
@@ -148,6 +156,74 @@ pub enum EditPhase {
     Cancel,
 }
 
+/// Источник шрифтов: вшитые в сборку или системные.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum FontSource {
+    Bundled,
+    System,
+}
+
+/// Шрифт документа: семейство и начертание.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FontNameDto {
+    pub family: String,
+    pub style: String,
+}
+
+/// Начертание из списка шрифтов: имя, вес, курсив, ширина (у системных шрифтов
+/// Chrome их нет — ядро угадывает по имени) и файл (имя в манифесте вшитых или
+/// postscript-имя системного) с номером шрифта в коллекции.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FontFaceDto {
+    pub style: String,
+    #[serde(default)]
+    pub weight: Option<f64>,
+    #[serde(default)]
+    pub italic: Option<bool>,
+    #[serde(default)]
+    pub stretch: Option<f64>,
+    pub file: String,
+    #[serde(default)]
+    pub index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FontFamilyDto {
+    pub family: String,
+    pub faces: Vec<FontFaceDto>,
+}
+
+/// Отсутствующий шрифт текущей страницы и сколько текстов им набрано.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingFontDto {
+    pub family: String,
+    pub style: String,
+    pub nodes: u32,
+}
+
+/// Семейство для выбора замены: источник и начертания.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct FontChoice {
+    pub family: String,
+    pub source: FontSource,
+    pub styles: Vec<String>,
+}
+
+/// Режим размера текста тестовой команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum TextSizingDto {
+    AutoWidth,
+    AutoHeight,
+    Fixed,
+}
+
 /// Правка выделения из панели свойств.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(
@@ -194,6 +270,12 @@ pub enum Command {
     /// Новый документ — страница-пример из `nodes` узлов (фреймы по 100 узлов).
     Demo {
         nodes: u32,
+    },
+    /// Новый документ — страница-пример из `texts` текстовых узлов (фреймы по 100
+    /// текстов фиксированного размера): замер «10 000 текстов» (спека подсистемы 3,
+    /// раздел 5).
+    DemoText {
+        texts: u32,
     },
     /// Открыть файл и применить поверх него пачки журнала изменений, записанные
     /// после него, по порядку записи (восстановление после сбоя, этап 6).
@@ -365,6 +447,45 @@ pub enum Command {
     },
     SetSettings {
         pixel_snap: bool,
+    },
+    // ——— Подсистема 3, этап 1: шрифты ———
+    /// Список шрифтов источника: вшитые (манифест сборки — его читает worker ядра)
+    /// или системные (Chrome — `queryLocalFonts`, десктоп — сканирование каталогов).
+    FontsAvailable {
+        source: FontSource,
+        families: Vec<FontFamilyDto>,
+    },
+    /// Байты файла шрифта в ответ на `FontRequest`; без байтов — файл получить не
+    /// удалось (шрифт считается отсутствующим).
+    LoadFont {
+        family: String,
+        file: String,
+        #[serde(default)]
+        #[tsify(type = "Uint8Array | undefined")]
+        bytes: Option<ByteBuf>,
+    },
+    /// Заменить шрифт во всех текстах текущей страницы одним шагом отмены.
+    ReplaceMissingFont {
+        from: FontNameDto,
+        to: FontNameDto,
+    },
+    /// Только тестовый режим (`init.test`; worker отвергает её без него): текстовый
+    /// узел в точке мира — инструмента T до этапа 2 нет. Ждёт шрифтов, если они
+    /// ещё грузятся.
+    TestCreateText {
+        x: f64,
+        y: f64,
+        text: String,
+        #[serde(default)]
+        font: Option<FontNameDto>,
+        #[serde(default)]
+        size: Option<f64>,
+        #[serde(default)]
+        sizing: Option<TextSizingDto>,
+        #[serde(default)]
+        width: Option<f64>,
+        #[serde(default)]
+        height: Option<f64>,
     },
 }
 
@@ -595,5 +716,26 @@ pub enum CoreEvent {
     /// Приходит, когда признак сменился.
     Modified {
         modified: bool,
+    },
+    // ——— Подсистема 3, этап 1: шрифты ———
+    /// Ядру нужны байты файлов семейства: вшитые качает worker ядра, системные —
+    /// основной поток (`LoadFont` на каждый файл).
+    FontRequest {
+        family: String,
+        source: FontSource,
+        files: Vec<String>,
+    },
+    /// Отсутствующие шрифты текущей страницы; приходит, когда список сменился.
+    MissingFonts {
+        list: Vec<MissingFontDto>,
+    },
+    /// Известные семейства для выбора замены; приходит, когда список сменился.
+    FontCatalog {
+        families: Vec<FontChoice>,
+    },
+    /// Сообщение для журнала ошибок (консоль), не для уведомления: неразборчивый
+    /// файл шрифта, пропущенное семейство.
+    Log {
+        message: String,
     },
 }

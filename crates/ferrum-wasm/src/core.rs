@@ -9,6 +9,7 @@
 //! (`FrameStats::needs_another_frame`: растры фреймов не догнали, картинки ещё
 //! декодируются).
 
+mod fonts;
 mod panels;
 
 use std::collections::{HashSet, VecDeque};
@@ -18,6 +19,7 @@ use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{CommandId, Cursor, Editor, EditorEvent, Input, Platform, ToolKind};
 use ferrum_render::{decode_png, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba};
 use ferrum_scene::Scene;
+use ferrum_text::{Fonts, SharedFonts};
 use kurbo::{Point, Size};
 use serde_bytes::ByteBuf;
 
@@ -26,8 +28,8 @@ use crate::input::{decode_all, Record};
 use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
-    Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, MAX_JOURNAL_BATCHES,
-    SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
+    Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, MAX_DEMO_TEXTS,
+    MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -90,6 +92,10 @@ pub struct Core {
     revision: u64,
     /// Номер последней непустой пачки журнала изменений (этап 6).
     journal_batch: u64,
+    /// Реестр шрифтов (подсистема 3): общий у редактора и рендера, переживает
+    /// замену документа — загруженные шрифты не качаются заново.
+    fonts: SharedFonts,
+    font_state: fonts::FontState,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -167,11 +173,15 @@ fn overlay_theme(t: Theme) -> OverlayTheme {
 impl Core {
     /// Ядро с пустым документом для холста `viewport` (CSS-пиксели) и `dpr`.
     pub fn new(platform: Platform, viewport: Size, dpr: f64, backend: Backend) -> Core {
-        let editor = Editor::new(Document::new(), None, viewport, dpr, platform)
+        let mut editor = Editor::new(Document::new(), None, viewport, dpr, platform)
             .expect("в новом документе есть страница");
+        let fonts = Fonts::shared();
+        editor.set_fonts(fonts.clone());
+        let mut renderer = Renderer::new();
+        renderer.set_fonts(fonts.clone());
         let mut core = Core {
             editor,
-            renderer: Renderer::new(),
+            renderer,
             images: DocImages::default(),
             backend,
             platform,
@@ -200,6 +210,8 @@ impl Core {
             modified_sent: Some(false),
             revision: 0,
             journal_batch: 0,
+            fonts,
+            font_state: fonts::FontState::default(),
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -244,6 +256,7 @@ impl Core {
             Editor::new(doc, None, viewport, dpr, self.platform).map_err(|e| e.to_string())?;
         editor.set_theme(overlay_theme(self.theme));
         editor.set_settings(self.editor.settings().clone());
+        editor.set_fonts(self.fonts.clone());
         *editor.keymap_mut() = self.editor.keymap().clone();
         editor.take_events();
         self.editor = editor;
@@ -258,6 +271,9 @@ impl Core {
         self.modified_sent = None;
         self.revision += 1;
         self.dirty = true;
+        // Списки шрифтов — для нового документа; его шрифты — запросить сразу.
+        self.font_state.missing_sent = None;
+        self.preload_page_fonts();
         Ok(())
     }
 
@@ -481,6 +497,36 @@ impl Core {
         self.push_opened(vec![]);
     }
 
+    /// Новый документ — страница-пример из `texts` текстов (фреймы по 100):
+    /// замер открытия и панорамирования «10 000 текстов» (спека подсистемы 3, 5).
+    pub fn demo_text(&mut self, texts: u32) {
+        if texts > MAX_DEMO_TEXTS {
+            self.error(format!("Пример не больше {MAX_DEMO_TEXTS} текстов"));
+            return;
+        }
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        if let Err(e) = doc.transact(page, vec![], |p| {
+            fixture::fill_texts(p, texts as usize)?;
+            Ok(vec![])
+        }) {
+            self.error(e.to_string());
+            return;
+        }
+        doc.clear_history();
+        if let Err(e) = self.replace_document(doc) {
+            self.error(e);
+            return;
+        }
+        self.editor.mark_journal();
+        let mut cam = self.editor.camera().clone();
+        cam.set_zoom(0.5);
+        cam.set_center(Point::new(720.0, 512.0));
+        self.editor.set_camera(cam);
+        self.editor.take_events();
+        self.push_opened(vec![]);
+    }
+
     /// Разбирает записи кольцевого буфера и отдаёт события редактору по порядку.
     /// Возвращает число принятых записей.
     pub fn apply_input(&mut self, bytes: &[u8]) -> usize {
@@ -513,6 +559,11 @@ impl Core {
         match cmd {
             Command::Open { bytes } => self.open(&bytes),
             Command::Demo { nodes } => self.demo(nodes),
+            Command::DemoText { texts } => self.demo_text(texts),
+            cmd @ (Command::FontsAvailable { .. }
+            | Command::LoadFont { .. }
+            | Command::ReplaceMissingFont { .. }
+            | Command::TestCreateText { .. }) => self.font_command(cmd),
             Command::OpenWithJournal { bytes, journal } => self.open_with_journal(&bytes, &journal),
             Command::FlushJournal => self.flush_journal(true),
             Command::Execute { command } => match CommandId::from_key(&command) {
@@ -594,6 +645,7 @@ impl Core {
                 EditorEvent::NeedsRedraw => self.dirty = true,
                 EditorEvent::DocumentChanged => {
                     document = true;
+                    self.fonts_document_changed();
                     self.touch();
                     self.ui.layers = true;
                     self.ui.properties = true;
@@ -609,6 +661,7 @@ impl Core {
                 }
                 EditorEvent::PageChanged(p) => {
                     self.events.push(CoreEvent::Page { id: p.to_string() });
+                    self.preload_page_fonts();
                     self.background_preview = None;
                     self.layers.reset();
                     self.ui.layers = true;
@@ -649,6 +702,7 @@ impl Core {
         }
         self.flush_ui();
         self.push_modified();
+        self.push_font_requests();
     }
 
     fn copy_png(&mut self, ids: &[NodeId]) {
@@ -721,6 +775,8 @@ impl Core {
         self.update_selection(&overlay.selection);
         self.dirty = stats.needs_another_frame;
         self.frames += 1;
+        // Раскладка при рисовании запрашивает незагруженные шрифты.
+        self.push_font_requests();
         stats
     }
 
@@ -736,6 +792,7 @@ impl Core {
         let mut backend = ferrum_render::CpuBackend::new(w, h);
         let mut renderer = Renderer::with_raster_cache_bytes(0);
         renderer.set_raster_build_time(None);
+        renderer.set_fonts(self.fonts.clone());
         let provider = self.images.export_provider(&self.editor.document().images);
         renderer.render(
             &mut backend,
