@@ -659,6 +659,11 @@ impl Core {
             self.error("Нечего экспортировать: страница пуста");
             return;
         }
+        // Текст, чей шрифт ещё грузится, в экспорт не попал бы: лучше ошибка.
+        if super::fonts::fonts_loading(self.editor.scene(), &self.fonts) {
+            self.error(super::fonts::FONTS_LOADING);
+            return;
+        }
         let before = self.images.placeholders_served();
         let provider = self.images.export_provider(&self.editor.document().images);
         let result = self

@@ -465,6 +465,18 @@ fn oversized_file_over_a_loaded_slot_frees_it() {
 }
 
 #[test]
+fn failed_load_over_a_loaded_slot_frees_it() {
+    let mut fonts = fonts();
+    let base = fonts.memory();
+    fonts.load_failed("Inter", "inter/Inter-Variable.ttf");
+    assert!(fonts.memory() < base);
+    assert_eq!(
+        fonts.status(&FontName::inter_regular()),
+        FontStatus::Missing
+    );
+}
+
+#[test]
 fn ellipsis_follows_the_real_advance_of_the_last_glyph() {
     let mut fonts = fonts();
     let t = text("ШШШШШШШШШШШШШШШШШШШШ", |p| {

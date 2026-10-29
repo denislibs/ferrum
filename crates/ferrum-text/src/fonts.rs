@@ -410,18 +410,6 @@ impl Fonts {
     /// файл не из списка, больше `MAX_FONT_FILE`, неразборчивый.
     pub fn load(&mut self, family: &str, file: &str, bytes: Vec<u8>) -> Result<(), String> {
         if bytes.len() > MAX_FONT_FILE {
-            // Слот мог быть уже загружен: его шрифты снимаются, а не остаются
-            // зарегистрированными в состоянии «отсутствует».
-            if let Some(slot) = self
-                .families
-                .get_mut(&family_key(family))
-                .and_then(|f| f.files.get_mut(file))
-            {
-                if slot.state == FileState::Loaded {
-                    Self::unload_slot(&mut self.fcx, &mut self.memory, slot);
-                    self.outlines.clear();
-                }
-            }
             self.fail(family, file);
             return Err(format!(
                 "Шрифт «{}» не загружен: файл больше {} МБ",
@@ -448,6 +436,12 @@ impl Fonts {
             .get_mut(&family_key(family))
             .and_then(|f| f.files.get_mut(file))
         {
+            // Слот мог быть уже загружен: его шрифты снимаются, а не остаются
+            // зарегистрированными в состоянии «отсутствует».
+            if slot.state == FileState::Loaded {
+                Self::unload_slot(&mut self.fcx, &mut self.memory, slot);
+                self.outlines.clear();
+            }
             slot.state = FileState::Failed;
             self.generation += 1;
         }

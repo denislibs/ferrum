@@ -10,7 +10,8 @@ use std::collections::VecDeque;
 
 use ferrum_doc::{FontName, LetterSpacing, LineHeight, TextContent, TextProps, TextSizing};
 use ferrum_editor::TextError;
-use ferrum_text::{FaceInfo, FamilyInfo, SourceKind, MAX_FAMILY_NAME, MAX_FONT_FILE};
+use ferrum_scene::Scene;
+use ferrum_text::{FaceInfo, FamilyInfo, FontStatus, SharedFonts, SourceKind, MAX_FAMILY_NAME};
 use kurbo::Point;
 use serde_bytes::ByteBuf;
 
@@ -29,6 +30,34 @@ pub(crate) struct FontState {
     pub catalog_sent: Option<Vec<FontChoice>>,
     /// Поколение реестра, при котором посчитаны отсутствующие (`None` — пересчитать).
     pub generation: Option<u64>,
+}
+
+/// Ответ экспорту и копированию PNG, пока шрифты текстов не загружены.
+pub(crate) const FONTS_LOADING: &str = "Шрифты ещё загружаются — повторите через мгновение";
+
+/// Грузится ли (или ещё не известен) шрифт какого-нибудь текста сцены, с учётом
+/// запасного Inter. Такой текст в PNG не попал бы; байты при этом запрошены.
+pub(crate) fn fonts_loading(scene: &Scene, fonts: &SharedFonts) -> bool {
+    let mut seen: Vec<FontName> = Vec::new();
+    let mut reg = fonts.borrow_mut();
+    let mut loading = false;
+    for (_, n) in scene.iter() {
+        let Some(t) = &n.props.text else { continue };
+        for f in t.content.fonts(&t.props.style) {
+            if seen.contains(&f) {
+                continue;
+            }
+            // Все шрифты опрашиваются: каждый незагруженный запрашивает байты.
+            if matches!(
+                reg.resolve(&f).status,
+                FontStatus::Loading | FontStatus::Pending
+            ) {
+                loading = true;
+            }
+            seen.push(f);
+        }
+    }
+    loading
 }
 
 fn source(s: FontSource) -> SourceKind {
@@ -120,14 +149,9 @@ impl Core {
                     self.error("Неверная команда загрузки шрифта");
                     return;
                 }
+                // Размер и разбор проверяет реестр; он же снимает уже загруженный слот.
                 let result = match bytes {
-                    Some(b) if b.len() <= MAX_FONT_FILE => {
-                        self.fonts.borrow_mut().load(&family, &file, b.into_vec())
-                    }
-                    Some(_) => {
-                        self.fonts.borrow_mut().load_failed(&family, &file);
-                        Err(format!("Шрифт «{family}» не загружен: файл больше 64 МБ"))
-                    }
+                    Some(b) => self.fonts.borrow_mut().load(&family, &file, b.into_vec()),
                     None => {
                         self.fonts.borrow_mut().load_failed(&family, &file);
                         Err(format!("Шрифт «{family}» не загружен: файл недоступен"))
@@ -302,6 +326,13 @@ impl Core {
             self.events
                 .push(CoreEvent::FontCatalog { families: catalog });
         }
+    }
+
+    /// Смена страницы: замена шрифта относилась к прошлой странице — отбросить.
+    pub(crate) fn drop_page_scoped_font_edits(&mut self) {
+        self.font_state
+            .waiting
+            .retain(|c| !matches!(c, Command::ReplaceMissingFont { .. }));
     }
 
     /// Документ правился: отсутствующие шрифты пересчитать при следующей пачке.

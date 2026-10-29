@@ -104,11 +104,37 @@ fn nodes(c: &Core) -> usize {
     c.editor().scene().len()
 }
 
+/// Кадр холста: число тёмных непрозрачных пикселей (тема светлая — холст светлый).
+fn dark_pixels(c: &mut Core) -> usize {
+    let (w, h) = c.device_size();
+    let mut b = CpuBackend::new(w, h);
+    c.draw(&mut b);
+    let px = b.render();
+    px.data().iter().filter(|p| p.r < 100 && p.a > 200).count()
+}
+
 #[test]
 fn text_waits_for_requested_fonts_then_appears_and_draws() {
     let mut c = core();
-    create(&mut c, "Ferrum", None);
+    c.command(Command::SetTheme {
+        theme: Theme::Light,
+    });
+    // Камера примера (зум 0.5, центр 720×512) показывает x 320…1120, y 212…812.
+    let create_at = |c: &mut Core| {
+        c.command(Command::TestCreateText {
+            x: 600.0,
+            y: 450.0,
+            text: "Ferrum".into(),
+            font: None,
+            size: Some(64.0),
+            sizing: None,
+            width: None,
+            height: None,
+        })
+    };
+    create_at(&mut c);
     assert_eq!(nodes(&c), 0, "шрифт ещё не загружен");
+    assert_eq!(dark_pixels(&mut c), 0, "до загрузки на холсте пусто");
     let events = c.take_events();
     assert_eq!(serve(&mut c, &events), 2);
     assert_eq!(nodes(&c), 1);
@@ -116,13 +142,9 @@ fn text_waits_for_requested_fonts_then_appears_and_draws() {
     assert!(events
         .iter()
         .any(|e| matches!(e, CoreEvent::Document { can_undo: true, .. })));
-    // Текст на холсте: тёмные пиксели в его рамке (камера примера — зум 0.5).
-    let (w, h) = c.device_size();
-    let mut b = CpuBackend::new(w, h);
-    c.draw(&mut b);
-    let px = b.render();
-    let dark = px.data().iter().filter(|p| p.r < 128 && p.a > 200).count();
-    assert!(dark > 20, "{dark}");
+    // Реестр сменился — кадр запрошен заново, и в нём глифы текста.
+    let dark = dark_pixels(&mut c);
+    assert!(dark > 100, "{dark}");
 }
 
 #[test]
@@ -327,4 +349,155 @@ fn document_refusal_is_reported_and_not_queued() {
         .take_events()
         .iter()
         .any(|e| matches!(e, CoreEvent::Error { .. })));
+}
+
+fn errors_of(events: &[CoreEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            CoreEvent::Error { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+const STILL_LOADING: &str = "Шрифты ещё загружаются — повторите через мгновение";
+
+#[test]
+fn export_copy_and_thumbnail_do_not_leave_loading_text_out() {
+    let mut c = core();
+    c.command(Command::DemoText { texts: 100 });
+    let loading = c.take_events();
+    c.command(Command::Export { scale: 1.0 });
+    let ev = c.take_events();
+    assert_eq!(errors_of(&ev), [STILL_LOADING]);
+    assert!(!ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+    c.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    c.command(Command::Execute {
+        command: "edit.copy_png".into(),
+    });
+    let ev = c.take_events();
+    assert_eq!(errors_of(&ev), [STILL_LOADING]);
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ClipboardPng { .. })));
+    // Превью: прежнее остаётся.
+    c.command(Command::Snapshot { thumbnail: true });
+    let ev = c.take_events();
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        CoreEvent::Snapshot {
+            thumbnail: None,
+            keep_thumbnail: true,
+            ..
+        }
+    )));
+    // Шрифты пришли — всё работает.
+    serve(&mut c, &loading);
+    c.take_events();
+    c.command(Command::Export { scale: 1.0 });
+    let ev = c.take_events();
+    assert!(errors_of(&ev).is_empty(), "{ev:?}");
+    assert!(ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+    c.command(Command::Snapshot { thumbnail: true });
+    let ev = c.take_events();
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        CoreEvent::Snapshot {
+            thumbnail: Some(_),
+            keep_thumbnail: false,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn export_contains_text_pixels_once_fonts_are_loaded() {
+    let mut c = core();
+    create(&mut c, "Ferrum", None);
+    let events = c.take_events();
+    serve(&mut c, &events);
+    c.take_events();
+    c.command(Command::Export { scale: 1.0 });
+    let ev = c.take_events();
+    let bytes = ev
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::Exported { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{ev:?}"));
+    let img = ferrum_render::decode_png(&bytes).unwrap();
+    // Кроме текста, на странице ничего нет: непрозрачные пиксели — глифы.
+    let ink = img.data().iter().filter(|p| p.a > 128).count();
+    assert!(ink > 50, "{ink}");
+}
+
+#[test]
+fn opening_a_document_drops_edits_waiting_for_fonts() {
+    let mut c = core();
+    create(&mut c, "Ferrum", None);
+    let events = c.take_events();
+    c.command(Command::Demo { nodes: 0 });
+    c.take_events();
+    serve(&mut c, &events);
+    assert_eq!(nodes(&c), 0, "правка не должна попасть в другой документ");
+}
+
+#[test]
+fn page_change_drops_waiting_font_replacement() {
+    let mut c = core();
+    // Inter готов; на двух страницах по тексту шрифтом «Comic Sans».
+    create(&mut c, "Ferrum", None);
+    let events = c.take_events();
+    serve(&mut c, &events);
+    let comic = Some(("Comic Sans", "Bold"));
+    create(&mut c, "Один", comic);
+    let first = c.editor().document().pages()[0].0.to_string();
+    c.command(Command::AddPage);
+    create(&mut c, "Два", comic);
+    c.command(Command::SetPage { id: first });
+    c.command(Command::ReplaceMissingFont {
+        from: FontNameDto {
+            family: "Comic Sans".into(),
+            style: "Bold".into(),
+        },
+        to: FontNameDto {
+            family: "Roboto".into(),
+            style: "Bold".into(),
+        },
+    });
+    let events = c.take_events();
+    // Ждёт Roboto; страница сменилась — замена относилась к первой.
+    let second = c.editor().document().pages()[1].0.to_string();
+    c.command(Command::SetPage { id: second });
+    c.take_events();
+    serve(&mut c, &events);
+    let missing = c.editor().missing_fonts();
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert_eq!(missing[0].font.family, "Comic Sans");
+}
+
+#[test]
+fn failed_load_releases_waiting_edit_with_fallback() {
+    let mut c = core();
+    create(&mut c, "Ferrum", None);
+    let events = c.take_events();
+    for e in &events {
+        if let CoreEvent::FontRequest { family, files, .. } = e {
+            for f in files {
+                c.command(Command::LoadFont {
+                    family: family.clone(),
+                    file: f.clone(),
+                    bytes: None,
+                });
+            }
+        }
+    }
+    assert_eq!(nodes(&c), 1);
+    let events = c.take_events();
+    assert!(events.iter().any(|e| matches!(e, CoreEvent::Log { .. })));
+    assert!(errors_of(&events).is_empty());
 }

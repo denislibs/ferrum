@@ -14,7 +14,7 @@ mod panels;
 
 use std::collections::{HashSet, VecDeque};
 
-use ferrum_doc::{container, fixture, Document, NodeId};
+use ferrum_doc::{container, fixture, DocResult, Document, NodeId, Tx};
 use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{CommandId, Cursor, Editor, EditorEvent, Input, Platform, ToolKind};
 use ferrum_render::{decode_png, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba};
@@ -273,6 +273,8 @@ impl Core {
         self.dirty = true;
         // Списки шрифтов — для нового документа; его шрифты — запросить сразу.
         self.font_state.missing_sent = None;
+        // Ждавшие шрифтов правки относились к прошлому документу.
+        self.font_state.waiting.clear();
         self.preload_page_fonts();
         Ok(())
     }
@@ -366,6 +368,10 @@ impl Core {
             let k = |v: u8| v as f32 / 255.0;
             Rgba::new([k(c.r), k(c.g), k(c.b), k(c.a)])
         });
+        // Превью без текста хуже прежнего: пусть остаётся прежнее.
+        if fonts::fonts_loading(scene, &self.fonts) {
+            return Err(());
+        }
         let provider = self.images.export_provider(&doc.images);
         self.renderer
             .thumbnail_png(scene, THUMB_WIDTH, THUMB_HEIGHT, background, &provider)
@@ -473,28 +479,7 @@ impl Core {
             self.error(format!("Пример не больше {MAX_DEMO_NODES} узлов"));
             return;
         }
-        let mut doc = Document::new();
-        let page = doc.pages()[0].0;
-        if let Err(e) = doc.transact(page, vec![], |p| {
-            fixture::fill(p, nodes as usize)?;
-            Ok(vec![])
-        }) {
-            self.error(e.to_string());
-            return;
-        }
-        doc.clear_history();
-        if let Err(e) = self.replace_document(doc) {
-            self.error(e);
-            return;
-        }
-        // Пример — как только что открытый файл: журнал пишет только правки после него.
-        self.editor.mark_journal();
-        let mut cam = self.editor.camera().clone();
-        cam.set_zoom(0.5);
-        cam.set_center(Point::new(720.0, 512.0));
-        self.editor.set_camera(cam);
-        self.editor.take_events();
-        self.push_opened(vec![]);
+        self.open_fixture(|p| fixture::fill(p, nodes as usize).map(|_| ()));
     }
 
     /// Новый документ — страница-пример из `texts` текстов (фреймы по 100):
@@ -504,10 +489,16 @@ impl Core {
             self.error(format!("Пример не больше {MAX_DEMO_TEXTS} текстов"));
             return;
         }
+        self.open_fixture(|p| fixture::fill_texts(p, texts as usize).map(|_| ()));
+    }
+
+    /// Новый документ из страницы-примера: как только что открытый файл (журнал
+    /// пишет только правки после него), камера — зум 0.5 над серединой примера.
+    fn open_fixture(&mut self, fill: impl FnOnce(&Tx) -> DocResult<()>) {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         if let Err(e) = doc.transact(page, vec![], |p| {
-            fixture::fill_texts(p, texts as usize)?;
+            fill(p)?;
             Ok(vec![])
         }) {
             self.error(e.to_string());
@@ -661,6 +652,7 @@ impl Core {
                 }
                 EditorEvent::PageChanged(p) => {
                     self.events.push(CoreEvent::Page { id: p.to_string() });
+                    self.drop_page_scoped_font_edits();
                     self.preload_page_fonts();
                     self.background_preview = None;
                     self.layers.reset();
@@ -706,6 +698,10 @@ impl Core {
     }
 
     fn copy_png(&mut self, ids: &[NodeId]) {
+        if fonts::fonts_loading(self.editor.scene(), &self.fonts) {
+            self.error(fonts::FONTS_LOADING);
+            return;
+        }
         let before = self.images.placeholders_served();
         // Экспорт декодирует всё нужное сразу, без бюджета кадра.
         let provider = self.images.export_provider(&self.editor.document().images);
