@@ -1,6 +1,7 @@
 //! Сборка кадра: обход сцены с отсечением невидимого и LOD, растровый кэш
 //! мелких фреймов верхнего уровня, воспроизведение списков отрисовки в бэкенд.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use ferrum_doc::{NodeId, NodeKind, ScaleMode};
 use ferrum_scene::shape::Geometry;
 use ferrum_scene::{Scene, SceneNode, Slot};
+use ferrum_text::{Fonts, LayoutRequest, TextLayout};
 use kurbo::{Affine, BezPath, Point, Rect};
 use vello_cpu::peniko::{Extend, Fill};
 use vello_cpu::Pixmap;
@@ -16,6 +18,7 @@ use crate::backend::{CpuBackend, ImageKey, ImagePaint, RenderBackend};
 use crate::clock::{default_clock, Clock};
 use crate::display::{self, DisplayList, Item, Paint, IMAGE_PLACEHOLDER};
 use crate::image::ImageProvider;
+use crate::text_node::{self, TEXT_LAYOUT_TIME_PER_FRAME, TEXT_LOD_PX};
 
 /// Поддерево меньше полупикселя не рисуется вовсе.
 pub const LOD_SKIP_PX: f64 = 0.5;
@@ -67,6 +70,10 @@ pub struct FrameStats {
     pub raster_builds: usize,
     pub clips: usize,
     pub layers: usize,
+    /// Текстовые узлы: разложено за кадр, нарисовано глифами, полосами (LOD).
+    pub text_layouts: usize,
+    pub text_glyphs: usize,
+    pub text_greeked: usize,
     /// Кадр неполный: часть растров не построена (бюджет кадра исчерпан, показаны
     /// прежние растры или узлы) или вместо картинки нарисована заглушка. Холст без
     /// правок и движения камеры должен запросить ещё кадр, иначе так и останется
@@ -78,6 +85,8 @@ pub struct FrameStats {
 pub struct DrawContext<'a> {
     pub scene: &'a Scene,
     pub images: &'a dyn ImageProvider,
+    /// Реестр шрифтов и раскладка текста.
+    pub fonts: &'a RefCell<Fonts>,
     /// Мир → пиксели устройства.
     pub transform: Affine,
     /// Пикселей устройства на единицу мира.
@@ -138,10 +147,23 @@ impl Raster {
     }
 }
 
+/// Раскладка текстового узла: годна, пока не изменились вид узла (`version`)
+/// и реестр шрифтов (`generation`).
+struct CachedText {
+    id: NodeId,
+    version: u64,
+    generation: u64,
+    layout: Arc<TextLayout>,
+    last_used: u64,
+}
+
 /// Кэши между кадрами: списки отрисовки по слотам сцены, растры фреймов, общий
 /// буфер для контуров обрезки.
 pub struct Painter {
     lists: Vec<Option<DisplayList>>,
+    /// Раскладки текстовых узлов по слотам (ленивые: при первом рисовании).
+    texts: HashMap<Slot, CachedText>,
+    text_time_spent: Duration,
     rasters: HashMap<Slot, Raster>,
     path: BezPath,
     frame: u64,
@@ -176,6 +198,8 @@ impl Painter {
     pub fn with_raster_limit(bytes: usize) -> Painter {
         Painter {
             lists: Vec::new(),
+            texts: HashMap::new(),
+            text_time_spent: Duration::ZERO,
             rasters: HashMap::new(),
             path: BezPath::new(),
             frame: 0,
@@ -214,6 +238,7 @@ impl Painter {
         self.frame += 1;
         self.raster_budget = RASTER_BUILDS_PER_FRAME;
         self.raster_time_spent = Duration::ZERO;
+        self.text_time_spent = Duration::ZERO;
         self.missing_image = false;
         self.raster_full = false;
         if self.frame.is_multiple_of(64) {
@@ -238,6 +263,8 @@ impl Painter {
         }
         self.rasters
             .retain(|_, r| r.last_used + EVICT_AFTER_FRAMES >= frame);
+        self.texts
+            .retain(|_, t| t.last_used + EVICT_AFTER_FRAMES >= frame);
         self.raster_bytes = self.rasters.values().map(Raster::bytes).sum();
     }
 
@@ -410,6 +437,12 @@ impl Painter {
             }
             return None;
         }
+        if n.props.kind == NodeKind::Text {
+            if part != Part::Strokes {
+                self.draw_text(backend, ctx, slot, n, alpha);
+            }
+            return None;
+        }
         let i = slot as usize;
         let split = part != Part::All;
         backend.set_transform(ctx.transform * n.world);
@@ -447,6 +480,105 @@ impl Painter {
         self.play(backend, &list, alpha, ctx, part);
         self.lists[i] = Some(list);
         None
+    }
+
+    /// Текстовый узел: раскладка из кэша или новая (в пределах времени кадра на
+    /// экране; при экспорте — всегда), затем глифы или полосы строк (LOD).
+    /// Раскладка ещё грузящимися шрифтами не рисуется: кадр перерисуют, когда
+    /// придут байты (поколение реестра).
+    fn draw_text(
+        &mut self,
+        backend: &mut impl RenderBackend,
+        ctx: &DrawContext,
+        slot: Slot,
+        n: &SceneNode,
+        alpha: f32,
+    ) {
+        let Some(text) = &n.props.text else { return };
+        let to_device = ctx.transform * n.world;
+        let generation = ctx.fonts.borrow().generation();
+        let frame = self.frame;
+        let cached = self
+            .texts
+            .get_mut(&slot)
+            .filter(|c| c.id == n.id && c.version == n.version && c.generation == generation)
+            .map(|c| {
+                c.last_used = frame;
+                c.layout.clone()
+            });
+        let layout = match cached {
+            Some(l) => Some(l),
+            None if self.can_layout_text(ctx) => {
+                let started = self.clock.as_ref().map(|c| c.now_ms());
+                let req = LayoutRequest::for_node(text, &n.props.fills, n.props.w, n.props.h);
+                let layout = Arc::new(ctx.fonts.borrow_mut().layout(&req));
+                if let (Some(t), Some(c)) = (started, self.clock.as_ref()) {
+                    let ms = (c.now_ms() - t).max(0.0);
+                    self.text_time_spent += Duration::from_secs_f64(ms / 1000.0);
+                }
+                self.stats.text_layouts += 1;
+                self.texts.insert(
+                    slot,
+                    CachedText {
+                        id: n.id,
+                        version: n.version,
+                        generation,
+                        layout: layout.clone(),
+                        last_used: self.frame,
+                    },
+                );
+                Some(layout)
+            }
+            None => {
+                // Время кадра на раскладку вышло: пока — полосы по оценке строк.
+                self.stats.needs_another_frame = true;
+                None
+            }
+        };
+        let Some(layout) = layout else {
+            text_node::paint_greek(
+                backend,
+                &text_node::estimate_lines(&n.props),
+                to_device,
+                alpha,
+            );
+            self.stats.text_greeked += 1;
+            return;
+        };
+        if layout.loading {
+            return;
+        }
+        let line_px = layout
+            .lines
+            .iter()
+            .map(|l| l.rect.height())
+            .fold(0.0, f64::max)
+            * ctx.scale;
+        if ctx.lod && line_px < TEXT_LOD_PX {
+            text_node::paint_greek(backend, &layout.lines, to_device, alpha);
+            self.stats.text_greeked += 1;
+        } else {
+            text_node::paint_glyphs(
+                backend,
+                &mut ctx.fonts.borrow_mut(),
+                &layout,
+                to_device,
+                alpha,
+            );
+            self.stats.text_glyphs += 1;
+        }
+    }
+
+    /// Можно ли разложить ещё один текст в этом кадре: экспорт и превью (без LOD)
+    /// раскладывают всё; на экране — первый всегда, дальше в пределах времени.
+    fn can_layout_text(&self, ctx: &DrawContext) -> bool {
+        if !ctx.lod || self.stats.text_layouts == 0 {
+            return true;
+        }
+        match self.clock.as_ref() {
+            Some(_) => self.text_time_spent < TEXT_LAYOUT_TIME_PER_FRAME,
+            None => true,
+        }
     }
 
     fn play(
@@ -545,6 +677,7 @@ impl Painter {
             let inner = DrawContext {
                 scene: ctx.scene,
                 images: ctx.images,
+                fonts: ctx.fonts,
                 transform: Affine::scale(scale) * Affine::translate(-area.origin().to_vec2()),
                 scale,
                 cull: None,

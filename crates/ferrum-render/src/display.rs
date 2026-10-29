@@ -76,6 +76,9 @@ pub fn color(c: Color) -> Rgba {
 /// Цвет узла для LOD-прямоугольника без построения списка: первая видимая заливка,
 /// иначе первая обводка.
 pub fn lod_color(p: &Props) -> Option<Rgba> {
+    if p.kind == NodeKind::Text {
+        return Some(crate::text_node::lod_color(p));
+    }
     if !matches!(p.kind, NodeKind::Line | NodeKind::Group) {
         if let Some(f) = p.fills.iter().find(|f| f.visible && f.opacity > 0.0) {
             return Some(match f.kind {
