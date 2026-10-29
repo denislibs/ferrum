@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use ferrum_doc::{
-    DocResult, FontName, NodeId, NodeKind, Props, PropsPatch, TextContent, TextData, TextProps,
-    TextSizing, Tx,
+    DocError, DocResult, FontName, NodeId, NodeKind, Props, PropsPatch, TextContent, TextData,
+    TextProps, TextSizing, Tx,
 };
 use ferrum_text::{FontStatus, Fonts, LayoutRequest, SharedFonts};
 use kurbo::Point;
@@ -20,6 +20,36 @@ use crate::editor::Editor;
 /// Правка ждёт шрифтов: их байты запрошены (`Fonts::take_requests`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextPending;
+
+/// Отказ правки текста: шрифты ещё грузятся или документ не принял правку
+/// (только для чтения, пределы текста) — у `DocError` есть сообщение для
+/// пользователя.
+#[derive(Debug)]
+pub enum TextError {
+    Pending,
+    Doc(DocError),
+}
+
+impl From<TextPending> for TextError {
+    fn from(_: TextPending) -> Self {
+        TextError::Pending
+    }
+}
+
+impl From<DocError> for TextError {
+    fn from(e: DocError) -> Self {
+        TextError::Doc(e)
+    }
+}
+
+impl std::fmt::Display for TextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TextError::Pending => f.write_str("Шрифты ещё загружаются"),
+            TextError::Doc(e) => e.fmt(f),
+        }
+    }
+}
 
 /// Правка одного текста при замене шрифта: новые свойства (если сменилось
 /// умолчание), содержимое и размер по новой раскладке (у авторазмера).
@@ -144,7 +174,9 @@ impl Editor {
         props: &TextProps,
         width: f64,
         height: f64,
-    ) -> Result<Option<NodeId>, TextPending> {
+    ) -> Result<NodeId, TextError> {
+        // Пределы — до раскладки: огромный текст не раскладывается зря.
+        content.check_limits()?;
         let mut p = Props::defaults(NodeKind::Text);
         (p.x, p.y, p.w, p.h) = (at.x, at.y, width.max(0.0), height.max(0.0));
         p.text = Some(Arc::new(TextData {
@@ -154,7 +186,7 @@ impl Editor {
         if let Some((w, h)) = fit_size(&mut self.fonts.borrow_mut(), &p)? {
             (p.w, p.h) = (w, h);
         }
-        let result = self.transact(|tx| {
+        let ids = self.transact(|tx| {
             let id = tx.create_node(None, None, NodeKind::Text)?;
             tx.set_props(
                 id,
@@ -169,8 +201,8 @@ impl Editor {
             )?;
             tx.set_text_content(id, content)?;
             Ok(vec![id])
-        });
-        Ok(result.ok().and_then(|ids| ids.first().copied()))
+        })?;
+        Ok(ids[0])
     }
 
     /// Шрифты текстов текущей страницы, без повторов.
@@ -221,7 +253,10 @@ impl Editor {
     /// отмены (спека 4); размер текстов с авторазмером — по новой раскладке в той
     /// же транзакции. Возвращает число изменённых узлов; новый шрифт ещё
     /// грузится — `Err(TextPending)` и ничего не меняется.
-    pub fn replace_font(&mut self, from: &FontName, to: &FontName) -> Result<usize, TextPending> {
+    pub fn replace_font(&mut self, from: &FontName, to: &FontName) -> Result<usize, TextError> {
+        if from == to {
+            return Ok(0);
+        }
         let mut edits: Vec<FontEdit> = Vec::new();
         let mut pending = false;
         for (_, n) in self.scene.iter() {
@@ -248,6 +283,10 @@ impl Editor {
                     None
                 }
             };
+            let size = size.filter(|s| *s != (n.props.w, n.props.h));
+            if props == t.props && content == t.content && size.is_none() {
+                continue;
+            }
             edits.push(FontEdit {
                 id: n.id,
                 props: (props != t.props).then_some(props),
@@ -256,14 +295,14 @@ impl Editor {
             });
         }
         if pending {
-            return Err(TextPending);
+            return Err(TextError::Pending);
         }
         if edits.is_empty() {
             return Ok(0);
         }
         let count = edits.len();
         let selection = self.selection.to_vec();
-        let _ = self.transact(|tx| {
+        self.transact(|tx| {
             for e in &edits {
                 tx.set_props(
                     e.id,
@@ -277,7 +316,7 @@ impl Editor {
                 tx.set_text_content(e.id, &e.content)?;
             }
             Ok(selection)
-        });
+        })?;
         Ok(count)
     }
 }

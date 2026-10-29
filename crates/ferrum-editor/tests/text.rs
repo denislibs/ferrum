@@ -77,7 +77,6 @@ fn created_text_gets_its_size_in_the_same_step() {
             0.0,
             0.0,
         )
-        .unwrap()
         .unwrap();
     let p = text_of(&mut h, id);
     assert_eq!((p.x, p.y), (10.0, 20.0));
@@ -98,7 +97,6 @@ fn created_text_gets_its_size_in_the_same_step() {
             120.0,
             0.0,
         )
-        .unwrap()
         .unwrap();
     let p = text_of(&mut h, id);
     assert_eq!(p.w, 120.0);
@@ -116,24 +114,21 @@ fn text_waits_for_fonts_and_changes_nothing_meanwhile() {
         0.0,
         0.0,
     );
-    assert_eq!(r, Err(TextPending));
+    assert!(matches!(r, Err(TextError::Pending)));
     assert!(h.ed.page_doc().walk().is_empty());
     let reqs = f.borrow_mut().take_requests();
     assert_eq!(reqs[0].family, "Inter");
     for file in &reqs[0].files {
         f.borrow_mut().load("Inter", file, font_file(file)).unwrap();
     }
-    assert!(h
-        .ed
-        .create_text(
-            Point::ZERO,
-            &TextContent::plain("Ferrum"),
-            &props(12.0),
-            0.0,
-            0.0
-        )
-        .unwrap()
-        .is_some());
+    h.ed.create_text(
+        Point::ZERO,
+        &TextContent::plain("Ferrum"),
+        &props(12.0),
+        0.0,
+        0.0,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -148,7 +143,6 @@ fn resizing_text_makes_it_fixed_in_one_step() {
             0.0,
             0.0,
         )
-        .unwrap()
         .unwrap();
     let before = text_of(&mut h, id);
     let steps = h.ed.step_count();
@@ -176,7 +170,6 @@ fn missing_fonts_are_listed_and_replaced_in_one_step() {
     comic.style.font = FontName::new("Comic Sans", "Bold");
     let a =
         h.ed.create_text(Point::ZERO, &TextContent::plain("Первый"), &comic, 0.0, 0.0)
-            .unwrap()
             .unwrap();
     let b =
         h.ed.create_text(
@@ -186,7 +179,6 @@ fn missing_fonts_are_listed_and_replaced_in_one_step() {
             0.0,
             0.0,
         )
-        .unwrap()
         .unwrap();
     // Третий: Inter по умолчанию, одно слово — отсутствующим шрифтом.
     let c =
@@ -197,7 +189,6 @@ fn missing_fonts_are_listed_and_replaced_in_one_step() {
             0.0,
             0.0,
         )
-        .unwrap()
         .unwrap();
     h.ed.transact(|tx| {
         tx.format_text(
@@ -224,8 +215,9 @@ fn missing_fonts_are_listed_and_replaced_in_one_step() {
     let steps = h.ed.step_count();
     let roboto = FontName::new("Roboto", "Bold");
     assert_eq!(
-        h.ed.replace_font(&FontName::new("Comic Sans", "Bold"), &roboto),
-        Ok(3)
+        h.ed.replace_font(&FontName::new("Comic Sans", "Bold"), &roboto)
+            .unwrap(),
+        3
     );
     assert_eq!(h.ed.step_count(), steps + 1);
     assert!(h.ed.missing_fonts().is_empty());
@@ -258,7 +250,7 @@ fn replacement_waits_for_the_new_font() {
         &FontName::new("Comic Sans", "Regular"),
         &FontName::new("Roboto", "Regular"),
     );
-    assert_eq!(r, Err(TextPending));
+    assert!(matches!(r, Err(TextError::Pending)));
     assert_eq!(h.ed.missing_fonts().len(), 1);
 }
 
@@ -274,7 +266,6 @@ fn copy_paste_and_duplicate_keep_text_and_marks() {
             0.0,
             0.0,
         )
-        .unwrap()
         .unwrap();
     h.ed.transact(|tx| {
         tx.format_text(
@@ -308,4 +299,80 @@ fn copy_paste_and_duplicate_keep_text_and_marks() {
     let dup = h.ed.selection()[0];
     assert_ne!(dup, id);
     assert_eq!(text_of(&mut h, dup).text.unwrap(), original);
+}
+
+#[test]
+fn over_limit_text_is_refused_with_an_error_and_no_step() {
+    let f = fonts(&FILES[..2]);
+    let mut h = h_with(&f);
+    let steps = h.ed.step_count();
+    let r = h.ed.create_text(
+        Point::ZERO,
+        &TextContent::plain(&"а".repeat(100_001)),
+        &props(12.0),
+        0.0,
+        0.0,
+    );
+    let Err(TextError::Doc(e)) = r else {
+        panic!("ожидалась ошибка документа");
+    };
+    assert!(e.to_string().contains("100 000"), "{e}");
+    assert!(h.ed.page_doc().walk().is_empty());
+    assert_eq!(h.ed.step_count(), steps);
+}
+
+#[test]
+fn replace_font_in_read_only_document_is_an_error() {
+    let f = fonts(&FILES);
+    let mut h = h_with(&f);
+    let mut comic = props(24.0);
+    comic.style.font = FontName::new("Comic Sans", "Regular");
+    h.ed.create_text(Point::ZERO, &TextContent::plain("Текст"), &comic, 0.0, 0.0)
+        .unwrap();
+    let bytes = ferrum_doc::container::encode(h.ed.document()).unwrap();
+    let future = ferrum_doc::container::testing::with_schema_version(&bytes, SCHEMA_VERSION + 1);
+    let doc = ferrum_doc::container::decode(&future).unwrap().document;
+    let mut ed = Editor::new(
+        doc,
+        None,
+        kurbo::Size::new(800.0, 600.0),
+        1.0,
+        Platform::Windows,
+    )
+    .unwrap();
+    ed.set_fonts(f.clone());
+    let steps = ed.step_count();
+    let r = ed.replace_font(
+        &FontName::new("Comic Sans", "Regular"),
+        &FontName::new("Roboto", "Regular"),
+    );
+    assert!(
+        matches!(r, Err(TextError::Doc(DocError::ReadOnly))),
+        "{r:?}"
+    );
+    assert_eq!(ed.step_count(), steps);
+    assert_eq!(ed.missing_fonts().len(), 1);
+}
+
+#[test]
+fn replace_font_without_changes_makes_no_step() {
+    let f = fonts(&FILES);
+    let mut h = h_with(&f);
+    let mut comic = props(24.0);
+    comic.style.font = FontName::new("Comic Sans", "Regular");
+    h.ed.create_text(Point::ZERO, &TextContent::plain("Текст"), &comic, 0.0, 0.0)
+        .unwrap();
+    let steps = h.ed.step_count();
+    let comic = FontName::new("Comic Sans", "Regular");
+    // Сама на себя и шрифт, которого на странице нет: ничего не меняется.
+    assert_eq!(h.ed.replace_font(&comic, &comic).unwrap(), 0);
+    assert_eq!(
+        h.ed.replace_font(
+            &FontName::new("Roboto", "Bold"),
+            &FontName::new("Roboto", "Regular")
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(h.ed.step_count(), steps);
 }

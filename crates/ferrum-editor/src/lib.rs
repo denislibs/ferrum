@@ -31,5 +31,5 @@ pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,
 };
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
-pub use text::{fit_size, MissingFont, TextPending};
+pub use text::{fit_size, MissingFont, TextError, TextPending};
 pub use tools::{Cursor, Tool, ToolKind, ToolOverlay};
