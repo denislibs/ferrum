@@ -4,12 +4,25 @@
 
 mod common;
 
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use common::*;
 use ferrum_doc::*;
-use ferrum_render::{Fonts, NoImages, Renderer, SharedFonts};
+use ferrum_render::{Clock, Fonts, NoImages, Renderer, SharedFonts};
 use ferrum_text::{group, read_faces, SourceKind};
+
+/// Часы, сдвигающиеся на 5 мс при каждом чтении: любая раскладка «длится» 5 мс,
+/// то есть дольше предела кадра в 4 мс, независимо от скорости машины.
+struct SteppingClock(Cell<f64>);
+
+impl Clock for SteppingClock {
+    fn now_ms(&self) -> f64 {
+        let t = self.0.get();
+        self.0.set(t + 5.0);
+        t
+    }
+}
 
 fn font_file(rel: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -162,7 +175,7 @@ fn ferrum_render_with(
 fn small_text_is_drawn_as_bars() {
     let fonts = fonts(true);
     let mut p = Page::new();
-    let id = add_text(
+    add_text(
         &mut p,
         0.0,
         0.0,
@@ -181,7 +194,6 @@ fn small_text_is_drawn_as_bars() {
     let mut backend = ferrum_render::CpuBackend::new(w, h);
     let stats = r.draw_scene(&mut backend, &scene, &cam, &NoImages);
     assert_eq!((stats.text_greeked, stats.text_glyphs), (1, 0), "{stats:?}");
-    let _ = id;
 }
 
 #[test]
@@ -201,6 +213,7 @@ fn layout_is_lazy_cached_and_time_limited() {
     }
     let scene = p.scene();
     let mut r = renderer(&fonts);
+    r.set_clock(Some(Box::new(SteppingClock(Cell::new(0.0)))));
     // Зум 20 %: строки по 3 px и меньше — полосы, глифов нет (кадр дешёвый).
     let mut cam = camera(200.0, 100.0);
     cam.set_zoom(0.2);
@@ -208,11 +221,9 @@ fn layout_is_lazy_cached_and_time_limited() {
     let (w, h) = cam.device_size();
     let mut backend = ferrum_render::CpuBackend::new(w, h);
     let first = r.draw_scene(&mut backend, &scene, &cam, &NoImages);
-    // Первый кадр раскладывает не всё: предел времени, остальное — полосы по оценке.
-    assert!(
-        first.text_layouts >= 1 && first.text_layouts < 600,
-        "{first:?}"
-    );
+    // Первая раскладка — всегда, дальше предел времени (часы шагают на 5 мс >
+    // 4 мс): остальное — полосы по оценке.
+    assert_eq!(first.text_layouts, 1, "{first:?}");
     assert_eq!(first.text_greeked, 600, "{first:?}");
     assert!(first.needs_another_frame);
     let mut frames = 1;
@@ -285,4 +296,72 @@ fn png_export_and_thumbnail_include_text() {
         .unwrap();
     let thumb = ferrum_render::Pixmap::from_png(std::io::Cursor::new(thumb)).unwrap();
     assert!(dark_pixels(&thumb, 0, 0, 480, 320) > 300);
+}
+
+/// Фрейм с текстом, мелкий настолько, что рисуется из растра.
+fn frame_with_text(count: usize) -> Page {
+    let mut p = Page::new();
+    let frame = p.add(None, NodeKind::Frame, rect(0.0, 0.0, 400.0, 100.0));
+    for i in 0..count {
+        p.doc
+            .transact(p.page, vec![], |tx| {
+                let id = tx.create_node(Some(frame), None, NodeKind::Text)?;
+                tx.set_props(
+                    id,
+                    &PropsPatch {
+                        text: Some(props(48.0, TextSizing::AutoWidth)),
+                        ..rect(10.0 + i as f64 * 150.0, 10.0, 140.0, 60.0)
+                    },
+                )?;
+                tx.set_text_content(id, &TextContent::plain("Ferrum"))?;
+                Ok(vec![id])
+            })
+            .unwrap();
+    }
+    p
+}
+
+#[test]
+fn raster_does_not_keep_text_of_a_loading_font() {
+    let fonts = fonts(false);
+    let mut p = frame_with_text(1);
+    let scene = p.scene();
+    let mut r = renderer(&fonts);
+    let mut cam = camera(120.0, 40.0);
+    cam.set_zoom(0.25);
+    cam.set_center(kurbo::Point::new(200.0, 50.0));
+    let blank = render_with(&mut r, &scene, &cam, &NoImages);
+    let inked = |img: &ferrum_render::Pixmap| dark_pixels(img, 0, 0, 120, 40);
+    assert_eq!(inked(&blank), 0);
+    let reqs = fonts.borrow_mut().take_requests();
+    for f in &reqs[0].files {
+        fonts.borrow_mut().load("Inter", f, font_file(f)).unwrap();
+    }
+    // Растр фрейма построен без текста; байты пришли — кадр показывает глифы.
+    let drawn = render_with(&mut r, &scene, &cam, &NoImages);
+    assert!(inked(&drawn) > 20, "{}", inked(&drawn));
+}
+
+#[test]
+fn raster_catches_up_deferred_text_layout() {
+    let fonts = fonts(true);
+    let mut p = frame_with_text(2);
+    let scene = p.scene();
+    let mut r = renderer(&fonts);
+    // Каждая раскладка «длится» дольше предела кадра: вторая откладывается.
+    r.set_clock(Some(Box::new(SteppingClock(Cell::new(0.0)))));
+    let mut cam = camera(120.0, 40.0);
+    cam.set_zoom(0.25);
+    cam.set_center(kurbo::Point::new(200.0, 50.0));
+    let (w, h) = cam.device_size();
+    let mut backend = ferrum_render::CpuBackend::new(w, h);
+    // Растр с одним настоящим текстом и полосами по оценке вместо второго.
+    let first = r.draw_scene(&mut backend, &scene, &cam, &NoImages);
+    assert_eq!(first.text_layouts, 1, "{first:?}");
+    assert!(first.needs_another_frame, "{first:?}");
+    // Следующий кадр перестраивает растр и раскладывает оставшийся текст.
+    let second = r.draw_scene(&mut backend, &scene, &cam, &NoImages);
+    assert_eq!(second.text_layouts, 1, "{second:?}");
+    assert_eq!(second.text_glyphs, 2, "{second:?}");
+    assert!(!second.needs_another_frame, "{second:?}");
 }

@@ -139,6 +139,9 @@ struct Raster {
     /// переиспользуется: картинка появится без изменения сцены, и устаревший
     /// растр показывал бы заглушку вечно.
     placeholder: bool,
+    /// Поколение реестра шрифтов при построении: пришли новые шрифты — текст
+    /// в растре мог устареть.
+    fonts_generation: u64,
 }
 
 impl Raster {
@@ -185,6 +188,9 @@ pub struct Painter {
     raster_full: bool,
     /// В текущем рисовании встретилась заглушка вместо картинки.
     missing_image: bool,
+    /// В текущем рисовании есть текст без окончательного вида: раскладка отложена
+    /// по времени (полосы по оценке) или шрифт ещё грузится (текст не нарисован).
+    text_unfinished: bool,
     pub stats: FrameStats,
 }
 
@@ -211,6 +217,7 @@ impl Painter {
             raster_bytes: 0,
             raster_limit: bytes,
             missing_image: false,
+            text_unfinished: false,
             raster_full: false,
             stats: FrameStats::default(),
         }
@@ -240,6 +247,7 @@ impl Painter {
         self.raster_time_spent = Duration::ZERO;
         self.text_time_spent = Duration::ZERO;
         self.missing_image = false;
+        self.text_unfinished = false;
         self.raster_full = false;
         if self.frame.is_multiple_of(64) {
             self.evict();
@@ -532,6 +540,7 @@ impl Painter {
             None => {
                 // Время кадра на раскладку вышло: пока — полосы по оценке строк.
                 self.stats.needs_another_frame = true;
+                self.text_unfinished = true;
                 None
             }
         };
@@ -546,6 +555,7 @@ impl Painter {
             return;
         };
         if layout.loading {
+            self.text_unfinished = true;
             return;
         }
         let line_px = layout
@@ -610,6 +620,7 @@ impl Painter {
         n: &SceneNode,
         area: Rect,
     ) -> bool {
+        let fonts_generation = ctx.fonts.borrow().generation();
         // Растр того же содержимого, возможно, другой плотности.
         let same = self
             .rasters
@@ -617,7 +628,10 @@ impl Painter {
             .is_some_and(|r| r.id == n.id && r.subtree_version == n.subtree_version);
         let fresh = same
             && self.rasters.get(&slot).is_some_and(|r| {
-                !r.placeholder && r.scale >= ctx.scale && r.scale < 2.0 * ctx.scale
+                !r.placeholder
+                    && r.fonts_generation == fonts_generation
+                    && r.scale >= ctx.scale
+                    && r.scale < 2.0 * ctx.scale
             });
         if !fresh {
             let scale = 2f64.powf(ctx.scale.log2().ceil());
@@ -687,13 +701,23 @@ impl Painter {
             };
             let outer = self.stats;
             let outer_missing = std::mem::take(&mut self.missing_image);
+            let outer_unfinished = std::mem::take(&mut self.text_unfinished);
+            self.stats.needs_another_frame = false;
             self.draw(&mut cpu, &inner, &[slot]);
-            let placeholder = std::mem::replace(&mut self.missing_image, outer_missing);
+            let missing = std::mem::replace(&mut self.missing_image, outer_missing);
+            let unfinished = std::mem::replace(&mut self.text_unfinished, outer_unfinished);
             // Растр с заглушкой на экране — та же заглушка: кадр неполный.
-            self.missing_image |= placeholder;
+            self.missing_image |= missing;
+            // Текст без окончательного вида в растре не остаётся: такой растр
+            // перестраивается, а отложенная раскладка просит ещё кадр.
+            let placeholder = missing || unfinished;
             self.stats = FrameStats {
                 raster_builds: outer.raster_builds + 1,
                 lists_built: self.stats.lists_built,
+                text_layouts: self.stats.text_layouts,
+                text_glyphs: self.stats.text_glyphs,
+                text_greeked: self.stats.text_greeked,
+                needs_another_frame: outer.needs_another_frame || self.stats.needs_another_frame,
                 ..outer
             };
             if let Some(old) = self.rasters.remove(&slot) {
@@ -708,6 +732,7 @@ impl Painter {
                 key: ImageKey::next_raster(),
                 last_used: self.frame,
                 placeholder,
+                fonts_generation,
             };
             self.raster_bytes += raster.bytes();
             self.rasters.insert(slot, raster);

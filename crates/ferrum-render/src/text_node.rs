@@ -110,3 +110,30 @@ pub(crate) fn paint_glyphs(
 pub(crate) fn lod_color(p: &Props) -> Rgba {
     color(text_color(&p.fills)).multiply_alpha(TEXT_GREEK_ALPHA)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrum_doc::{NodeKind, TextContent, TextData, TextProps};
+
+    fn lines(text: &str, sizing: TextSizing) -> usize {
+        let mut p = Props::defaults(NodeKind::Text);
+        p.text = Some(std::sync::Arc::new(TextData {
+            props: TextProps {
+                sizing,
+                ..TextProps::default()
+            },
+            content: TextContent::plain(text),
+        }));
+        estimate_lines(&p).len()
+    }
+
+    #[test]
+    fn auto_width_estimate_counts_every_paragraph() {
+        // Содержимое всегда оканчивается переводом строки (он закрывает последний
+        // абзац), поэтому число переводов строки и есть число абзацев.
+        assert_eq!(lines("a", TextSizing::AutoWidth), 1);
+        assert_eq!(lines("a\nb", TextSizing::AutoWidth), 2);
+        assert_eq!(lines("a\nb\n", TextSizing::AutoWidth), 2);
+    }
+}
