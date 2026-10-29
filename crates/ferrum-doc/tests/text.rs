@@ -226,7 +226,6 @@ fn text_props_patch_writes_only_text_nodes() {
 fn limits_refuse_the_edit_without_a_step() {
     let (mut doc, page, id) = doc_with_text();
     let before = content(&mut doc, page, id);
-    let steps = doc.can_undo();
     let long = "я".repeat(MAX_TEXT_CHARS);
     let err = doc.transact(page, vec![], |tx| {
         tx.insert_text(id, 0, &long, None)?;
@@ -251,7 +250,9 @@ fn limits_refuse_the_edit_without_a_step() {
     });
     assert!(matches!(err, Err(DocError::TooManyTextRuns)), "{err:?}");
     assert_eq!(content(&mut doc, page, id), ok);
-    assert!(steps);
+    // Отказы не добавили шагов: единственный шаг отмены — создание узла.
+    doc.undo().unwrap();
+    assert!(!doc.page(page).unwrap().contains(id));
 }
 
 #[test]

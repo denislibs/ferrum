@@ -26,7 +26,7 @@ use crate::codec;
 use crate::error::{DocError, DocResult};
 use crate::loro_ext;
 use crate::scene_cache::SceneRow;
-use crate::text::{AttrKey, TextAttrs, TextContent, MAX_TEXT_CHARS, MAX_TEXT_RUNS};
+use crate::text::{AttrKey, TextAttrs, TextContent, TextData, MAX_TEXT_CHARS, MAX_TEXT_RUNS};
 use crate::text_codec;
 use crate::types::*;
 
@@ -561,12 +561,22 @@ impl PageDoc {
         let inverse = edit(&text)?;
         let content = text_codec::read_content(&text);
         if content.styled_runs() > MAX_TEXT_RUNS {
-            text.apply_delta(&inverse)?;
-            return Err(DocError::TooManyTextRuns);
+            // Откат не удался — Loro изменён без записи в журнал и зеркала.
+            return Err(match text.apply_delta(&inverse) {
+                Ok(()) => DocError::TooManyTextRuns,
+                Err(e) => DocError::RollbackFailed {
+                    original: Box::new(DocError::TooManyTextRuns),
+                    rollback: Box::new(e.into()),
+                },
+            });
         }
         if let Some(props) = self.state.borrow_mut().props.get_mut(&id) {
-            if let Some(t) = &mut props.text {
-                Arc::make_mut(t).content = content;
+            if let Some(t) = &props.text {
+                // Новый `Arc`: прежний `TextData` не копируется целиком.
+                props.text = Some(Arc::new(TextData {
+                    props: t.props.clone(),
+                    content,
+                }));
             }
         }
         self.record(Inverse::Text(id, inverse));
