@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use ferrum_editor::Platform;
 use ferrum_render::CpuBackend;
-use ferrum_text::read_faces;
+use ferrum_text::{read_faces, MAX_FAMILY_NAME as MAX_FAMILY_NAME_BYTES};
 use ferrum_wasm::core::Core;
 use ferrum_wasm::protocol::*;
 use kurbo::Size;
@@ -240,12 +240,10 @@ fn catalog_and_logs_and_limits() {
         width: None,
         height: None,
     });
-    let errors = c
-        .take_events()
-        .into_iter()
-        .filter(|e| matches!(e, CoreEvent::Error { .. }))
-        .count();
-    assert_eq!(errors, 2);
+    let events = c.take_events();
+    // Неверное семейство пропущено с записью в журнал; длинный текст — отказ.
+    assert_eq!(errors_of(&events).len(), 1);
+    assert!(events.iter().any(|e| matches!(e, CoreEvent::Log { .. })));
 }
 
 #[test]
@@ -269,51 +267,86 @@ fn demo_with_ten_thousand_texts_opens_without_layout() {
     eprintln!("пример из 10 000 текстов: {elapsed:?}");
 }
 
+/// Неверные семейства и начертания пропускаются с записью в журнал, лишнее сверх
+/// пределов отбрасывается, остальной список принимается (а не весь отвергается).
 #[test]
-fn font_list_limits_are_errors_and_catalog_stays_unchanged() {
+fn font_list_skips_bad_entries_and_keeps_the_rest() {
     let mut c = Core::new(Platform::Mac, Size::new(400.0, 300.0), 1.0, Backend::Cpu);
-    let face = |file: String| FontFaceDto {
-        style: "Regular".into(),
+    let face = |style: &str, file: String| FontFaceDto {
+        style: style.into(),
         weight: None,
         italic: None,
         stretch: None,
         file,
         index: None,
     };
-    let family = |faces| FontFamilyDto {
-        family: "Long".into(),
+    let family = |name: &str, faces| FontFamilyDto {
+        family: name.into(),
         faces,
     };
-    // Путь к файлу — не больше 4096 байт, начертаний у семейства — не больше 1000.
-    for list in [
-        vec![family(vec![face("f".repeat(MAX_TEXT_BYTES + 1))])],
-        vec![family(
+    let mut list = vec![
+        // Длинный путь у одного начертания — пропущено только оно.
+        family(
+            "Mixed",
+            vec![
+                face("Regular", "f".repeat(MAX_TEXT_BYTES + 1)),
+                face("Bold", "f".repeat(MAX_TEXT_BYTES)),
+                face("", "e".into()),
+            ],
+        ),
+        // Начертаний больше 1000 — берутся первые 1000.
+        family(
+            "Many",
             (0..=MAX_FONT_FACES)
-                .map(|i| face(format!("f{i}")))
+                .map(|i| face(&format!("S{i}"), format!("m{i}")))
                 .collect(),
-        )],
-    ] {
-        c.command(Command::FontsAvailable {
-            source: FontSource::System,
-            families: list,
-        });
-    }
-    let events = c.take_events();
-    let errors = events
-        .iter()
-        .filter(|e| matches!(e, CoreEvent::Error { .. }))
-        .count();
-    assert_eq!(errors, 2);
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, CoreEvent::FontCatalog { families } if families.iter().any(|f| f.family == "Long"))));
-    // Предельные значения принимаются.
+        ),
+        // Неверное имя семейства — пропущено семейство.
+        family(
+            &"x".repeat(MAX_FAMILY_NAME_BYTES + 1),
+            vec![face("Regular", "x".into())],
+        ),
+    ];
+    // Семейств больше 4096 — берутся первые.
+    list.extend(
+        (0..MAX_FONT_FAMILIES)
+            .map(|i| family(&format!("F{i}"), vec![face("Regular", format!("g{i}"))])),
+    );
     c.command(Command::FontsAvailable {
         source: FontSource::System,
-        families: vec![family(vec![face("f".repeat(MAX_TEXT_BYTES))])],
+        families: list,
     });
     let events = c.take_events();
-    assert!(!events.iter().any(|e| matches!(e, CoreEvent::Error { .. })));
+    assert!(errors_of(&events).is_empty(), "{:?}", errors_of(&events));
+    let logs = events
+        .iter()
+        .filter(|e| matches!(e, CoreEvent::Log { .. }))
+        .count();
+    assert!(
+        logs >= 4,
+        "журнал: семейства, начертания, предел начертаний, предел семейств"
+    );
+    let catalog = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            CoreEvent::FontCatalog { families } => Some(families.clone()),
+            _ => None,
+        })
+        .expect("каталог");
+    let styles = |name: &str| {
+        catalog
+            .iter()
+            .find(|f| f.family == name)
+            .map(|f| f.styles.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(styles("Mixed"), vec!["Bold".to_string()]);
+    assert_eq!(styles("Many").len(), MAX_FONT_FACES);
+    assert!(styles("F0").len() == 1);
+    // Последнее семейство — за пределом списка.
+    let last = format!("F{}", MAX_FONT_FAMILIES - 1);
+    assert!(styles(&last).is_empty());
 }
 
 #[test]

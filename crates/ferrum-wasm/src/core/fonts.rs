@@ -96,41 +96,64 @@ fn font_name(f: &FontNameDto) -> Result<FontName, String> {
 }
 
 /// Семейства из команды: имена и списки в пределах, у начертаний без веса —
-/// вес и курсив по имени (Chrome не сообщает их в `FontData`).
-fn families(list: Vec<FontFamilyDto>) -> Result<Vec<FamilyInfo>, String> {
-    if list.len() > MAX_FONT_FAMILIES {
-        return Err(format!("Шрифтов больше {MAX_FONT_FAMILIES} семейств"));
+/// вес и курсив по имени (Chrome не сообщает их в `FontFamilyDto`). Неверное
+/// семейство или начертание пропускается, лишнее сверх пределов отбрасывается —
+/// остальной список принимается (один кривой файл шрифта у пользователя не
+/// должен прятать все системные шрифты). Второе значение — строки журнала.
+fn families(list: Vec<FontFamilyDto>) -> (Vec<FamilyInfo>, Vec<String>) {
+    let mut log = Vec::new();
+    let total = list.len();
+    if total > MAX_FONT_FAMILIES {
+        log.push(format!(
+            "Шрифтов {total} семейств, взяты первые {MAX_FONT_FAMILIES}"
+        ));
     }
-    list.into_iter()
-        .map(|f| {
-            if !name_ok(&f.family, MAX_FAMILY_NAME) || f.faces.len() > MAX_FONT_FACES {
-                return Err("Неверный список шрифтов".to_string());
+    let (mut bad_families, mut bad_faces, mut extra_faces) = (0usize, 0usize, 0usize);
+    let mut out = Vec::with_capacity(total.min(MAX_FONT_FAMILIES));
+    for f in list.into_iter().take(MAX_FONT_FAMILIES) {
+        if !name_ok(&f.family, MAX_FAMILY_NAME) {
+            bad_families += 1;
+            continue;
+        }
+        extra_faces += f.faces.len().saturating_sub(MAX_FONT_FACES);
+        let mut faces = Vec::with_capacity(f.faces.len().min(MAX_FONT_FACES));
+        for x in f.faces.into_iter().take(MAX_FONT_FACES) {
+            if !name_ok(&x.style, MAX_FAMILY_NAME) || !name_ok(&x.file, MAX_TEXT_BYTES) {
+                bad_faces += 1;
+                continue;
             }
-            let faces = f
-                .faces
-                .into_iter()
-                .map(|x| {
-                    if !name_ok(&x.style, MAX_FAMILY_NAME) || !name_ok(&x.file, MAX_TEXT_BYTES) {
-                        return Err("Неверный список шрифтов".to_string());
-                    }
-                    let (guess_w, guess_i) = ferrum_text::style_name::guess_attrs(&x.style);
-                    let finite = |v: Option<f64>| v.filter(|v| v.is_finite());
-                    Ok(FaceInfo {
-                        weight: finite(x.weight).map_or(guess_w, |v| v.clamp(1.0, 1000.0) as f32),
-                        italic: x.italic.unwrap_or(guess_i),
-                        stretch: finite(x.stretch).map_or(1.0, |v| v.clamp(0.5, 2.0) as f32),
-                        index: x.index.unwrap_or(0),
-                        style: x.style,
-                        file: x.file,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(FamilyInfo {
-                family: f.family,
-                faces,
-            })
-        })
-        .collect()
+            let (guess_w, guess_i) = ferrum_text::style_name::guess_attrs(&x.style);
+            let finite = |v: Option<f64>| v.filter(|v| v.is_finite());
+            faces.push(FaceInfo {
+                weight: finite(x.weight).map_or(guess_w, |v| v.clamp(1.0, 1000.0) as f32),
+                italic: x.italic.unwrap_or(guess_i),
+                stretch: finite(x.stretch).map_or(1.0, |v| v.clamp(0.5, 2.0) as f32),
+                index: x.index.unwrap_or(0),
+                style: x.style,
+                file: x.file,
+            });
+        }
+        out.push(FamilyInfo {
+            family: f.family,
+            faces,
+        });
+    }
+    if bad_families > 0 {
+        log.push(format!(
+            "Пропущено семейств шрифтов с неверным именем: {bad_families}"
+        ));
+    }
+    if bad_faces > 0 {
+        log.push(format!(
+            "Пропущено начертаний с неверным именем или файлом: {bad_faces}"
+        ));
+    }
+    if extra_faces > 0 {
+        log.push(format!(
+            "Пропущено начертаний сверх {MAX_FONT_FACES} у семейства: {extra_faces}"
+        ));
+    }
+    (out, log)
 }
 
 impl Core {
@@ -140,15 +163,16 @@ impl Core {
             Command::FontsAvailable {
                 source: s,
                 families: list,
-            } => match families(list) {
-                Ok(list) => {
-                    self.fonts.borrow_mut().add_catalog(source(s), list);
-                    // Шрифты страницы, которые до списка были «неизвестны», — запросить.
-                    self.preload_page_fonts();
-                    self.after_fonts_changed();
+            } => {
+                let (list, log) = families(list);
+                for message in log {
+                    self.events.push(CoreEvent::Log { message });
                 }
-                Err(e) => self.error(e),
-            },
+                self.fonts.borrow_mut().add_catalog(source(s), list);
+                // Шрифты страницы, которые до списка были «неизвестны», — запросить.
+                self.preload_page_fonts();
+                self.after_fonts_changed();
+            }
             Command::LoadFont {
                 family,
                 file,

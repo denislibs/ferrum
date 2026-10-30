@@ -45,6 +45,11 @@ test('пределы совпадают с константами ядра', () 
   expect(rustConst(`${CRATES}ferrum-text/src/fonts.rs`, 'MAX_FAMILY_NAME')).toBe(MAX_FAMILY_NAME);
   expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_FAMILIES')).toBe(MAX_FONT_FAMILIES);
   expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_FACES')).toBe(MAX_FONT_FACES);
+  // Десктоп отдаёт список системных шрифтов уже в этих пределах.
+  const desktop = '../../desktop/src-tauri/src/fonts.rs';
+  expect(rustConst(desktop, 'MAX_FONT_FAMILIES')).toBe(MAX_FONT_FAMILIES);
+  expect(rustConst(desktop, 'MAX_FONT_FACES')).toBe(MAX_FONT_FACES);
+  expect(rustConst(desktop, 'MAX_FAMILY_NAME')).toBe(MAX_FAMILY_NAME);
 });
 
 test('theme-init.js читает настройки с тем же пределом', () => {

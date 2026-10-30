@@ -6,7 +6,7 @@
 // Rust, байты сырым ответом IPC. Firefox и Safari — только вшитые.
 
 import type { FontFamilyDto } from '../wasm/ferrum_wasm';
-import { localFamilies, type LocalFont } from '../core/fonts';
+import { desktopFamilies, localFamilies, type LocalFont } from '../core/fonts';
 import { MAX_FONT_BYTES, tooLarge } from '../core/limits';
 import type { Editor } from './context';
 import { isTauri, systemFontBytes, systemFontList } from './tauri';
@@ -65,7 +65,11 @@ export function tauriFonts(): SystemFonts {
   return {
     supported: true,
     granted: async () => true,
-    list: () => systemFontList(),
+    async list() {
+      const { families, dropped } = desktopFamilies(await systemFontList());
+      if (dropped) console.warn(`ferrum: системных шрифтов пропущено (неверные или сверх предела): ${dropped}`);
+      return families;
+    },
     read: (file) => systemFontBytes(file),
   };
 }

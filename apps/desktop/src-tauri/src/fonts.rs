@@ -13,6 +13,60 @@ pub const MAX_FONT_FILES: usize = 20_000;
 /// Наибольшая вложенность каталогов при сканировании.
 const MAX_DEPTH: usize = 16;
 
+/// Пределы списка для ядра (спека 8) — те же, что `MAX_FONT_FAMILIES`,
+/// `MAX_FONT_FACES` протокола и `MAX_FAMILY_NAME` реестра (сверяет
+/// `apps/web/unit/limits.test.ts`): список отдаётся уже в пределах.
+pub const MAX_FONT_FAMILIES: usize = 4096;
+pub const MAX_FONT_FACES: usize = 1000;
+pub const MAX_FAMILY_NAME: usize = 256;
+
+fn name_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_FAMILY_NAME
+}
+
+/// Семейства в пределах ядра: неверные имена пропускаются, лишние начертания и
+/// семейства отбрасываются; что пропущено — в `skipped` (журнал ошибок).
+fn bound(families: Vec<FamilyInfo>, skipped: &mut Vec<String>) -> Vec<FamilyInfo> {
+    let total = families.len();
+    let mut out = Vec::with_capacity(total.min(MAX_FONT_FAMILIES));
+    for mut f in families {
+        if !name_ok(&f.family) {
+            skipped.push(format!(
+                "Шрифт пропущен: имя семейства длиннее {MAX_FAMILY_NAME} байт"
+            ));
+            continue;
+        }
+        let before = f.faces.len();
+        f.faces.retain(|x| name_ok(&x.style));
+        if f.faces.len() < before {
+            skipped.push(format!(
+                "Шрифт «{}»: пропущено начертаний с неверным именем: {}",
+                f.family,
+                before - f.faces.len()
+            ));
+        }
+        if f.faces.len() > MAX_FONT_FACES {
+            skipped.push(format!(
+                "Шрифт «{}»: начертаний {}, взяты первые {MAX_FONT_FACES}",
+                f.family,
+                f.faces.len()
+            ));
+            f.faces.truncate(MAX_FONT_FACES);
+        }
+        if f.faces.is_empty() {
+            continue;
+        }
+        if out.len() == MAX_FONT_FAMILIES {
+            skipped.push(format!(
+                "Шрифтов {total} семейств, взяты первые {MAX_FONT_FAMILIES}"
+            ));
+            break;
+        }
+        out.push(f);
+    }
+    out
+}
+
 /// Список системных шрифтов: файлы и семейства (номер файла — `FaceInfo::file`).
 #[derive(Default)]
 pub struct SystemFonts {
@@ -115,7 +169,7 @@ impl SystemFonts {
             out.files.push(path);
             faces.extend(found);
         }
-        out.families = group(faces);
+        out.families = bound(group(faces), &mut out.skipped);
         out
     }
 
@@ -157,6 +211,40 @@ mod tests {
         );
         assert!(fonts.read(99).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn family(name: String, faces: usize) -> FamilyInfo {
+        FamilyInfo {
+            family: name,
+            faces: (0..faces)
+                .map(|i| ferrum_fontmeta::FaceInfo {
+                    style: format!("S{i}"),
+                    weight: 400.0,
+                    italic: false,
+                    stretch: 1.0,
+                    file: i.to_string(),
+                    index: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn list_is_bounded_and_bad_names_skipped() {
+        let mut list = vec![
+            family("x".repeat(MAX_FAMILY_NAME + 1), 1),
+            family("Many".into(), MAX_FONT_FACES + 5),
+        ];
+        list[1].faces[0].style = "y".repeat(MAX_FAMILY_NAME + 1);
+        list.extend((0..MAX_FONT_FAMILIES + 3).map(|i| family(format!("F{i}"), 1)));
+        let mut skipped = Vec::new();
+        let out = bound(list, &mut skipped);
+        assert_eq!(out.len(), MAX_FONT_FAMILIES);
+        assert_eq!(out[0].family, "Many");
+        assert_eq!(out[0].faces.len(), MAX_FONT_FACES);
+        assert_eq!(out[0].faces[0].style, "S1", "неверное начертание пропущено");
+        // Длинное имя, неверное начертание, лишние начертания, лишние семейства.
+        assert_eq!(skipped.len(), 4, "{skipped:?}");
     }
 
     #[cfg(unix)]

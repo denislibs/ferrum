@@ -68,6 +68,44 @@ export function localFamilies(fonts: readonly LocalFont[]): FontFamilyDto[] {
   return [...byFamily.values()];
 }
 
+/** Список системных шрифтов десктопа (ответ `fonts_list`) в пределах ядра: файл
+ * начертания — номер файла в списке Rust. Rust уже ограничивает список; здесь —
+ * вторая граница: неверное семейство или начертание пропускается, лишнее сверх
+ * пределов отбрасывается, а не губит весь список. `dropped` — сколько записей
+ * пропущено (для журнала). */
+export function desktopFamilies(json: unknown): { families: FontFamilyDto[]; dropped: number } {
+  if (!Array.isArray(json)) return { families: [], dropped: 0 };
+  const out: FontFamilyDto[] = [];
+  let dropped = Math.max(0, json.length - MAX_FONT_FAMILIES);
+  for (const f of json.slice(0, MAX_FONT_FAMILIES) as unknown[]) {
+    const fam = f as { family?: unknown; faces?: unknown } | null;
+    if (!isName(fam?.family) || !Array.isArray(fam.faces)) {
+      dropped++;
+      continue;
+    }
+    dropped += Math.max(0, fam.faces.length - MAX_FONT_FACES);
+    const faces: FontFamilyDto['faces'] = [];
+    for (const x of fam.faces.slice(0, MAX_FONT_FACES) as unknown[]) {
+      const face = x as Record<string, unknown> | null;
+      if (!face || !isName(face.style) || typeof face.file !== 'string' || !/^\d{1,9}$/.test(face.file)) {
+        dropped++;
+        continue;
+      }
+      faces.push({
+        style: face.style,
+        weight: typeof face.weight === 'number' ? face.weight : undefined,
+        italic: typeof face.italic === 'boolean' ? face.italic : undefined,
+        stretch: typeof face.stretch === 'number' ? face.stretch : undefined,
+        file: face.file,
+        index: typeof face.index === 'number' && Number.isInteger(face.index) && face.index >= 0 ? face.index : undefined,
+      });
+    }
+    if (faces.length) out.push({ family: fam.family, faces });
+    else dropped++;
+  }
+  return { families: out, dropped };
+}
+
 /** Ключ начертания как в ядре (`style_key`): без разделителей и регистра. */
 export function styleKey(s: string): string {
   return [...s].filter((c) => /[\p{L}\p{N}]/u.test(c)).join('').toLowerCase();
