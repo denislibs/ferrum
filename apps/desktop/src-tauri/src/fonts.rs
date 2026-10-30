@@ -10,6 +10,9 @@ use ferrum_fontmeta::{group, read_faces, FamilyInfo, MAX_FONT_FILE};
 /// Наибольшее число файлов шрифтов при сканировании (страховка от огромных каталогов).
 pub const MAX_FONT_FILES: usize = 20_000;
 
+/// Наибольшая вложенность каталогов при сканировании.
+const MAX_DEPTH: usize = 16;
+
 /// Список системных шрифтов: файлы и семейства (номер файла — `FaceInfo::file`).
 #[derive(Default)]
 pub struct SystemFonts {
@@ -47,7 +50,11 @@ pub fn font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Ссылки на каталоги не обходятся: петля ссылок иначе — бесконечная рекурсия.
+fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -57,8 +64,13 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
         if out.len() >= MAX_FONT_FILES {
             return;
         }
+        let link = p
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink());
         if p.is_dir() {
-            collect(&p, out);
+            if !link {
+                collect(&p, depth + 1, out);
+            }
         } else if p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
             matches!(
                 e.to_ascii_lowercase().as_str(),
@@ -75,7 +87,7 @@ impl SystemFonts {
     pub fn scan(dirs: &[PathBuf]) -> SystemFonts {
         let mut paths = Vec::new();
         for d in dirs {
-            collect(d, &mut paths);
+            collect(d, 0, &mut paths);
         }
         let mut out = SystemFonts::default();
         let mut faces = Vec::new();
@@ -144,6 +156,21 @@ mod tests {
             std::fs::metadata(dir.join("nested/b.TTF")).unwrap().len() as usize
         );
         assert!(fonts.read(99).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loop_does_not_recurse() {
+        let dir = std::env::temp_dir().join(format!("ferrum-fonts-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("sub/loop")).unwrap();
+        let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/public/fonts");
+        std::fs::copy(web.join("ptsans/PTSans-Regular.ttf"), dir.join("sub/a.ttf")).unwrap();
+        let fonts = SystemFonts::scan(std::slice::from_ref(&dir));
+        assert_eq!(fonts.families.len(), 1);
+        assert_eq!(fonts.families[0].faces.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
