@@ -200,8 +200,18 @@ fn write_line_height(w: &mut Writer, v: LineHeight) {
     w.f64(x);
 }
 
+/// Число из файла: только конечное (как у читателя Loro); иначе строка — мусор.
+fn finite(x: f64) -> Option<f64> {
+    x.is_finite().then_some(x)
+}
+
+/// Размер шрифта: конечный и больше нуля (как у читателя Loro).
+fn font_size(x: f64) -> Option<f64> {
+    (x.is_finite() && x > 0.0).then_some(x)
+}
+
 fn read_line_height(r: &mut Reader) -> Option<LineHeight> {
-    let (tag, x) = (r.u8()?, r.f64()?);
+    let (tag, x) = (r.u8()?, finite(r.f64()?)?);
     Some(match tag {
         0 => LineHeight::Auto,
         1 => LineHeight::Px(x),
@@ -220,7 +230,7 @@ fn write_letter_spacing(w: &mut Writer, v: LetterSpacing) {
 }
 
 fn read_letter_spacing(r: &mut Reader) -> Option<LetterSpacing> {
-    let (tag, x) = (r.u8()?, r.f64()?);
+    let (tag, x) = (r.u8()?, finite(r.f64()?)?);
     Some(match tag {
         1 => LetterSpacing::Px(x),
         2 => LetterSpacing::Percent(x),
@@ -290,22 +300,30 @@ fn write_text(w: &mut Writer, t: &TextData) -> Option<()> {
     Some(())
 }
 
+/// Свойства и содержимое текста из файла — не доверенные: те же правила, что у
+/// читателя Loro (конечные числа, размер больше нуля, отступ списка в пределах),
+/// и пределы текста (`check_limits`). Нарушение — `None`: кэш отбрасывается и
+/// страница открывается из Loro, а не рисует NaN и не раскладывает мегабайты.
 fn read_text(r: &mut Reader) -> Option<TextData> {
     let sizing = decode_enum(&SIZINGS, r.u8()?)?;
     let align_h = decode_enum(&ALIGNS_H, r.u8()?)?;
     let align_v = decode_enum(&ALIGNS_V, r.u8()?)?;
-    let paragraph_spacing = r.f64()?;
-    let paragraph_indent = r.f64()?;
+    let paragraph_spacing = finite(r.f64()?)?;
+    let paragraph_indent = finite(r.f64()?)?;
     let truncate = r.u8()? != 0;
     let max_lines = Some(r.u32()?).filter(|n| *n > 0);
     let font = FontName::new(r.str16()?, r.str16()?);
-    let size = r.f64()?;
+    let size = font_size(r.f64()?)?;
     let line_height = read_line_height(r)?;
     let letter_spacing = read_letter_spacing(r)?;
     let decoration = decode_enum(&DECORATIONS, r.u8()?)?;
     let case = decode_enum(&CASES, r.u8()?)?;
     let n = r.u32()? as usize;
-    let mut runs = Vec::with_capacity(n.min(MAX_TEXT_RUNS * 2 + 1));
+    // Участки без разметки чередуются с размеченными: больше — уже за пределом.
+    if n > MAX_TEXT_RUNS * 2 + 1 {
+        return None;
+    }
+    let mut runs = Vec::with_capacity(n);
     for _ in 0..n {
         let text = r.str32()?;
         let mask = r.u16()?;
@@ -321,7 +339,7 @@ fn read_text(r: &mut Reader) -> Option<TextData> {
             a.style = Some(r.str16()?);
         }
         if on(AttrKey::Size) {
-            a.size = Some(r.f64()?);
+            a.size = Some(font_size(r.f64()?)?);
         }
         if on(AttrKey::Fill) {
             a.fill = Some(read_fill(r)?);
@@ -342,7 +360,11 @@ fn read_text(r: &mut Reader) -> Option<TextData> {
             a.list = Some(decode_enum(&LISTS, r.u8()?)?);
         }
         if on(AttrKey::Indent) {
-            a.indent = Some(r.u8()?);
+            let v = r.u8()?;
+            if v > MAX_LIST_INDENT {
+                return None;
+            }
+            a.indent = Some(v);
         }
         runs.push(TextRun { text, attrs: a });
     }
@@ -364,7 +386,11 @@ fn read_text(r: &mut Reader) -> Option<TextData> {
                 case,
             },
         },
-        content: TextContent { runs },
+        content: {
+            let content = TextContent { runs };
+            content.check_limits().ok()?;
+            content
+        },
     })
 }
 
@@ -438,4 +464,91 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
         });
     }
     Some(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Document;
+
+    /// Строки страницы с одним текстом «Привет».
+    fn text_rows() -> Vec<SceneRow> {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        doc.transact(page, vec![], |p| {
+            let id = p.create_node(None, None, NodeKind::Text)?;
+            p.set_text_content(id, &TextContent::plain("Привет"))?;
+            Ok(vec![])
+        })
+        .unwrap();
+        doc.page(page).unwrap().scene_rows().unwrap()
+    }
+
+    /// Кэш с текстом, изменённым `f`, — читается ли.
+    fn decodes(f: impl FnOnce(&mut TextData)) -> bool {
+        let mut rows = text_rows();
+        let text = rows[0].props.text.as_mut().unwrap();
+        f(Arc::make_mut(text));
+        decode(&encode(&rows).unwrap()).is_some()
+    }
+
+    #[test]
+    fn valid_text_row_round_trips() {
+        let rows = text_rows();
+        assert_eq!(decode(&encode(&rows).unwrap()), Some(rows));
+    }
+
+    #[test]
+    fn non_finite_text_numbers_drop_the_cache() {
+        assert!(!decodes(|t| t.props.style.size = f64::NAN));
+        assert!(!decodes(|t| t.props.style.size = f64::INFINITY));
+        assert!(!decodes(|t| t.props.style.size = 0.0));
+        assert!(!decodes(|t| t.props.style.size = -3.0));
+        assert!(!decodes(|t| t.props.paragraph_spacing = f64::NAN));
+        assert!(!decodes(|t| t.props.paragraph_indent = f64::NEG_INFINITY));
+        assert!(!decodes(
+            |t| t.props.style.line_height = LineHeight::Px(f64::NAN)
+        ));
+        assert!(!decodes(
+            |t| t.props.style.line_height = LineHeight::Percent(f64::INFINITY)
+        ));
+        assert!(!decodes(
+            |t| t.props.style.letter_spacing = LetterSpacing::Px(f64::NAN)
+        ));
+        assert!(!decodes(|t| t.content.runs[0].attrs.size = Some(f64::NAN)));
+        assert!(!decodes(
+            |t| t.content.runs[0].attrs.line_height = Some(LineHeight::Px(f64::INFINITY))
+        ));
+        assert!(!decodes(
+            |t| t.content.runs[0].attrs.indent = Some(MAX_LIST_INDENT + 1)
+        ));
+        // Предельные, но верные значения читаются.
+        assert!(decodes(
+            |t| t.content.runs[0].attrs.indent = Some(MAX_LIST_INDENT)
+        ));
+        assert!(decodes(
+            |t| t.props.style.letter_spacing = LetterSpacing::Px(-2.0)
+        ));
+    }
+
+    #[test]
+    fn over_limit_text_drops_the_cache() {
+        assert!(!decodes(
+            |t| t.content = TextContent::plain(&"я".repeat(MAX_TEXT_CHARS + 1))
+        ));
+        assert!(decodes(
+            |t| t.content = TextContent::plain(&"я".repeat(MAX_TEXT_CHARS))
+        ));
+        assert!(!decodes(|t| {
+            t.content.runs = (0..=MAX_TEXT_RUNS)
+                .map(|i| TextRun {
+                    text: "a".into(),
+                    attrs: TextAttrs {
+                        size: Some(10.0 + (i % 2) as f64),
+                        ..Default::default()
+                    },
+                })
+                .collect();
+        }));
+    }
 }
