@@ -114,16 +114,25 @@ export function installSystemFonts(
       if (ok && !shown) await show();
     });
   }
+  // Любой сбой получения байтов (чтение, размер сверх предела, который отверг бы
+  // `send`) — `loadFont` без байтов: ядро помечает файл несостоявшимся и рисует
+  // запасным шрифтом. Иначе шрифт ждал бы байтов вечно, а с ним — правки,
+  // экспорт и миниатюра.
   const off = ed.core.on((e) => {
     if (e.type !== 'fontRequest' || e.source !== 'system') return;
+    const family = e.family;
+    const failed = (file: string, err: unknown) => {
+      console.warn(`ferrum: системный шрифт ${family} не прочитан`, err);
+      ed.send({ type: 'loadFont', family, file });
+    };
     for (const file of e.files) {
       src
         .read(file)
-        .then((buf) => ed.send({ type: 'loadFont', family: e.family, file, bytes: new Uint8Array(buf) }))
-        .catch((err: unknown) => {
-          console.warn(`ferrum: системный шрифт ${e.family} не прочитан`, err);
-          ed.send({ type: 'loadFont', family: e.family, file });
-        });
+        .then((buf) => {
+          if (buf.byteLength > MAX_FONT_BYTES) return failed(file, tooLarge(MAX_FONT_BYTES, buf.byteLength));
+          ed.send({ type: 'loadFont', family, file, bytes: new Uint8Array(buf) });
+        })
+        .catch((err: unknown) => failed(file, err));
     }
   });
   return { show, dispose: off };

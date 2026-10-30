@@ -136,6 +136,10 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn too_large() -> String {
+    format!("Файл шрифта больше {} МБ", MAX_FONT_FILE / (1024 * 1024))
+}
+
 impl SystemFonts {
     /// Сканирует каталоги: каждый файл читается один раз ради метаданных.
     pub fn scan(dirs: &[PathBuf]) -> SystemFonts {
@@ -173,10 +177,27 @@ impl SystemFonts {
         out
     }
 
-    /// Байты файла по номеру из списка.
+    /// Байты файла по номеру из списка. Файл мог вырасти после сканирования
+    /// (обновил менеджер шрифтов): размер проверяется до чтения и при чтении —
+    /// больше `MAX_FONT_FILE` в память не попадает, ответ — ошибка, и интерфейс
+    /// сообщает ядру о сбое загрузки (шрифт не ждёт байтов вечно).
     pub fn read(&self, id: usize) -> Result<Vec<u8>, String> {
+        use std::io::Read;
         let path = self.files.get(id).ok_or("Неверный номер файла шрифта")?;
-        std::fs::read(path).map_err(|e| format!("Не удалось прочитать шрифт: {e}"))
+        let fail = |e: std::io::Error| format!("Не удалось прочитать шрифт: {e}");
+        let file = std::fs::File::open(path).map_err(fail)?;
+        let len = file.metadata().map_err(fail)?.len();
+        if len > MAX_FONT_FILE as u64 {
+            return Err(too_large());
+        }
+        let mut bytes = Vec::with_capacity(len as usize);
+        file.take(MAX_FONT_FILE as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(fail)?;
+        if bytes.len() > MAX_FONT_FILE {
+            return Err(too_large());
+        }
+        Ok(bytes)
     }
 }
 
@@ -210,6 +231,27 @@ mod tests {
             std::fs::metadata(dir.join("nested/b.TTF")).unwrap().len() as usize
         );
         assert!(fonts.read(99).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Файл вырос после сканирования больше 64 МБ — ошибка, а не чтение в память.
+    #[test]
+    fn read_refuses_file_grown_past_limit() {
+        let dir = std::env::temp_dir().join(format!("ferrum-fonts-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/public/fonts");
+        let path = dir.join("a.ttf");
+        std::fs::copy(web.join("ptsans/PTSans-Regular.ttf"), &path).unwrap();
+        let fonts = SystemFonts::scan(std::slice::from_ref(&dir));
+        let id: usize = fonts.families[0].faces[0].file.parse().unwrap();
+        assert!(fonts.read(id).is_ok());
+        // Разреженный файл: место на диске не занимает.
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(MAX_FONT_FILE as u64 + 1).unwrap();
+        drop(f);
+        let err = fonts.read(id).unwrap_err();
+        assert!(err.contains("64 МБ"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
