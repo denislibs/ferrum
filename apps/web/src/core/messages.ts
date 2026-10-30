@@ -4,7 +4,7 @@
 
 import type { Command, CoreEvent } from '../wasm/ferrum_wasm';
 import { MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from './clipboard-text';
-import { MAX_DATA_BYTES, MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, mb, tooLarge } from './limits';
+import { MAX_DATA_BYTES, MAX_FONT_BYTES, MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, mb, tooLarge } from './limits';
 
 export type ToWorker =
   | {
@@ -47,6 +47,8 @@ export const MAX_COMMAND_BYTES = {
   paste: MAX_DATA_BYTES,
   placeImage: MAX_DATA_BYTES,
   pasteImage: MAX_DATA_BYTES,
+  /** Файл шрифта (`loadFont`; без байтов — файл получить не удалось). */
+  loadFont: MAX_FONT_BYTES,
 } as const;
 
 /** Байты команды не того вида (не массив байтов) — текст без технических имён. */
@@ -61,7 +63,15 @@ const SHARED_BYTES = 'Неверная команда: данные не мог�
 export function commandSizeError(cmd: Command): string | null {
   if (typeof cmd !== 'object' || cmd === null) return null;
   if (cmd.type === 'openWithJournal') return journalCommandError(cmd);
-  if (cmd.type !== 'open' && cmd.type !== 'paste' && cmd.type !== 'placeImage' && cmd.type !== 'pasteImage') return null;
+  if (cmd.type === 'loadFont' && (cmd as { bytes?: unknown }).bytes === undefined) return null;
+  if (
+    cmd.type !== 'open' &&
+    cmd.type !== 'paste' &&
+    cmd.type !== 'placeImage' &&
+    cmd.type !== 'pasteImage' &&
+    cmd.type !== 'loadFont'
+  )
+    return null;
   const bytes = (cmd as { bytes: unknown }).bytes;
   const kind = bytesKindError(bytes);
   if (kind) return kind;
@@ -132,7 +142,7 @@ export interface ClipboardExtra {
 export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transferable[] } | { error: string } {
   const error = commandSizeError(cmd);
   if (error) return { error };
-  if (typeof cmd !== 'object' || cmd === null || !('bytes' in cmd)) return { cmd, transfer: [] };
+  if (typeof cmd !== 'object' || cmd === null || !('bytes' in cmd) || cmd.bytes === undefined) return { cmd, transfer: [] };
   const own = (b: Uint8Array) => (b.byteOffset !== 0 || b.byteLength !== b.buffer.byteLength ? b.slice() : b);
   const bytes = own(cmd.bytes as unknown as Uint8Array);
   if (cmd.type === 'openWithJournal') {

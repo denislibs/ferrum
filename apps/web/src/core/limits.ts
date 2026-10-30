@@ -20,6 +20,13 @@ export const MAX_SETTINGS_BYTES = 80 * 1024;
 export const MAX_NAME_CHARS = 256;
 /** Пачек журнала изменений при открытии файла — как `MAX_JOURNAL_BATCHES` ядра. */
 export const MAX_JOURNAL_ENTRIES = 100_000;
+/** Файл шрифта — как `ferrum_fontmeta::MAX_FONT_FILE` ядра (спека подсистемы 3, раздел 4). */
+export const MAX_FONT_BYTES = 64 * MIB;
+/** Имя семейства и начертания в байтах UTF-8 — как `MAX_FAMILY_NAME` ядра. */
+export const MAX_FAMILY_NAME = 256;
+/** Семейств в списке шрифтов и начертаний у семейства — как `MAX_FONT_FAMILIES`, `MAX_FONT_FACES`. */
+export const MAX_FONT_FAMILIES = 4096;
+export const MAX_FONT_FACES = 1000;
 
 /** Мегабайты с округлением вверх: «предел 64 МБ, получено 64 МБ» сбивало бы с толку. */
 export const mb = (bytes: number): number => Math.ceil(bytes / MIB);

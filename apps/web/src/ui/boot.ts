@@ -183,6 +183,7 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     // Правки после файла (сбой, закрытая вкладка): ядро применит их поверх него.
     core.send({ type: 'openWithJournal', bytes: new Uint8Array(doc.bytes), journal: doc.journal.map((b) => new Uint8Array(b)) });
   } else if (doc) core.send({ type: 'open', bytes: new Uint8Array(doc.bytes) });
+  else if (params.has('texts')) core.send({ type: 'demoText', texts: Number(params.get('texts')) });
   else core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 0) });
   return editor;
 }

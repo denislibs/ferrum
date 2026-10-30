@@ -48,7 +48,9 @@ async function main(): Promise<void> {
     if (e.type === 'pasteRequested' && clipboard) core.send({ type: 'paste', bytes: clipboard.slice() });
   });
   startHud(hud, core);
-  core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 1000) });
+  // `?texts=N` — страница из N текстов (замер «10 000 текстов», подсистема 3).
+  if (params.has('texts')) core.send({ type: 'demoText', texts: Number(params.get('texts')) });
+  else core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 1000) });
   canvas.focus();
 }
 

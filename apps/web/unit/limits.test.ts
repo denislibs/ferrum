@@ -5,6 +5,10 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import {
   MAX_DATA_BYTES,
+  MAX_FAMILY_NAME,
+  MAX_FONT_BYTES,
+  MAX_FONT_FACES,
+  MAX_FONT_FAMILIES,
   MAX_IMAGE_SIDE,
   MAX_JOURNAL_ENTRIES,
   MAX_KEYMAP_BYTES,
@@ -36,6 +40,11 @@ test('пределы совпадают с константами ядра', () 
   expect(rustConst(`${CRATES}ferrum-editor/src/keymap.rs`, 'MAX_KEYMAP_JSON')).toBe(MAX_KEYMAP_BYTES);
   expect(rustConst(`${CRATES}ferrum-editor/src/pages.rs`, 'MAX_NAME_CHARS')).toBe(MAX_NAME_CHARS);
   expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_JOURNAL_BATCHES')).toBe(MAX_JOURNAL_ENTRIES);
+  // Шрифты (подсистема 3): файл, имя семейства, размер списка.
+  expect(rustConst(`${CRATES}ferrum-fontmeta/src/lib.rs`, 'MAX_FONT_FILE')).toBe(MAX_FONT_BYTES);
+  expect(rustConst(`${CRATES}ferrum-text/src/fonts.rs`, 'MAX_FAMILY_NAME')).toBe(MAX_FAMILY_NAME);
+  expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_FAMILIES')).toBe(MAX_FONT_FAMILIES);
+  expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_FACES')).toBe(MAX_FONT_FACES);
 });
 
 test('theme-init.js читает настройки с тем же пределом', () => {

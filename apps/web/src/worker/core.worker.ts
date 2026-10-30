@@ -18,6 +18,7 @@ import {
   type ToWorker,
 } from '../core/messages';
 import { imageSize } from '../core/image-size';
+import { isFontPath, manifestFamilies } from '../core/fonts';
 import { addSaturating, drainRing, holdInput, writeLive as writeLiveSlots, type Held } from '../core/shared';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -172,10 +173,62 @@ function clipboardEvent(e: CoreEvent & { type: 'clipboard' }, cut: boolean): Cor
   return x;
 }
 
+/** Адрес файла вшитых шрифтов: `public/fonts` в корне сайта (Vite `base` — `/`,
+ * в Tauri — тот же корень `tauri://localhost/`). */
+function fontUrl(file: string): string {
+  return new URL(`/fonts/${file}`, self.location.origin).href;
+}
+
+/** Список вшитых шрифтов — манифест сборки; без него вшитых нет (и ядро не
+ * считает шрифты отсутствующими: список не пришёл). */
+async function loadManifest(): Promise<void> {
+  let families: ReturnType<typeof manifestFamilies> = [];
+  try {
+    const res = await fetch(fontUrl('manifest.json'));
+    if (res.ok) families = manifestFamilies(await res.json());
+    else console.warn(`ferrum: манифест шрифтов недоступен (HTTP ${res.status})`);
+  } catch (e) {
+    console.warn('ferrum: манифест шрифтов недоступен', e);
+  }
+  if (!core) return;
+  core.command({ type: 'fontsAvailable', source: 'bundled', families });
+  sendEvents();
+}
+
+/** Байты вшитого семейства: worker качает файлы сам (основной поток их не
+ * видит), кэш — HTTP-кэш браузера. Неудача — `loadFont` без байтов. */
+async function loadBundled(family: string, files: string[]): Promise<void> {
+  await Promise.all(
+    files.map(async (file) => {
+      let bytes: Uint8Array | undefined;
+      try {
+        if (!isFontPath(file)) throw new Error('неверный путь');
+        const res = await fetch(fontUrl(file));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        bytes = new Uint8Array(await res.arrayBuffer());
+      } catch (e) {
+        console.warn(`ferrum: шрифт ${family} (${file}) не загружен`, e);
+      }
+      if (!core) return;
+      try {
+        core.command({ type: 'loadFont', family, file, bytes });
+        sendEvents();
+      } catch (e) {
+        fatal(e);
+      }
+    }),
+  );
+}
+
 /** Байты событий уходят без копии: их буферы передаются основному потоку. */
 function sendEvents(): void {
   if (!core) return;
   let events: CoreEvent[] = core.takeEvents();
+  if (events.length === 0) return;
+  // Вшитые шрифты качает этот worker; основному потоку — только системные.
+  for (const e of events) if (e.type === 'fontRequest' && e.source === 'bundled') void loadBundled(e.family, e.files);
+  events = events.filter((e) => !(e.type === 'fontRequest' && e.source === 'bundled'));
+  for (const e of events) if (e.type === 'log') console.warn('ferrum:', e.message);
   if (events.length === 0) return;
   for (const e of events) if (e.type === 'surfaceLost') void recoverSurface(e.backend, e.message);
   if (events.some((e) => e.type === 'clipboard')) {
@@ -259,6 +312,11 @@ function handle(msg: ToWorker): void {
           return;
         }
         const cmd = msg.cmd;
+        // Тестовое создание текста — только в тестовом режиме страницы.
+        if (typeof cmd === 'object' && cmd !== null && cmd.type === 'testCreateText' && !testHooks) {
+          postError('Неверное сообщение для ядра');
+          return;
+        }
         // Команда не доверенная: не объект — её отвергнет разбор в ядре.
         const image = typeof cmd === 'object' && cmd !== null && (cmd.type === 'pasteImage' || cmd.type === 'placeImage');
         if (image && !commandSizeError(cmd) && imageSize(cmd.bytes)?.type !== 'png') {
@@ -385,5 +443,6 @@ scope.onmessage = async (e: MessageEvent<unknown>) => {
     return;
   }
   for (const m of early.splice(0)) handle(m);
+  void loadManifest();
   if (sab && waitAsync) void sabLoop();
 };
