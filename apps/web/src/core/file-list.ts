@@ -4,7 +4,7 @@
 // чистые функции, общие для него и модульных тестов. Всё, что пересекает границу
 // потоков, не доверенное: проверки — `requestError`.
 
-import { MAX_NAME_CHARS, MAX_OPEN_BYTES, MAX_SETTINGS_BYTES, tooLarge } from './limits';
+import { MAX_FONT_BYTES, MAX_NAME_CHARS, MAX_OPEN_BYTES, MAX_SETTINGS_BYTES, tooLarge } from './limits';
 
 /** Поля настроек пользователя в хранилище `settings` — по ключу на поле: вкладки
  * пишут только свои изменения и не затирают чужие. Значения проверяет интерфейс. */
@@ -150,6 +150,9 @@ export type IoOp =
   | { op: 'delete'; file: string }
   | { op: 'emptyTrash' }
   | { op: 'thumb'; file: string }
+  /** Байты системного шрифта Chrome (`FontData.blob()`): `Blob` приходит ссылкой,
+   * читает его этот worker, байты уходят передачей (спека подсистемы 3, раздел 4). */
+  | { op: 'fontBytes'; blob: Blob }
   /** Тесты: засеять `count` пустых записей (только в тестовом режиме). */
   | { op: 'seed'; count: number }
   /** Тесты: следующие записи содержимого отказывают, как при нехватке места. */
@@ -186,6 +189,7 @@ export interface IoResults {
   delete: null;
   emptyTrash: null;
   thumb: Blob | null;
+  fontBytes: ArrayBuffer;
   seed: null;
   failWrites: null;
   holdSettings: null;
@@ -304,6 +308,8 @@ export function requestError(r: unknown): string | null {
       return null;
     case 'setSettings':
       return settingsPatchError(m.patch);
+    case 'fontBytes':
+      return typeof Blob === 'function' && m.blob instanceof Blob ? bytesError(m.blob, MAX_FONT_BYTES) : BAD;
     case 'seed':
       return isCount(m.count, MAX_SEED) ? null : BAD;
     case 'failWrites':

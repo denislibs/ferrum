@@ -1,9 +1,9 @@
 // Шрифты на стороне TypeScript (подсистема 3): манифест вшитых, системные шрифты
-// Chrome в семейства, адрес файла.
+// Chrome в семейства, адрес файла и начертание замены по умолчанию.
 
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { isFontPath, localFamilies, manifestFamilies } from '../src/core/fonts';
+import { defaultStyle, isFontPath, localFamilies, manifestFamilies, styleKey } from '../src/core/fonts';
 
 test('манифест сборки читается целиком, мусор пропускается', () => {
   const manifest = JSON.parse(readFileSync(new URL('../public/fonts/manifest.json', import.meta.url), 'utf8'));
@@ -40,4 +40,13 @@ test('системные шрифты Chrome группируются по се�
       ],
     },
   ]);
+});
+
+test('начертание замены: то же, иначе Regular, иначе первое', () => {
+  expect(styleKey('Semi Bold Italic')).toBe(styleKey('SemiBold Italic'));
+  const roboto = { family: 'Roboto', source: 'bundled' as const, styles: ['Thin', 'Regular', 'SemiBold Italic'] };
+  expect(defaultStyle(roboto, 'Semi Bold Italic')).toBe('SemiBold Italic');
+  expect(defaultStyle(roboto, 'Wide')).toBe('Regular');
+  expect(defaultStyle({ ...roboto, styles: ['Thin'] }, 'Wide')).toBe('Thin');
+  expect(defaultStyle(undefined, 'Bold')).toBe('');
 });

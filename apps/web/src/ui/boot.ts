@@ -12,6 +12,7 @@ import { supportsCustomFormat } from './clipboard';
 import { forwardKey } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
 import { loadLayoutMap, type LayoutMap } from './shortcuts';
+import { installSystemFonts, NO_SYSTEM_FONTS, type SystemFonts } from './system-fonts';
 import type { UiStore } from './store';
 
 /** Сколько заставка держится с открытия страницы, даже если ядро готово раньше:
@@ -85,6 +86,8 @@ export interface BootOptions {
   /** Байты файла и пачки журнала после них (читаются, пока запускается ядро);
    * `null` — новый файл. */
   document?: Promise<{ bytes: ArrayBuffer; journal: ArrayBuffer[] } | null>;
+  /** Системные шрифты платформы (подсистема 3); нет — только вшитые. */
+  systemFonts?: SystemFonts;
 }
 
 /** Тестовый режим страницы (`__ferrumTest` или `?debug`). */
@@ -163,6 +166,7 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   const refreshLayout = () => void loadLayoutMap().then((m) => setLayout(() => m));
   refreshLayout();
   (navigator as Navigator & { keyboard?: EventTarget }).keyboard?.addEventListener?.('layoutchange', refreshLayout);
+  const fonts = installSystemFonts({ core, store, send: (cmd) => core.send(cmd) }, opts.systemFonts ?? NO_SYSTEM_FONTS);
   const editor: Editor = {
     core,
     store,
@@ -171,9 +175,11 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     send: (cmd) => core.send(cmd),
     run: (command) => core.send({ type: 'execute', command }),
     layout,
+    showSystemFonts: () => void fonts.show(),
     // Ядро и защита чтений layout уходят вместе с редактором: экрану файлов они не нужны.
     dispose: () => {
       unguard();
+      fonts.dispose();
       core.dispose();
     },
   };

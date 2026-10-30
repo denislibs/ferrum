@@ -13,6 +13,7 @@ import { Caret, Icon } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { NumberField, type EditTarget } from './number-field';
 import type { FieldInput } from './number';
+import { MissingFontsSection } from './missing-fonts';
 import { FillsSection, PageSection, StrokesSection } from './paints';
 
 /** Правка; `target` — кого правят с начала жеста (без него — текущее выделение). */
@@ -52,7 +53,15 @@ export function PropertiesPanel(props: { theme: 'dark' | 'light' }) {
 
   return (
     <div class="fe-props" id="panel-design" role="tabpanel" aria-labelledby="tab-design" tabindex="-1">
-      <Show when={count() > 0} fallback={<PageSection theme={props.theme} />}>
+      <Show
+        when={count() > 0}
+        fallback={
+          <>
+            <MissingFontsSection />
+            <PageSection theme={props.theme} />
+          </>
+        }
+      >
         <PositionSection edit={edit} val={val} />
         <AppearanceSection edit={edit} />
         <FillsSection />

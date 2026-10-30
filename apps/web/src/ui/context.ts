@@ -17,6 +17,8 @@ export interface Editor {
   run(command: string): void;
   /** Раскладка клавиатуры пользователя для подписей (если браузер её отдаёт); сигнал. */
   layout(): LayoutMap | undefined;
+  /** «Показать системные шрифты» (Chrome — с разрешения браузера). */
+  showSystemFonts(): void;
   /** Остановить ядро (уход с редактора). */
   dispose(): void;
 }

@@ -56,3 +56,56 @@ test('текст рисуется вшитым Inter, загруженным wor
     await expect(page.getByRole('button', { name: 'Показать системные шрифты' })).toHaveCount(0);
   }
 });
+
+test('отсутствующий шрифт: список и замена одним шагом отмены', async ({ page }) => {
+  await openApp(page, 0);
+  await createText(page, 0, 0, 'Comic', { family: 'Comic Sans', style: 'Bold' });
+  // Без выделения — панель «Дизайн» показывает отсутствующие шрифты.
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'select', ids: [], mode: 'replace' }));
+  const section = page.getByRole('region', { name: 'Отсутствующие шрифты (1)' });
+  await expect(section).toBeVisible();
+  const group = section.getByRole('group', { name: 'Comic Sans Bold' });
+  await group.getByRole('combobox', { name: 'Замена для Comic Sans Bold: семейство' }).selectOption('Roboto');
+  await expect(group.getByRole('combobox', { name: 'Замена для Comic Sans Bold: начертание' })).toHaveValue('Bold');
+  const steps = (await live(page)).steps;
+  await group.getByRole('button', { name: 'Заменить' }).click();
+  // Замена ждёт загрузки Roboto, затем — один шаг, и список пуст.
+  await liveWhen(page, `l.steps === ${steps + 1}`);
+  await expect(section).toHaveCount(0);
+  await page.locator('canvas').focus();
+  await page.keyboard.press('ControlOrMeta+KeyZ');
+  await expect(page.getByRole('region', { name: 'Отсутствующие шрифты (1)' })).toBeVisible();
+});
+
+test('тестовая команда создания текста вне тестового режима отвергается', async ({ page }) => {
+  await page.addInitScript(() => ((window as { __ferrumPerf?: boolean }).__ferrumPerf = true));
+  await page.goto('/?nodes=0#/new');
+  await page.waitForFunction(() => window.__ferrum?.ui?.ready === true, null, { timeout: 90_000 });
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'testCreateText', x: 0, y: 0, text: 'x' }));
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.toasts.map((t) => t.text))).toContain('Неверное сообщение для ядра');
+  expect((await live(page)).nodes).toBe(0);
+});
+
+test('системные шрифты Chrome: «Показать системные шрифты», байты через worker ввода-вывода', async ({ page, context }, info) => {
+  test.skip(info.project.name !== 'chromium', 'queryLocalFonts — только Chrome и Edge');
+  await openApp(page, 0);
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'setPageBackground', color: '#ffffff', phase: 'commit' }));
+  // Разрешение после запуска: список при запуске не строился, нужен щелчок.
+  await context.grantPermissions(['local-fonts']);
+  const family = await page.evaluate(async () => {
+    const all = await (window as unknown as { queryLocalFonts: () => Promise<{ family: string; style: string }[]> }).queryLocalFonts();
+    const bundled = ['Inter', 'Onest', 'Roboto', 'Open Sans', 'Montserrat', 'PT Sans', 'PT Serif', 'Noto Sans', 'JetBrains Mono', 'Playfair Display'];
+    return all.find((f) => f.style === 'Regular' && !bundled.includes(f.family))?.family ?? null;
+  });
+  test.skip(family === null, 'в системе нет шрифтов, кроме вшитых');
+  const l = await live(page);
+  const at = await appScreen(page, l, 100, 300);
+  await createText(page, 100, 300, 'Ferrum', { family: family!, style: 'Regular' });
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'select', ids: [], mode: 'replace' }));
+  await expect(page.getByRole('region', { name: 'Отсутствующие шрифты (1)' })).toBeVisible();
+  await page.getByRole('button', { name: 'Показать системные шрифты' }).click();
+  // Шрифт нашёлся: список пуст, текст нарисован системным шрифтом (байты пришли).
+  await expect(page.getByRole('region', { name: /Отсутствующие шрифты/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Показать системные шрифты' })).toHaveCount(0);
+  await expect.poll(() => darkPixels(page, at, 120), { timeout: 10_000 }).toBeGreaterThan(200);
+});

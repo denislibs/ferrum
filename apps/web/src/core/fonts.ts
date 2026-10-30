@@ -3,7 +3,7 @@
 // (`queryLocalFonts`) в виде команды `fontsAvailable`. Чистая логика — для
 // модульных тестов; данные не доверенные и ограничены как в ядре.
 
-import type { FontFamilyDto } from '../wasm/ferrum_wasm';
+import type { FontChoice, FontFamilyDto } from '../wasm/ferrum_wasm';
 import { MAX_FAMILY_NAME, MAX_FONT_FACES, MAX_FONT_FAMILIES } from './limits';
 
 const utf8 = new TextEncoder();
@@ -66,4 +66,19 @@ export function localFamilies(fonts: readonly LocalFont[]): FontFamilyDto[] {
     fam.faces.push({ style: f.style, file: f.postscriptName });
   }
   return [...byFamily.values()];
+}
+
+/** Ключ начертания как в ядре (`style_key`): без разделителей и регистра. */
+export function styleKey(s: string): string {
+  return [...s].filter((c) => /[\p{L}\p{N}]/u.test(c)).join('').toLowerCase();
+}
+
+/** Начертание замены по умолчанию: то же имя, иначе Regular, иначе первое. */
+export function defaultStyle(choice: FontChoice | undefined, wanted: string): string {
+  if (!choice || choice.styles.length === 0) return '';
+  return (
+    choice.styles.find((s) => styleKey(s) === styleKey(wanted)) ??
+    choice.styles.find((s) => styleKey(s) === 'regular') ??
+    choice.styles[0]
+  );
 }

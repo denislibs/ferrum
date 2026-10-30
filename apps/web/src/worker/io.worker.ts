@@ -396,6 +396,12 @@ async function handle(r: IoRequest): Promise<{ value: unknown; transfer?: Transf
       const blob = (await request(d.transaction('thumbs').objectStore('thumbs').get(r.file))) as unknown;
       return { value: blob instanceof Blob ? blob : null };
     }
+    case 'fontBytes': {
+      // Байты системного шрифта (вне очереди правок: база не нужна). Размер проверен
+      // по `Blob` в `requestError`; основному потоку — передачей.
+      const buf = await r.blob.arrayBuffer();
+      return { value: buf, transfer: [buf] };
+    }
     case 'setSettings':
       // Тесты: запись «потеряна» — ответа нет (вне очереди правок: её не держит).
       if (holdSettings) return new Promise<never>(() => {});

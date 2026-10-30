@@ -6,6 +6,7 @@
 // передаёт: их дают только родные диалоги в Rust. Окно одно: изменения списка
 // интерфейс узнаёт от своих же вызовов, `BroadcastChannel` не нужен.
 
+import type { FontFamilyDto } from '../wasm/ferrum_wasm';
 import type { FileMeta, IoResults, JournalMark, Section } from '../core/file-list';
 import type { DiskFiles } from './disk';
 import type { FileStore } from './file-store';
@@ -42,6 +43,17 @@ function russian(message: string): string {
   if (message.startsWith('state not managed')) return 'Хранилище файлов не открыто';
   if (/^invalid args |^command \S+ not found/.test(message)) return 'Неверный запрос к хранилищу файлов';
   return message;
+}
+
+/** Системные шрифты десктопа (спека подсистемы 3, раздел 4): семейства из
+ * каталогов шрифтов; файл начертания — номер файла в списке Rust. */
+export function systemFontList(): Promise<FontFamilyDto[]> {
+  return invoke<FontFamilyDto[]>('fonts_list');
+}
+
+/** Байты файла системного шрифта — сырым ответом IPC. */
+export function systemFontBytes(file: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>('fonts_read', { id: Number(file) });
 }
 
 /** Сырое тело запроса и параметры заголовком `x-ferrum` (ASCII: UUID и числа). */
