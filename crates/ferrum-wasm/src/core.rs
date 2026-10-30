@@ -273,6 +273,7 @@ impl Core {
         self.dirty = true;
         // Списки шрифтов — для нового документа; его шрифты — запросить сразу.
         self.font_state.missing_sent = None;
+        self.font_state.missing_key = None;
         // Ждавшие шрифтов правки относились к прошлому документу.
         self.font_state.waiting.clear();
         self.preload_page_fonts();
@@ -636,7 +637,6 @@ impl Core {
                 EditorEvent::NeedsRedraw => self.dirty = true,
                 EditorEvent::DocumentChanged => {
                     document = true;
-                    self.fonts_document_changed();
                     self.touch();
                     self.ui.layers = true;
                     self.ui.properties = true;

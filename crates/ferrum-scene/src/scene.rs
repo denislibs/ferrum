@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use ferrum_doc::{Changes, NodeId, NodeKind, PageDoc, Props, PropsPatch, SceneRow};
 use kurbo::{Affine, Point, Rect};
@@ -174,6 +175,11 @@ pub struct Scene {
     /// Номер этого экземпляра сцены (из `fresh_version`): новая сцена, в том числе
     /// пересобранная внутри `apply`, получает новый.
     generation: u64,
+    /// Ревизия шрифтов текстов: растёт, когда текстовый узел появляется, исчезает
+    /// или меняет `props.text` (документом или превью). Сдвиг, ресайз и прочие
+    /// правки нетекстовых свойств её не меняют — по ней ядро не пересчитывает
+    /// отсутствующие шрифты на каждую правку. Сравнивать вместе с `generation`.
+    text_revision: u64,
     /// Черновики жеста в порядке `set_drafts` и их слоты (в том же порядке).
     drafts: Vec<Draft>,
     draft_slots: Vec<Slot>,
@@ -200,6 +206,11 @@ impl Scene {
     /// Номер экземпляра сцены; не повторяется между сценами процесса.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Ревизия текстов внутри экземпляра сцены (см. поле `text_revision`).
+    pub fn text_revision(&self) -> u64 {
+        self.text_revision
     }
 
     /// Узел по индексу, если он жив: без паники на освобождённых и чужих индексах.
@@ -329,6 +340,9 @@ impl Scene {
 
     fn alloc(&mut self, id: NodeId, mut props: Props) -> Slot {
         shape::sanitize(&mut props);
+        if props.text.is_some() {
+            self.text_revision += 1;
+        }
         let version = fresh_version();
         let node = SceneNode {
             id,
@@ -588,6 +602,7 @@ impl Scene {
             return;
         }
         let counter = self.changes + 1;
+        let text_revision = self.text_revision;
         // Черновиков нет в документе, а позиции в `changes` посчитаны без них:
         // на время обновления они убираются и потом ставятся обратно поверх.
         let drafts = std::mem::take(&mut self.drafts);
@@ -609,6 +624,8 @@ impl Scene {
                 .map(|(&s, (_, patch))| (self.at(s).id, patch.clone()))
                 .collect();
             *self = Scene::from_page(page);
+            // Ревизия текстов, как и счётчик, не откатывается: пересборка — смена.
+            self.text_revision += text_revision + 1;
             self.set_preview(&preview);
         }
         if !drafts.is_empty() {
@@ -740,7 +757,16 @@ impl Scene {
         if looks_different(&n.props, &props) {
             n.version = version;
         }
+        // Тот же `Arc` (правка нетекстовых свойств) — сравнение бесплатно.
+        let text_changed = match (&n.props.text, &props.text) {
+            (None, None) => false,
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b) && a != b,
+            _ => true,
+        };
         n.props = props;
+        if text_changed {
+            self.text_revision += 1;
+        }
     }
 
     /// Убирает узлы из списков детей их родителей. Из одного списка — одним проходом.
@@ -783,6 +809,9 @@ impl Scene {
     fn remove_subtree(&mut self, slot: Slot) {
         for s in self.preorder(&[slot]) {
             let n = self.nodes.get_mut(s).take().expect("живой узел сцены");
+            if n.props.text.is_some() {
+                self.text_revision += 1;
+            }
             if let Some(b) = n.world_bounds {
                 self.tree_removals.push((s, b));
             }

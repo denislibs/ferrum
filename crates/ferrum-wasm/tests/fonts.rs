@@ -501,3 +501,80 @@ fn failed_load_releases_waiting_edit_with_fallback() {
     assert!(events.iter().any(|e| matches!(e, CoreEvent::Log { .. })));
     assert!(errors_of(&events).is_empty());
 }
+
+fn font_lists_sent(events: &[CoreEvent]) -> (usize, usize) {
+    let missing = events
+        .iter()
+        .filter(|e| matches!(e, CoreEvent::MissingFonts { .. }))
+        .count();
+    let catalog = events
+        .iter()
+        .filter(|e| matches!(e, CoreEvent::FontCatalog { .. }))
+        .count();
+    (missing, catalog)
+}
+
+/// Отсутствующие шрифты и каталог не пересчитываются от правок без текста
+/// (сдвиг стрелками, отмена сдвига): только от смены шрифта текста, смены
+/// страницы и изменения реестра.
+#[test]
+fn nudge_does_not_rescan_missing_fonts_or_catalog() {
+    let mut c = core();
+    create(&mut c, "Ferrum", None);
+    let events = c.take_events();
+    serve(&mut c, &events);
+    create(&mut c, "Comic", Some(("Comic Sans", "Bold")));
+    c.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    c.take_events();
+    let before = c.font_recomputes_for_tests();
+    for _ in 0..10 {
+        c.command(Command::Execute {
+            command: "nudge.right".into(),
+        });
+    }
+    c.command(Command::Execute {
+        command: "edit.undo".into(),
+    });
+    let events = c.take_events();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Document { .. })));
+    assert_eq!(
+        c.font_recomputes_for_tests(),
+        before,
+        "сдвиг — без пересчёта"
+    );
+    assert_eq!(font_lists_sent(&events), (0, 0), "и без повторных списков");
+
+    // Смена шрифта текста: отсутствующие — заново (каталог не менялся).
+    c.command(Command::ReplaceMissingFont {
+        from: FontNameDto {
+            family: "Comic Sans".into(),
+            style: "Bold".into(),
+        },
+        to: FontNameDto {
+            family: "Inter".into(),
+            style: "Bold".into(),
+        },
+    });
+    let events = c.take_events();
+    let after_replace = c.font_recomputes_for_tests();
+    assert!(after_replace.0 > before.0);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::MissingFonts { list } if list.is_empty())));
+
+    // Смена страницы: отсутствующие — заново.
+    c.command(Command::AddPage);
+    c.take_events();
+    let after_page = c.font_recomputes_for_tests();
+    assert!(after_page.0 > after_replace.0);
+
+    // Загрузка шрифта меняет реестр: и отсутствующие, и каталог.
+    c.load_font_for_tests("Roboto", FILES[2], font_file(FILES[2]));
+    c.take_events();
+    let after_load = c.font_recomputes_for_tests();
+    assert!(after_load.0 > after_page.0 && after_load.1 > after_page.1);
+}

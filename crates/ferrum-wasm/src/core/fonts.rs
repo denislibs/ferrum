@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 
-use ferrum_doc::{FontName, LetterSpacing, LineHeight, TextContent, TextProps, TextSizing};
+use ferrum_doc::{FontName, LetterSpacing, LineHeight, PageId, TextContent, TextProps, TextSizing};
 use ferrum_editor::TextError;
 use ferrum_scene::Scene;
 use ferrum_text::{FaceInfo, FamilyInfo, FontStatus, SharedFonts, SourceKind, MAX_FAMILY_NAME};
@@ -28,9 +28,18 @@ pub(crate) struct FontState {
     pub waiting: VecDeque<Command>,
     pub missing_sent: Option<Vec<MissingFontDto>>,
     pub catalog_sent: Option<Vec<FontChoice>>,
-    /// Поколение реестра, при котором посчитаны отсутствующие (`None` — пересчитать).
-    pub generation: Option<u64>,
+    /// При чём посчитаны отсутствующие: страница, экземпляр сцены, ревизия
+    /// текстов сцены, поколение реестра (`None` — пересчитать). Правка без
+    /// текстов (сдвиг, отмена геометрии) ключ не меняет — обхода сцены нет.
+    pub missing_key: Option<MissingKey>,
+    /// Поколение реестра, при котором собран каталог (`None` — пересобрать).
+    pub catalog_key: Option<u64>,
+    /// Сколько раз пересчитаны отсутствующие и каталог — для тестов.
+    pub recomputed: (u64, u64),
 }
+
+/// Ключ списка отсутствующих шрифтов (см. `FontState::missing_key`).
+pub(crate) type MissingKey = (PageId, u64, u64, u64);
 
 /// Ответ экспорту и копированию PNG, пока шрифты текстов не загружены.
 pub(crate) const FONTS_LOADING: &str = "Шрифты ещё загружаются — повторите через мгновение";
@@ -249,7 +258,6 @@ impl Core {
         for cmd in waiting {
             self.text_command(cmd);
         }
-        self.font_state.generation = None;
         self.push_font_requests();
     }
 
@@ -264,7 +272,6 @@ impl Core {
                 reg.resolve(f);
             }
         }
-        self.font_state.generation = None;
         self.push_font_requests();
     }
 
@@ -288,14 +295,30 @@ impl Core {
         self.push_missing_fonts();
     }
 
-    /// `MissingFonts` и `FontCatalog`, если сменились. Пересчёт — при правке
-    /// документа, смене страницы и изменении реестра, а не на каждом кадре.
+    /// `MissingFonts` и `FontCatalog`, если сменились. Отсутствующие считаются
+    /// заново, только когда сменились страница, сцена, тексты на ней или реестр;
+    /// каталог — только когда сменился реестр.
     pub(crate) fn push_missing_fonts(&mut self) {
         let generation = self.fonts.borrow().generation();
-        if self.font_state.generation == Some(generation) {
-            return;
+        let scene = self.editor.scene();
+        let key = (
+            self.editor.page(),
+            scene.generation(),
+            scene.text_revision(),
+            generation,
+        );
+        if self.font_state.missing_key != Some(key) {
+            self.font_state.missing_key = Some(key);
+            self.push_missing_list();
         }
-        self.font_state.generation = Some(generation);
+        if self.font_state.catalog_key != Some(generation) {
+            self.font_state.catalog_key = Some(generation);
+            self.push_catalog();
+        }
+    }
+
+    fn push_missing_list(&mut self) {
+        self.font_state.recomputed.0 += 1;
         let list: Vec<MissingFontDto> = self
             .editor
             .missing_fonts()
@@ -310,6 +333,10 @@ impl Core {
             self.font_state.missing_sent = Some(list.clone());
             self.events.push(CoreEvent::MissingFonts { list });
         }
+    }
+
+    fn push_catalog(&mut self) {
+        self.font_state.recomputed.1 += 1;
         let catalog: Vec<FontChoice> = self
             .fonts
             .borrow()
@@ -335,9 +362,10 @@ impl Core {
             .retain(|c| !matches!(c, Command::ReplaceMissingFont { .. }));
     }
 
-    /// Документ правился: отсутствующие шрифты пересчитать при следующей пачке.
-    pub(crate) fn fonts_document_changed(&mut self) {
-        self.font_state.generation = None;
+    /// Сколько раз пересчитаны (отсутствующие шрифты, каталог) — для тестов.
+    #[doc(hidden)]
+    pub fn font_recomputes_for_tests(&self) -> (u64, u64) {
+        self.font_state.recomputed
     }
 
     /// Байты для `LoadFont` тестов: `ByteBuf` из вектора.
