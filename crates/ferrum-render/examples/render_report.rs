@@ -162,6 +162,134 @@ fn frame(
     (median(runs), stats)
 }
 
+/// Вшитый Inter из `apps/web/public/fonts` в общем реестре — как его грузит ядро.
+fn inter_fonts() -> ferrum_render::SharedFonts {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/web/public/fonts");
+    let fonts = ferrum_render::Fonts::shared();
+    let mut f = fonts.borrow_mut();
+    let files = [
+        "inter/Inter-Variable.ttf",
+        "inter/Inter-Italic-Variable.ttf",
+    ];
+    let mut faces = Vec::new();
+    for rel in files {
+        faces.extend(ferrum_text::read_faces(
+            &std::fs::read(dir.join(rel)).unwrap(),
+            rel,
+        ));
+    }
+    f.add_catalog(ferrum_text::SourceKind::Bundled, ferrum_text::group(faces));
+    for rel in files {
+        f.load("Inter", rel, std::fs::read(dir.join(rel)).unwrap())
+            .unwrap();
+    }
+    drop(f);
+    fonts
+}
+
+/// Текст (подсистема 3, этап 1): страница из 10 000 текстов открывается без
+/// раскладки (размеры — из документа), раскладка ленивая (при первом рисовании,
+/// в пределах времени кадра), панорамирование по разложенным — 60 fps.
+fn text_section(report: &mut Report) {
+    const TEXTS: usize = 10_000;
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    doc.transact(page, vec![], |p| {
+        ferrum_doc::fixture::fill_texts(p, TEXTS).map(|_| vec![])
+    })
+    .unwrap();
+    let bytes = encode(&doc).unwrap();
+    let open = median(
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                let mut d = decode(&bytes).unwrap().document;
+                let scene = Scene::from_page(d.page(page).unwrap());
+                std::hint::black_box(scene.len());
+                t.elapsed()
+            })
+            .collect(),
+    );
+    report.gate(
+        "Текст: открытие страницы из 10 000 текстов (файл → сцена)",
+        open,
+        1000.0,
+        "≤ 1000 мс (wasm ≤ 2 с)",
+    );
+    let mut d = decode(&bytes).unwrap().document;
+    let scene = Scene::from_page(d.page(page).unwrap());
+    let mut renderer = Renderer::new();
+    renderer.set_fonts(inter_fonts());
+    let mut camera = Camera::new(VIEWPORT, 1.0);
+    camera.set_center(Point::new(720.0, 512.0));
+    let (w, h) = camera.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    // Прогрев: ленивая раскладка видимых текстов догоняет за несколько кадров.
+    let mut warm = 0;
+    let mut first = Duration::ZERO;
+    for i in 0..WARMUP_CAP {
+        backend.reset(w, h);
+        let t = Instant::now();
+        let s = renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+        if i == 0 {
+            first = t.elapsed();
+        }
+        warm = i + 1;
+        if !s.needs_another_frame {
+            break;
+        }
+    }
+    report.gate(
+        "Текст: первый кадр (раскладка в пределах кадра)",
+        first,
+        16.7,
+        "≤ 16.7 мс",
+    );
+    report.info(
+        "Текст: кадров до полной раскладки видимого",
+        warm.to_string(),
+    );
+    // Панорамирование по странице: каждый кадр — сдвиг на 40 px; новые тексты
+    // раскладываются на лету.
+    let mut times = Vec::new();
+    for i in 0..240 {
+        camera.set_center(Point::new(
+            720.0 + i as f64 * 40.0,
+            512.0 + (i % 60) as f64 * 10.0,
+        ));
+        backend.reset(w, h);
+        let t = Instant::now();
+        renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+        times.push(t.elapsed());
+    }
+    times.sort();
+    let p95 = times[times.len() * 95 / 100];
+    report.gate(
+        "Текст: панорамирование, p95 кадра (зум 100 %)",
+        p95,
+        16.7,
+        "≤ 16.7 мс",
+    );
+    // Вся страница издалека: полосы LOD и растры фреймов.
+    camera.set_zoom(0.05);
+    camera.set_center(Point::new(40_000.0, 1_500.0));
+    let _ = warm_up(&mut renderer, &mut backend, &scene, &camera);
+    let (whole, stats) = frame(&mut renderer, &mut backend, &scene, &camera);
+    report.info(
+        "Текст: вся страница — растров / глифами / полосами",
+        format!(
+            "{} / {} / {}",
+            stats.rasters, stats.text_glyphs, stats.text_greeked
+        ),
+    );
+    report.gate(
+        "Текст: вся страница с LOD, сборка кадра",
+        whole,
+        8.0,
+        "≤ 8 мс",
+    );
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -736,6 +864,8 @@ fn main() {
             ms(worst),
         );
     }
+
+    text_section(&mut report);
 
     // Экспорт фрейма @3x — справочно.
     let first_frame = scene.at(scene.roots()[0]).id;
