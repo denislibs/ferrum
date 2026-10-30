@@ -36,6 +36,13 @@ impl Writer {
         self.bytes(s.as_bytes());
         Some(())
     }
+
+    /// Строка с длиной u32 — текст узла (до 100 000 символов, до 400 КБ).
+    pub fn str32(&mut self, s: &str) -> Option<()> {
+        self.u32(u32::try_from(s.len()).ok()?);
+        self.bytes(s.as_bytes());
+        Some(())
+    }
 }
 
 pub(crate) struct Reader<'a> {
@@ -81,6 +88,11 @@ impl<'a> Reader<'a> {
 
     pub fn str16(&mut self) -> Option<String> {
         let n = self.u16()? as usize;
+        String::from_utf8(self.take(n)?.to_vec()).ok()
+    }
+
+    pub fn str32(&mut self) -> Option<String> {
+        let n = self.u32()? as usize;
         String::from_utf8(self.take(n)?.to_vec()).ok()
     }
 }

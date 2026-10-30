@@ -2,10 +2,13 @@
 //! чтобы одновременные правки разных свойств одного узла не затирали друг друга.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use loro::{Container, LoroMap, LoroValue, ValueOrContainer};
 
 use crate::error::{DocError, DocResult};
+use crate::text::TextData;
+use crate::text_codec;
 use crate::types::*;
 
 pub(crate) mod key {
@@ -27,7 +30,7 @@ pub(crate) mod key {
     pub const STROKES: &str = "strokes";
 }
 
-fn value(map: &LoroMap, k: &str) -> Option<LoroValue> {
+pub(crate) fn value(map: &LoroMap, k: &str) -> Option<LoroValue> {
     match map.get(k)? {
         ValueOrContainer::Value(v) => Some(v),
         ValueOrContainer::Container(Container::List(l)) => Some(l.get_deep_value()),
@@ -36,7 +39,7 @@ fn value(map: &LoroMap, k: &str) -> Option<LoroValue> {
     }
 }
 
-fn as_f64(v: &LoroValue) -> Option<f64> {
+pub(crate) fn as_f64(v: &LoroValue) -> Option<f64> {
     match v {
         LoroValue::Double(d) => Some(*d),
         LoroValue::I64(i) => Some(*i as f64),
@@ -44,14 +47,14 @@ fn as_f64(v: &LoroValue) -> Option<f64> {
     }
 }
 
-fn as_bool(v: &LoroValue) -> Option<bool> {
+pub(crate) fn as_bool(v: &LoroValue) -> Option<bool> {
     match v {
         LoroValue::Bool(b) => Some(*b),
         _ => None,
     }
 }
 
-fn as_str(v: &LoroValue) -> Option<String> {
+pub(crate) fn as_str(v: &LoroValue) -> Option<String> {
     match v {
         LoroValue::String(s) => Some(s.to_string()),
         _ => None,
@@ -106,6 +109,14 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
             Some(v) => read_list(&v, read_stroke),
             None => d.strokes,
         },
+        text: (kind == NodeKind::Text).then(|| {
+            Arc::new(TextData {
+                props: text_codec::read_text_props(map),
+                content: text_codec::existing_text(map)
+                    .map(|t| text_codec::read_content(&t))
+                    .unwrap_or_default(),
+            })
+        }),
     })
 }
 
@@ -130,14 +141,14 @@ fn read_list<T>(v: &LoroValue, item: fn(&LoroValue) -> Option<T>) -> Vec<T> {
     }
 }
 
-fn field<'a>(v: &'a LoroValue, k: &str) -> Option<&'a LoroValue> {
+pub(crate) fn field<'a>(v: &'a LoroValue, k: &str) -> Option<&'a LoroValue> {
     match v {
         LoroValue::Map(m) => m.get(k),
         _ => None,
     }
 }
 
-fn read_fill(v: &LoroValue) -> Option<Fill> {
+pub(crate) fn read_fill(v: &LoroValue) -> Option<Fill> {
     let kind = match field(v, "kind").and_then(as_str)?.as_str() {
         "solid" => FillKind::Solid,
         "image" => FillKind::Image,
@@ -196,8 +207,16 @@ pub(crate) fn write_props(map: &LoroMap, p: &Props) -> DocResult<()> {
         flip_y: p.flip_y.then_some(true),
         fills: Some(p.fills.clone()),
         strokes: Some(p.strokes.clone()),
+        text: p.text.as_ref().map(|t| t.props.clone()),
     };
-    write_patch(map, &patch)
+    write_patch(map, &patch)?;
+    // Содержимое — в новый `LoroText` узла: узел только что создан (или
+    // восстановлен отменой удаления под новым `TreeID`), контейнер пуст.
+    if let Some(t) = &p.text {
+        let text = text_codec::text_container(map)?;
+        text.apply_delta(&text_codec::insert_delta(&t.content))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn write_patch(map: &LoroMap, p: &PropsPatch) -> DocResult<()> {
@@ -242,10 +261,14 @@ pub(crate) fn write_patch(map: &LoroMap, p: &PropsPatch) -> DocResult<()> {
             LoroValue::from(strokes.iter().map(stroke_value).collect::<Vec<_>>()),
         )?;
     }
+    // Вызывающий убирает `text` из патча узла не текста (`PageDoc::set_props`).
+    if let Some(text) = &p.text {
+        text_codec::write_text_props(map, text)?;
+    }
     Ok(())
 }
 
-fn obj(fields: Vec<(&str, LoroValue)>) -> LoroValue {
+pub(crate) fn obj(fields: Vec<(&str, LoroValue)>) -> LoroValue {
     LoroValue::from(
         fields
             .into_iter()
@@ -254,7 +277,7 @@ fn obj(fields: Vec<(&str, LoroValue)>) -> LoroValue {
     )
 }
 
-fn fill_value(f: &Fill) -> LoroValue {
+pub(crate) fn fill_value(f: &Fill) -> LoroValue {
     let mut fields = vec![
         (
             "kind",

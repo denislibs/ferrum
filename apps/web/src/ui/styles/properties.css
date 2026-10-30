@@ -287,3 +287,26 @@
 .fe-picker .fe-field__label {
   cursor: default;
 }
+
+/* Отсутствующие шрифты: имя и число слоёв, выбор семейства и начертания, «Заменить». */
+.fe-missing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+.fe-missing__name {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.fe-missing__pick {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+}
+.fe-missing__pick .fe-select {
+  width: 100%;
+  font: inherit;
+}

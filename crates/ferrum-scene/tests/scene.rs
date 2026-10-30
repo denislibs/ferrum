@@ -680,3 +680,84 @@ fn change_counter_grows_on_every_apply_and_preview() {
     scene.clear_preview();
     assert_eq!(scene.change_counter(), c3);
 }
+
+/// Ревизия текстов растёт от создания, удаления и правки текста (документом и
+/// превью), но не от сдвига узла: по ней ядро не пересчитывает отсутствующие
+/// шрифты на каждую правку геометрии.
+#[test]
+fn text_revision_tracks_only_text_changes() {
+    let (mut doc, page, [_, r, ..]) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let mut t = None;
+    doc.transact(page, vec![], |p| {
+        let id = p.create_node(None, None, NodeKind::Text)?;
+        p.set_text_content(id, &ferrum_doc::TextContent::plain("Привет"))?;
+        t = Some(id);
+        Ok(vec![])
+    })
+    .unwrap();
+    let t = t.unwrap();
+    let r0 = scene.text_revision();
+    apply(&mut scene, &mut doc, page);
+    let r1 = scene.text_revision();
+    assert!(r1 > r0, "создание текста меняет ревизию");
+
+    // Сдвиг текста и прямоугольника — ревизия та же.
+    doc.transact(page, vec![], |p| {
+        p.set_props(
+            t,
+            &PropsPatch {
+                x: Some(5.0),
+                ..Default::default()
+            },
+        )?;
+        p.set_props(
+            r,
+            &PropsPatch {
+                x: Some(7.0),
+                ..Default::default()
+            },
+        )?;
+        Ok(vec![])
+    })
+    .unwrap();
+    apply(&mut scene, &mut doc, page);
+    assert_eq!(scene.text_revision(), r1, "сдвиг не меняет ревизию текстов");
+    scene.set_preview(&[(t, patch(9.0, 9.0, 50.0, 20.0))]);
+    scene.clear_preview();
+    assert_eq!(scene.text_revision(), r1, "превью геометрии тоже");
+
+    // Смена шрифта — меняет.
+    let mut props = doc
+        .page(page)
+        .unwrap()
+        .props(t)
+        .unwrap()
+        .text_props()
+        .unwrap()
+        .clone();
+    props.style.font = ferrum_doc::FontName::new("Roboto", "Regular");
+    doc.transact(page, vec![], |p| {
+        p.set_props(
+            t,
+            &PropsPatch {
+                text: Some(props.clone()),
+                ..Default::default()
+            },
+        )?;
+        Ok(vec![])
+    })
+    .unwrap();
+    apply(&mut scene, &mut doc, page);
+    let r2 = scene.text_revision();
+    assert!(r2 > r1, "смена шрифта меняет ревизию");
+
+    // Удаление — меняет.
+    doc.transact(page, vec![], |p| {
+        p.delete_nodes(&[t])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    apply(&mut scene, &mut doc, page);
+    assert!(scene.text_revision() > r2, "удаление текста меняет ревизию");
+}

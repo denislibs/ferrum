@@ -761,6 +761,7 @@ dependencies = [
  "loro",
  "loro-internal",
  "proptest",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -772,11 +773,20 @@ dependencies = [
  "ferrum-doc",
  "ferrum-render",
  "ferrum-scene",
+ "ferrum-text",
  "kurbo",
  "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ferrum-fontmeta"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "skrifa",
 ]
 
 [[package]]
@@ -786,6 +796,7 @@ dependencies = [
  "blake3",
  "ferrum-doc",
  "ferrum-scene",
+ "ferrum-text",
  "kurbo",
  "parley",
  "skrifa",
@@ -806,6 +817,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum-text"
+version = "0.1.0"
+dependencies = [
+ "ferrum-doc",
+ "ferrum-fontmeta",
+ "kurbo",
+ "parley",
+ "serde",
+ "serde_json",
+ "skrifa",
+]
+
+[[package]]
 name = "ferrum-wasm"
 version = "0.1.0"
 dependencies = [
@@ -814,6 +838,7 @@ dependencies = [
  "ferrum-editor",
  "ferrum-render",
  "ferrum-scene",
+ "ferrum-text",
  "js-sys",
  "kurbo",
  "proptest",

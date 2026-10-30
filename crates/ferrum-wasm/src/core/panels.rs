@@ -478,8 +478,13 @@ impl Core {
             | Command::Snapshot { .. }
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
-            | Command::ReadMeasurements => {
-                debug_assert!(false, "команда этапа 4 — в `Core::command`");
+            | Command::ReadMeasurements
+            | Command::DemoText { .. }
+            | Command::FontsAvailable { .. }
+            | Command::LoadFont { .. }
+            | Command::ReplaceMissingFont { .. }
+            | Command::TestCreateText { .. } => {
+                debug_assert!(false, "команда ядра — в `Core::command`");
             }
         }
     }
@@ -652,6 +657,11 @@ impl Core {
         };
         if ids.is_empty() {
             self.error("Нечего экспортировать: страница пуста");
+            return;
+        }
+        // Текст, чей шрифт ещё грузится, в экспорт не попал бы: лучше ошибка.
+        if super::fonts::fonts_loading(self.editor.scene(), &self.fonts) {
+            self.error(super::fonts::FONTS_LOADING);
             return;
         }
         let before = self.images.placeholders_served();

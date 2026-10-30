@@ -2,10 +2,12 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use loro::TreeID;
 
 use crate::error::DocError;
+use crate::text::{TextData, TextProps, TEXT_COLOR};
 
 /// Идентификатор узла. Обёртка над `TreeID` Loro: уникален и при совместной работе.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -91,6 +93,7 @@ pub enum NodeKind {
     Ellipse,
     Line,
     Image,
+    Text,
 }
 
 impl NodeKind {
@@ -102,6 +105,7 @@ impl NodeKind {
             NodeKind::Ellipse => "ellipse",
             NodeKind::Line => "line",
             NodeKind::Image => "image",
+            NodeKind::Text => "text",
         }
     }
 
@@ -113,6 +117,7 @@ impl NodeKind {
             "ellipse" => NodeKind::Ellipse,
             "line" => NodeKind::Line,
             "image" => NodeKind::Image,
+            "text" => NodeKind::Text,
             _ => return None,
         })
     }
@@ -126,6 +131,7 @@ impl NodeKind {
             NodeKind::Ellipse => "Эллипс",
             NodeKind::Line => "Линия",
             NodeKind::Image => "Изображение",
+            NodeKind::Text => "Текст",
         }
     }
 }
@@ -216,6 +222,8 @@ pub struct Props {
     pub flip_y: bool,
     pub fills: Vec<Fill>,
     pub strokes: Vec<Stroke>,
+    /// Текст и его свойства — только у `NodeKind::Text`.
+    pub text: Option<Arc<TextData>>,
 }
 
 impl Props {
@@ -238,6 +246,8 @@ impl Props {
                 }],
             ),
             NodeKind::Image => (100.0, 100.0, vec![], vec![]),
+            // Размер пустого текста ставит редактор по раскладке; цвет — чёрный.
+            NodeKind::Text => (0.0, 0.0, vec![Fill::solid(TEXT_COLOR)], vec![]),
         };
         Props {
             kind,
@@ -256,7 +266,13 @@ impl Props {
             flip_y: false,
             fills,
             strokes,
+            text: (kind == NodeKind::Text).then(|| Arc::new(TextData::default())),
         }
+    }
+
+    /// Свойства текста (у не текста — `None`).
+    pub fn text_props(&self) -> Option<&TextProps> {
+        self.text.as_deref().map(|t| &t.props)
     }
 }
 
@@ -278,6 +294,9 @@ pub struct PropsPatch {
     pub flip_y: Option<bool>,
     pub fills: Option<Vec<Fill>>,
     pub strokes: Option<Vec<Stroke>>,
+    /// Свойства текста целиком (содержимое правится `Tx::insert_text` и соседями).
+    /// У не текста пропускается.
+    pub text: Option<TextProps>,
 }
 
 impl PropsPatch {
@@ -299,6 +318,10 @@ impl PropsPatch {
             flip_y: self.flip_y.map(|_| before.flip_y),
             fills: self.fills.as_ref().map(|_| before.fills.clone()),
             strokes: self.strokes.as_ref().map(|_| before.strokes.clone()),
+            text: match (&self.text, &before.text) {
+                (Some(_), Some(t)) => Some(t.props.clone()),
+                _ => None,
+            },
         }
     }
 
@@ -336,6 +359,9 @@ impl PropsPatch {
         }
         if let Some(v) = &self.strokes {
             p.strokes = v.clone();
+        }
+        if let (Some(v), Some(t)) = (&self.text, &mut p.text) {
+            Arc::make_mut(t).props = v.clone();
         }
     }
 }

@@ -24,6 +24,14 @@ pub enum DocError {
     UnsupportedFormat(u32),
     #[error("Файл повреждён: {0}")]
     Corrupted(String),
+    #[error("Узел {0} — не текст")]
+    NotText(String),
+    #[error("Текст длиннее 100 000 символов — правка не применена")]
+    TextTooLong,
+    #[error("В тексте больше 10 000 участков со стилями — правка не применена")]
+    TooManyTextRuns,
+    #[error("Позиция {0} вне текста длиной {1}")]
+    TextRange(usize, usize),
     #[error("Ошибка Loro: {0}")]
     Loro(#[from] loro::LoroError),
     #[error("Ошибка экспорта Loro: {0}")]

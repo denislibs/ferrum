@@ -6,6 +6,8 @@ members = [
     "crates/ferrum-render",
     "crates/ferrum-editor",
     "crates/ferrum-wasm",
+    "crates/ferrum-fontmeta",
+    "crates/ferrum-text",
 ]
 # Десктоп — свой workspace со своим Cargo.lock (Tauri и сотни крейтов окна).
 exclude = ["apps/desktop/src-tauri"]

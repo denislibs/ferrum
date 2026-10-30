@@ -785,7 +785,7 @@ fn commit_patches(cx: &mut Ctx, patches: Vec<(NodeId, PropsPatch)>) {
     let sel = cx.selection.to_vec();
     cx.commit(|tx, _| {
         for (id, patch) in &patches {
-            tx.set_props(*id, patch)?;
+            crate::text::set_props_resizing(tx, *id, patch)?;
         }
         Ok(sel)
     });

@@ -5,7 +5,6 @@ use ferrum_doc::{DocResult, NodeId, Props, PropsPatch, Tx};
 use ferrum_scene::Scene;
 use kurbo::{Affine, Vec2};
 
-use crate::clipboard::full_patch;
 use crate::geometry::{decompose_props, parent_world};
 
 /// Сдвиг в мире, переведённый в координаты родителя узла (только линейная часть).
@@ -51,15 +50,14 @@ pub fn duplicate(tx: &Tx, scene: &Scene, ids: &[NodeId], offset: Vec2) -> DocRes
         props.x += d.x;
         props.y += d.y;
         let index = scene.index(slot) as usize + 1;
-        let root = tx.create_node(parent, Some(index), props.kind)?;
-        tx.set_props(root, &full_patch(&props))?;
+        // Со всеми свойствами сразу: у текста — и содержимое.
+        let root = tx.create_with_props(parent, Some(index), &props)?;
         // Поддерево — обходом без рекурсии: глубина не ограничена.
         let mut stack = vec![(id, root)];
         while let Some((src, dst)) = stack.pop() {
             for child in tx.children(Some(src)) {
                 let p = tx.props(child)?;
-                let copy = tx.create_node(Some(dst), None, p.kind)?;
-                tx.set_props(copy, &full_patch(&p))?;
+                let copy = tx.create_with_props(Some(dst), None, &p)?;
                 stack.push((child, copy));
             }
         }

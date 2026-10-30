@@ -344,3 +344,51 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   // Рамка выделения во время жеста доходила до интерфейса из общей памяти.
   expect(liveX.size, 'живые значения жеста в панели').toBeGreaterThan(10);
 });
+
+// --- Текст (подсистема 3, этап 1) ---------------------------------------------
+//
+// Страница из 10 000 текстов: открывается быстрее 2 с (размеры — из документа,
+// раскладка не нужна), панорамирование по ней — 60 fps (p95 кадра worker'а
+// vello_cpu ≤ 16,7 мс): раскладка ленивая — при первом рисовании видимых и в
+// пределах времени кадра.
+
+const TEXTS = 10_000;
+
+test('10 000 текстов: открытие и панорамирование @perf', async ({ page }, info) => {
+  test.skip(info.project.name !== 'chromium', 'замер текста — в проекте chromium (vello_cpu)');
+  const t0 = Date.now();
+  await gotoDebug(page, `/debug.html?texts=${TEXTS}&backend=cpu`);
+  await page.waitForFunction(() => window.__ferrum?.ready === true, null, { timeout: 120_000 });
+  await page.waitForFunction(() => (window.__ferrum!.core!.live?.frames ?? 0) > 0, null, { timeout: 60_000 });
+  const openMs = Date.now() - t0;
+  // Шрифт страницы (Inter) пришёл: кадры с глифами, а не пустые.
+  await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'fontCatalog'), null, { timeout: 30_000 });
+  await page.waitForTimeout(500);
+  await page.evaluate(() => {
+    const w = window as unknown as { __frameMs: number[] };
+    w.__frameMs = [];
+    let seen = window.__ferrum!.core!.live!.frames;
+    const tick = () => {
+      const l = window.__ferrum!.core!.live!;
+      if (l.frames !== seen) {
+        seen = l.frames;
+        w.__frameMs.push(l.frameMs);
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  const l = await live(page);
+  await page.mouse.move(l.viewportW / 2, l.viewportH / 2);
+  await during(page, 3000, (i) => page.mouse.wheel(i % 120 < 60 ? 15 : -15, i % 40 < 20 ? 10 : -10));
+  const frames = await page.evaluate(() => [...(window as unknown as { __frameMs: number[] }).__frameMs].sort((a, b) => a - b));
+  const p95 = frames[Math.min(frames.length - 1, Math.round((frames.length - 1) * 0.95))] ?? 0;
+  const out = path.join(info.project.outputDir, 'perf-text.json');
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, JSON.stringify({ openMs, frames: frames.length, p95 }, null, 2));
+  console.log(`perf text: открытие ${openMs} мс, кадров ${frames.length}, p95 ${p95.toFixed(2)} мс`);
+  expect((await live(page)).nodes).toBe(TEXTS + TEXTS / 100);
+  expect(openMs, 'открытие 10 000 текстов').toBeLessThan(2000);
+  expect(frames.length, 'worker рисовал кадры').toBeGreaterThan(30);
+  expect(p95, 'p95 кадра worker\'а').toBeLessThanOrEqual(WORKER_P95_MS);
+});

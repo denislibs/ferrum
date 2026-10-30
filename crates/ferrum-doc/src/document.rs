@@ -9,7 +9,7 @@ use loro::{
 
 use crate::changes::Changes;
 use crate::error::{DocError, DocResult};
-use crate::history::{History, HistoryEntry};
+use crate::history::{History, HistoryEntry, TextMerge};
 use crate::images::ImageStore;
 use crate::journal::{self, BatchWriter, Replayed};
 use crate::page::{Inverse, PageDoc, Tx};
@@ -337,6 +337,34 @@ impl Document {
     where
         F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
     {
+        self.transact_with(page, selection_before, None, f)
+    }
+
+    /// Как `transact`, но шаг сливается с прошлым, если тот — продолжение этой
+    /// правки текста (`TextMerge::continues`): ввод подряд — один шаг отмены.
+    pub fn transact_merging<F>(
+        &mut self,
+        page: PageId,
+        selection_before: Vec<NodeId>,
+        merge: TextMerge,
+        f: F,
+    ) -> DocResult<Vec<NodeId>>
+    where
+        F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
+    {
+        self.transact_with(page, selection_before, Some(merge), f)
+    }
+
+    fn transact_with<F>(
+        &mut self,
+        page: PageId,
+        selection_before: Vec<NodeId>,
+        merge: Option<TextMerge>,
+        f: F,
+    ) -> DocResult<Vec<NodeId>>
+    where
+        F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
+    {
         // Сначала загрузка: страница с неизвестными узлами делает документ
         // доступным только для чтения.
         self.page(page)?;
@@ -352,12 +380,16 @@ impl Document {
         match result {
             Ok(selection_after) => {
                 if !ops.is_empty() {
-                    self.history.push(HistoryEntry {
+                    let entry = HistoryEntry {
                         page,
                         ops,
                         selection_before,
                         selection_after: selection_after.clone(),
-                    });
+                    };
+                    match merge {
+                        Some(m) => self.history.push_merging(entry, m),
+                        None => self.history.push(entry),
+                    }
                 }
                 Ok(selection_after)
             }
@@ -628,10 +660,10 @@ mod tests {
     fn missing_props_op() -> Inverse {
         Inverse::Props(
             missing_node(),
-            PropsPatch {
+            Box::new(PropsPatch {
                 x: Some(1.0),
                 ..Default::default()
-            },
+            }),
         )
     }
 
@@ -825,7 +857,7 @@ mod tests {
         };
         let err = rollback(
             &page,
-            &[Inverse::Props(missing_node(), patch)],
+            &[Inverse::Props(missing_node(), Box::new(patch))],
             DocError::CyclicMove,
         );
         match err {

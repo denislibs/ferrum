@@ -13,15 +13,19 @@ pub mod journal;
 mod loro_ext;
 mod page;
 mod scene_cache;
+mod text;
+mod text_codec;
 mod types;
 
 pub use changes::Changes;
 pub use document::{Document, Restore, SCHEMA_VERSION};
 pub use error::{DocError, DocResult};
+pub use history::{TextMerge, MERGE_PAUSE_MS};
 pub use images::ImageStore;
 pub use journal::Replayed;
 pub use page::{PageDoc, Tx};
 pub use scene_cache::SceneRow;
+pub use text::*;
 pub use types::*;
 
 #[doc(hidden)]

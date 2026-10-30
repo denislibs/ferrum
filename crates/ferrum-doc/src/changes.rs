@@ -47,6 +47,7 @@ impl Changes {
                 Inverse::Restore(nodes) => self.deleted.extend(nodes.iter().map(|n| n.id)),
                 Inverse::Props(id, _) => self.props.push(*id),
                 Inverse::Move { id, .. } => self.moved.push(*id),
+                Inverse::Text(id, _) => self.props.push(*id),
             }
         }
     }

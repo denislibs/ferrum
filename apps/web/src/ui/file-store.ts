@@ -60,6 +60,9 @@ export interface FileStore {
   onChange(listener: () => void): () => void;
   /** Файлы на диске (File System Access, Tauri); нет — пунктов «с диска» нет. */
   readonly disk?: DiskFiles;
+  /** Байты системного шрифта Chrome (`FontData.blob()`) — читает worker
+   * ввода-вывода; нет — системных шрифтов браузера нет. */
+  fontBytes?(blob: Blob): Promise<ArrayBuffer>;
   dispose(): void;
 }
 
@@ -135,6 +138,10 @@ export class IdbFileStore implements FileStore, FileStoreTestHooks, SettingsBack
 
   list(section: Section, query: string, start: number, count: number) {
     return this.call({ op: 'list', section, query, start, count });
+  }
+  /** Байты системного шрифта Chrome: `Blob` читает worker ввода-вывода. */
+  fontBytes(blob: Blob) {
+    return this.call({ op: 'fontBytes', blob });
   }
   get(file: string) {
     return this.call({ op: 'get', file });

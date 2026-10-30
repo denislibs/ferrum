@@ -6,7 +6,9 @@ import { createStore, reconcile } from 'solid-js/store';
 import type {
   ConflictInfo,
   CoreEvent,
+  FontChoice,
   KeymapEntry,
+  MissingFontDto,
   LayerRow,
   PageInfo,
   PresetInfo,
@@ -51,6 +53,11 @@ export interface UiState {
   toasts: Toast[];
   /** Сочетание занято другими командами: настройки предлагают заменить. */
   bindConflict: { command: string; shortcut: string; commands: string[] } | null;
+  /** Отсутствующие шрифты текущей страницы (подсистема 3) и семейства для замены. */
+  missingFonts: MissingFontDto[];
+  fontCatalog: FontChoice[];
+  /** Системные шрифты: есть ли на платформе и показаны ли уже. */
+  systemFonts: { supported: boolean; shown: boolean };
 }
 
 const initial: UiState = {
@@ -74,6 +81,9 @@ const initial: UiState = {
   docSeq: 0,
   toasts: [],
   bindConflict: null,
+  missingFonts: [],
+  fontCatalog: [],
+  systemFonts: { supported: false, shown: false },
 };
 
 /** Сколько уведомлений видно одновременно и сколько секунд живёт каждое. */
@@ -160,6 +170,12 @@ export function createUiStore() {
       }
       case 'toggleUi':
         setState('uiHidden', (h) => !h);
+        break;
+      case 'missingFonts':
+        setState('missingFonts', reconcile(e.list));
+        break;
+      case 'fontCatalog':
+        setState('fontCatalog', e.families);
         break;
       case 'error':
         // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.

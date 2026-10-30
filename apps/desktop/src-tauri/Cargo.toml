@@ -21,6 +21,8 @@ tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
 ferrum-desktop-store = { path = "store" }
+# Метаданные системных шрифтов — тот же разбор, что у манифеста вшитых.
+ferrum-fontmeta = { path = "../../../crates/ferrum-fontmeta" }
 tauri = { version = "=2.12.1", features = [] }
 tauri-plugin-dialog = "=2.8.1"
 serde = { version = "=1.0.229", features = ["derive"] }

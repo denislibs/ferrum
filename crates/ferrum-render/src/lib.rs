@@ -12,6 +12,7 @@ mod gpu;
 mod image;
 mod overlay;
 mod text;
+mod text_node;
 
 use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::Scene;
@@ -26,6 +27,7 @@ pub use draw::{
     FrameStats, EVICT_AFTER_FRAMES, LOD_RECT_PX, LOD_SKIP_PX, RASTER_BUILDS_PER_FRAME,
     RASTER_BUILD_TIME_PER_FRAME, RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
+pub use ferrum_text::{Fonts, SharedFonts};
 #[cfg(feature = "gpu")]
 pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, GPU_ATLAS_SIDE};
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
@@ -34,6 +36,7 @@ pub use overlay::{
     MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM,
 };
 pub use text::{Label, TextEngine, ONEST};
+pub use text_node::{TEXT_GREEK_ALPHA, TEXT_LAYOUT_TIME_PER_FRAME, TEXT_LOD_PX};
 #[cfg(feature = "gpu")]
 pub use vello_common::{multi_atlas::AtlasConfig, paint::ImageId};
 pub use vello_cpu::Pixmap;
@@ -60,10 +63,18 @@ pub enum ExportError {
 }
 
 /// Рендерер одного холста: кэши списков отрисовки, растров и шрифтов живут между кадрами.
-#[derive(Default)]
 pub struct Renderer {
     painter: Painter,
     text: TextEngine,
+    /// Реестр шрифтов и раскладка текстовых узлов — общие с редактором
+    /// (`set_fonts`); свой рендерер без реестра знает только вшитый Onest.
+    fonts: SharedFonts,
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Renderer::with_raster_cache_bytes(RASTER_CACHE_BYTES)
+    }
 }
 
 impl Renderer {
@@ -77,7 +88,21 @@ impl Renderer {
         Renderer {
             painter: Painter::with_raster_limit(bytes),
             text: TextEngine::new(),
+            fonts: Fonts::shared(),
         }
+    }
+
+    /// Общий реестр шрифтов ядра. Раскладки, посчитанные со старым реестром,
+    /// устаревают по его поколению.
+    ///
+    /// Реестр лежит в `RefCell`: пока идёт рисование или экспорт, вызывающий не
+    /// должен держать его заимствование (`borrow`/`borrow_mut`) — иначе паника.
+    pub fn set_fonts(&mut self, fonts: SharedFonts) {
+        self.fonts = fonts;
+    }
+
+    pub fn fonts(&self) -> &SharedFonts {
+        &self.fonts
     }
 
     /// Предел времени на построение растров фреймов за кадр (по умолчанию
@@ -141,6 +166,7 @@ impl Renderer {
         let ctx = DrawContext {
             scene,
             images,
+            fonts: &self.fonts,
             transform: camera.view_transform(),
             scale: camera.device_scale(),
             cull: Some(camera.visible_world_rect()),
@@ -278,6 +304,7 @@ impl Renderer {
         let ctx = DrawContext {
             scene,
             images,
+            fonts: &self.fonts,
             transform: Affine::scale(scale) * Affine::translate(-area.origin().to_vec2()),
             scale,
             cull: None,
@@ -347,6 +374,7 @@ impl Renderer {
         let ctx = DrawContext {
             scene,
             images,
+            fonts: &self.fonts,
             transform,
             scale,
             cull: None,

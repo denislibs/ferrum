@@ -20,9 +20,13 @@
 //! приложение печатает его, убирает свой временный каталог и выходит (код 0 — ядро
 //! запустилось и круг прошёл), без ответа за 90 с — выход с кодом 1.
 
+mod fonts;
+
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+
+use ferrum_fontmeta::FamilyInfo;
 
 use ferrum_desktop_store::{io_error, FileMeta, Library, ListResult, ReadParts, Section, Settings};
 use serde::{Deserialize, Serialize};
@@ -36,6 +40,8 @@ struct Desk {
     settings: Mutex<Settings>,
     /// Части чтений файла, ещё не забранные интерфейсом (`files_read_part`).
     parts: Mutex<ReadParts>,
+    /// Системные шрифты (подсистема 3): сканируются при первом `fonts_list`.
+    fonts: OnceLock<fonts::SystemFonts>,
 }
 
 type Res<T> = Result<T, String>;
@@ -286,6 +292,30 @@ fn settings_set(patch: Map<String, Value>, desk: State<'_, Desk>) -> Res<()> {
     desk.settings().set(patch)
 }
 
+/// Системные шрифты: семейства и начертания (файл — номер в списке процесса).
+/// Первый вызов сканирует каталоги шрифтов ОС — в потоке Tauri, не в окне.
+#[tauri::command(async)]
+fn fonts_list(desk: State<'_, Desk>) -> Res<Vec<FamilyInfo>> {
+    let fonts = desk.fonts.get_or_init(|| {
+        let f = fonts::SystemFonts::scan(&fonts::font_dirs());
+        for s in &f.skipped {
+            eprintln!("{s}");
+        }
+        f
+    });
+    Ok(fonts.families.clone())
+}
+
+/// Байты файла системного шрифта сырым ответом (без JSON и копий в JS).
+#[tauri::command(async)]
+fn fonts_read(id: usize, desk: State<'_, Desk>) -> Res<Response> {
+    let fonts = desk
+        .fonts
+        .get()
+        .ok_or("Список системных шрифтов ещё не построен")?;
+    Ok(Response::new(fonts.read(id)?))
+}
+
 fn smoke() -> bool {
     std::env::var("FERRUM_SMOKE").is_ok_and(|v| v == "1")
 }
@@ -382,6 +412,7 @@ fn open_desk(app: &tauri::App) -> Result<Desk, String> {
         lib: Mutex::new(lib),
         settings: Mutex::new(settings),
         parts: Mutex::new(ReadParts::default()),
+        fonts: OnceLock::new(),
     })
 }
 
@@ -445,6 +476,8 @@ pub fn run() {
             files_copy_dialog,
             settings_get,
             settings_set,
+            fonts_list,
+            fonts_read,
             smoke_mode,
             smoke_done,
         ])

@@ -20,6 +20,7 @@ import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
 import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
+import { systemFonts } from './system-fonts';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { restartText, type Restart } from './restart';
 import type { Route } from './router';
@@ -241,6 +242,7 @@ export function App(props: AppProps) {
     boot(canvas, store, {
       document: bytes,
       backend: props.backend,
+      systemFonts: systemFonts((blob) => props.files.fontBytes?.(blob) ?? Promise.reject(new Error('нет хранилища'))),
       // До документа: тема (первый кадр сразу в цвете темы), привязка и сохранённая раскладка.
       beforeDocument: (ed) => {
         ed.send({ type: 'setTheme', theme: theme() });

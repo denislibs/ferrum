@@ -9,15 +9,17 @@
 //! (`FrameStats::needs_another_frame`: растры фреймов не догнали, картинки ещё
 //! декодируются).
 
+mod fonts;
 mod panels;
 
 use std::collections::{HashSet, VecDeque};
 
-use ferrum_doc::{container, fixture, Document, NodeId};
+use ferrum_doc::{container, fixture, DocResult, Document, NodeId, Tx};
 use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{CommandId, Cursor, Editor, EditorEvent, Input, Platform, ToolKind};
 use ferrum_render::{decode_png, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba};
 use ferrum_scene::Scene;
+use ferrum_text::{Fonts, SharedFonts};
 use kurbo::{Point, Size};
 use serde_bytes::ByteBuf;
 
@@ -26,8 +28,8 @@ use crate::input::{decode_all, Record};
 use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
-    Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, MAX_JOURNAL_BATCHES,
-    SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
+    Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, MAX_DEMO_TEXTS,
+    MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -90,6 +92,10 @@ pub struct Core {
     revision: u64,
     /// Номер последней непустой пачки журнала изменений (этап 6).
     journal_batch: u64,
+    /// Реестр шрифтов (подсистема 3): общий у редактора и рендера, переживает
+    /// замену документа — загруженные шрифты не качаются заново.
+    fonts: SharedFonts,
+    font_state: fonts::FontState,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -167,11 +173,15 @@ fn overlay_theme(t: Theme) -> OverlayTheme {
 impl Core {
     /// Ядро с пустым документом для холста `viewport` (CSS-пиксели) и `dpr`.
     pub fn new(platform: Platform, viewport: Size, dpr: f64, backend: Backend) -> Core {
-        let editor = Editor::new(Document::new(), None, viewport, dpr, platform)
+        let mut editor = Editor::new(Document::new(), None, viewport, dpr, platform)
             .expect("в новом документе есть страница");
+        let fonts = Fonts::shared();
+        editor.set_fonts(fonts.clone());
+        let mut renderer = Renderer::new();
+        renderer.set_fonts(fonts.clone());
         let mut core = Core {
             editor,
-            renderer: Renderer::new(),
+            renderer,
             images: DocImages::default(),
             backend,
             platform,
@@ -200,6 +210,8 @@ impl Core {
             modified_sent: Some(false),
             revision: 0,
             journal_batch: 0,
+            fonts,
+            font_state: fonts::FontState::default(),
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -244,6 +256,7 @@ impl Core {
             Editor::new(doc, None, viewport, dpr, self.platform).map_err(|e| e.to_string())?;
         editor.set_theme(overlay_theme(self.theme));
         editor.set_settings(self.editor.settings().clone());
+        editor.set_fonts(self.fonts.clone());
         *editor.keymap_mut() = self.editor.keymap().clone();
         editor.take_events();
         self.editor = editor;
@@ -258,6 +271,12 @@ impl Core {
         self.modified_sent = None;
         self.revision += 1;
         self.dirty = true;
+        // Списки шрифтов — для нового документа; его шрифты — запросить сразу.
+        self.font_state.missing_sent = None;
+        self.font_state.missing_key = None;
+        // Ждавшие шрифтов правки относились к прошлому документу.
+        self.font_state.waiting.clear();
+        self.preload_page_fonts();
         Ok(())
     }
 
@@ -350,6 +369,10 @@ impl Core {
             let k = |v: u8| v as f32 / 255.0;
             Rgba::new([k(c.r), k(c.g), k(c.b), k(c.a)])
         });
+        // Превью без текста хуже прежнего: пусть остаётся прежнее.
+        if fonts::fonts_loading(scene, &self.fonts) {
+            return Err(());
+        }
         let provider = self.images.export_provider(&doc.images);
         self.renderer
             .thumbnail_png(scene, THUMB_WIDTH, THUMB_HEIGHT, background, &provider)
@@ -457,10 +480,26 @@ impl Core {
             self.error(format!("Пример не больше {MAX_DEMO_NODES} узлов"));
             return;
         }
+        self.open_fixture(|p| fixture::fill(p, nodes as usize).map(|_| ()));
+    }
+
+    /// Новый документ — страница-пример из `texts` текстов (фреймы по 100):
+    /// замер открытия и панорамирования «10 000 текстов» (спека подсистемы 3, 5).
+    pub fn demo_text(&mut self, texts: u32) {
+        if texts > MAX_DEMO_TEXTS {
+            self.error(format!("Пример не больше {MAX_DEMO_TEXTS} текстов"));
+            return;
+        }
+        self.open_fixture(|p| fixture::fill_texts(p, texts as usize).map(|_| ()));
+    }
+
+    /// Новый документ из страницы-примера: как только что открытый файл (журнал
+    /// пишет только правки после него), камера — зум 0.5 над серединой примера.
+    fn open_fixture(&mut self, fill: impl FnOnce(&Tx) -> DocResult<()>) {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         if let Err(e) = doc.transact(page, vec![], |p| {
-            fixture::fill(p, nodes as usize)?;
+            fill(p)?;
             Ok(vec![])
         }) {
             self.error(e.to_string());
@@ -471,7 +510,6 @@ impl Core {
             self.error(e);
             return;
         }
-        // Пример — как только что открытый файл: журнал пишет только правки после него.
         self.editor.mark_journal();
         let mut cam = self.editor.camera().clone();
         cam.set_zoom(0.5);
@@ -513,6 +551,11 @@ impl Core {
         match cmd {
             Command::Open { bytes } => self.open(&bytes),
             Command::Demo { nodes } => self.demo(nodes),
+            Command::DemoText { texts } => self.demo_text(texts),
+            cmd @ (Command::FontsAvailable { .. }
+            | Command::LoadFont { .. }
+            | Command::ReplaceMissingFont { .. }
+            | Command::TestCreateText { .. }) => self.font_command(cmd),
             Command::OpenWithJournal { bytes, journal } => self.open_with_journal(&bytes, &journal),
             Command::FlushJournal => self.flush_journal(true),
             Command::Execute { command } => match CommandId::from_key(&command) {
@@ -609,6 +652,8 @@ impl Core {
                 }
                 EditorEvent::PageChanged(p) => {
                     self.events.push(CoreEvent::Page { id: p.to_string() });
+                    self.drop_page_scoped_font_edits();
+                    self.preload_page_fonts();
                     self.background_preview = None;
                     self.layers.reset();
                     self.ui.layers = true;
@@ -649,9 +694,14 @@ impl Core {
         }
         self.flush_ui();
         self.push_modified();
+        self.push_font_requests();
     }
 
     fn copy_png(&mut self, ids: &[NodeId]) {
+        if fonts::fonts_loading(self.editor.scene(), &self.fonts) {
+            self.error(fonts::FONTS_LOADING);
+            return;
+        }
         let before = self.images.placeholders_served();
         // Экспорт декодирует всё нужное сразу, без бюджета кадра.
         let provider = self.images.export_provider(&self.editor.document().images);
@@ -721,6 +771,8 @@ impl Core {
         self.update_selection(&overlay.selection);
         self.dirty = stats.needs_another_frame;
         self.frames += 1;
+        // Раскладка при рисовании запрашивает незагруженные шрифты.
+        self.push_font_requests();
         stats
     }
 
@@ -736,6 +788,7 @@ impl Core {
         let mut backend = ferrum_render::CpuBackend::new(w, h);
         let mut renderer = Renderer::with_raster_cache_bytes(0);
         renderer.set_raster_build_time(None);
+        renderer.set_fonts(self.fonts.clone());
         let provider = self.images.export_provider(&self.editor.document().images);
         renderer.render(
             &mut backend,

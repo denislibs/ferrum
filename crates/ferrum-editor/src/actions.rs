@@ -584,8 +584,7 @@ impl Editor {
                         target
                     }
                 };
-                let id = tx.create_node(parent, None, props.kind)?;
-                tx.set_props(id, &full_patch(&props))?;
+                let id = tx.create_with_props(parent, None, &props)?;
                 if n.parent.is_none() {
                     roots.push(id);
                 }

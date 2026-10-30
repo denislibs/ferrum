@@ -232,7 +232,10 @@ fn file_from_before_flips_opens_unmirrored() {
 
 #[test]
 fn scene_cache_version_covers_flips() {
-    assert_eq!(SCENE_CACHE_VERSION, 2, "таблица с флагами отражения");
+    assert_eq!(
+        SCENE_CACHE_VERSION, 3,
+        "таблица с флагами отражения (2) и текстом (3)"
+    );
     // Кэш прежней версии с честным хэшем снапшота игнорируется без предупреждений.
     let (doc, page, [f, ..]) = sample();
     let bytes = testing::map_sections(&encode(&doc).unwrap(), |kind, _, data| {

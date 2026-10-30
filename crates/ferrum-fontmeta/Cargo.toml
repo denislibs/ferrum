@@ -1,0 +1,12 @@
+[package]
+name = "ferrum-fontmeta"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Метаданные файлов шрифтов (семейство, начертания) — без раскладки и Loro:
+# им пользуются ferrum-text (манифест вшитых шрифтов) и десктоп (системные шрифты).
+[dependencies]
+skrifa.workspace = true
+serde.workspace = true

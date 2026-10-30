@@ -473,7 +473,7 @@ impl Editor {
                     let selection = self.selection.to_vec();
                     self.ctx().commit(|tx, _| {
                         for (id, patch) in &p {
-                            tx.set_props(*id, patch)?;
+                            crate::text::set_props_resizing(tx, *id, patch)?;
                         }
                         Ok(selection)
                     });
