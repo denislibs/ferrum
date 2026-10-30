@@ -191,8 +191,14 @@ async function loadManifest(): Promise<void> {
     console.warn('ferrum: манифест шрифтов недоступен', e);
   }
   if (!core) return;
-  core.command({ type: 'fontsAvailable', source: 'bundled', families });
-  sendEvents();
+  // Паника ядра здесь — тот же путь, что у остальных команд: `fatal` и
+  // перезапуск, а не необработанный отказ промиса.
+  try {
+    core.command({ type: 'fontsAvailable', source: 'bundled', families });
+    sendEvents();
+  } catch (e) {
+    fatal(e);
+  }
 }
 
 /** Байты вшитого семейства: worker качает файлы сам (основной поток их не
