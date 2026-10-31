@@ -497,3 +497,53 @@ fn paint_bucket_clears_an_inner_square_inside_a_filled_one() {
     assert_round_trips(&outer);
     assert!(!filled_at(&outer, ring) && filled_at(&outer, hole));
 }
+
+fn squares_in_a_frame(k: usize) -> VectorNetwork {
+    ferrum_doc::fixture::squares_network(k)
+}
+
+#[test]
+fn paint_bucket_on_many_contours_is_local_and_fast() {
+    // 4000 квадратов в рамке: щелчок решает только про участки у точки, а не
+    // сравнивает каждый контур с каждой гранью (было ≈ 1.7 с в release).
+    let n = squares_in_a_frame(4000);
+    let (inside, between) = (Point::new(10.0, 10.0), Point::new(17.0, 17.0));
+    let t = std::time::Instant::now();
+    let one = toggle_fill(&n, inside, false).unwrap();
+    let frame = toggle_fill(&one, between, false).unwrap();
+    let cleared = toggle_fill(&frame, inside, false).unwrap();
+    let elapsed = t.elapsed();
+    assert!(filled_at(&one, inside) && !filled_at(&one, between));
+    assert!(filled_at(&frame, inside) && filled_at(&frame, between));
+    assert!(
+        !filled_at(&frame, Point::new(30.0, 10.0)),
+        "чужой квадрат — дыра рамки"
+    );
+    assert!(!filled_at(&cleared, inside) && filled_at(&cleared, between));
+    assert_round_trips(&cleared);
+    let empty = toggle_fill(&frame, between, false).expect("снятие с рамки");
+    assert!(filled_at(&empty, inside) && !filled_at(&empty, between));
+    // Отладочная сборка медленнее release в десятки раз — предел с запасом.
+    assert!(elapsed.as_secs_f64() < 3.0, "{elapsed:?}");
+}
+
+#[test]
+fn clearing_one_square_of_a_region_over_many_keeps_the_rest() {
+    // Одна область на 2000 квадратов (как после «Сплющить»): снятие заливки с
+    // одного переписывает область остальными, не трогая чужие участки.
+    let mut n = squares_in_a_frame(2000);
+    n.regions.push(VectorRegion {
+        rule: FillRule::NonZero,
+        loops: (0..2000u32).map(|i| (4 * i..4 * i + 4).collect()).collect(),
+        fills: None,
+    });
+    let t = std::time::Instant::now();
+    let r = toggle_fill(&n, Point::new(10.0, 10.0), false).unwrap();
+    let elapsed = t.elapsed();
+    assert!(!filled_at(&r, Point::new(10.0, 10.0)));
+    assert!(filled_at(&r, Point::new(30.0, 10.0)) && filled_at(&r, Point::new(30.0, 30.0)));
+    assert!(!filled_at(&r, Point::new(17.0, 17.0)), "рамка не залита");
+    assert_eq!(r.regions.len(), 1);
+    assert_eq!(r.regions[0].loops.len(), 1999);
+    assert!(elapsed.as_secs_f64() < 3.0, "{elapsed:?}");
+}

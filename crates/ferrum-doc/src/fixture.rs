@@ -197,3 +197,31 @@ pub fn curvy_network(n: usize, radius: f64) -> crate::VectorNetwork {
         },
     }
 }
+
+/// Сеть для замеров «Заливки области»: `k` квадратов 10 × 10 сеткой с шагом 20
+/// (`k` связных частей, от (5, 5)) внутри квадратной рамки вокруг всех них (ещё
+/// одна часть, последние 4 точки и сегмента). Квадрат `i` — точки и сегменты
+/// `4i..4i + 4`. Без областей.
+pub fn squares_network(k: usize) -> crate::VectorNetwork {
+    use crate::{VectorNetwork, VectorPoint, VectorSegment};
+    let mut n = VectorNetwork::default();
+    let side = ((k as f64).sqrt().ceil() as usize).max(1);
+    let square = |n: &mut VectorNetwork, x: f64, y: f64, s: f64| {
+        let b = n.points.len() as u32;
+        for (dx, dy) in [(0.0, 0.0), (s, 0.0), (s, s), (0.0, s)] {
+            n.points.push(VectorPoint::new(x + dx, y + dy));
+        }
+        for j in 0..4u32 {
+            n.segments.push(VectorSegment::line(b + j, b + (j + 1) % 4));
+        }
+    };
+    for i in 0..k {
+        let (x, y) = (
+            (i % side) as f64 * 20.0 + 5.0,
+            (i / side) as f64 * 20.0 + 5.0,
+        );
+        square(&mut n, x, y, 10.0);
+    }
+    square(&mut n, 0.0, 0.0, side as f64 * 20.0);
+    n
+}

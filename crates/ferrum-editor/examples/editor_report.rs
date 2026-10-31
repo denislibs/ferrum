@@ -750,6 +750,7 @@ fn main() {
         "Вектор 100 000 точек",
         ferrum_doc::fixture::wavy_network(100_000),
     );
+    paint_bucket(&mut report);
     vector_edit(
         &mut report,
         "Кривой вектор 100 000 точек",
@@ -951,6 +952,78 @@ fn vector_edit(report: &mut Report, label: &str, net: ferrum_doc::VectorNetwork)
         &format!("{label}: кадр правки, все точки выделены"),
         &frames,
         16.7,
+    );
+}
+
+/// «Заливка области» на сети из 24 999 квадратов в рамке (100 000 точек): щелчок
+/// ищет участок и закрашивающие области у точки, а не сравнивает каждый контур
+/// с каждой гранью.
+fn paint_bucket(report: &mut Report) {
+    use ferrum_editor::vector_ops::toggle_fill;
+    // Область на первые 9 999 квадратов (предел — 10 000 петель на сеть).
+    let mut net = ferrum_doc::fixture::squares_network(24_999);
+    net.regions.push(ferrum_doc::VectorRegion {
+        rule: ferrum_doc::FillRule::NonZero,
+        loops: (0..9_999u32)
+            .map(|i| (4 * i..4 * i + 4).collect())
+            .collect(),
+        fills: None,
+    });
+    let timed = |net: &ferrum_doc::VectorNetwork, at: Point| {
+        let t = Instant::now();
+        let r = toggle_fill(net, at, false);
+        (t.elapsed(), r)
+    };
+    // Квадрат 0 — в (5, 5); квадрат 20 000 — в строке 125 сетки 159 × 159.
+    let (inside, outside, between) = (
+        Point::new(10.0, 10.0),
+        Point::new(
+            (20_000 % 159) as f64 * 20.0 + 10.0,
+            (20_000 / 159) as f64 * 20.0 + 10.0,
+        ),
+        Point::new(17.0, 17.0),
+    );
+    let (d, rest) = timed(&net, inside);
+    report.gate(
+        "Заливка области, 24 999 квадратов: снятие с одного из 9 999 залитых одной областью",
+        d,
+        100.0,
+    );
+    report.check(
+        "Заливка области: остальные 9 998 квадратов залиты",
+        rest.as_ref()
+            .is_some_and(|r| r.regions.len() == 1 && r.regions[0].loops.len() == 9_998),
+        format!(
+            "{:?}",
+            rest.as_ref()
+                .map(|r| r.regions.iter().map(|r| r.loops.len()).collect::<Vec<_>>())
+        ),
+        "[9998]",
+    );
+    let (d, new) = timed(&net, outside);
+    report.gate(
+        "Заливка области, 24 999 квадратов: новая область в незалитом квадрате",
+        d,
+        100.0,
+    );
+    report.check(
+        "Заливка области: новая область добавлена",
+        new.as_ref().is_some_and(|r| r.regions.len() == 2),
+        format!("{:?}", new.as_ref().map(|r| r.regions.len())),
+        "2",
+    );
+    // Рамка с 24 999 дырами — больше предела петель: отказ, сеть не меняется.
+    let (d, framed) = timed(&net, between);
+    report.gate(
+        "Заливка области, 24 999 квадратов: щелчок в рамку (отказ по пределу петель)",
+        d,
+        100.0,
+    );
+    report.check(
+        "Заливка области: рамка с 24 999 дырами не записана",
+        framed.is_none(),
+        format!("{:?}", framed.is_some()),
+        "отказ",
     );
 }
 
