@@ -302,9 +302,12 @@ impl Editor {
     /// Инструмент «Перо» вне правки: сеанс без узла, первый щелчок начнёт новый
     /// вектор. В правке — перо внутри неё.
     pub(crate) fn start_pen(&mut self) {
-        if let Some(v) = &mut self.vector_edit {
-            v.tool = VectorTool::Pen;
-            v.drag = None;
+        if self.vector_edit.is_some() {
+            // Незаконченный жест отменяется: сеть — снова как до него.
+            self.cancel_vector_drag();
+            if let Some(v) = &mut self.vector_edit {
+                v.tool = VectorTool::Pen;
+            }
             return;
         }
         if self.doc.is_read_only() {
@@ -1102,4 +1105,58 @@ pub(crate) fn convert_to_vector(tx: &Tx, id: NodeId, patch: &PropsPatch) -> DocR
     tx.convert_to_vector(id, net)?;
     tx.set_props(id, patch)?;
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ferrum_doc::{Document, NodeKind, PropsPatch, VectorNetwork, VectorPoint, VectorSegment};
+    use kurbo::{Point, Size};
+
+    use crate::editor::Editor;
+    use crate::input::{Input, Modifiers, Platform, PointerEvent};
+    use crate::vector_edit::VectorTool;
+
+    #[test]
+    fn pen_inside_edit_mode_cancels_a_pending_drag_and_restores_the_network() {
+        // Перо в правке посреди перетаскивания точки (кнопка ещё нажата):
+        // жест отменяется, а рабочая сеть — снова как до него.
+        let view = Size::new(800.0, 600.0);
+        let mut ed = Editor::new(Document::new(), None, view, 1.0, Platform::Windows).unwrap();
+        let mut cam = ferrum_render::Camera::new(view, 1.0);
+        cam.set_center(Point::new(400.0, 300.0));
+        ed.set_camera(cam);
+        let net = VectorNetwork {
+            points: vec![VectorPoint::new(0.0, 0.0), VectorPoint::new(100.0, 0.0)],
+            segments: vec![VectorSegment::line(0, 1)],
+            regions: vec![],
+        };
+        let id = ed
+            .transact(|tx| {
+                let id = tx.create_node(None, None, NodeKind::Vector)?;
+                tx.set_props(
+                    id,
+                    &PropsPatch {
+                        x: Some(100.0),
+                        y: Some(100.0),
+                        w: Some(100.0),
+                        h: Some(0.0),
+                        vector: Some(Arc::new(net.clone())),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(vec![id])
+            })
+            .unwrap()[0];
+        assert!(ed.start_vector_edit(id));
+        let pe = |x: f64, y: f64, t: f64| PointerEvent::new((x, y), Modifiers::NONE, t);
+        ed.handle(Input::PointerDown(pe(200.0, 100.0, 1000.0)));
+        ed.handle(Input::PointerMove(pe(260.0, 140.0, 1100.0)));
+        assert_ne!(ed.vector_work().unwrap(), &net, "жест идёт");
+        ed.start_pen();
+        assert_eq!(ed.vector_tool(), Some(VectorTool::Pen));
+        assert_eq!(ed.vector_work().unwrap(), &net, "сеть до жеста");
+        assert!(!ed.scene().has_preview(), "превью жеста убрано");
+    }
 }
