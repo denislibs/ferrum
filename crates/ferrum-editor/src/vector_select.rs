@@ -6,6 +6,7 @@
 //! стрелками, «Заливка области» (B). Каждая правка — один шаг отмены.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use ferrum_doc::NodeId;
 use kurbo::{Line, Point, Rect, Vec2};
@@ -96,7 +97,7 @@ impl Editor {
             v.drag = Some(Drag::Handle {
                 seg,
                 end,
-                origin: v.work.clone(),
+                origin: (*v.work).clone(),
             });
             return true;
         }
@@ -120,7 +121,7 @@ impl Editor {
                 start_screen: e.point,
                 start_world: world,
                 anchor,
-                origin: v.work.clone(),
+                origin: (*v.work).clone(),
                 moved: false,
             });
             return true;
@@ -132,7 +133,7 @@ impl Editor {
                     seg,
                     t,
                     start_world: world,
-                    origin: v.work.clone(),
+                    origin: (*v.work).clone(),
                 });
                 return true;
             }
@@ -154,7 +155,7 @@ impl Editor {
                 start_screen: e.point,
                 start_world: world,
                 anchor: world,
-                origin: v.work.clone(),
+                origin: (*v.work).clone(),
                 moved: false,
             });
             return true;
@@ -255,7 +256,7 @@ impl Editor {
                     }
                 }
                 let d = v.to_shape(target) - v.to_shape(anchor);
-                v.work = move_points(&origin, &moving, d);
+                v.work = Arc::new(move_points(&origin, &moving, d));
                 v.snap_lines = lines;
                 v.drag = Some(Drag::Points {
                     start_screen,
@@ -276,7 +277,7 @@ impl Editor {
                     },
                 );
                 let t = v.to_shape(world) - p;
-                v.work = set_handle(&origin, seg, end, t, e.modifiers.alt);
+                v.work = Arc::new(set_handle(&origin, seg, end, t, e.modifiers.alt));
             }
             Drag::Bend {
                 seg,
@@ -285,7 +286,7 @@ impl Editor {
                 origin,
             } => {
                 let d = v.to_shape(world) - v.to_shape(start_world);
-                v.work = bend(&origin, seg, t, d);
+                v.work = Arc::new(bend(&origin, seg, t, d));
             }
             Drag::Marquee {
                 start_world, base, ..
@@ -320,7 +321,7 @@ impl Editor {
         let changed = match &drag {
             Some(Drag::Points { origin, .. })
             | Some(Drag::Handle { origin, .. })
-            | Some(Drag::Bend { origin, .. }) => *origin != v.work,
+            | Some(Drag::Bend { origin, .. }) => *origin != *v.work,
             _ => false,
         };
         if changed {
@@ -342,7 +343,7 @@ impl Editor {
         let filled = v.base.fills.iter().any(|f| f.visible);
         let at = v.to_shape(world);
         if let Some(net) = toggle_fill(&v.work, at, filled) {
-            v.work = net;
+            v.work = Arc::new(net);
             self.commit_vector_work();
         }
     }
@@ -378,7 +379,7 @@ impl Editor {
             self.delete_node(id);
             return;
         }
-        v.work = net;
+        v.work = Arc::new(net);
         self.commit_vector_work();
     }
 
@@ -418,7 +419,7 @@ impl Editor {
             return;
         }
         let local = v.vec_to_shape(d);
-        v.work = move_points(&v.work, &moving, local);
+        v.work = Arc::new(move_points(&v.work, &moving, local));
         self.commit_vector_work();
     }
 

@@ -123,7 +123,7 @@ pub const VECTOR_MAX_POINTS_DRAWN: usize = 5000;
 
 /// Правка вектора (подсистема 3, этап 3): сеть, точки, ручки и резинка пера.
 /// Всё — в координатах формы узла.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct VectorEditOverlay {
     /// Координаты формы → мир.
     pub transform: Affine,
@@ -136,6 +136,20 @@ pub struct VectorEditOverlay {
     pub selected_handles: Vec<(u32, bool)>,
     /// Резинка пера: от последней точки пути к курсору.
     pub rubber: Option<(Point, Point)>,
+}
+
+impl PartialEq for VectorEditOverlay {
+    /// Сеть сравнивается по указателю (одна и та же — равна, без обхода 100 000
+    /// точек), иначе по значению.
+    fn eq(&self, o: &Self) -> bool {
+        self.transform == o.transform
+            && (std::sync::Arc::ptr_eq(&self.net, &o.net) || self.net == o.net)
+            && self.points == o.points
+            && self.segments == o.segments
+            && self.handles == o.handles
+            && self.selected_handles == o.selected_handles
+            && self.rubber == o.rubber
+    }
 }
 
 /// Что показать поверх содержимого. Заполняет редактор (этап 3).
@@ -366,10 +380,10 @@ fn vector_edit(
     for i in 0..net.segments.len() {
         seg_path(i, &mut all, &mut last);
     }
-    // Большая сеть — ломаной с точностью в четверть пикселя: тысячи сегментов
-    // меньше пикселя обводить по одному незачем.
+    // Большая сеть — ломаной с точностью в четверть пикселя устройства (как списки
+    // отображения): тысячи сегментов меньше пикселя обводить по одному незачем.
     if all.elements().len() > ferrum_scene::vector::SIMPLIFY_MIN_ELEMENTS {
-        all = ferrum_scene::vector::simplify_path(&all, 0.25 * dpr);
+        all = ferrum_scene::vector::simplify_path(&all, crate::display::LOD_TOLERANCE_PX);
     }
     backend.stroke_path(&all, &Stroke::new(dpr));
     if !v.segments.is_empty() {

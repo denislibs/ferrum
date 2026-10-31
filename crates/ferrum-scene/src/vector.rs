@@ -684,6 +684,9 @@ pub fn simplify(shape: &PathShape, tol: f64) -> PathShape {
     }
     PathShape {
         stroke: simplify_path(&shape.stroke, tol),
+        ends: shape.ends.clone(),
+        junctions: shape.junctions.clone(),
+        closed: shape.closed,
         regions: shape
             .regions
             .iter()
@@ -692,7 +695,6 @@ pub fn simplify(shape: &PathShape, tol: f64) -> PathShape {
                 ..r.clone()
             })
             .collect(),
-        ..shape.clone()
     }
 }
 
@@ -751,7 +753,11 @@ impl Thinner {
 }
 
 /// Ломаная пути с точностью `tol` (см. `simplify`) — и для оверлея правки.
+///
+/// Отклонение ломаной от исходного пути не больше `tol`: допуск делится пополам
+/// между сглаживанием кривых и отбрасыванием точек.
 pub fn simplify_path(path: &BezPath, tol: f64) -> BezPath {
+    let tol = tol / 2.0;
     let mut out = BezPath::new();
     let mut t = Thinner::default();
     let mut last = Point::ZERO;

@@ -118,7 +118,8 @@ pub fn fill_texts(page: &Tx, texts: usize) -> DocResult<Vec<NodeId>> {
 
 /// Сеть для замеров (подсистема 3, этап 3): замкнутый волнистый контур из `n`
 /// точек по эллипсу 2000 × 1000 (как обведённая карта или скан), каждый
-/// четвёртый сегмент — кривая, одна область по всей петле.
+/// четвёртый сегмент — кривая, одна область по всей петле. Меньше трёх точек —
+/// без петли и области (0 — пустая сеть, 1 — одна точка, 2 — один сегмент).
 pub fn wavy_network(n: usize) -> crate::VectorNetwork {
     use crate::{FillRule, VectorNetwork, VectorPoint, VectorRegion, VectorSegment};
     let points = (0..n)
@@ -128,7 +129,8 @@ pub fn wavy_network(n: usize) -> crate::VectorNetwork {
             VectorPoint::new(1000.0 + 1000.0 * r * a.cos(), 500.0 + 500.0 * r * a.sin())
         })
         .collect();
-    let segments = (0..n as u32)
+    let count = if n >= 3 { n } else { n.saturating_sub(1) };
+    let segments = (0..count as u32)
         .map(|i| {
             let mut s = VectorSegment::line(i, (i + 1) % n as u32);
             if i % 4 == 0 {
@@ -141,10 +143,14 @@ pub fn wavy_network(n: usize) -> crate::VectorNetwork {
     VectorNetwork {
         points,
         segments,
-        regions: vec![VectorRegion {
-            rule: FillRule::NonZero,
-            loops: vec![(0..n as u32).collect()],
-            fills: None,
-        }],
+        regions: if n >= 3 {
+            vec![VectorRegion {
+                rule: FillRule::NonZero,
+                loops: vec![(0..n as u32).collect()],
+                fills: None,
+            }]
+        } else {
+            vec![]
+        },
     }
 }

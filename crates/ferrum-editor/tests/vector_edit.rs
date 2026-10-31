@@ -484,3 +484,18 @@ fn bucket_mode_leaves_edit_on_a_press_at_another_node() {
     assert!(!h.ed.is_editing_vector());
     assert_eq!(h.sel(), vec![other]);
 }
+
+#[test]
+fn overlay_shares_the_network_until_it_changes() {
+    let mut h = H::new();
+    let id = square(&mut h, false);
+    h.ed.start_vector_edit(id);
+    let a = h.ed.overlay().vector_edit.unwrap();
+    // Указатель двигается, сеть та же: сеть не копируется и сравнение — по указателю.
+    h.hover(150.0, 150.0);
+    let b = h.ed.overlay().vector_edit.unwrap();
+    assert!(Arc::ptr_eq(&a.net, &b.net), "сеть оверлея — одна и та же");
+    h.drag((200.0, 200.0), (230.0, 240.0), Modifiers::NONE);
+    let c = h.ed.overlay().vector_edit.unwrap();
+    assert!(!Arc::ptr_eq(&a.net, &c.net) && a.net != c.net);
+}

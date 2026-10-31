@@ -236,10 +236,12 @@ impl DisplayList {
     pub fn paths_at(&mut self, scale: f64) -> &Paths {
         let detail = match self.path.as_deref() {
             Some(p)
-                if scale > 0.0
+                if scale.is_finite()
+                    && scale > 0.0
                     && p.shape.stroke.elements().len() >= vector::SIMPLIFY_MIN_ELEMENTS =>
             {
-                LOD_TOLERANCE_PX / 2f64.powf(scale.log2().ceil())
+                // Предел масштаба — чтобы точность не ушла в бесконечность.
+                LOD_TOLERANCE_PX / 2f64.powf(scale.clamp(1e-6, 1e9).log2().ceil())
             }
             _ => 0.0,
         };
@@ -250,16 +252,14 @@ impl DisplayList {
         let geom = self.geometry;
         let items = &self.items;
         let list = &self.items;
-        let simplified = self
-            .path
-            .as_deref()
-            .filter(|_| detail > 0.0)
-            .map(|p| vector::simplify(&p.shape, detail));
-        let ps = simplified
-            .as_ref()
-            .or(self.path.as_deref().map(|p| &p.shape));
         let style = self.path.as_deref().map(|p| p.style).unwrap_or_default();
+        let full = self.path.as_deref().map(|p| &p.shape);
         self.paths.get_or_insert_with(|| {
+            // Упрощение — только при построении: кадры с готовыми контурами его не платят.
+            let simplified = full
+                .filter(|_| detail > 0.0)
+                .map(|shape| vector::simplify(shape, detail));
+            let ps = simplified.as_ref().or(full);
             let mut shape = BezPath::new();
             geom.fill_path_into(&mut shape);
             let items: Vec<Option<BezPath>> = items
@@ -328,4 +328,88 @@ pub fn exterior(path: &BezPath, margin: f64) -> BezPath {
         out.extend(path.iter());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use ferrum_doc::{Document, NodeKind, PropsPatch};
+    use ferrum_scene::Scene;
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn vector_node(n: usize) -> SceneNode {
+        let net = ferrum_doc::fixture::wavy_network(n);
+        let b = vector::network_bounds(&net).unwrap();
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let id = doc
+            .transact(page, vec![], |tx| {
+                let id = tx.create_node(None, None, NodeKind::Vector)?;
+                tx.set_props(
+                    id,
+                    &PropsPatch {
+                        w: Some(b.width()),
+                        h: Some(b.height()),
+                        fills: Some(vec![ferrum_doc::Fill::solid(ferrum_doc::Color::SHAPE_GRAY)]),
+                        strokes: Some(vec![ferrum_doc::Stroke {
+                            color: ferrum_doc::Color::BLACK,
+                            width: 2.0,
+                            align: ferrum_doc::StrokeAlign::Center,
+                        }]),
+                        vector: Some(Arc::new(net.clone())),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(vec![id])
+            })
+            .unwrap()[0];
+        Scene::from_page(doc.page(page).unwrap())
+            .node(id)
+            .unwrap()
+            .clone()
+    }
+
+    /// Всего элементов в контурах заливки и обводки.
+    fn size(p: &Paths) -> usize {
+        p.items.iter().flatten().map(|b| b.elements().len()).sum()
+    }
+
+    fn first(p: &Paths) -> *const kurbo::PathEl {
+        p.items.iter().flatten().next().unwrap().elements().as_ptr()
+    }
+
+    #[test]
+    fn small_vectors_are_exact_at_any_scale() {
+        let mut list = DisplayList::build(&vector_node(50), false);
+        let exact = size(list.paths_at(0.0));
+        assert!(exact > 0);
+        for scale in [0.001, 1.0, 64.0] {
+            assert_eq!(size(list.paths_at(scale)), exact);
+            assert_eq!(list.detail, 0.0);
+        }
+    }
+
+    #[test]
+    fn big_vectors_are_simplified_to_the_scale_and_rebuilt_across_a_power_of_two() {
+        let mut list = DisplayList::build(&vector_node(6000), false);
+        let exact = size(list.paths_at(0.0));
+        assert_eq!(list.detail, 0.0, "масштаб 0 — точные контуры");
+        let coarse = size(list.paths_at(1.0));
+        assert_eq!(list.detail, LOD_TOLERANCE_PX);
+        assert!(coarse * 2 < exact, "{exact} → {coarse}");
+        // Внутри одной степени двойки — те же контуры, без перестройки.
+        let at = first(list.paths_at(0.9));
+        assert_eq!(list.detail, LOD_TOLERANCE_PX);
+        assert_eq!(first(list.paths_at(0.9)), at);
+        // Приблизили за степень двойки — точность вдвое выше, контуры перестроены.
+        let fine = size(list.paths_at(1.5));
+        assert_eq!(list.detail, LOD_TOLERANCE_PX / 2.0);
+        assert!(fine > coarse, "{coarse} → {fine}");
+        // Крайние масштабы не падают.
+        list.paths_at(f64::MIN_POSITIVE);
+        list.paths_at(1e12);
+        list.paths_at(f64::NAN);
+        list.paths_at(f64::INFINITY);
+    }
 }

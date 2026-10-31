@@ -171,7 +171,8 @@ pub(crate) struct VectorEdit {
     /// Матрица формы узла → мир.
     pub world: Affine,
     /// Сеть в координатах формы с незаписанными правками жеста или пути.
-    pub work: VectorNetwork,
+    /// В `Arc`: оверлей и сравнение кадров делят сеть, копия — только при правке.
+    pub work: Arc<VectorNetwork>,
     /// Версия узла в сцене, с которой сеанс сверился.
     pub version: u64,
     pub sel: VectorSelection,
@@ -239,7 +240,7 @@ impl Editor {
 
     /// Сеть правки в координатах формы — с незаписанным жестом и путём пера.
     pub fn vector_work(&self) -> Option<&VectorNetwork> {
-        self.vector_edit.as_ref().map(|v| &v.work)
+        self.vector_edit.as_ref().map(|v| &*v.work)
     }
 
     /// Входит в правку вектора или фигуры (прямоугольник, эллипс, линия),
@@ -278,7 +279,7 @@ impl Editor {
             draft,
             base: props,
             world,
-            work: net,
+            work: Arc::new(net),
             version,
             sel: VectorSelection::default(),
             tool: VectorTool::Select,
@@ -311,7 +312,7 @@ impl Editor {
             draft,
             base: Props::defaults(NodeKind::Vector),
             world: Affine::IDENTITY,
-            work: VectorNetwork::default(),
+            work: Arc::default(),
             version: 0,
             sel: VectorSelection::default(),
             tool: VectorTool::Pen,
@@ -378,7 +379,7 @@ impl Editor {
         v.base = props;
         v.world = world;
         v.version = version;
-        v.work = net;
+        v.work = Arc::new(net);
         v.sel.clamp(&v.work);
         if v.pen
             .last
@@ -393,7 +394,7 @@ impl Editor {
         let Some(v) = &self.vector_edit else {
             return;
         };
-        let patch = reframe(&v.base, v.work.clone());
+        let patch = reframe(&v.base, (*v.work).clone());
         match (&v.id, &v.new) {
             (Some(id), _) if v.base.kind == NodeKind::Vector => {
                 self.scene.set_preview(&[(*id, patch)]);
@@ -444,7 +445,7 @@ impl Editor {
         let Some(v) = &self.vector_edit else {
             return false;
         };
-        let patch = reframe(&v.base, v.work.clone());
+        let patch = reframe(&v.base, (*v.work).clone());
         let (id, new, base) = (v.id, v.new.clone(), v.base.clone());
         self.scene.clear_preview();
         let page = self.page;
@@ -488,7 +489,7 @@ impl Editor {
                     v.pen = PenPath::default();
                     v.version = u64::MAX;
                     if v.id.is_none() {
-                        v.work = VectorNetwork::default();
+                        v.work = Arc::default();
                         v.new = None;
                     }
                 }
@@ -562,7 +563,7 @@ impl Editor {
         let pixel_snap = self.settings.pixel_snap;
         let v = self.vector_edit.as_mut().expect("сеанс пера");
         v.mods = e.modifiers;
-        let mut net = v.work.clone();
+        let mut net = (*v.work).clone();
         let from_last = v.pen.last;
         // Щелчок по точке сети: замкнуть, соединить или продолжить от неё.
         if let Some(p) = hit_point {
@@ -598,7 +599,7 @@ impl Editor {
                             fills: None,
                         });
                     }
-                    v.work = net;
+                    v.work = Arc::new(net);
                     v.pen.dirty = true;
                     v.sel = VectorSelection {
                         points: BTreeSet::from([p]),
@@ -610,7 +611,7 @@ impl Editor {
                         incoming: Some(seg as usize),
                         outgoing,
                         mirror,
-                        origin: v.work.clone(),
+                        origin: (*v.work).clone(),
                         start_screen: e.point,
                         broken: e.modifiers.alt,
                     });
@@ -637,7 +638,7 @@ impl Editor {
         // Щелчок пером по сегменту без пути — новая точка на нём.
         if let (None, Some((seg, t))) = (from_last, hit_segment) {
             let (n2, p) = crate::vector_ops::add_point(&net, seg, t);
-            v.work = n2;
+            v.work = Arc::new(n2);
             v.pen.dirty = true;
             v.sel = VectorSelection {
                 points: BTreeSet::from([p]),
@@ -672,7 +673,7 @@ impl Editor {
         v.pen.last = Some(p);
         v.pen.pending_out = None;
         v.pen.dirty = true;
-        v.work = net;
+        v.work = Arc::new(net);
         v.sel = VectorSelection {
             points: BTreeSet::from([p]),
             ..Default::default()
@@ -682,7 +683,7 @@ impl Editor {
             incoming,
             outgoing: None,
             mirror: true,
-            origin: v.work.clone(),
+            origin: (*v.work).clone(),
             start_screen: e.point,
             broken: e.modifiers.alt,
         });
@@ -752,7 +753,7 @@ impl Editor {
         if v.pen.last == Some(point) {
             v.pen.pending_out = Some(d);
         }
-        v.work = net;
+        v.work = Arc::new(net);
         v.drag = Some(Drag::PenHandle {
             point,
             incoming,
@@ -801,20 +802,20 @@ impl Editor {
             let lone = l as usize + 1 == v.work.points.len()
                 && !v.work.segments.iter().any(|s| s.start == l || s.end == l);
             if lone {
-                v.work.points.pop();
+                Arc::make_mut(&mut v.work).points.pop();
             }
         }
         // Выделение не ссылается на убранные точки.
         v.sel.clamp(&v.work);
         if v.id.is_none() && v.work.segments.is_empty() {
             v.pen.dirty = false;
-            v.work = VectorNetwork::default();
+            v.work = Arc::default();
             v.new = None;
             self.scene.clear_preview();
             return;
         }
         // Сеть не изменилась (одна точка или всё отменено): ни шага, ни превращения.
-        let unchanged = shape_network(&v.base).is_some_and(|n| n == v.work);
+        let unchanged = shape_network(&v.base).is_some_and(|n| n == *v.work);
         if unchanged {
             v.pen.dirty = false;
             self.scene.clear_preview();
@@ -856,9 +857,9 @@ impl Editor {
             }
         });
         if let Some(s) = seg {
-            v.work.segments.truncate(s as usize);
+            Arc::make_mut(&mut v.work).segments.truncate(s as usize);
         }
-        v.work.points.pop();
+        Arc::make_mut(&mut v.work).points.pop();
         v.pen.last = prev;
         v.pen.pending_out = None;
         v.sel = VectorSelection {
@@ -1009,7 +1010,7 @@ impl Editor {
             Some(Drag::Points { origin, .. })
             | Some(Drag::Handle { origin, .. })
             | Some(Drag::Bend { origin, .. }) => {
-                v.work = origin;
+                v.work = Arc::new(origin);
                 v.snap_lines.clear();
                 self.scene.clear_preview();
             }
@@ -1059,7 +1060,7 @@ impl Editor {
         };
         Some(VectorEditOverlay {
             transform: v.world,
-            net: Arc::new(v.work.clone()),
+            net: v.work.clone(),
             points: v.sel.points.iter().copied().collect(),
             segments: v.sel.segments.iter().copied().collect(),
             handles: handles

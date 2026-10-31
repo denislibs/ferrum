@@ -419,3 +419,34 @@ fn stroke_outset_without_paths_matches_the_built_shape() {
         }
     }
 }
+
+#[test]
+fn simplified_path_stays_within_the_tolerance_of_the_original() {
+    use kurbo::ParamCurve;
+    let shape = network_shape(&vector(ferrum_doc::fixture::wavy_network(100_000)));
+    for tol in [0.25, 1.0] {
+        let s = simplify(&shape, tol);
+        let mut worst = 0.0f64;
+        // Исходный контур отбирается плотно (каждый 15-й сегмент, 5 точек на нём).
+        for seg in shape.stroke.segments().step_by(15) {
+            for k in 0..5 {
+                let q = seg.eval(k as f64 / 5.0);
+                let d = distance_to(&s.stroke, q, 2.0 * tol + 1.0).unwrap_or(f64::MAX);
+                worst = worst.max(d);
+            }
+        }
+        assert!(worst <= tol, "допуск {tol}: отклонение {worst}");
+    }
+}
+
+#[test]
+fn wavy_network_survives_tiny_sizes() {
+    use ferrum_doc::fixture::wavy_network;
+    assert!(wavy_network(0).points.is_empty() && wavy_network(0).segments.is_empty());
+    let one = wavy_network(1);
+    assert_eq!((one.points.len(), one.segments.len()), (1, 0), "без петли");
+    let two = wavy_network(2);
+    assert_eq!((two.points.len(), two.segments.len()), (2, 1));
+    assert!(two.regions.is_empty());
+    assert_eq!(wavy_network(3).segments.len(), 3);
+}
