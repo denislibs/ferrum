@@ -15,6 +15,12 @@ const ICONS = {
   ellipse: '<circle cx="12" cy="12" r="10"/>',
   line: '<path d="M22 2 2 22"/>',
   arrow: '<path d="M7 17 17 7"/><path d="M7 7h10v10"/>',
+  // Булевы операции (тулбар и строки слоёв): два квадрата, закрашено то, что
+  // остаётся.
+  union: '<path d="M4 4h10v6h6v10H10v-6H4z" fill="currentColor" fill-opacity=".35"/>',
+  subtract: '<path d="M4 4h10v6h-4v4H4z" fill="currentColor" fill-opacity=".35"/><path d="M14 10h6v10H10v-6" stroke-dasharray="2 2"/>',
+  intersect: '<path d="M10 14H4V4h10v6M14 14h6v6H10v-6" stroke-dasharray="2 2"/><rect x="10" y="10" width="4" height="4" fill="currentColor" fill-opacity=".35"/>',
+  exclude: '<path d="M4 4h10v6h-4v4H4z" fill="currentColor" fill-opacity=".35"/><path d="M14 10h6v10H10v-6h4z" fill="currentColor" fill-opacity=".35"/>',
   image: '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
   pen: '<path d="m18 13-.654-4.736a4 4 0 00-2.756-3.266l-9.163-2.9a2 2 0 00-2.017.493l-.82.819a2 2 0 00-.492 2.017l2.9 9.163a4 4 0 003.266 2.756L13 18"/><path d="M18.648 12.352a1.205 1.205 0 011.704 0l1.296 1.296a1.205 1.205 0 010 1.704l-6.296 6.296a1.205 1.205 0 01-1.704 0l-1.296-1.296a1.205 1.205 0 010-1.704z"/><path d="m3 3 6.586 6.586"/><circle cx="11" cy="11" r="2"/>',
   text: '<path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/>',
