@@ -48,6 +48,7 @@ pub enum NodeType {
     Image,
     Text,
     Vector,
+    Boolean,
 }
 
 impl From<NodeKind> for NodeType {
@@ -61,6 +62,7 @@ impl From<NodeKind> for NodeType {
             NodeKind::Image => NodeType::Image,
             NodeKind::Text => NodeType::Text,
             NodeKind::Vector => NodeType::Vector,
+            NodeKind::Boolean => NodeType::Boolean,
         }
     }
 }

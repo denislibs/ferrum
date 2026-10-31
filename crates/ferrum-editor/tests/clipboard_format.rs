@@ -533,3 +533,50 @@ fn vector_and_stroke_style_round_trip_and_are_checked() {
         Some(&VectorNetwork::default())
     );
 }
+
+#[test]
+fn boolean_with_children_round_trips_and_op_is_checked() {
+    use ferrum_doc::BooleanOp;
+    let mut b = Props::defaults(NodeKind::Boolean);
+    b.boolean_op = Some(BooleanOp::Intersect);
+    let p = ClipPayload {
+        nodes: vec![
+            ClipNode {
+                parent: None,
+                props: b,
+            },
+            ClipNode {
+                parent: Some(0),
+                props: Props::defaults(NodeKind::Rect),
+            },
+            ClipNode {
+                parent: Some(0),
+                props: Props::defaults(NodeKind::Ellipse),
+            },
+        ],
+        images: vec![],
+        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+    };
+    let bytes = p.encode();
+    let json = json_of(&bytes);
+    assert!(json.contains("\"booleanOp\":\"intersect\""), "{json}");
+    assert_eq!(ClipPayload::decode(&bytes).unwrap(), p);
+    // Неизвестная операция — отказ вставки.
+    let bad = json.replace("\"intersect\"", "\"divide\"");
+    assert!(matches!(
+        ClipPayload::decode(&with_json(&bad)),
+        Err(ClipboardError::Corrupted(_))
+    ));
+    // Без поля — объединение; размер группы из чужих данных не принимается.
+    let plain = ClipPayload::decode(&with_json(&doc_json(
+        &[node_json(None, "boolean")],
+        &[],
+        "[0.0,0.0,10.0,10.0]",
+    )))
+    .unwrap();
+    let props = &plain.nodes[0].props;
+    assert_eq!(props.boolean_op, Some(BooleanOp::Union));
+    assert_eq!((props.w, props.h), (0.0, 0.0));
+    // У прямоугольника поле операции пропускается.
+    assert!(p.nodes[1].props.boolean_op.is_none());
+}

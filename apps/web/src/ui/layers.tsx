@@ -27,6 +27,7 @@ const KIND_ICON: Record<NodeType, IconName> = {
   image: 'image',
   text: 'text',
   vector: 'pen',
+  boolean: 'group',
 };
 
 /** Окно строк для прокрутки `scrollTop` и высоты `height`. */

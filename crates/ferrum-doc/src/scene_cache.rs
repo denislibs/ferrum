@@ -10,6 +10,7 @@ use std::sync::Arc;
 use loro::TreeID;
 
 use crate::binary::{Reader, Writer};
+use crate::boolean::BooleanOp;
 use crate::text::*;
 use crate::types::*;
 use crate::vector::*;
@@ -47,6 +48,9 @@ fn kind_code(k: NodeKind) -> u8 {
         // Четвёртая версия (`SCENE_CACHE_VERSION = 4`): у каждой строки после
         // обводок — стиль обводки, у вектора после него — сеть (`write_vector`).
         NodeKind::Vector => 7,
+        // Пятая версия (`SCENE_CACHE_VERSION = 5`): у булевой группы после стиля
+        // обводки — код операции.
+        NodeKind::Boolean => 8,
     }
 }
 
@@ -60,6 +64,7 @@ fn kind_from(c: u8) -> Option<NodeKind> {
         NodeKind::Image,
         NodeKind::Text,
         NodeKind::Vector,
+        NodeKind::Boolean,
     ]
     .get(c as usize)
     .copied()
@@ -133,6 +138,9 @@ pub(crate) fn encode(rows: &[SceneRow]) -> Option<Vec<u8>> {
             let bytes = v.encode();
             w.u32(u32::try_from(bytes.len()).ok()?);
             w.bytes(&bytes);
+        }
+        if let Some(op) = p.boolean_op {
+            w.u8(code(&BooleanOp::ALL, op));
         }
     }
     Some(w.buf)
@@ -467,6 +475,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
             }
             _ => None,
         };
+        let boolean_op = match kind {
+            NodeKind::Boolean => Some(decode_enum(&BooleanOp::ALL, r.u8()?)?),
+            _ => None,
+        };
         let [x, y, w, h, rotation, opacity, corner_radius] = nums;
         rows.push(SceneRow {
             id,
@@ -492,6 +504,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
                 stroke_style,
                 text,
                 vector,
+                boolean_op,
             },
         });
     }

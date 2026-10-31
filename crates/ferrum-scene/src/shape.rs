@@ -96,7 +96,8 @@ pub fn geometry(p: &Props) -> Geometry {
     let h = p.h.max(0.0);
     let rect = Rect::new(0.0, 0.0, w, h);
     match p.kind {
-        NodeKind::Group => Geometry::None,
+        // Булева группа пока — как группа: результат операции — следующая задача.
+        NodeKind::Group | NodeKind::Boolean => Geometry::None,
         NodeKind::Frame | NodeKind::Rect | NodeKind::Image => Geometry::Rect {
             rect,
             radius: p.corner_radius.max(0.0).min(w / 2.0).min(h / 2.0),
