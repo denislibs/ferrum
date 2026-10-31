@@ -1214,6 +1214,8 @@ pub fn path_network(path: &BezPath, rule: FillRule) -> VectorNetwork {
                 _ => items.push((start, [0.0; 2], [0.0; 2])),
             }
         }
+        // Замкнутый подпуть из одного сегмента (в том числе петля одной кривой)
+        // сеть не принимает: сегмент с совпадающими концами недопустим.
         if items.is_empty() || (closed && items.len() < 2) {
             return;
         }
@@ -1258,13 +1260,17 @@ pub fn path_network(path: &BezPath, rule: FillRule) -> VectorNetwork {
                 }
             }
             PathEl::QuadTo(c, p) => {
-                let c = kurbo::QuadBez::new(last, c, p).raise();
-                sub.push((p, arr(c.p1 - c.p0), arr(c.p2 - c.p3)));
-                last = p;
+                if (p - last).hypot() > 1e-9 || (c - last).hypot() > 1e-9 {
+                    let c = kurbo::QuadBez::new(last, c, p).raise();
+                    sub.push((p, arr(c.p1 - c.p0), arr(c.p2 - c.p3)));
+                    last = p;
+                }
             }
             PathEl::CurveTo(a, b, p) => {
-                sub.push((p, arr(a - last), arr(b - p)));
-                last = p;
+                if [p, a, b].iter().any(|q| (*q - last).hypot() > 1e-9) {
+                    sub.push((p, arr(a - last), arr(b - p)));
+                    last = p;
+                }
             }
             PathEl::ClosePath => {
                 if let Some(s) = start.take() {

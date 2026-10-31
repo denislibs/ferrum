@@ -364,3 +364,269 @@ fn text_missed_while_the_font_registry_is_busy_is_recomputed_on_the_next_frame()
     h.hover(10.0, 10.0);
     assert!(area(&h) > 500.0, "глифы в результате: {}", area(&h));
 }
+
+const LOADING: &str = "Шрифты ещё загружаются — текст не сплющен";
+
+fn stroke(color: Color, width: f64, align: StrokeAlign) -> Stroke {
+    Stroke {
+        color,
+        width,
+        align,
+    }
+}
+
+#[test]
+fn flatten_refuses_a_boolean_whose_text_has_no_glyphs_yet() {
+    let mut h = text_h();
+    let t = add_text(&mut h, 100.0, 100.0, "Ok", 40.0);
+    let r = h.rect(None, 400.0, 100.0, 20.0, 20.0);
+    let other = h.rect(None, 0.0, 400.0, 30.0, 30.0);
+    h.ed.select(&[t, r]);
+    // Реестр занят при сборке группы: текст остался без формы.
+    let fonts = h.ed.fonts().clone();
+    let busy = fonts.borrow_mut();
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    // Реестр всё ещё занят (или шрифты не готовы): текст формы не имеет.
+    h.ed.select(&[g]);
+    h.ed.take_events();
+    let steps = h.ed.step_count();
+    h.key("KeyE", ctrl());
+    assert_eq!(h.ed.step_count(), steps, "ни шага отмены");
+    assert_eq!(errors(&mut h), vec![LOADING]);
+    assert_eq!(h.props(g).kind, NodeKind::Boolean);
+    assert_eq!(h.children(Some(g)).len(), 2, "текст на месте");
+    // Остальное выделение сплющивается, группа остаётся.
+    h.ed.select(&[g, other]);
+    h.key("KeyE", ctrl());
+    assert_eq!(h.props(g).kind, NodeKind::Boolean);
+    assert_eq!(h.sel().len(), 1);
+    assert_eq!(h.props(h.sel()[0]).kind, NodeKind::Vector);
+    drop(busy);
+    // Шрифты доступны — группа сплющивается вместе с текстом.
+    h.ed.select(&[g]);
+    h.key("KeyE", ctrl());
+    assert_eq!(h.props(h.sel()[0]).kind, NodeKind::Vector);
+    assert!(h.ed.scene().node(g).is_none());
+}
+
+#[test]
+fn flatten_of_an_empty_boolean_says_so() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 100.0, 100.0, 10.0, 10.0);
+    h.ed.select(&[a, b]);
+    h.key("KeyI", alt_shift());
+    let g = h.sel()[0];
+    h.ed.take_events();
+    let steps = h.ed.step_count();
+    h.key("KeyE", ctrl());
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(
+        errors(&mut h),
+        vec!["Булева группа пуста — нечего сплющить"]
+    );
+    assert_eq!(h.props(g).kind, NodeKind::Boolean);
+}
+
+#[test]
+fn flatten_refuses_a_boolean_with_a_locked_layer() {
+    let mut h = H::new();
+    let a = h.rect(None, 100.0, 100.0, 100.0, 100.0);
+    let b = h.rect(None, 150.0, 100.0, 100.0, 100.0);
+    h.ed.select(&[a, b]);
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    h.set(
+        a,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[g]);
+    h.ed.take_events();
+    let steps = h.ed.step_count();
+    h.key("KeyE", ctrl());
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(
+        errors(&mut h),
+        vec!["Заблокированные и скрытые слои не сплющиваются"]
+    );
+    assert_eq!(h.children(Some(g)).len(), 2);
+}
+
+#[test]
+fn flatten_of_a_rotated_flipped_boolean_keeps_pose_and_strokes() {
+    let mut h = H::new();
+    let a = h.rect(None, 100.0, 100.0, 100.0, 60.0);
+    let b = h.rect(None, 150.0, 130.0, 100.0, 60.0);
+    h.ed.select(&[a, b]);
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    h.set(
+        g,
+        PropsPatch {
+            rotation: Some(30.0),
+            flip_x: Some(true),
+            strokes: Some(vec![stroke(Color::BLACK, 3.0, StrokeAlign::Center)]),
+            ..Default::default()
+        },
+    );
+    let before = world_box(&mut h, g);
+    let strokes = h.props(g).strokes;
+    h.key("KeyE", ctrl());
+    let v = h.sel()[0];
+    assert_ne!(v, g);
+    assert_eq!(h.props(v).kind, NodeKind::Vector);
+    assert_eq!(h.props(v).strokes, strokes);
+    let after = world_box(&mut h, v);
+    assert!(near(before, after, 1e-6), "{before:?} {after:?}");
+}
+
+#[test]
+fn outline_stroke_of_underlined_text_rings_only_the_glyphs() {
+    let mut h = text_h();
+    let mut props = ferrum_doc::TextProps::default();
+    props.style.size = 40.0;
+    props.style.decoration = ferrum_doc::Decoration::Underline;
+    let t =
+        h.ed.create_text(
+            Point::new(100.0, 100.0),
+            &ferrum_doc::TextContent::plain("Ok"),
+            &props,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+    h.set(
+        t,
+        PropsPatch {
+            strokes: Some(vec![stroke(Color::BLACK, 2.0, StrokeAlign::Center)]),
+            ..Default::default()
+        },
+    );
+    let n = h.ed.scene().node(t).unwrap().clone();
+    let (glyphs, all) = {
+        let mut f = h.ed.fonts().borrow_mut();
+        (
+            ferrum_render::text_glyphs_outline(&mut f, &n.props).unwrap(),
+            ferrum_render::text_outline(&mut f, &n.props).unwrap(),
+        )
+    };
+    let ring = |p: &BezPath| {
+        kurbo::stroke(
+            p.iter(),
+            &kurbo::Stroke::new(2.0).with_join(kurbo::Join::Miter),
+            &kurbo::StrokeOpts::default(),
+            0.01,
+        )
+        .bounding_box()
+    };
+    let (want, with_bars) = (ring(&glyphs), ring(&all));
+    assert!(
+        !near(want, with_bars, 0.5),
+        "подчёркивание должно выступать за глифы"
+    );
+    h.ed.select(&[t]);
+    h.key("KeyO", ctrl_alt());
+    let v = *h.children(None).last().unwrap();
+    assert_ne!(v, t);
+    let got = world_box(&mut h, v);
+    let want = n.world.transform_rect_bbox(want);
+    assert!(near(got, want, 0.2), "{got:?} против {want:?}");
+}
+
+#[test]
+fn outline_stroke_inside_and_outside_of_a_closed_vector() {
+    for (align, want) in [
+        (StrokeAlign::Inside, Rect::new(100.0, 100.0, 200.0, 150.0)),
+        (StrokeAlign::Outside, Rect::new(90.0, 90.0, 210.0, 160.0)),
+    ] {
+        let mut h = H::new();
+        let r = h.rect(None, 100.0, 100.0, 100.0, 50.0);
+        h.ed.select(&[r]);
+        h.key("KeyE", ctrl());
+        let vec = h.sel()[0];
+        h.set(
+            vec,
+            PropsPatch {
+                strokes: Some(vec![stroke(Color::BLACK, 10.0, align)]),
+                ..Default::default()
+            },
+        );
+        h.ed.select(&[vec]);
+        h.key("KeyO", ctrl_alt());
+        let ring = *h.children(None).last().unwrap();
+        assert_ne!(ring, vec);
+        let b = world_box(&mut h, ring);
+        assert!(near(b, want, 0.05), "{align:?}: {b:?}");
+        h.assert_scene_clean();
+    }
+}
+
+#[test]
+fn outline_stroke_keeps_the_order_of_several_strokes() {
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 100.0, 50.0);
+    let (red, blue) = (Color::rgba(255, 0, 0, 255), Color::rgba(0, 0, 255, 255));
+    h.set(
+        r,
+        PropsPatch {
+            strokes: Some(vec![
+                stroke(red, 2.0, StrokeAlign::Center),
+                stroke(blue, 6.0, StrokeAlign::Center),
+            ]),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[r]);
+    h.key("KeyO", ctrl_alt());
+    let v = *h.children(None).last().unwrap();
+    let p = h.props(v);
+    let fills: Vec<_> = p
+        .vector
+        .as_deref()
+        .unwrap()
+        .regions
+        .iter()
+        .map(|r| r.fills.clone().unwrap())
+        .collect();
+    assert_eq!(fills, vec![vec![Fill::solid(red)], vec![Fill::solid(blue)]]);
+}
+
+#[test]
+fn outline_stroke_says_when_layers_are_locked() {
+    let mut h = H::new();
+    let r = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    h.set(
+        r,
+        PropsPatch {
+            strokes: Some(vec![stroke(Color::BLACK, 2.0, StrokeAlign::Center)]),
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[r]);
+    h.ed.take_events();
+    h.key("KeyO", ctrl_alt());
+    assert_eq!(
+        errors(&mut h),
+        vec!["Заблокированные и скрытые слои не обрабатываются"]
+    );
+}
+
+#[test]
+fn path_network_drops_zero_length_curves() {
+    let mut p = BezPath::new();
+    p.move_to((50.0, 0.0));
+    p.curve_to((50.0, 0.0), (50.0, 0.0), (50.0, 0.0));
+    p.quad_to((50.0, 0.0), (50.0, 0.0));
+    p.line_to((60.0, 0.0));
+    p.line_to((60.0, 10.0));
+    p.close_path();
+    let net = path_network(&p, FillRule::NonZero);
+    assert_eq!(net.validate(), Ok(()));
+    assert_eq!(net.regions[0].loops.len(), 1);
+    assert_eq!(net.segments.len(), 3);
+}

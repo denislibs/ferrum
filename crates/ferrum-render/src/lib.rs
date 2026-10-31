@@ -37,7 +37,9 @@ pub use overlay::{
     VECTOR_HANDLE_RADIUS, VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
 };
 pub use text::{Label, TextEngine, ONEST};
-pub use text_node::{text_outline, TEXT_GREEK_ALPHA, TEXT_LAYOUT_TIME_PER_FRAME, TEXT_LOD_PX};
+pub use text_node::{
+    text_glyphs_outline, text_outline, TEXT_GREEK_ALPHA, TEXT_LAYOUT_TIME_PER_FRAME, TEXT_LOD_PX,
+};
 #[cfg(feature = "gpu")]
 pub use vello_common::{multi_atlas::AtlasConfig, paint::ImageId};
 pub use vello_cpu::Pixmap;

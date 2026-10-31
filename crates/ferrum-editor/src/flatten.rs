@@ -32,22 +32,72 @@ fn flattenable(k: NodeKind) -> bool {
 
 impl Editor {
     /// Сеть узла в координатах его формы: фигура и вектор — `shape_network`,
-    /// булева группа — её результат, текст — контуры глифов (`None`, пока
-    /// шрифты грузятся).
-    pub(crate) fn node_network(&self, slot: Slot) -> Option<VectorNetwork> {
+    /// булева группа — её результат, текст — контуры глифов. `Err` — сообщение
+    /// пользователю: шрифты ещё грузятся (текст узла или внутри булевой группы
+    /// остался бы без контуров и потерялся) или булева группа пуста.
+    pub(crate) fn node_network(&self, slot: Slot) -> Result<VectorNetwork, &'static str> {
+        const LOADING: &str = "Шрифты ещё загружаются — текст не сплющен";
         let n = self.scene.at(slot);
         match n.props.kind {
             NodeKind::Boolean => {
-                let b = n.boolean.as_ref()?;
-                Some(path_network(&b.contours.to_path(), FillRule::NonZero))
+                // Результат кеша мог посчитаться без текста — ждём шрифты.
+                if self.outlines_missed.get() || self.has_unshaped_text(slot) {
+                    return Err(LOADING);
+                }
+                let b = n
+                    .boolean
+                    .as_ref()
+                    .ok_or("Булева группа пуста — нечего сплющить")?;
+                let net = path_network(&b.contours.to_path(), FillRule::NonZero);
+                if net.regions.is_empty() {
+                    return Err("Булева группа пуста — нечего сплющить");
+                }
+                Ok(net)
             }
             NodeKind::Text => {
-                let mut fonts = self.fonts.try_borrow_mut().ok()?;
-                let path = ferrum_render::text_outline(&mut fonts, &n.props)?;
-                Some(path_network(&path, FillRule::NonZero))
+                let mut fonts = self.fonts.try_borrow_mut().map_err(|_| LOADING)?;
+                let path = ferrum_render::text_outline(&mut fonts, &n.props).ok_or(LOADING)?;
+                Ok(path_network(&path, FillRule::NonZero))
             }
-            _ => shape_network(&n.props),
+            _ => shape_network(&n.props).ok_or("Нечего сплющить"),
         }
+    }
+
+    /// Есть ли среди видимых потомков `slot` текст, у которого пока нет контуров
+    /// глифов (шрифты грузятся или реестр занят).
+    fn has_unshaped_text(&self, slot: Slot) -> bool {
+        let mut stack: Vec<Slot> = self.scene.at(slot).children.clone();
+        while let Some(s) = stack.pop() {
+            let n = self.scene.at(s);
+            if !n.props.visible {
+                continue;
+            }
+            if n.props.kind == NodeKind::Text {
+                match self.fonts.try_borrow_mut() {
+                    Ok(mut f) => {
+                        if ferrum_render::text_outline(&mut f, &n.props).is_none() {
+                            return true;
+                        }
+                    }
+                    Err(_) => return true,
+                }
+            }
+            stack.extend(n.children.iter().copied());
+        }
+        false
+    }
+
+    /// Есть ли среди потомков `slot` заблокированный слой.
+    fn has_locked_descendant(&self, slot: Slot) -> bool {
+        let mut stack: Vec<Slot> = self.scene.at(slot).children.clone();
+        while let Some(s) = stack.pop() {
+            let n = self.scene.at(s);
+            if n.props.locked {
+                return true;
+            }
+            stack.extend(n.children.iter().copied());
+        }
+        false
     }
 
     /// Сплющивает выделение в один вектор.
@@ -59,6 +109,9 @@ impl Editor {
         let mut removed: Vec<NodeId> = Vec::new();
         // Пропущено из-за блокировки или скрытия — пользователь узнает об этом.
         let mut skipped = false;
+        // Булевы группы, которые сейчас не сплющить (шрифты, пустой результат):
+        // остаются на месте, остальное выделение сплющивается.
+        let mut refused: Vec<&'static str> = Vec::new();
         for id in &ids {
             let Some(slot) = self.scene.slot(*id) else {
                 continue;
@@ -69,6 +122,17 @@ impl Editor {
                 continue;
             }
             let kind = self.scene.at(slot).props.kind;
+            // Булева группа с заблокированным слоем — как обычная группа: не трогается.
+            if kind == NodeKind::Boolean && self.has_locked_descendant(slot) {
+                skipped = true;
+                continue;
+            }
+            if kind == NodeKind::Boolean {
+                if let Err(msg) = self.node_network(slot) {
+                    refused.push(msg);
+                    continue;
+                }
+            }
             if flattenable(kind) {
                 leaves.push(*id);
                 removed.push(*id);
@@ -93,6 +157,17 @@ impl Editor {
                     match n.props.kind {
                         NodeKind::Group => stack.extend(n.children.iter().rev()),
                         // Булева группа внутри группы — её результатом.
+                        NodeKind::Boolean if self.has_locked_descendant(s) => {
+                            (foreign, held) = (true, true)
+                        }
+                        // Булеву группу внутри группы не сплющить — не терять её.
+                        NodeKind::Boolean => match self.node_network(s) {
+                            Ok(_) => inner.push((self.scene.order_key(s), n.id)),
+                            Err(msg) => {
+                                refused.push(msg);
+                                foreign = true;
+                            }
+                        },
                         k if flattenable(k) => inner.push((self.scene.order_key(s), n.id)),
                         _ => foreign = true,
                     }
@@ -108,13 +183,19 @@ impl Editor {
                 removed.push(*id);
             }
         }
+        refused.sort_unstable();
+        refused.dedup();
+        let refused_any = !refused.is_empty();
+        for msg in refused {
+            self.out.events.push(EditorEvent::Error(msg.into()));
+        }
         if skipped {
             self.out.events.push(EditorEvent::Error(
                 "Заблокированные и скрытые слои не сплющиваются".into(),
             ));
         }
         if leaves.is_empty() {
-            if !skipped {
+            if !skipped && !refused_any {
                 self.out.events.push(EditorEvent::Error(
                     "Нечего сплющить: сплющиваются векторы, фигуры, текст, булевы группы и их группы"
                         .into(),
@@ -132,11 +213,12 @@ impl Editor {
                 if props.kind == NodeKind::Vector {
                     return;
                 }
-                let Some(net) = self.node_network(top_slot) else {
-                    self.out.events.push(EditorEvent::Error(
-                        "Шрифты ещё загружаются — текст не сплющен".into(),
-                    ));
-                    return;
+                let net = match self.node_network(top_slot) {
+                    Ok(net) => net,
+                    Err(msg) => {
+                        self.out.events.push(EditorEvent::Error(msg.into()));
+                        return;
+                    }
                 };
                 let id = *one;
                 // Булева группа и текст — новым вектором на своём месте (у них
@@ -174,11 +256,12 @@ impl Editor {
             let slot = self.scene.slot(*id).expect("в сцене");
             let n = self.scene.at(slot);
             // Текст без шрифтов не терять: ничего не сплющивается.
-            let Some(mut net) = self.node_network(slot) else {
-                self.out.events.push(EditorEvent::Error(
-                    "Шрифты ещё загружаются — текст не сплющен".into(),
-                ));
-                return;
+            let mut net = match self.node_network(slot) {
+                Ok(net) => net,
+                Err(msg) => {
+                    self.out.events.push(EditorEvent::Error(msg.into()));
+                    return;
+                }
             };
             // Заливки узла, отличные от заливок результата, остаются у его областей.
             let own = n.props.fills != top_leaf.fills

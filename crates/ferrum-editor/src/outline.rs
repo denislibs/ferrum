@@ -9,7 +9,9 @@
 //! сохраняет кривые; внутри и снаружи — обрезка контуром формы булевой операцией
 //! (ломаные с точностью `BOOLEAN_TOLERANCE`).
 
-use ferrum_doc::{BooleanOp, Fill, FillRule, NodeId, NodeKind, Props, Stroke, StrokeAlign};
+use ferrum_doc::{
+    BooleanOp, Fill, FillKind, FillRule, NodeId, NodeKind, Props, Stroke, StrokeAlign,
+};
 use ferrum_scene::boolean::{combine, flatten_path, normalize, BOOLEAN_TOLERANCE};
 use ferrum_scene::vector::{self as vpath, StrokeClip};
 use ferrum_scene::Slot;
@@ -43,11 +45,11 @@ impl Editor {
         let n = self.scene.at(slot);
         let p = &n.props;
         if p.kind == NodeKind::Text {
-            // Глифы: по центру — как есть, внутри и снаружи — двойной толщиной с
+            // Глифы (без подчёркивания и зачёркивания — рендер их не обводит): по центру — как есть, внутри и снаружи — двойной толщиной с
             // обрезкой по глифам (как рисует рендер).
             let glyphs = {
                 let mut fonts = self.fonts.try_borrow_mut().ok()?;
-                ferrum_render::text_outline(&mut fonts, p)?
+                ferrum_render::text_glyphs_outline(&mut fonts, p)?
             };
             let w = match s.align {
                 StrokeAlign::Center => s.width,
@@ -88,11 +90,14 @@ impl Editor {
         let ids = self.ordered_selection();
         let mut jobs: Vec<(NodeId, Props, bool)> = Vec::new();
         let mut loading = false;
+        // Пропущено из-за блокировки или скрытия.
+        let mut skipped = false;
         for id in ids {
             let Some(slot) = self.scene.slot(id) else {
                 continue;
             };
             if locked(&self.scene, slot) || !self.scene.is_visible(slot) {
+                skipped = true;
                 continue;
             }
             let p = self.scene.at(slot).props.clone();
@@ -125,17 +130,32 @@ impl Editor {
             base.stroke_style = Default::default();
             let patch = reframe(&base, merge_networks(&parts));
             patch.apply_to(&mut base);
-            let keep = p.fills.iter().any(|f| f.visible && f.opacity > 0.0);
+            let keep = p.fills.iter().any(|f| {
+                f.visible && f.opacity > 0.0 && (f.kind != FillKind::Solid || f.color.a > 0)
+            });
             jobs.push((id, base, keep));
         }
         if jobs.is_empty() {
             let msg = if loading {
                 "Шрифты ещё загружаются — контур обводки текста не построен"
+            } else if skipped {
+                "Заблокированные и скрытые слои не обрабатываются"
             } else {
                 "У выделенных слоёв нет видимых обводок"
             };
             self.out.events.push(EditorEvent::Error(msg.into()));
             return;
+        }
+        // Часть выделения обработана, часть — нет: сказать и об этом.
+        if loading {
+            self.out.events.push(EditorEvent::Error(
+                "Шрифты ещё загружаются — контур обводки текста не построен".into(),
+            ));
+        }
+        if skipped {
+            self.out.events.push(EditorEvent::Error(
+                "Заблокированные и скрытые слои не обрабатываются".into(),
+            ));
         }
         self.ctx().commit(|tx, _| {
             let mut created = Vec::new();
