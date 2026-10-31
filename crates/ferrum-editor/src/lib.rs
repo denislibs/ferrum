@@ -24,6 +24,7 @@ pub mod text_edit;
 mod text_input;
 mod text_style;
 pub mod tools;
+pub mod vector_ops;
 
 pub use actions::{FIT_PADDING_PX, PRESET_GAP};
 pub use commands::{Command, CommandId, COMMANDS};

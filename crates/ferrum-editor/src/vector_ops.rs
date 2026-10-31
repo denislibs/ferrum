@@ -1,0 +1,750 @@
+//! Правки векторной сети без документа (спека подсистемы 3, раздел 9): фигура →
+//! сеть, сеть → рамка узла, добавление точки на сегменте, удаление с сохранением
+//! формы и с разрывом, ручки с зеркальностью, изгиб сегмента, грани для
+//! «Заливки области», сплющивание нескольких узлов. Все функции чистые: на входе
+//! сеть и параметры, на выходе новая сеть — режим правки и перо записывают её
+//! одной транзакцией.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use ferrum_doc::{
+    Color, Fill, FillRule, HandleMode, NodeKind, Props, PropsPatch, VectorNetwork, VectorPoint,
+    VectorRegion, VectorSegment,
+};
+use ferrum_scene::vector::{fit, network_bounds, segment_curve};
+use kurbo::{Affine, BezPath, CubicBez, ParamCurve, PathSeg, Point, Shape, Vec2};
+
+/// Доля радиуса для ручек дуги в четверть окружности.
+const KAPPA: f64 = 0.552_284_749_830_793_4;
+
+fn v2(t: [f64; 2]) -> Vec2 {
+    Vec2::new(t[0], t[1])
+}
+
+fn arr(v: Vec2) -> [f64; 2] {
+    [v.x, v.y]
+}
+
+fn pt(net: &VectorNetwork, i: u32) -> Point {
+    let p = &net.points[i as usize];
+    Point::new(p.x, p.y)
+}
+
+/// Сеть узла в координатах его формы (`0..w × 0..h`, до отражения): у вектора —
+/// растянутая под рамку, у прямоугольника, эллипса и линии — их контур (как в
+/// Figma при входе в правку фигуры). `None` — у узла нет контура (группа, текст,
+/// изображение, фрейм).
+pub fn shape_network(p: &Props) -> Option<VectorNetwork> {
+    let (w, h) = (p.w.max(0.0), p.h.max(0.0));
+    let closed = |points: Vec<VectorPoint>, segments: Vec<VectorSegment>| {
+        let loop_ = (0..segments.len() as u32).collect();
+        VectorNetwork {
+            points,
+            segments,
+            regions: vec![VectorRegion {
+                rule: FillRule::NonZero,
+                loops: vec![loop_],
+                fills: None,
+            }],
+        }
+    };
+    match p.kind {
+        NodeKind::Vector => {
+            let net = p.vector.as_deref()?;
+            Some(transform_network(net, fit(p)))
+        }
+        NodeKind::Line => Some(VectorNetwork {
+            points: vec![VectorPoint::new(0.0, 0.0), VectorPoint::new(w, 0.0)],
+            segments: vec![VectorSegment::line(0, 1)],
+            regions: vec![],
+        }),
+        NodeKind::Rect => {
+            let r = p.corner_radius.max(0.0).min(w / 2.0).min(h / 2.0);
+            if r <= 0.0 {
+                let pts = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
+                return Some(closed(
+                    pts.iter().map(|&(x, y)| VectorPoint::new(x, y)).collect(),
+                    (0..4)
+                        .map(|i| VectorSegment::line(i, (i + 1) % 4))
+                        .collect(),
+                ));
+            }
+            // Скругление — дугами: по две точки на угол, между ними кривая.
+            let k = r * KAPPA;
+            let pts = [
+                (r, 0.0),
+                (w - r, 0.0),
+                (w, r),
+                (w, h - r),
+                (w - r, h),
+                (r, h),
+                (0.0, h - r),
+                (0.0, r),
+            ];
+            let arcs = [
+                ([k, 0.0], [0.0, -k]),
+                ([0.0, k], [k, 0.0]),
+                ([-k, 0.0], [0.0, k]),
+                ([0.0, -k], [-k, 0.0]),
+            ];
+            let mut segments = Vec::new();
+            for c in 0..4u32 {
+                segments.push(VectorSegment::line(2 * c, 2 * c + 1));
+                let (ts, te) = arcs[c as usize];
+                segments.push(VectorSegment {
+                    start: 2 * c + 1,
+                    end: (2 * c + 2) % 8,
+                    tangent_start: ts,
+                    tangent_end: te,
+                });
+            }
+            Some(closed(
+                pts.iter().map(|&(x, y)| VectorPoint::new(x, y)).collect(),
+                segments,
+            ))
+        }
+        NodeKind::Ellipse => {
+            let (rx, ry) = (w / 2.0, h / 2.0);
+            let (kx, ky) = (rx * KAPPA, ry * KAPPA);
+            let point = |x, y| VectorPoint {
+                handle_mode: HandleMode::MirrorAll,
+                ..VectorPoint::new(x, y)
+            };
+            // Сверху по часовой: верх, право, низ, лево.
+            let points = vec![point(rx, 0.0), point(w, ry), point(rx, h), point(0.0, ry)];
+            let t = [
+                ([kx, 0.0], [0.0, -ky]),
+                ([0.0, ky], [kx, 0.0]),
+                ([-kx, 0.0], [0.0, ky]),
+                ([0.0, -ky], [-kx, 0.0]),
+            ];
+            let segments = (0..4u32)
+                .map(|i| VectorSegment {
+                    start: i,
+                    end: (i + 1) % 4,
+                    tangent_start: t[i as usize].0,
+                    tangent_end: t[i as usize].1,
+                })
+                .collect();
+            Some(closed(points, segments))
+        }
+        _ => None,
+    }
+}
+
+/// Сеть под аффинным преобразованием: точки — целиком, ручки — линейной частью.
+pub fn transform_network(net: &VectorNetwork, a: Affine) -> VectorNetwork {
+    let c = a.as_coeffs();
+    let lin = |t: [f64; 2]| [c[0] * t[0] + c[2] * t[1], c[1] * t[0] + c[3] * t[1]];
+    VectorNetwork {
+        points: net
+            .points
+            .iter()
+            .map(|p| {
+                let q = a * Point::new(p.x, p.y);
+                VectorPoint {
+                    x: q.x,
+                    y: q.y,
+                    ..*p
+                }
+            })
+            .collect(),
+        segments: net
+            .segments
+            .iter()
+            .map(|s| VectorSegment {
+                tangent_start: lin(s.tangent_start),
+                tangent_end: lin(s.tangent_end),
+                ..*s
+            })
+            .collect(),
+        regions: net.regions.clone(),
+    }
+}
+
+/// Новая сеть узла `p` в координатах его формы → правка узла: сеть сдвигается к
+/// началу своих границ, рамка узла — по ним, положение пересчитывается с учётом
+/// поворота и отражения так, что на экране ничего не сдвигается.
+pub fn reframe(p: &Props, net: VectorNetwork) -> PropsPatch {
+    let b = network_bounds(&net).unwrap_or(kurbo::Rect::ZERO);
+    let m = b.origin();
+    let (nw, nh) = (b.width(), b.height());
+    let d = Vec2::new(
+        if p.flip_x { p.w - m.x - nw } else { m.x },
+        if p.flip_y { p.h - m.y - nh } else { m.y },
+    );
+    let r = Affine::rotate(-p.rotation.to_radians()) * d.to_point();
+    let shifted = transform_network(&net, Affine::translate(-m.to_vec2()));
+    PropsPatch {
+        x: Some(p.x + r.x),
+        y: Some(p.y + r.y),
+        w: Some(nw),
+        h: Some(nh),
+        vector: Some(Arc::new(shifted)),
+        ..Default::default()
+    }
+}
+
+/// Убирает точки `drop_points` и сегменты `drop_segs`, перенумеровывая остальное.
+/// Петли, в которых был удалённый сегмент, разорваны — уходят (область без
+/// петель — тоже).
+pub fn compact(
+    net: &VectorNetwork,
+    drop_points: &HashSet<u32>,
+    drop_segs: &HashSet<u32>,
+) -> VectorNetwork {
+    let mut point_map = vec![u32::MAX; net.points.len()];
+    let mut points = Vec::new();
+    for (i, p) in net.points.iter().enumerate() {
+        if !drop_points.contains(&(i as u32)) {
+            point_map[i] = points.len() as u32;
+            points.push(*p);
+        }
+    }
+    let mut seg_map = vec![u32::MAX; net.segments.len()];
+    let mut segments = Vec::new();
+    for (i, s) in net.segments.iter().enumerate() {
+        let (a, b) = (point_map[s.start as usize], point_map[s.end as usize]);
+        if drop_segs.contains(&(i as u32)) || a == u32::MAX || b == u32::MAX {
+            continue;
+        }
+        seg_map[i] = segments.len() as u32;
+        segments.push(VectorSegment {
+            start: a,
+            end: b,
+            ..*s
+        });
+    }
+    let regions = net
+        .regions
+        .iter()
+        .filter_map(|r| {
+            let loops: Vec<Vec<u32>> = r
+                .loops
+                .iter()
+                .filter(|l| l.iter().all(|&s| seg_map[s as usize] != u32::MAX))
+                .map(|l| l.iter().map(|&s| seg_map[s as usize]).collect())
+                .collect();
+            (!loops.is_empty()).then(|| VectorRegion { loops, ..r.clone() })
+        })
+        .collect();
+    VectorNetwork {
+        points,
+        segments,
+        regions,
+    }
+}
+
+/// Точка на сегменте `seg` при параметре `t`: сегмент делится в этой точке
+/// (кривая — по де Кастельжо, форма та же), петли областей получают оба
+/// куска в порядке обхода. Возвращает сеть и номер новой точки.
+pub fn add_point(net: &VectorNetwork, seg: usize, t: f64) -> (VectorNetwork, u32) {
+    let mut out = net.clone();
+    let s = net.segments[seg];
+    let t = t.clamp(0.0, 1.0);
+    let curve = segment_curve(net, &s);
+    let at = curve.eval(t);
+    let new = out.points.len() as u32;
+    let (first, second, mode) = match curve {
+        PathSeg::Cubic(c) => {
+            let (a, b) = (c.subsegment(0.0..t), c.subsegment(t..1.0));
+            (
+                VectorSegment {
+                    start: s.start,
+                    end: new,
+                    tangent_start: arr(a.p1 - a.p0),
+                    tangent_end: arr(a.p2 - a.p3),
+                },
+                VectorSegment {
+                    start: new,
+                    end: s.end,
+                    tangent_start: arr(b.p1 - b.p0),
+                    tangent_end: arr(b.p2 - b.p3),
+                },
+                HandleMode::MirrorAngle,
+            )
+        }
+        _ => (
+            VectorSegment::line(s.start, new),
+            VectorSegment::line(new, s.end),
+            HandleMode::None,
+        ),
+    };
+    out.points.push(VectorPoint {
+        handle_mode: mode,
+        ..VectorPoint::new(at.x, at.y)
+    });
+    out.segments[seg] = first;
+    let second_i = out.segments.len() as u32;
+    out.segments.push(second);
+    for r in &mut out.regions {
+        for l in &mut r.loops {
+            let Some(k) = l.iter().position(|&x| x as usize == seg) else {
+                continue;
+            };
+            let Some(order) = net.loop_points(l) else {
+                continue;
+            };
+            // Петля проходит сегмент от его начала — второй кусок после первого.
+            if order[k] == s.start {
+                l.insert(k + 1, second_i);
+            } else {
+                l.insert(k, second_i);
+            }
+        }
+    }
+    (out, new)
+}
+
+/// Сегменты точки.
+fn incident(net: &VectorNetwork, p: u32) -> Vec<usize> {
+    net.segments
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.start == p || s.end == p)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Сегмент `seg` как кривая от точки `from` (развёрнутая, если сегмент идёт к ней).
+fn curve_from(net: &VectorNetwork, seg: usize, from: u32) -> CubicBez {
+    let c = match segment_curve(net, &net.segments[seg]) {
+        PathSeg::Cubic(c) => c,
+        PathSeg::Line(l) => CubicBez::new(l.p0, l.p0, l.p1, l.p1),
+        PathSeg::Quad(q) => q.raise(),
+    };
+    if net.segments[seg].start == from {
+        c
+    } else {
+        CubicBez::new(c.p3, c.p2, c.p1, c.p0)
+    }
+}
+
+/// Одна кубическая кривая вместо двух `a` (от x к p) и `b` (от p к y): концы и
+/// направления касательных в x и y те же, длины ручек — наименьшими квадратами
+/// по точкам обеих кривых (параметр — по длине хорды, как у Шнайдера).
+fn merge_curves(a: CubicBez, b: CubicBez) -> CubicBez {
+    let (x, y) = (a.p0, b.p3);
+    let dir = |v: Vec2, fallback: Vec2| {
+        let v = if v.hypot2() > 1e-18 { v } else { fallback };
+        let n = v.hypot();
+        if n > 0.0 {
+            v / n
+        } else {
+            Vec2::ZERO
+        }
+    };
+    let t1 = dir(a.p1 - a.p0, a.p3 - a.p0);
+    let t2 = dir(b.p2 - b.p3, b.p0 - b.p3);
+    // Точки обеих кривых и их параметры по накопленной длине хорды.
+    let mut samples = Vec::new();
+    for (c, k) in [(a, 0), (b, 1)] {
+        for i in 0..=16 {
+            if k == 1 && i == 0 {
+                continue;
+            }
+            samples.push(c.eval(i as f64 / 16.0));
+        }
+    }
+    let mut len = vec![0.0];
+    for w in samples.windows(2) {
+        len.push(len.last().unwrap() + (w[1] - w[0]).hypot());
+    }
+    let total = *len.last().unwrap();
+    if total <= 0.0 {
+        return CubicBez::new(x, x, y, y);
+    }
+    let (mut c11, mut c12, mut c22, mut x1, mut x2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (q, l) in samples.iter().zip(&len) {
+        let u = l / total;
+        let (b0, b1, b2, b3) = (
+            (1.0 - u).powi(3),
+            3.0 * u * (1.0 - u).powi(2),
+            3.0 * u * u * (1.0 - u),
+            u.powi(3),
+        );
+        let a1 = t1 * b1;
+        let a2 = t2 * b2;
+        let rest = q.to_vec2() - (x.to_vec2() * (b0 + b1) + y.to_vec2() * (b2 + b3));
+        c11 += a1.dot(a1);
+        c12 += a1.dot(a2);
+        c22 += a2.dot(a2);
+        x1 += a1.dot(rest);
+        x2 += a2.dot(rest);
+    }
+    let det = c11 * c22 - c12 * c12;
+    let chord = (y - x).hypot();
+    let (mut l1, mut l2) = if det.abs() > 1e-12 {
+        ((x1 * c22 - x2 * c12) / det, (c11 * x2 - c12 * x1) / det)
+    } else {
+        (chord / 3.0, chord / 3.0)
+    };
+    // Отрицательная длина — петля: тогда треть хорды, как у Шнайдера.
+    if l1 < 1e-9 || l2 < 1e-9 {
+        l1 = chord / 3.0;
+        l2 = chord / 3.0;
+    }
+    CubicBez::new(x, x + t1 * l1, y + t2 * l2, y)
+}
+
+/// Удаление точек с сохранением формы (Delete): у точки с двумя сегментами они
+/// сливаются в один, приближающий оба (два отрезка — отрезок); конец пути
+/// уходит со своим сегментом; у остальных точек уходят и их сегменты.
+pub fn delete_points_keep_shape(net: &VectorNetwork, points: &[u32]) -> VectorNetwork {
+    let mut cur = net.clone();
+    // По одной, от больших номеров к меньшим: удаление точки сдвигает номера
+    // только после неё, поэтому оставшиеся в очереди номера верны.
+    let mut queue: Vec<u32> = points.to_vec();
+    queue.sort_unstable();
+    queue.dedup();
+    while let Some(p) = queue.pop() {
+        if p as usize >= cur.points.len() {
+            continue;
+        }
+        let segs = incident(&cur, p);
+        if let [a, b] = segs[..] {
+            let ca = curve_from(&cur, a, p);
+            let cb = curve_from(&cur, b, p);
+            let other = |s: usize| {
+                let s = &cur.segments[s];
+                if s.start == p {
+                    s.end
+                } else {
+                    s.start
+                }
+            };
+            let (xi, yi) = (other(a), other(b));
+            if xi != yi {
+                // Обе прямые — прямая; иначе — приближение двух кривых одной.
+                let both_straight = cur.segments[a].is_straight() && cur.segments[b].is_straight();
+                let merged = if both_straight {
+                    VectorSegment::line(xi, yi)
+                } else {
+                    // Кривая от x через p к y.
+                    let a_rev = CubicBez::new(ca.p3, ca.p2, ca.p1, ca.p0);
+                    let m = merge_curves(a_rev, cb);
+                    VectorSegment {
+                        start: xi,
+                        end: yi,
+                        tangent_start: arr(m.p1 - m.p0),
+                        tangent_end: arr(m.p2 - m.p3),
+                    }
+                };
+                cur.segments[a] = merged;
+                // Петли: сегмент `b` уходит, `a` его заменяет.
+                for r in &mut cur.regions {
+                    for l in &mut r.loops {
+                        l.retain(|&s| s as usize != b);
+                    }
+                }
+                let drop_p = HashSet::from([p]);
+                let drop_s = HashSet::from([b as u32]);
+                cur = compact(&cur, &drop_p, &drop_s);
+                continue;
+            }
+        }
+        // Конец пути, ветвление или одиночная точка: точка уходит с сегментами.
+        let drop_s: HashSet<u32> = segs.iter().map(|&s| s as u32).collect();
+        cur = compact(&cur, &HashSet::from([p]), &drop_s);
+    }
+    cur
+}
+
+/// Удаление с разрывом (Shift+Delete): точки уходят вместе со своими сегментами.
+pub fn delete_points_break(net: &VectorNetwork, points: &[u32]) -> VectorNetwork {
+    let drop_p: HashSet<u32> = points.iter().copied().collect();
+    let drop_s: HashSet<u32> = net
+        .segments
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| drop_p.contains(&s.start) || drop_p.contains(&s.end))
+        .map(|(i, _)| i as u32)
+        .collect();
+    compact(net, &drop_p, &drop_s)
+}
+
+/// Удаление сегментов: точки остаются, кроме тех, у которых не осталось ни
+/// одного сегмента (как в Figma — висящих точек не бывает).
+pub fn delete_segments(net: &VectorNetwork, segs: &[u32]) -> VectorNetwork {
+    let drop_s: HashSet<u32> = segs.iter().copied().collect();
+    let mut degree = vec![0u32; net.points.len()];
+    let mut touched = HashSet::new();
+    for (i, s) in net.segments.iter().enumerate() {
+        if drop_s.contains(&(i as u32)) {
+            touched.insert(s.start);
+            touched.insert(s.end);
+        } else {
+            degree[s.start as usize] += 1;
+            degree[s.end as usize] += 1;
+        }
+    }
+    let drop_p: HashSet<u32> = touched
+        .into_iter()
+        .filter(|&p| degree[p as usize] == 0)
+        .collect();
+    compact(net, &drop_p, &drop_s)
+}
+
+/// Сдвиг точек (ручки — смещения от точек — едут вместе с ними).
+pub fn move_points(net: &VectorNetwork, points: &[u32], d: Vec2) -> VectorNetwork {
+    let mut out = net.clone();
+    for &i in points {
+        let p = &mut out.points[i as usize];
+        p.x += d.x;
+        p.y += d.y;
+    }
+    out
+}
+
+/// Какой конец сегмента: ручка у начала или у конца.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HandleEnd {
+    Start,
+    End,
+}
+
+/// Ручка сегмента `seg` у его конца `end` становится `tangent` (смещение от
+/// точки). Зеркальность точки (`MirrorAngle`, `MirrorAll`) поворачивает ручку
+/// второго сегмента точки в противоположную сторону (у `MirrorAll` — и той же
+/// длины); `break_mirror` (Alt) делает точку независимой (`Free`).
+pub fn set_handle(
+    net: &VectorNetwork,
+    seg: usize,
+    end: HandleEnd,
+    tangent: Vec2,
+    break_mirror: bool,
+) -> VectorNetwork {
+    let mut out = net.clone();
+    let s = &mut out.segments[seg];
+    let p = match end {
+        HandleEnd::Start => {
+            s.tangent_start = arr(tangent);
+            s.start
+        }
+        HandleEnd::End => {
+            s.tangent_end = arr(tangent);
+            s.end
+        }
+    };
+    let mode = out.points[p as usize].handle_mode;
+    if break_mirror {
+        out.points[p as usize].handle_mode = HandleMode::Free;
+        return out;
+    }
+    if mode == HandleMode::None {
+        // Точка без ручек получила ручку: дальше — зеркально, как у пера Figma.
+        out.points[p as usize].handle_mode = HandleMode::MirrorAll;
+    }
+    let mode = out.points[p as usize].handle_mode;
+    if !matches!(mode, HandleMode::MirrorAngle | HandleMode::MirrorAll) {
+        return out;
+    }
+    let segs = incident(&out, p);
+    let Some(&other) = segs.iter().find(|&&i| i != seg) else {
+        return out;
+    };
+    if segs.len() != 2 {
+        return out;
+    }
+    let o = &mut out.segments[other];
+    let slot = if o.start == p {
+        &mut o.tangent_start
+    } else {
+        &mut o.tangent_end
+    };
+    let len = tangent.hypot();
+    let own = v2(*slot).hypot();
+    if len > 0.0 {
+        let l = if mode == HandleMode::MirrorAll || own == 0.0 {
+            len
+        } else {
+            own
+        };
+        *slot = arr(-tangent / len * l);
+    }
+    out
+}
+
+/// Изгиб (Ctrl/Cmd + протяжка сегмента): точка сегмента при параметре `t`
+/// уходит на `d`, обе ручки сдвигаются на `d / (3t(1 − t))` — так точка кривой
+/// при этом параметре попадает ровно под курсор. Концы не двигаются.
+pub fn bend(net: &VectorNetwork, seg: usize, t: f64, d: Vec2) -> VectorNetwork {
+    let mut out = net.clone();
+    let t = t.clamp(0.1, 0.9);
+    let k = d / (3.0 * t * (1.0 - t));
+    let s = &mut out.segments[seg];
+    if s.is_straight() {
+        // Отрезок — кубической кривой с ручками в трети: параметр тот же, что у
+        // отрезка (`t` пришёл из попадания по отрезку).
+        let third = (pt(net, s.end) - pt(net, s.start)) / 3.0;
+        s.tangent_start = arr(third);
+        s.tangent_end = arr(-third);
+    }
+    s.tangent_start = arr(v2(s.tangent_start) + k);
+    s.tangent_end = arr(v2(s.tangent_end) + k);
+    out
+}
+
+/// Грани сети как плоского графа (сегменты без пересечений): петли сегментов,
+/// ограничивающие внутренние области; внешняя грань каждой связной части не
+/// входит. Обход: из полуребра u→v к следующему по углу касательной в v.
+pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
+    let n = net.segments.len();
+    // Полуребро 2i — сегмент i от начала, 2i+1 — от конца.
+    let from = |h: usize| {
+        let s = &net.segments[h / 2];
+        if h.is_multiple_of(2) {
+            s.start
+        } else {
+            s.end
+        }
+    };
+    let angle = |h: usize| {
+        let s = &net.segments[h / 2];
+        let c = segment_curve(net, s);
+        let (p, q) = match c {
+            PathSeg::Cubic(c) if h.is_multiple_of(2) => {
+                (c.p0, if c.p1 != c.p0 { c.p1 } else { c.p2 })
+            }
+            PathSeg::Cubic(c) => (c.p3, if c.p2 != c.p3 { c.p2 } else { c.p1 }),
+            PathSeg::Line(l) if h.is_multiple_of(2) => (l.p0, l.p1),
+            PathSeg::Line(l) => (l.p1, l.p0),
+            PathSeg::Quad(q) => (q.p0, q.p1),
+        };
+        (q - p).atan2()
+    };
+    let mut out_of: HashMap<u32, Vec<usize>> = HashMap::new();
+    for h in 0..2 * n {
+        out_of.entry(from(h)).or_default().push(h);
+    }
+    for list in out_of.values_mut() {
+        list.sort_by(|&a, &b| angle(a).total_cmp(&angle(b)));
+    }
+    let mut seen = vec![false; 2 * n];
+    let mut result = Vec::new();
+    for start in 0..2 * n {
+        if seen[start] {
+            continue;
+        }
+        let mut face = Vec::new();
+        let mut h = start;
+        loop {
+            seen[h] = true;
+            face.push(h);
+            let twin = h ^ 1;
+            let list = &out_of[&from(twin)];
+            let k = list.iter().position(|&x| x == twin).unwrap_or(0);
+            h = list[(k + 1) % list.len()];
+            if h == start || seen[h] || face.len() > 2 * n {
+                break;
+            }
+        }
+        if h != start {
+            continue;
+        }
+        let path = face_path(net, &face);
+        // Внутренние грани обходятся против часовой на экране (площадь kurbo < 0).
+        if path.area() < -1e-9 {
+            result.push(face.iter().map(|h| (h / 2) as u32).collect());
+        }
+    }
+    result
+}
+
+/// Контур грани по полурёбрам.
+fn face_path(net: &VectorNetwork, face: &[usize]) -> BezPath {
+    let mut path = BezPath::new();
+    for (k, &h) in face.iter().enumerate() {
+        let c = curve_from(
+            net,
+            h / 2,
+            if h.is_multiple_of(2) {
+                net.segments[h / 2].start
+            } else {
+                net.segments[h / 2].end
+            },
+        );
+        if k == 0 {
+            path.move_to(c.p0);
+        }
+        path.curve_to(c.p1, c.p2, c.p3);
+    }
+    path.close_path();
+    path
+}
+
+/// Контур петли сегментов (в порядке обхода) — для попадания в грань.
+pub fn loop_path(net: &VectorNetwork, l: &[u32]) -> Option<BezPath> {
+    let order = net.loop_points(l)?;
+    let mut path = BezPath::new();
+    path.move_to(pt(net, order[0]));
+    for (k, &s) in l.iter().enumerate() {
+        let c = curve_from(net, s as usize, order[k]);
+        path.curve_to(c.p1, c.p2, c.p3);
+    }
+    path.close_path();
+    Some(path)
+}
+
+/// «Заливка области» (B) в точке `at` (координаты сети): самая маленькая грань
+/// под точкой. Залита петлёй какой-то области — заливка снимается (петля
+/// уходит), иначе — новая область с заливками узла (у узла без заливок — серая,
+/// как у новой фигуры). `None` — под точкой нет замкнутой грани.
+pub fn toggle_fill(net: &VectorNetwork, at: Point, node_has_fills: bool) -> Option<VectorNetwork> {
+    let face = faces(net)
+        .into_iter()
+        .filter_map(|f| {
+            let path = loop_path(net, &f)?;
+            (path.winding(at) != 0).then(|| (path.area().abs(), f))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))?
+        .1;
+    let key: HashSet<u32> = face.iter().copied().collect();
+    let mut out = net.clone();
+    let mut removed = false;
+    for r in &mut out.regions {
+        let before = r.loops.len();
+        r.loops
+            .retain(|l| l.iter().copied().collect::<HashSet<u32>>() != key);
+        removed |= r.loops.len() != before;
+    }
+    if removed {
+        out.regions.retain(|r| !r.loops.is_empty());
+        return Some(out);
+    }
+    out.regions.push(VectorRegion {
+        rule: FillRule::NonZero,
+        loops: vec![face],
+        fills: (!node_has_fills).then(|| vec![Fill::solid(Color::SHAPE_GRAY)]),
+    });
+    Some(out)
+}
+
+/// Сплющивание: сети узлов (каждая — в координатах формы своего узла, с
+/// матрицей формы → общие координаты) в одну сеть общих координат.
+pub fn merge_networks(parts: &[(VectorNetwork, Affine)]) -> VectorNetwork {
+    let mut out = VectorNetwork::default();
+    for (net, a) in parts {
+        let t = transform_network(net, *a);
+        let (po, so) = (out.points.len() as u32, out.segments.len() as u32);
+        out.points.extend(t.points);
+        out.segments
+            .extend(t.segments.into_iter().map(|s| VectorSegment {
+                start: s.start + po,
+                end: s.end + po,
+                ..s
+            }));
+        out.regions.extend(t.regions.into_iter().map(|r| {
+            VectorRegion {
+                loops: r
+                    .loops
+                    .into_iter()
+                    .map(|l| l.into_iter().map(|i| i + so).collect())
+                    .collect(),
+                ..r
+            }
+        }));
+    }
+    out
+}
