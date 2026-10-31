@@ -167,6 +167,9 @@ fn panel_edit(e: &Edit) -> Result<PanelEdit, String> {
             join,
             miter_limit,
         } => {
+            if cap_start.is_none() && cap_end.is_none() && join.is_none() && miter_limit.is_none() {
+                return Err("В правке стиля обводки нет изменений".into());
+            }
             // Недоверенный ввод: предел вне диапазона — отказ, а не подгонка
             // (панель зажимает значения сама, `limits.ts`).
             if let Some(m) = miter_limit {

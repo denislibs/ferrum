@@ -521,3 +521,146 @@ mod live {
         }
     }
 }
+
+// --- стиль обводки: правила строк и «Смешанные» ---
+
+use ferrum_doc::{StrokeCap, StrokeJoin, VectorNetwork, VectorPoint, VectorSegment};
+use ferrum_wasm::summary::{StrokeCapDto, StrokeJoinDto};
+use std::sync::Arc;
+
+fn net(points: usize, segs: &[(u32, u32)]) -> Arc<VectorNetwork> {
+    Arc::new(VectorNetwork {
+        points: (0..points)
+            .map(|i| VectorPoint::new(i as f64 * 10.0, (i % 2) as f64 * 10.0))
+            .collect(),
+        segments: segs
+            .iter()
+            .map(|&(a, b)| VectorSegment::line(a, b))
+            .collect(),
+        regions: vec![],
+    })
+}
+
+fn open_vector(p: &mut Page, patch: PropsPatch) -> NodeId {
+    p.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(net(3, &[(0, 1), (1, 2)])),
+            ..patch
+        },
+    )
+}
+
+fn closed_vector(p: &mut Page) -> NodeId {
+    p.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(net(3, &[(0, 1), (1, 2), (2, 0)])),
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn stroke_style_rows_follow_the_node_kinds() {
+    let mut p = Page::new();
+    let line = p.add(None, NodeKind::Line, at(0.0, 0.0, 50.0, 0.0));
+    let rect = p.add(None, NodeKind::Rect, at(0.0, 0.0, 50.0, 50.0));
+    let round = p.add(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            corner_radius: Some(8.0),
+            ..at(0.0, 0.0, 50.0, 50.0)
+        },
+    );
+    let ellipse = p.add(None, NodeKind::Ellipse, at(0.0, 0.0, 50.0, 50.0));
+    let group = p.add(None, NodeKind::Group, PropsPatch::default());
+    let text = p.add(None, NodeKind::Text, at(0.0, 0.0, 50.0, 20.0));
+    let open = open_vector(&mut p, PropsPatch::default());
+    let closed = closed_vector(&mut p);
+    let sc = p.scene();
+    let st = |ids: &[NodeId]| summarize(&sc, ids).stroke_style;
+    let rows = |ids: &[NodeId]| st(ids).map(|s| (s.ends, s.corners));
+    assert_eq!(rows(&[line]), Some((true, false)));
+    assert_eq!(rows(&[rect]), Some((false, true)));
+    assert_eq!(rows(&[line, rect]), Some((true, true)));
+    assert_eq!(rows(&[open]), Some((true, true)));
+    assert_eq!(rows(&[closed]), Some((false, true)));
+    // Скруглённый прямоугольник и эллипс — без строк; группа и текст — без стиля.
+    assert_eq!(rows(&[round]), None);
+    assert_eq!(rows(&[ellipse]), None);
+    assert_eq!(rows(&[group]), None);
+    assert_eq!(rows(&[text]), None);
+    // Группа и текст в выделении не мешают.
+    assert_eq!(rows(&[group, text, closed]), Some((false, true)));
+    // У вектора-«Т» (ветвление) свободные концы есть.
+    let t = p.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(net(4, &[(0, 1), (1, 2), (1, 3)])),
+            ..Default::default()
+        },
+    );
+    let sc = p.scene();
+    assert_eq!(
+        summarize(&sc, &[t]).stroke_style.map(|s| s.ends),
+        Some(true)
+    );
+}
+
+#[test]
+fn stroke_style_is_mixed_across_a_selection() {
+    let mut p = Page::new();
+    let a = open_vector(
+        &mut p,
+        PropsPatch {
+            stroke_cap_start: Some(StrokeCap::Round),
+            stroke_cap_end: Some(StrokeCap::Square),
+            stroke_join: Some(StrokeJoin::Bevel),
+            stroke_miter_limit: Some(8.0),
+            ..Default::default()
+        },
+    );
+    let b = open_vector(
+        &mut p,
+        PropsPatch {
+            stroke_cap_start: Some(StrokeCap::Round),
+            ..Default::default()
+        },
+    );
+    let sc = p.scene();
+    let st = summarize(&sc, &[a, b]).stroke_style.unwrap();
+    assert_eq!(st.cap_start, Some(StrokeCapDto::Round));
+    assert_eq!(st.cap_end, None);
+    assert_eq!(st.join, None);
+    assert!(st.miter_limit.mixed);
+    let one = summarize(&sc, &[a]).stroke_style.unwrap();
+    assert_eq!(one.join, Some(StrokeJoinDto::Bevel));
+    assert_eq!(one.miter_limit, same(8.0));
+}
+
+#[test]
+fn hidden_rows_do_not_cause_false_mixed() {
+    let mut p = Page::new();
+    // У линии соединение и предел скрыты — их отличия не «смешивают» вектор.
+    let line = p.add(
+        None,
+        NodeKind::Line,
+        PropsPatch {
+            stroke_join: Some(StrokeJoin::Round),
+            stroke_miter_limit: Some(9.0),
+            ..at(0.0, 0.0, 50.0, 0.0)
+        },
+    );
+    let v = closed_vector(&mut p);
+    let sc = p.scene();
+    let st = summarize(&sc, &[line, v]).stroke_style.unwrap();
+    assert_eq!(st.join, Some(StrokeJoinDto::Miter));
+    assert_eq!(st.miter_limit, same(4.0));
+    // Закрытый вектор не подмешивает окончания к линии.
+    assert_eq!(st.cap_start, Some(StrokeCapDto::None));
+}

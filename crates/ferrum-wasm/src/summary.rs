@@ -329,6 +329,20 @@ impl Acc<f64> {
     }
 }
 
+/// Есть ли у сети открытый конец (точка ровно с одним сегментом) — без сборки
+/// путей: один проход по сегментам.
+fn has_open_end(net: &ferrum_doc::VectorNetwork) -> bool {
+    let mut degree = vec![0u8; net.points.len()];
+    for s in &net.segments {
+        for i in [s.start as usize, s.end as usize] {
+            if let Some(d) = degree.get_mut(i) {
+                *d = d.saturating_add(1);
+            }
+        }
+    }
+    degree.contains(&1)
+}
+
 /// Сводка по выделенным узлам (неизвестные пропускаются).
 pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
     let mut count = 0u32;
@@ -383,25 +397,24 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
         }
         if !matches!(p.kind, NodeKind::Group | NodeKind::Text) {
             let s = &p.stroke_style;
-            join.add(s.join);
-            miter.add_num(s.miter_limit);
-            match p.kind {
-                NodeKind::Line => {
-                    ends = true;
-                    cap_start.add(s.cap_start);
-                    cap_end.add(s.cap_end);
-                }
-                NodeKind::Vector => {
-                    let shape = ferrum_scene::vector::network_shape(p);
-                    corners = true;
-                    if !shape.ends.is_empty() {
-                        ends = true;
-                        cap_start.add(s.cap_start);
-                        cap_end.add(s.cap_end);
-                    }
-                }
-                NodeKind::Ellipse => {}
-                _ => corners |= p.corner_radius <= 0.0,
+            // Окончания — у линии и у вектора с открытым концом; соединение и
+            // предел — только там, где строка видна (есть углы): скрытые узлы не
+            // дают ложных «Смешанные».
+            let (has_ends, has_corners) = match p.kind {
+                NodeKind::Line => (true, false),
+                NodeKind::Vector => (p.vector.as_deref().is_some_and(has_open_end), true),
+                NodeKind::Ellipse => (false, false),
+                _ => (false, p.corner_radius <= 0.0),
+            };
+            if has_ends {
+                ends = true;
+                cap_start.add(s.cap_start);
+                cap_end.add(s.cap_end);
+            }
+            if has_corners {
+                corners = true;
+                join.add(s.join);
+                miter.add_num(s.miter_limit);
             }
         }
         if count == 1 {
@@ -457,12 +470,12 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
                 },
             }
         }),
-        stroke_style: join.first.map(|j| StrokeStyleDto {
+        stroke_style: (ends || corners).then(|| StrokeStyleDto {
             ends,
             corners,
             cap_start: cap_start.first.filter(|_| !cap_start.mixed).map(cap_dto),
             cap_end: cap_end.first.filter(|_| !cap_end.mixed).map(cap_dto),
-            join: (!join.mixed).then(|| join_dto(j)),
+            join: join.first.filter(|_| !join.mixed).map(join_dto),
             miter_limit: miter.num().unwrap_or(Num {
                 value: ferrum_doc::DEFAULT_MITER_LIMIT,
                 mixed: false,

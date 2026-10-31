@@ -113,6 +113,8 @@ fn stroke_style_edit_applies_and_bad_values_are_refused() {
     let st = summary(&c.take_events()).unwrap().stroke_style.unwrap();
     assert_eq!(st.cap_end, Some(StrokeCapDto::ArrowTriangle));
     assert_eq!(st.join, Some(StrokeJoinDto::Round));
+    // Соседнее поле чередуется: правка без изменения не даёт события.
+    let mut flip = false;
     for bad in [
         0.5,
         101.0,
@@ -134,9 +136,21 @@ fn stroke_style_edit_applies_and_bad_values_are_refused() {
             ["Неверная правка: Предел острого угла — от 1 до 100"],
             "{bad}"
         );
-        // Отказ — без правки: предел остался прежним.
-        let st = summary(&c.take_events()).and_then(|s| s.stroke_style);
-        assert!(st.is_none_or(|st| st.miter_limit.value == 4.0), "{bad}");
+        // Отказ — без правки: допустимая правка соседнего поля покажет
+        // сводку, в которой предел остался прежним.
+        c.command(style(Edit::StrokeStyle {
+            cap_start: None,
+            cap_end: None,
+            join: Some(if flip {
+                StrokeJoinDto::Bevel
+            } else {
+                StrokeJoinDto::Miter
+            }),
+            miter_limit: None,
+        }));
+        flip = !flip;
+        let st = summary(&c.take_events()).unwrap().stroke_style.unwrap();
+        assert_eq!(st.miter_limit.value, 4.0, "{bad}");
     }
     // Границы диапазона допустимы.
     for ok in [1.0, 100.0] {
@@ -151,6 +165,23 @@ fn stroke_style_edit_applies_and_bad_values_are_refused() {
         let st = summary(&ev).unwrap().stroke_style.unwrap();
         assert_eq!(st.miter_limit.value, ok);
     }
+}
+
+#[test]
+fn empty_stroke_style_edit_is_refused_without_a_step() {
+    let mut c = core();
+    pen_path(&mut c);
+    c.take_events();
+    c.command(style(Edit::StrokeStyle {
+        cap_start: None,
+        cap_end: None,
+        join: None,
+        miter_limit: None,
+    }));
+    assert_eq!(
+        errors(&c.take_events()),
+        ["Неверная правка: В правке стиля обводки нет изменений"]
+    );
 }
 
 #[test]
