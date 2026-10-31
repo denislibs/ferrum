@@ -91,6 +91,9 @@ test('во время перетаскивания на холсте поля п
   await page.mouse.click(at.x, at.y);
   const x = field(page, 'X');
   await expect(x).toHaveValue('140');
+  // Второе нажатие позже порога двойного щелчка (500 мс): двойной щелчок по
+  // прямоугольнику — его правка как вектора.
+  await page.waitForTimeout(600);
   await page.mouse.down();
   await page.mouse.move(at.x + 30, at.y, { steps: 6 });
   // Документ ещё не изменён, а поле уже показывает новое положение.

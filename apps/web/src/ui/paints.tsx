@@ -3,13 +3,16 @@
 // «Смешанные»); любая правка шлёт новый список целиком (`editSelection` →
 // `fills`/`strokes`), палитра — превью во время жеста и один шаг при отпускании.
 // Заливка изображением показывается, но не правится (картинку меняет этап 6).
+// Под обводками — окончания открытых концов, соединение и предел острого угла
+// (подсистема 3, этап 3): одна правка — одна команда `strokeStyle`.
 //
 // Правка строится от списка и выделения на её начало (`begin`): жест палитры или
 // набор в поле не должны попасть в тех, кого выделили позже, и не должны
 // переписать их список. Палитра закрывается, когда выделение сменилось.
 
 import { createEffect, createSignal, For, Index, on, Show, untrack } from 'solid-js';
-import type { Align, EditPhase, FillDto, StrokeDto } from '../wasm/ferrum_wasm';
+import type { Align, EditPhase, FillDto, StrokeCapDto, StrokeDto, StrokeJoinDto } from '../wasm/ferrum_wasm';
+import { MAX_MITER_LIMIT, MIN_MITER_LIMIT } from '../core/limits';
 import { Section } from './chrome';
 import { cssColor, hexHasAlpha, paintOpacity, parseHex, parseOpacityText, toHex, toHex6, type Rgb } from './colour';
 import { CommitInput } from './commit-input';
@@ -32,6 +35,112 @@ const ALIGNS: { value: Align; label: string }[] = [
 ];
 
 const SCALE_MODES = { fill: 'Заполнить', fit: 'Вписать', tile: 'Плитка' } as const;
+
+const CAPS: { value: StrokeCapDto; label: string }[] = [
+  { value: 'none', label: 'Нет' },
+  { value: 'round', label: 'Круглое' },
+  { value: 'square', label: 'Квадратное' },
+  { value: 'arrowLines', label: 'Стрелка' },
+  { value: 'arrowTriangle', label: 'Треугольник' },
+  { value: 'circle', label: 'Круг' },
+  { value: 'diamond', label: 'Ромб' },
+];
+
+const JOINS: { value: StrokeJoinDto; label: string }[] = [
+  { value: 'miter', label: 'Острое' },
+  { value: 'round', label: 'Круглое' },
+  { value: 'bevel', label: 'Скошенное' },
+];
+
+/** Окончания, соединение и предел острого угла — под списком обводок. «Смешанные» —
+ * пустой пункт списка. */
+function StrokeStyleRows() {
+  const ed = useEditor();
+  const style = () => ed.store.state.summary?.strokeStyle;
+  const send = (edit: {
+    capStart?: StrokeCapDto;
+    capEnd?: StrokeCapDto;
+    join?: StrokeJoinDto;
+    miterLimit?: number;
+  }) =>
+    sendEdit(
+      ed.send,
+      { type: 'strokeStyle', capStart: edit.capStart, capEnd: edit.capEnd, join: edit.join, miterLimit: edit.miterLimit },
+      'commit',
+      captureEdit(ed).target,
+    );
+  return (
+    <Show when={style()}>
+      {(s) => (
+        <>
+          <Show when={s().ends}>
+            <div class="fe-grid2">
+              <label class="fe-field">
+                <select
+                  class="fe-native-select"
+                  aria-label="Окончание в начале"
+                  value={s().capStart ?? ''}
+                  onChange={(e) => send({ capStart: e.currentTarget.value as StrokeCapDto })}
+                >
+                  <Show when={!s().capStart}>
+                    <option value="">Смешанное</option>
+                  </Show>
+                  <For each={CAPS}>{(c) => <option value={c.value}>{c.label}</option>}</For>
+                </select>
+              </label>
+              <label class="fe-field">
+                <select
+                  class="fe-native-select"
+                  aria-label="Окончание в конце"
+                  value={s().capEnd ?? ''}
+                  onChange={(e) => send({ capEnd: e.currentTarget.value as StrokeCapDto })}
+                >
+                  <Show when={!s().capEnd}>
+                    <option value="">Смешанное</option>
+                  </Show>
+                  <For each={CAPS}>{(c) => <option value={c.value}>{c.label}</option>}</For>
+                </select>
+              </label>
+            </div>
+          </Show>
+          <Show when={s().corners}>
+            <div class="fe-grid2">
+              <label class="fe-field">
+                <select
+                  class="fe-native-select"
+                  aria-label="Соединение"
+                  value={s().join ?? ''}
+                  onChange={(e) => send({ join: e.currentTarget.value as StrokeJoinDto })}
+                >
+                  <Show when={!s().join}>
+                    <option value="">Смешанное</option>
+                  </Show>
+                  <For each={JOINS}>{(j) => <option value={j.value}>{j.label}</option>}</For>
+                </select>
+              </label>
+              <Show when={s().join !== 'round' && s().join !== 'bevel'}>
+                <NumberField
+                  label="∠"
+                  name="Предел острого угла"
+                  value={s().miterLimit.value}
+                  mixed={s().miterLimit.mixed}
+                  min={MIN_MITER_LIMIT}
+                  max={MAX_MITER_LIMIT}
+                  onEdit={(input, phase, target) => {
+                    const cur = s().miterLimit.value;
+                    const raw = input.kind === 'set' ? input.value : cur + input.delta;
+                    const miterLimit = Math.min(MAX_MITER_LIMIT, Math.max(MIN_MITER_LIMIT, raw));
+                    sendEdit(ed.send, { type: 'strokeStyle', miterLimit, capStart: undefined, capEnd: undefined, join: undefined }, phase, target);
+                  }}
+                />
+              </Show>
+            </div>
+          </Show>
+        </>
+      )}
+    </Show>
+  );
+}
 
 /** Цвет из `#rrggbbaa` и прозрачность для панели. */
 function shown(color: string, opacity: number): { rgb: Rgb & { a: number }; alpha: number } {
@@ -342,6 +451,9 @@ export function StrokesSection() {
               );
             }}
           </For>
+          <Show when={p().mixed || list().length > 0}>
+            <StrokeStyleRows />
+          </Show>
           <Show when={picker()}>
             {(pk) => {
               const index = pk().index;

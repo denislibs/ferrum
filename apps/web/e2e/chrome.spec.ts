@@ -15,7 +15,8 @@ test('прямоугольник рисуется инструментом из 
   const toolbar = page.getByRole('toolbar', { name: 'Инструменты' });
   await toolbar.getByRole('button', { name: 'Фигуры' }).click();
   const menu = page.getByRole('menu', { name: 'Фигуры' });
-  await expect(menu.getByRole('menuitemcheckbox')).toHaveCount(4);
+  // Прямоугольник, эллипс, линия, стрелка, изображение.
+  await expect(menu.getByRole('menuitemcheckbox')).toHaveCount(5);
   await menu.getByRole('menuitemcheckbox', { name: /Эллипс/ }).click();
   await expect.poll(() => ui(page, (s) => s.tool)).toBe('ellipse');
   await expect(toolbar.getByRole('button', { name: 'Эллипс' })).toHaveAttribute('aria-pressed', 'true');
@@ -48,8 +49,10 @@ test('подсказка «Название  Клавиша» — из дейс�
   const move = page.getByRole('button', { name: 'Перемещение' });
   await move.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
-  await page.getByRole('button', { name: 'Перо — подсистема 3' }).hover();
-  await expect(page.getByRole('tooltip')).toHaveText('Перо  P — подсистема 3');
+  await page.getByRole('button', { name: 'Перо', exact: true }).hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Перо  P');
+  await page.getByRole('button', { name: 'Комментарии — подсистема 4' }).hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Комментарии  C — подсистема 4');
   // Открытая подсказка следует за раскладкой: V снят, Q назначен — текст меняется на месте.
   await move.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
