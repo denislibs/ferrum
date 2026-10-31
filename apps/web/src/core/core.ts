@@ -81,6 +81,8 @@ export function cssCursor(kind: CursorKind, angle: number): string {
       return 'copy';
     case 'rotate':
       return 'alias';
+    case 'text':
+      return 'text';
     case 'resize': {
       const a = ((angle % 180) + 180) % 180;
       if (a < 22.5 || a >= 157.5) return 'ew-resize';

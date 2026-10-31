@@ -244,6 +244,9 @@ impl WasmCore {
 
     /// Команда основного потока. Объект не той формы — событие `error`, не паника.
     pub fn command(&mut self, #[wasm_bindgen(unchecked_param_type = "Command")] cmd: JsValue) {
+        // Время — для склейки ввода в один шаг и мигания курсора.
+        let now = self.now();
+        self.core.set_time(now);
         match parse_command(cmd) {
             Ok(c) => self.core.command(c),
             Err(message) => self.core.push_event(CoreEvent::Error { message }),
@@ -266,6 +269,9 @@ impl WasmCore {
 
     /// Начало кадра после ввода: рисует кадр, если он нужен. `true` — нарисован.
     pub fn frame(&mut self) -> bool {
+        // Мигание курсора правки текста: кадр нужен, когда курсор гаснет и горит.
+        let now = self.now();
+        self.core.set_time(now);
         if let Some(r) = self.surface.poll_readback() {
             self.awaiting = false;
             match r {

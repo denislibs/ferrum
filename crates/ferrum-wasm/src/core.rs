@@ -11,6 +11,7 @@
 
 mod fonts;
 mod panels;
+mod text;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -96,6 +97,8 @@ pub struct Core {
     /// замену документа — загруженные шрифты не качаются заново.
     fonts: SharedFonts,
     font_state: fonts::FontState,
+    /// Что ушло полю ввода и секции «Текст» (подсистема 3, этап 2).
+    text_state: text::TextState,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -141,8 +144,7 @@ fn cursor(c: Cursor) -> (CursorKind, f64) {
         Cursor::Duplicate => (CursorKind::Duplicate, 0.0),
         Cursor::Resize { angle } => (CursorKind::Resize, angle),
         Cursor::Rotate { angle } => (CursorKind::Rotate, angle),
-        // Текстовый курсор появится в протоколе вместе с командами текста.
-        Cursor::Text => (CursorKind::Default, 0.0),
+        Cursor::Text => (CursorKind::Text, 0.0),
     }
 }
 
@@ -216,6 +218,7 @@ impl Core {
             journal_batch: 0,
             fonts,
             font_state: fonts::FontState::default(),
+            text_state: text::TextState::default(),
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -280,6 +283,8 @@ impl Core {
         self.font_state.missing_key = None;
         // Ждавшие шрифтов правки относились к прошлому документу.
         self.font_state.waiting.clear();
+        // Поле ввода и секция «Текст» узнают о новом документе заново.
+        self.text_state = text::TextState::default();
         self.preload_page_fonts();
         Ok(())
     }
@@ -562,6 +567,14 @@ impl Core {
             | Command::TestCreateText { .. }) => self.font_command(cmd),
             Command::OpenWithJournal { bytes, journal } => self.open_with_journal(&bytes, &journal),
             Command::FlushJournal => self.flush_journal(true),
+            // Правка текста: после ждущих шрифтов правок — по порядку.
+            cmd if text::is_text_command(&cmd) => {
+                if self.font_state.waiting.is_empty() {
+                    self.text_command(cmd);
+                } else {
+                    self.font_state.waiting.push_back(cmd);
+                }
+            }
             Command::Execute { command } => match CommandId::from_key(&command) {
                 Some(id) => self.editor.execute(id),
                 None => self.error(format!("Неизвестная команда «{}»", clip(&command))),
@@ -703,7 +716,9 @@ impl Core {
                 .retain(|e| !matches!(e, CoreEvent::Document { .. }));
             self.push_document();
         }
+        let properties = self.ui.properties;
         self.flush_ui();
+        self.push_text_state(properties);
         self.push_modified();
         self.push_font_requests();
     }

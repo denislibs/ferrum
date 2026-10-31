@@ -27,6 +27,8 @@ pub(crate) struct FontState {
     /// Правки, ждущие шрифтов, по порядку прихода.
     pub waiting: VecDeque<Command>,
     pub missing_sent: Option<Vec<MissingFontDto>>,
+    /// Семейства текстов страницы, что ушли последними (`PageFonts`).
+    pub page_sent: Option<Vec<String>>,
     pub catalog_sent: Option<Vec<FontChoice>>,
     /// При чём посчитаны отсутствующие: страница, экземпляр сцены, ревизия
     /// текстов сцены, поколение реестра (`None` — пересчитать). Правка без
@@ -203,7 +205,7 @@ impl Core {
     }
 
     /// Правка текста; ждущая шрифтов — в очередь (повтор — `after_fonts_changed`).
-    fn text_command(&mut self, cmd: Command) {
+    pub(crate) fn text_command(&mut self, cmd: Command) {
         let result = match &cmd {
             Command::ReplaceMissingFont { from, to } => match (font_name(from), font_name(to)) {
                 (Ok(from), Ok(to)) => self.editor.replace_font(&from, &to).map(|_| ()),
@@ -212,6 +214,7 @@ impl Core {
                     return;
                 }
             },
+            c if super::text::is_text_command(c) => self.run_text(c),
             Command::TestCreateText {
                 x,
                 y,
@@ -280,7 +283,13 @@ impl Core {
         self.dirty = true;
         let waiting: Vec<Command> = self.font_state.waiting.drain(..).collect();
         for cmd in waiting {
-            self.text_command(cmd);
+            // Правка снова ждёт — следующие за ней тоже ждут: порядок команд текста
+            // (стиль, затем набор) сохраняется.
+            if self.font_state.waiting.is_empty() {
+                self.text_command(cmd);
+            } else {
+                self.font_state.waiting.push_back(cmd);
+            }
         }
         self.push_font_requests();
     }
@@ -343,6 +352,18 @@ impl Core {
 
     fn push_missing_list(&mut self) {
         self.font_state.recomputed.0 += 1;
+        // Семейства страницы — для группы «В документе» выбора шрифта.
+        let mut families: Vec<String> = self
+            .editor
+            .page_fonts()
+            .into_iter()
+            .map(|f| f.family)
+            .collect();
+        families.dedup();
+        if self.font_state.page_sent.as_ref() != Some(&families) {
+            self.font_state.page_sent = Some(families.clone());
+            self.events.push(CoreEvent::PageFonts { families });
+        }
         let list: Vec<MissingFontDto> = self
             .editor
             .missing_fonts()
