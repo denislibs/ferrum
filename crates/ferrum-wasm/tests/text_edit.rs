@@ -783,3 +783,36 @@ fn errors(events: &[CoreEvent]) -> Vec<String> {
         })
         .collect()
 }
+
+#[test]
+fn journal_and_snapshot_apply_typing_that_waits_for_a_font() {
+    // Вкладка закрывается (`pagehide` → `FlushJournal`), пока набор ждёт шрифта:
+    // ожидание прекращается, набор — запасным шрифтом и попадает в журнал.
+    let (mut c, id) = core();
+    c.command(Command::FlushJournal);
+    c.take_events();
+    typing_waits_for_roboto(&mut c, &id);
+    c.command(Command::FlushJournal);
+    assert_eq!(text_of(&c, &id), "Привет!\n");
+    let events = c.take_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::Journal {
+                bytes: Some(_),
+                failed: false,
+                ..
+            }
+        )),
+        "набор — в пачке журнала: {events:?}"
+    );
+    // Снимок — так же.
+    let (mut c, id) = core();
+    typing_waits_for_roboto(&mut c, &id);
+    c.command(Command::Snapshot { thumbnail: false });
+    assert_eq!(text_of(&c, &id), "Привет!\n");
+    assert!(c
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Snapshot { .. })));
+}

@@ -639,7 +639,10 @@ impl Core {
             | Command::ReplaceMissingFont { .. }
             | Command::TestCreateText { .. }) => self.font_command(cmd),
             Command::OpenWithJournal { bytes, journal } => self.open_with_journal(&bytes, &journal),
-            Command::FlushJournal => self.flush_journal(true),
+            Command::FlushJournal => {
+                self.settle_waiting_fonts();
+                self.flush_journal(true);
+            }
             // Правка текста; ждущая шрифтов — в очередь.
             cmd if text::is_text_command(&cmd) => self.text_command(cmd),
             Command::Execute { command } => match CommandId::from_key(&command) {
@@ -674,7 +677,10 @@ impl Core {
                 }),
                 Err(e) => self.error(format!("Не удалось сохранить: {e}")),
             },
-            Command::Snapshot { thumbnail } => self.snapshot(thumbnail),
+            Command::Snapshot { thumbnail } => {
+                self.settle_waiting_fonts();
+                self.snapshot(thumbnail);
+            }
             Command::MarkSaved { revision } => {
                 // Ревизия не доверенная: только точное совпадение с текущей.
                 if revision == self.revision as f64 {
