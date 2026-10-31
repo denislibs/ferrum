@@ -299,6 +299,11 @@ fn node_outline(scene: &Scene, id: NodeId, view: Affine) -> Option<BezPath> {
             path.line_to(to_device * Point::new(len, 0.0));
         }
         Geometry::None => path = to_device * n.local_bounds?.to_path(0.1),
+        // Вектор подсвечивается своей сетью, а не рамкой.
+        Geometry::Vector(_) => {
+            path = ferrum_scene::vector::network_shape(&n.props).stroke;
+            path.apply_affine(to_device);
+        }
         geom => {
             geom.fill_path_into(&mut path);
             path.apply_affine(to_device);
