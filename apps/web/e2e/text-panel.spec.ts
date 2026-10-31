@@ -6,6 +6,11 @@
 import { expect, test, type Page } from '@playwright/test';
 import { live, liveWhen, openApp } from './helpers';
 
+// Чтений layout вне фазы measure планировщика не было (тестовый режим их копит).
+test.afterEach(async ({ page }) => {
+  expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
+});
+
 const ui = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!)));
 
 /** Текст тестовой командой; ждёт узел (шрифт грузится асинхронно). */

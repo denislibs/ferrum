@@ -81,11 +81,18 @@ export function FontPicker(props: { current: string; onPick: (family: string) =>
     document.addEventListener('pointerdown', outside, true);
     onCleanup(() => document.removeEventListener('pointerdown', outside, true));
   });
+  // Строка под курсором стрелок — в видимой части: прокрутка читается в фазе
+  // measure, пишется в фазе mutate.
   const reveal = (index: number) => {
-    const y = index * ROW;
-    if (y < list.scrollTop) list.scrollTop = y;
-    else if (y + ROW > list.scrollTop + LIST_HEIGHT) list.scrollTop = y + ROW - LIST_HEIGHT;
-    setTop(list.scrollTop);
+    ed.scheduler.measure(() => {
+      const cur = list.scrollTop;
+      const y = index * ROW;
+      const next = y < cur ? y : y + ROW > cur + LIST_HEIGHT ? y + ROW - LIST_HEIGHT : cur;
+      ed.scheduler.mutate(() => {
+        if (next !== cur) list.scrollTop = next;
+        setTop(next);
+      });
+    });
   };
   // Прокрутка читается в фазе measure (защита layout тестового режима).
   const onScroll = ed.core.costed(() => ed.scheduler.measure(() => setTop(list.scrollTop)));

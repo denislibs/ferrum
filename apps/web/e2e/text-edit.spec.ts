@@ -7,6 +7,11 @@
 import { expect, test, type Page } from '@playwright/test';
 import { appScreen, live, liveWhen, openApp } from './helpers';
 
+// Чтений layout вне фазы measure планировщика не было (тестовый режим их копит).
+test.afterEach(async ({ page }) => {
+  expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
+});
+
 const ui = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!)));
 const clipTexts = (page: Page) =>
   page.evaluate(() => window.__ferrum!.uiEvents!.filter((e) => e.type === 'clipboard' && e.text !== undefined).map((e) => e.text!));
@@ -83,6 +88,20 @@ test('стрелки, Backspace и выделение Shift — в позици�
   await page.keyboard.press('Shift+ArrowRight');
   await page.keyboard.type('Y');
   expect(await copyAll(page)).toBe('YXb');
+});
+
+test('фокус упал в body посреди правки — набор и Backspace всё равно в текст @firefox', async ({ page }) => {
+  await openApp(page, 0);
+  await newText(page, 100, 300);
+  await page.keyboard.type('ab');
+  // Исчезла кнопка, по которой щёлкнули: фокус — у body.
+  await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+  await page.keyboard.type('cd');
+  await expect(page.locator('.fe-text-input')).toBeFocused();
+  await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+  await page.keyboard.press('Backspace');
+  expect(await copyAll(page)).toBe('abc');
 });
 
 test('IME: составление — превью без шага, конец составления — текст, поле пустое', async ({ page }) => {

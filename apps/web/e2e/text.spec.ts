@@ -7,6 +7,11 @@
 import { expect, test, type Page } from '@playwright/test';
 import { appScreen, live, liveWhen, openApp } from './helpers';
 
+// Чтений layout вне фазы measure планировщика не было (тестовый режим их копит).
+test.afterEach(async ({ page }) => {
+  expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
+});
+
 /** Текст в точке мира; ждёт узел в сцене (шрифты грузятся асинхронно). */
 async function createText(page: Page, x: number, y: number, text: string, font?: { family: string; style: string }): Promise<void> {
   const before = (await live(page)).nodes;
