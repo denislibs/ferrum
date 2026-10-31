@@ -233,8 +233,20 @@ impl Editor {
     /// встаёт на место верхнего выделенного узла; узлы остаются на экране там же.
     fn wrap(&mut self, kind: NodeKind) {
         let ids = self.ordered_selection();
+        self.wrap_with(ids, kind, PropsPatch::default());
+    }
+
+    /// Общая часть `wrap` и булевых операций: `ids` (в порядке слоёв, не пусто)
+    /// оборачиваются новым узлом `kind` с дополнительными свойствами `extra`.
+    /// `false` — пустой список или отказ документа (сообщение ушло).
+    pub(crate) fn wrap_with(
+        &mut self,
+        ids: Vec<NodeId>,
+        kind: NodeKind,
+        extra: PropsPatch,
+    ) -> bool {
         let Some(&top) = ids.last() else {
-            return;
+            return false;
         };
         let top_slot = self.scene.slot(top).expect("выделение в сцене");
         let parent_slot = self.scene.at(top_slot).parent;
@@ -262,7 +274,7 @@ impl Editor {
             let mut patch = PropsPatch {
                 x: Some(origin.x),
                 y: Some(origin.y),
-                ..Default::default()
+                ..extra
             };
             if kind == NodeKind::Frame {
                 patch.w = Some(frame_box.width());
@@ -288,7 +300,7 @@ impl Editor {
                 }
             }
             Ok(vec![c])
-        });
+        })
     }
 
     /// Ctrl+Shift+G: дети групп, булевых групп и фреймов выделения встают на их

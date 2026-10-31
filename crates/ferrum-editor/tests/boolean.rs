@@ -271,3 +271,130 @@ fn ungroup_returns_the_children_and_resize_scales_them() {
     assert_eq!(h.sel(), vec![a, b]);
     h.assert_scene_clean();
 }
+
+#[test]
+fn mixed_selections_with_booleans_and_frames() {
+    let mut h = H::new();
+    let (a, b) = two_rects(&mut h);
+    h.ed.select(&[a, b]);
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    let f = h.frame(None, 400.0, 0.0, 100.0, 100.0);
+    // [булева группа, фрейм] — операция группы меняется, фрейм не мешает.
+    h.ed.select(&[g, f]);
+    h.ed.take_events();
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.key("KeyI", alt_shift());
+    assert_eq!(h.props(g).boolean_op, Some(BooleanOp::Intersect));
+    assert!(errors(&mut h).is_empty());
+    h.assert_one_step(steps, &before);
+    // [булева группа, прямоугольник] — оборачиваются заново в новую булеву группу.
+    let r = h.rect(None, 0.0, 300.0, 50.0, 50.0);
+    h.ed.select(&[g, r]);
+    h.key("KeyE", alt_shift());
+    let outer = h.sel()[0];
+    assert_ne!(outer, g);
+    assert_eq!(h.props(outer).boolean_op, Some(BooleanOp::Exclude));
+    assert_eq!(h.children(Some(outer)), vec![g, r]);
+    assert_eq!(h.props(g).boolean_op, Some(BooleanOp::Intersect));
+}
+
+#[test]
+fn style_comes_from_the_leaf_of_a_group_or_a_nested_boolean() {
+    let mut h = H::new();
+    let low = h.rect(None, 0.0, 0.0, 50.0, 50.0);
+    h.set(
+        low,
+        PropsPatch {
+            fills: Some(solid(1, 2, 3)),
+            ..Default::default()
+        },
+    );
+    let grp = h.add(None, NodeKind::Group, patch(0.0, 0.0, 0.0, 0.0));
+    let in_a = h.rect(Some(grp), 100.0, 0.0, 50.0, 50.0);
+    let in_b = h.rect(Some(grp), 120.0, 0.0, 50.0, 50.0);
+    h.set(
+        in_a,
+        PropsPatch {
+            fills: Some(solid(10, 0, 0)),
+            ..Default::default()
+        },
+    );
+    h.set(
+        in_b,
+        PropsPatch {
+            fills: Some(solid(0, 10, 0)),
+            ..Default::default()
+        },
+    );
+    // Группа сверху: стиль её верхнего листа; у «Вычитания» — нижнего слоя.
+    h.ed.select(&[low, grp]);
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    assert_eq!(h.props(g).fills, solid(0, 10, 0));
+    // Группа снизу при «Вычитании»: её нижний лист.
+    h.ed.execute(CommandId::Undo);
+    let above = h.rect(None, 200.0, 0.0, 50.0, 50.0);
+    h.ed.select(&[grp, above]);
+    h.key("KeyS", alt_shift());
+    let g = h.sel()[0];
+    assert_eq!(h.props(g).fills, solid(10, 0, 0));
+    // Вложенная булева группа берётся как есть, со своими заливками.
+    let inner = g;
+    let top = h.rect(None, 300.0, 0.0, 50.0, 50.0);
+    h.ed.select(&[inner, top]);
+    h.key("KeyS", alt_shift());
+    let outer = h.sel()[0];
+    assert_eq!(h.props(outer).fills, solid(10, 0, 0));
+}
+
+#[test]
+fn ungrouping_a_boolean_is_one_undo_step() {
+    let mut h = H::new();
+    let (a, b) = two_rects(&mut h);
+    h.ed.select(&[a, b]);
+    h.key("KeyU", alt_shift());
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.key(
+        "KeyG",
+        Modifiers {
+            shift: true,
+            ..ctrl()
+        },
+    );
+    assert_eq!(h.children(None), vec![a, b]);
+    h.assert_one_step(steps, &before);
+}
+
+#[test]
+fn boolean_over_other_parents_is_placed_like_a_group() {
+    // Те же слои, обёрнутые Ctrl+G и булевой операцией, встают в одни координаты.
+    let place = |boolean: bool| {
+        let mut h = H::new();
+        let a = h.rect(None, 100.0, 100.0, 100.0, 100.0);
+        let grp = h.add(None, NodeKind::Group, patch(400.0, 100.0, 0.0, 0.0));
+        let b = h.rect(Some(grp), 0.0, 0.0, 60.0, 40.0);
+        h.set(
+            grp,
+            PropsPatch {
+                rotation: Some(30.0),
+                ..Default::default()
+            },
+        );
+        h.ed.select(&[a, b]);
+        if boolean {
+            h.key("KeyU", alt_shift());
+        } else {
+            h.key("KeyG", ctrl());
+        }
+        let c = h.sel()[0];
+        let par = h.parent(c);
+        let sibs = h.children(par);
+        let idx = sibs.iter().position(|x| *x == c).unwrap();
+        let pb = h.props(b);
+        (idx, pb.x, pb.y, pb.rotation, h.children(Some(c)).len())
+    };
+    assert_eq!(place(true), place(false));
+}

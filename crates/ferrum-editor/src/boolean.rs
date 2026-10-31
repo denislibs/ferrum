@@ -8,12 +8,11 @@
 //! группу не входят, нужно хотя бы два слоя.
 
 use crate::editor::{Editor, EditorEvent};
-use crate::geometry::parent_world;
-use crate::ops::reposition;
 use ferrum_doc::{BooleanOp, NodeId, NodeKind, Props, PropsPatch};
 
-/// Слой, чей стиль берёт новая булева группа: у группы — её верхний (у
-/// «Вычитания» — нижний) потомок со своими заливками.
+/// Слой, чей стиль берёт новая булева группа: у обычной группы — её верхний
+/// (у «Вычитания» — нижний) лист, есть у него заливки или нет; вложенная
+/// булева группа и фрейм берутся как есть.
 fn style_source(editor: &Editor, id: NodeId, top: bool) -> Option<Props> {
     let n = editor.scene.node(id)?;
     if n.props.kind != NodeKind::Group {
@@ -34,29 +33,17 @@ impl Editor {
         if ids.is_empty() {
             return;
         }
-        // Выделены только булевы группы — у них меняется операция.
-        let all_booleans = ids.iter().all(|id| {
-            self.scene
-                .node(*id)
-                .is_some_and(|n| n.props.kind == NodeKind::Boolean)
-        });
-        if all_booleans {
-            self.set_boolean_op(&ids, op);
+        let layers: Vec<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.is_frame(*id))
+            .collect();
+        let frames = layers.len() < ids.len();
+        // Булевы группы (фреймы не в счёт) — у них меняется операция.
+        if !layers.is_empty() && layers.iter().all(|id| self.is_kind(*id, NodeKind::Boolean)) {
+            self.set_boolean_op(&layers, op);
             return;
         }
-        let frames = ids.iter().any(|id| {
-            self.scene
-                .node(*id)
-                .is_some_and(|n| n.props.kind == NodeKind::Frame)
-        });
-        let layers: Vec<NodeId> = ids
-            .into_iter()
-            .filter(|id| {
-                self.scene
-                    .node(*id)
-                    .is_some_and(|n| n.props.kind != NodeKind::Frame)
-            })
-            .collect();
         if layers.len() < 2 {
             let msg = if frames {
                 "Булевы операции не применяются к фреймам"
@@ -66,44 +53,38 @@ impl Editor {
             self.out.events.push(EditorEvent::Error(msg.into()));
             return;
         }
-        if frames {
-            self.out.events.push(EditorEvent::Error(
-                "Фреймы в булеву группу не входят".into(),
-            ));
-        }
         let top = *layers.last().expect("слоёв не меньше двух");
-        let top_slot = self.scene.slot(top).expect("выделение в сцене");
-        let parent_slot = self.scene.at(top_slot).parent;
-        let parent = parent_slot.map(|p| self.scene.at(p).id);
-        let pw = parent_world(&self.scene, top_slot);
-        let index = self.scene.index(top_slot) as usize + 1;
         let source = if op == BooleanOp::Subtract {
             style_source(self, layers[0], false)
         } else {
             style_source(self, top, true)
         };
-        let mut props = Props {
-            name: op.name().into(),
+        let mut patch = PropsPatch {
+            name: Some(op.name().into()),
             boolean_op: Some(op),
-            ..Props::defaults(NodeKind::Boolean)
+            ..Default::default()
         };
         if let Some(s) = source {
-            props.fills = s.fills;
-            props.strokes = s.strokes;
-            props.stroke_style = s.stroke_style;
+            patch.fills = Some(s.fills);
+            patch.strokes = Some(s.strokes);
+            patch.stroke_cap_start = Some(s.stroke_style.cap_start);
+            patch.stroke_cap_end = Some(s.stroke_style.cap_end);
+            patch.stroke_join = Some(s.stroke_style.join);
+            patch.stroke_miter_limit = Some(s.stroke_style.miter_limit);
         }
-        self.ctx().commit(|tx, scene| {
-            let b = tx.create_with_props(parent, Some(index), &props)?;
-            tx.move_nodes(&layers, Some(b), 0)?;
-            for id in &layers {
-                let n = scene.node(*id).expect("выделение в сцене");
-                // Тот же родитель: координаты те же (группа в начале координат).
-                if n.parent != parent_slot {
-                    tx.set_props(*id, &reposition(pw, n.world, &n.props))?;
-                }
-            }
-            Ok(vec![b])
-        });
+        if self.wrap_with(layers, NodeKind::Boolean, patch) && frames {
+            self.out.events.push(EditorEvent::Error(
+                "Фреймы в булеву группу не входят".into(),
+            ));
+        }
+    }
+
+    fn is_kind(&self, id: NodeId, kind: NodeKind) -> bool {
+        self.scene.node(id).is_some_and(|n| n.props.kind == kind)
+    }
+
+    fn is_frame(&self, id: NodeId) -> bool {
+        self.is_kind(id, NodeKind::Frame)
     }
 
     /// Меняет операцию булевых групп `ids`; имя по умолчанию («Объединение» и
