@@ -325,7 +325,8 @@ pub enum AlignVDto {
 }
 
 /// Правка стиля символов из секции «Текст»: только известные ключи. Семейство
-/// без начертания — начертание то же (если есть в семействе), иначе Regular.
+/// без начертания — Regular (интерфейс сам подбирает то же начертание, если оно
+/// есть в семействе, и шлёт его явно).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextStylePatchDto {
