@@ -3,7 +3,8 @@
 //! отмены. Один узел сохраняет свою позу (поворот, отражение), несколько —
 //! сливаются в координатах родителя верхнего из них; вектор встаёт на место
 //! верхнего и берёт его свойства (имя, заливки, обводки), а области других
-//! узлов сохраняют свои заливки цветом.
+//! узлов сохраняют свои заливки цветом. Группа с заблокированным слоем не
+//! сплющивается; скрытые слои группы в вектор не попадают (как в Figma).
 
 use crate::editor::{Editor, EditorEvent};
 use crate::geometry::parent_world;
@@ -32,7 +33,8 @@ impl Editor {
             let Some(slot) = self.scene.slot(*id) else {
                 continue;
             };
-            if locked(&self.scene, slot) {
+            // Заблокированный и скрытый (сам или предком) не трогаются.
+            if locked(&self.scene, slot) || !self.scene.is_visible(slot) {
                 continue;
             }
             let kind = self.scene.at(slot).props.kind;
@@ -45,6 +47,17 @@ impl Editor {
                 let mut foreign = false;
                 while let Some(s) = stack.pop() {
                     let n = self.scene.at(s);
+                    // Заблокированный слой нельзя ни слить, ни удалить с группой —
+                    // такую группу целиком не сплющить.
+                    if n.props.locked {
+                        foreign = true;
+                        continue;
+                    }
+                    // Скрытые слои в результат не попадают (как в Figma) и
+                    // уходят вместе с группой.
+                    if !n.props.visible {
+                        continue;
+                    }
                     match n.props.kind {
                         NodeKind::Group => stack.extend(n.children.iter().rev()),
                         k if flattenable(k) => inner.push((self.scene.order_key(s), n.id)),
@@ -53,7 +66,7 @@ impl Editor {
                 }
                 // Группу с текстом, изображением или фреймом сплющить целиком нельзя:
                 // их пришлось бы потерять вместе с группой.
-                if foreign {
+                if foreign || inner.is_empty() {
                     continue;
                 }
                 inner.sort_by(|a, b| a.0.cmp(&b.0));

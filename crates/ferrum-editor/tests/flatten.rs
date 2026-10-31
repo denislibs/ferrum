@@ -110,6 +110,87 @@ fn one_shape_keeps_its_pose_and_groups_flatten_whole() {
 }
 
 #[test]
+fn group_with_a_locked_child_is_not_flattened() {
+    // Заблокированный слой не сливается и не удаляется вместе с группой.
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 20.0, 0.0, 10.0, 10.0);
+    h.ed.select(&[a, b]);
+    h.key("KeyG", ctrl());
+    let g = h.sel()[0];
+    h.set(
+        b,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[g]);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.key("KeyE", ctrl());
+    assert_eq!(h.ed.step_count(), steps, "шага нет");
+    assert_eq!(h.state(), before, "документ не изменился");
+    assert!(h.props(b).locked && h.props(b).kind == NodeKind::Rect);
+    // Заблокированный глубже, во вложенной группе, — так же.
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 20.0, 0.0, 10.0, 10.0);
+    let c = h.rect(None, 40.0, 0.0, 10.0, 10.0);
+    h.ed.select(&[b, c]);
+    h.key("KeyG", ctrl());
+    let inner = h.sel()[0];
+    h.ed.select(&[a, inner]);
+    h.key("KeyG", ctrl());
+    let outer = h.sel()[0];
+    h.set(
+        c,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[outer]);
+    let before = h.state();
+    h.key("KeyE", ctrl());
+    assert_eq!(h.state(), before);
+}
+
+#[test]
+fn hidden_children_of_a_group_are_not_in_the_result() {
+    // Как в Figma: скрытые слои группы в вектор не попадают и видимыми не становятся.
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 20.0, 0.0, 10.0, 10.0);
+    let c = h.rect(None, 40.0, 0.0, 10.0, 10.0);
+    let d = h.rect(None, 60.0, 0.0, 10.0, 10.0);
+    h.ed.select(&[c, d]);
+    h.key("KeyG", ctrl());
+    let inner = h.sel()[0];
+    h.ed.select(&[a, b, inner]);
+    h.key("KeyG", ctrl());
+    let g = h.sel()[0];
+    for id in [b, inner] {
+        h.set(
+            id,
+            PropsPatch {
+                visible: Some(false),
+                ..Default::default()
+            },
+        );
+    }
+    h.ed.select(&[g]);
+    h.key("KeyE", ctrl());
+    let all = h.children(None);
+    assert_eq!(all.len(), 1);
+    let p = h.props(all[0]);
+    assert!(p.visible && p.kind == NodeKind::Vector);
+    let w = world_points(&mut h, all[0]);
+    assert_eq!(w.len(), 4, "только видимый прямоугольник: {w:?}");
+    assert!(has(&w, Point::new(0.0, 0.0)) && !has(&w, Point::new(20.0, 0.0)));
+}
+
+#[test]
 fn nothing_to_flatten_is_an_error_without_a_step() {
     let mut h = H::new();
     let f = h.frame(None, 0.0, 0.0, 100.0, 100.0);
