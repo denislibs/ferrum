@@ -148,6 +148,14 @@ impl PageDoc {
                 *page.state.borrow_mut() = state;
                 if page.cache_matches_tree(rows) {
                     page.from_cache.set(true);
+                    // Кэш — тоже ввод из файла: текст сверх пределов в нём делает
+                    // страницу только для чтения, как и при чтении из Loro.
+                    page.oversized_text.set(rows.iter().any(|r| {
+                        r.props
+                            .text
+                            .as_ref()
+                            .is_some_and(|t| t.content.check_limits().is_err())
+                    }));
                 } else {
                     page.rebuild_from_loro()?;
                 }
@@ -1226,6 +1234,26 @@ mod tests {
 
     fn props_of(page: &PageDoc, ids: &[NodeId]) -> Vec<Props> {
         ids.iter().map(|id| page.props(*id).unwrap()).collect()
+    }
+
+    #[test]
+    fn oversized_text_in_scene_cache_is_detected() {
+        let page = PageDoc::new();
+        let id = page.create_node(None, None, NodeKind::Text).unwrap();
+        let snapshot = page.export_snapshot().unwrap();
+        let mut rows = page.scene_rows().unwrap();
+        let ok = PageDoc::load(&snapshot, Some(&rows)).unwrap();
+        assert!(ok.loaded_from_cache());
+        assert!(!ok.has_oversized_text());
+        // Строка кэша из файла несёт текст сверх предела: дерево Loro то же, кэш
+        // принимается, но страница должна стать «только для чтения».
+        let row = rows.iter_mut().find(|r| r.id == id).unwrap();
+        let mut data = (**row.props.text.as_ref().unwrap()).clone();
+        data.content = TextContent::plain(&"я".repeat(MAX_TEXT_CHARS + 1));
+        row.props.text = Some(Arc::new(data));
+        let bad = PageDoc::load(&snapshot, Some(&rows)).unwrap();
+        assert!(bad.loaded_from_cache());
+        assert!(bad.has_oversized_text());
     }
 
     #[test]
