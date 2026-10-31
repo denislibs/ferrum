@@ -235,6 +235,44 @@ fn over_limit_network_is_refused_without_a_step() {
 }
 
 #[test]
+fn invalid_network_from_an_edit_is_refused_with_a_message_without_a_node_id() {
+    // Правка редактора (например, «Сплющить» сверх 10 000 петель) — понятное
+    // сообщение без «Узел —».
+    let (mut doc, page, id) = doc_with_vector();
+    let mut net = VectorNetwork {
+        points: vec![VectorPoint::new(0.0, 0.0), VectorPoint::new(10.0, 0.0)],
+        segments: vec![VectorSegment::line(0, 1), VectorSegment::line(1, 0)],
+        regions: vec![],
+    };
+    net.regions = (0..=MAX_VECTOR_LOOPS)
+        .map(|_| VectorRegion {
+            rule: FillRule::NonZero,
+            loops: vec![vec![0, 1]],
+            fills: None,
+        })
+        .collect();
+    let err = doc
+        .transact(page, vec![id], |tx| {
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    vector: Some(Arc::new(net.clone())),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![id])
+        })
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(matches!(err, DocError::VectorRejected(_)), "{err:?}");
+    assert!(!text.contains('—') && !text.starts_with("Узел"), "{text}");
+    assert_eq!(
+        text,
+        "Правка вектора не применена: в векторе слишком много сегментов или областей"
+    );
+}
+
+#[test]
 fn invalid_network_in_file_hides_the_node_and_opens_read_only() {
     let (mut doc, page, id) = doc_with_vector();
     let p = doc.page(page).unwrap();

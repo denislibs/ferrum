@@ -42,7 +42,7 @@ fn check_vector(v: &VectorNetwork) -> DocResult<()> {
     match v.validate() {
         Ok(()) => Ok(()),
         Err(VectorError::TooManyPoints) => Err(DocError::VectorTooLarge),
-        Err(e) => Err(DocError::InvalidVector("—".into(), e)),
+        Err(e) => Err(DocError::VectorRejected(e)),
     }
 }
 
