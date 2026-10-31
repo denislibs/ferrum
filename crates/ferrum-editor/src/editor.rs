@@ -412,6 +412,7 @@ impl Editor {
             settings,
             out,
             tool,
+            fonts,
             ..
         } = self;
         (
@@ -426,6 +427,7 @@ impl Editor {
                 hover,
                 settings,
                 out,
+                fonts,
             },
         )
     }

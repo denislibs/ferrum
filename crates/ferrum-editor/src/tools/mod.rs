@@ -19,6 +19,7 @@ pub use text::TextTool;
 use ferrum_doc::{Changes, DocResult, Document, NodeId, PageId, Props, Tx};
 use ferrum_render::Camera;
 use ferrum_scene::Scene;
+use ferrum_text::SharedFonts;
 use kurbo::{Line, Point, Rect};
 
 use crate::editor::{EditorEvent, Settings};
@@ -145,6 +146,8 @@ pub struct Ctx<'a> {
     pub(crate) hover: &'a mut Option<NodeId>,
     pub(crate) settings: &'a Settings,
     pub(crate) out: &'a mut Outbox,
+    /// Реестр шрифтов: ресайз текста считает высоту по раскладке.
+    pub(crate) fonts: &'a SharedFonts,
 }
 
 /// Исходящее: события для интерфейса, счётчики.

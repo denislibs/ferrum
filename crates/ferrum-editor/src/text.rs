@@ -6,11 +6,12 @@
 //! Раскладке нужны байты шрифтов. Если какой-то шрифт ещё грузится, правка не
 //! делается: `TextPending` — ядро повторит её, когда шрифты придут.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrum_doc::{
-    DocError, DocResult, FontName, NodeId, NodeKind, Props, PropsPatch, TextContent, TextData,
-    TextProps, TextSizing, Tx,
+    DocError, FontName, NodeId, NodeKind, Props, PropsPatch, TextContent, TextData, TextProps,
+    TextSizing,
 };
 use ferrum_text::{FontStatus, Fonts, LayoutRequest, SharedFonts};
 use kurbo::Point;
@@ -128,30 +129,62 @@ pub(crate) fn fit_patch(
     Ok(patch)
 }
 
-/// Ресайз текста рамкой (ручки, поля W/H, масштаб группы) переводит его в
-/// `Fixed`: размер больше не по тексту. Этап 2 добавит правила Figma для
-/// горизонтального ресайза (`AutoHeight`) вместе с режимом размера в панели.
-pub(crate) fn sizing_after_resize(before: &Props, patch: &PropsPatch) -> PropsPatch {
-    let Some(t) = &before.text else {
-        return patch.clone();
-    };
-    let resized = patch.w.is_some_and(|w| w != before.w) || patch.h.is_some_and(|h| h != before.h);
-    if !resized || t.props.sizing == TextSizing::Fixed || patch.text.is_some() {
-        return patch.clone();
-    }
-    PropsPatch {
-        text: Some(TextProps {
-            sizing: TextSizing::Fixed,
-            ..t.props.clone()
-        }),
-        ..patch.clone()
+/// Режим размера текста после ресайза рамки — правила Figma: у «авто» только
+/// ширина (стороны слева и справа, поле W) — «авто по высоте» с новой шириной,
+/// иначе (высота, угол, масштаб группы) — фиксированный. `None` — размер не менялся.
+pub(crate) fn sizing_after_resize(
+    sizing: TextSizing,
+    width_changed: bool,
+    height_changed: bool,
+) -> Option<TextSizing> {
+    match (sizing, width_changed, height_changed) {
+        (_, false, false) | (TextSizing::Fixed, _, _) => None,
+        (_, true, false) => Some(TextSizing::AutoHeight),
+        _ => Some(TextSizing::Fixed),
     }
 }
 
-/// `set_props` с правилом ресайза текста (`sizing_after_resize`).
-pub(crate) fn set_props_resizing(tx: &Tx, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
-    let before = tx.props(id)?;
-    tx.set_props(id, &sizing_after_resize(&before, patch))
+/// Правила ресайза к правкам текстов жеста или панели (и к превью, и к записи):
+/// режим размера по `sizing_after_resize`, у «авто по высоте» — высота по
+/// раскладке при новой ширине (превью переносит строки сразу). `bases` —
+/// свойства узлов на начало жеста.
+pub(crate) fn resize_texts<'a>(
+    fonts: &mut Fonts,
+    bases: impl Iterator<Item = (NodeId, &'a Props)>,
+    patches: &mut [(NodeId, PropsPatch)],
+) {
+    let texts: HashMap<NodeId, &Props> = bases.filter(|(_, p)| p.text.is_some()).collect();
+    if texts.is_empty() {
+        return;
+    }
+    for (id, patch) in patches.iter_mut() {
+        let Some(before) = texts.get(id) else {
+            continue;
+        };
+        let Some(t) = before.text_props() else {
+            continue;
+        };
+        if patch.text.is_some() {
+            continue;
+        }
+        let dw = patch.w.is_some_and(|w| w != before.w);
+        let dh = patch.h.is_some_and(|h| h != before.h);
+        let Some(sizing) = sizing_after_resize(t.sizing, dw, dh) else {
+            continue;
+        };
+        patch.text = Some(TextProps {
+            sizing,
+            ..t.clone()
+        });
+        if sizing == TextSizing::AutoHeight {
+            let mut p = (*before).clone();
+            patch.apply_to(&mut p);
+            // Шрифт ещё грузится — высота прежняя, поправит следующая правка.
+            if let Ok(Some((_, h))) = fit_size(fonts, &p) {
+                patch.h = Some(h);
+            }
+        }
+    }
 }
 
 /// Новый шрифт участков после замены `from` → `to`: участок, набранный `from`

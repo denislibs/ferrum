@@ -24,6 +24,7 @@ use crate::selection::{
     top_hit, Pick,
 };
 use crate::snap::{Snapper, SNAP_THRESHOLD_PX};
+use crate::text::resize_texts;
 
 /// Двойной клик: не дольше 500 мс и не дальше 4 px от первого.
 pub const DOUBLE_CLICK_MS: f64 = 500.0;
@@ -540,11 +541,16 @@ impl SelectTool {
                 let new = resize_rect(r.sbox.rect, r.handle, local, mods.shift, mods.alt);
                 r.transform =
                     r.sbox.to_world * rect_map(r.sbox.rect, new) * r.sbox.to_world.inverse();
-                let patches = scale_patches_in(
+                let mut patches = scale_patches_in(
                     &r.bases,
                     r.transform,
                     r.sbox.to_world,
                     cx.settings.pixel_snap.into(),
+                );
+                resize_texts(
+                    &mut cx.fonts.borrow_mut(),
+                    r.bases.iter().map(|b| (b.id, &b.props)),
+                    &mut patches,
                 );
                 cx.scene.set_preview(&patches);
             }
@@ -625,11 +631,16 @@ impl SelectTool {
             State::Dragging(d) => commit_drag(cx, d, cx.to_world(e.point)),
             State::Marquee(_) => {}
             State::Resizing(r) => {
-                let patches = scale_patches_in(
+                let mut patches = scale_patches_in(
                     &r.bases,
                     r.transform,
                     r.sbox.to_world,
                     cx.settings.pixel_snap.into(),
+                );
+                resize_texts(
+                    &mut cx.fonts.borrow_mut(),
+                    r.bases.iter().map(|b| (b.id, &b.props)),
+                    &mut patches,
                 );
                 commit_patches(cx, patches);
             }
@@ -785,7 +796,7 @@ fn commit_patches(cx: &mut Ctx, patches: Vec<(NodeId, PropsPatch)>) {
     let sel = cx.selection.to_vec();
     cx.commit(|tx, _| {
         for (id, patch) in &patches {
-            crate::text::set_props_resizing(tx, *id, patch)?;
+            tx.set_props(*id, patch)?;
         }
         Ok(sel)
     });

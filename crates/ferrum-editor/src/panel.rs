@@ -22,6 +22,7 @@ use crate::geometry::{
 };
 use crate::ops::reposition;
 use crate::pages::clean_name;
+use crate::text::resize_texts;
 
 /// Числовое поле панели свойств.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -407,6 +408,13 @@ fn patches(g: &PanelGesture, edit: &PanelEdit) -> Vec<(NodeId, PropsPatch)> {
     out
 }
 
+/// Свойства узлов жеста панели на его начало (выделенные и дети групп).
+fn gesture_bases(g: &PanelGesture) -> impl Iterator<Item = (NodeId, &Props)> {
+    g.targets.iter().flat_map(|t| {
+        std::iter::once((t.id, &t.props)).chain(t.bases.iter().map(|b| (b.id, &b.props)))
+    })
+}
+
 /// Куда положить слои, перетащенные в панели слоёв (строки сверху вниз — от
 /// переднего плана к заднему).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,7 +459,9 @@ impl Editor {
                     self.cancel_gesture();
                     self.panel = Some(capture(&self.scene, &targets(self), deep));
                 }
-                let p = patches(self.panel.as_ref().expect("задан выше"), edit);
+                let g = self.panel.as_ref().expect("задан выше");
+                let mut p = patches(g, edit);
+                resize_texts(&mut self.fonts.borrow_mut(), gesture_bases(g), &mut p);
                 self.scene.set_preview(&p);
             }
             Phase::Commit => {
@@ -467,13 +477,14 @@ impl Editor {
                         capture(&self.scene, &targets(self), deep)
                     }
                 };
-                let p = patches(&g, edit);
+                let mut p = patches(&g, edit);
+                resize_texts(&mut self.fonts.borrow_mut(), gesture_bases(&g), &mut p);
                 self.scene.clear_preview();
                 if !p.is_empty() {
                     let selection = self.selection.to_vec();
                     self.ctx().commit(|tx, _| {
                         for (id, patch) in &p {
-                            crate::text::set_props_resizing(tx, *id, patch)?;
+                            tx.set_props(*id, patch)?;
                         }
                         Ok(selection)
                     });

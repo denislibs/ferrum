@@ -132,7 +132,7 @@ fn text_waits_for_fonts_and_changes_nothing_meanwhile() {
 }
 
 #[test]
-fn resizing_text_makes_it_fixed_in_one_step() {
+fn resizing_text_width_makes_it_auto_height_in_one_step() {
     let f = fonts(&FILES[..2]);
     let mut h = h_with(&f);
     let id =
@@ -156,7 +156,9 @@ fn resizing_text_makes_it_fixed_in_one_step() {
     );
     let after = text_of(&mut h, id);
     assert_eq!(after.w, 300.0);
-    assert_eq!(after.text_props().unwrap().sizing, TextSizing::Fixed);
+    // Только ширина — «авто по высоте» (правила Figma, этап 2); высота по тексту.
+    assert_eq!(after.text_props().unwrap().sizing, TextSizing::AutoHeight);
+    assert_eq!(after.h, before.h);
     assert_eq!(h.ed.step_count(), steps + 1);
     h.ed.execute(CommandId::Undo);
     assert_eq!(text_of(&mut h, id), before);
