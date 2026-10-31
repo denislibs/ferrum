@@ -4,18 +4,20 @@
 //! глифов из `skrifa`. О Loro и рендере не знает: получает `TextData` узла,
 //! отдаёт строки и глифы.
 
+mod caret;
 mod fonts;
 mod layout;
 pub mod style_name;
 
+pub use caret::{next_word_end, paragraph_range, prev_word_start, word_range, Caret};
 pub use ferrum_fontmeta::{group, read_faces, FaceInfo, FamilyInfo, MAX_FONT_FILE};
 pub use fonts::{
     font_units_per_em, glyph_outline, FontRequest, FontStatus, Fonts, Resolved, SharedFonts,
     SourceKind, FALLBACK_FAMILY, MAX_FAMILIES, MAX_FAMILY_NAME, MAX_FONT_MEMORY,
 };
 pub use layout::{
-    text_color, DecorationBox, Face, GlyphRun, LayoutRequest, LineBox, PlacedGlyph, TextLayout,
-    LIST_INDENT_EM,
+    text_color, CaretLine, DecorationBox, Face, GlyphRun, LayoutRequest, LineBox, PlacedGlyph,
+    TextLayout, LIST_INDENT_EM,
 };
 
 /// Onest (SIL OFL 1.1, `assets/fonts/OFL.txt`) вшит в wasm: им набраны подписи
