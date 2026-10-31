@@ -215,7 +215,13 @@ fn bend_moves_the_curve_point_under_the_cursor() {
         let before = segment_curve(&n, &n.segments[0]).eval(t);
         let after = segment_curve(&b, &b.segments[0]).eval(t);
         assert!(near(after, before + d, 1e-9), "t = {t}");
-        assert_eq!((b.points[0], b.points[1]), (n.points[0], n.points[1]));
+        // Концы стоят на месте; режим ручек у них — `Free` (см. следующий тест).
+        for i in 0..2 {
+            assert_eq!(
+                (b.points[i].x, b.points[i].y),
+                (n.points[i].x, n.points[i].y)
+            );
+        }
     }
 }
 
@@ -272,4 +278,118 @@ fn merge_offsets_indices_and_transforms_handles() {
         2.0 * b.segments[0].tangent_start[0]
     );
     assert!(m.validate().is_ok());
+}
+
+/// Закрашена ли точка сетью: сумма поворотов петель каждой области по её правилу.
+fn filled_at(n: &VectorNetwork, p: Point) -> bool {
+    use kurbo::Shape;
+    n.regions.iter().any(|r| {
+        let w: i32 = r
+            .loops
+            .iter()
+            .filter_map(|l| loop_path(n, l))
+            .map(|path| path.winding(p))
+            .sum();
+        match r.rule {
+            FillRule::NonZero => w != 0,
+            FillRule::EvenOdd => w.rem_euclid(2) == 1,
+        }
+    })
+}
+
+fn assert_round_trips(n: &VectorNetwork) {
+    assert!(n.validate().is_ok(), "{:?}", n.validate());
+    assert_eq!(&VectorNetwork::decode(&n.encode()).unwrap(), n);
+}
+
+#[test]
+fn paint_bucket_ignores_a_dangling_edge_inside_a_face() {
+    // Квадрат и «хвост» из угла внутрь: грань не заходит в хвост и обратно.
+    let sq = net(
+        &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+        &[(0, 1), (1, 2), (2, 3), (3, 0)],
+    );
+    let mut with_spur = sq.clone();
+    with_spur.points.push(VectorPoint::new(50.0, 50.0));
+    with_spur.segments.push(VectorSegment::line(0, 4));
+    let f = faces(&with_spur);
+    assert_eq!(f.len(), 1, "{f:?}");
+    let mut l = f[0].clone();
+    l.sort();
+    assert_eq!(l, vec![0, 1, 2, 3]);
+    let filled = toggle_fill(&with_spur, Point::new(70.0, 30.0), false).unwrap();
+    assert_eq!(filled.regions[0].loops[0].len(), 4);
+    assert_round_trips(&filled);
+}
+
+#[test]
+fn bend_then_dragging_the_handle_keeps_neighbours_straight() {
+    let rect = shape_network(&props(NodeKind::Rect, 100.0, 60.0)).unwrap();
+    let bent = bend(&rect, 0, 0.5, Vec2::new(0.0, -20.0));
+    let dragged = set_handle(&bent, 0, HandleEnd::Start, Vec2::new(30.0, -30.0), false);
+    for i in 1..4 {
+        assert!(dragged.segments[i].is_straight(), "сегмент {i}");
+    }
+    assert_round_trips(&dragged);
+}
+
+#[test]
+fn paint_bucket_empties_exactly_the_clicked_face_of_a_bigger_filled_loop() {
+    let mut sq = net(
+        &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+        &[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)],
+    );
+    sq.regions.push(VectorRegion {
+        rule: FillRule::NonZero,
+        loops: vec![vec![0, 1, 2, 3]],
+        fills: Some(vec![Fill::solid(Color::SHAPE_GRAY)]),
+    });
+    let (upper, lower) = (Point::new(70.0, 30.0), Point::new(30.0, 70.0));
+    assert!(filled_at(&sq, upper) && filled_at(&sq, lower));
+    let r = toggle_fill(&sq, upper, false).unwrap();
+    assert!(!filled_at(&r, upper));
+    assert!(filled_at(&r, lower));
+    assert_eq!(r.regions.len(), 1);
+    assert_eq!(r.regions[0].fills, sq.regions[0].fills);
+    assert_round_trips(&r);
+    // Повторный щелчок заливает грань снова.
+    let again = toggle_fill(&r, upper, false).unwrap();
+    assert!(filled_at(&again, upper) && filled_at(&again, lower));
+    assert_round_trips(&again);
+}
+
+#[test]
+fn paint_bucket_on_a_ring_clears_the_ring_not_the_hole() {
+    let mut n = net(
+        &[
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 100.0),
+            (0.0, 100.0),
+            (30.0, 30.0),
+            (70.0, 30.0),
+            (70.0, 70.0),
+            (30.0, 70.0),
+        ],
+        &[
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+        ],
+    );
+    n.regions.push(VectorRegion {
+        rule: FillRule::EvenOdd,
+        loops: vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7]],
+        fills: Some(vec![Fill::solid(Color::SHAPE_GRAY)]),
+    });
+    let (ring, hole) = (Point::new(10.0, 50.0), Point::new(50.0, 50.0));
+    assert!(filled_at(&n, ring) && !filled_at(&n, hole));
+    let r = toggle_fill(&n, ring, false).unwrap();
+    assert!(!filled_at(&r, ring) && !filled_at(&r, hole));
+    assert_round_trips(&r);
 }

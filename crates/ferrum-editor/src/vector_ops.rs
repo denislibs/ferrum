@@ -583,6 +583,14 @@ pub fn bend(net: &VectorNetwork, seg: usize, t: f64, d: Vec2) -> VectorNetwork {
     }
     s.tangent_start = arr(v2(s.tangent_start) + k);
     s.tangent_end = arr(v2(s.tangent_end) + k);
+    let (a, b) = (s.start as usize, s.end as usize);
+    // Концы без ручек остаются «углами»: ручка изгиба не должна зеркально
+    // искривлять соседние прямые стороны при последующей протяжке.
+    for i in [a, b] {
+        if out.points[i].handle_mode == HandleMode::None {
+            out.points[i].handle_mode = HandleMode::Free;
+        }
+    }
     out
 }
 
@@ -614,8 +622,35 @@ pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
         };
         (q - p).atan2()
     };
+    // Висячие сегменты (с концом степени 1) не ограничивают грань — обход
+    // вошёл бы в них и вышел обратно, повторив сегмент: отбрасываем их до
+    // обхода, пока такие находятся.
+    let mut active = vec![true; n];
+    loop {
+        let mut degree: HashMap<u32, usize> = HashMap::new();
+        for s in net
+            .segments
+            .iter()
+            .zip(&active)
+            .filter(|(_, a)| **a)
+            .map(|(s, _)| s)
+        {
+            *degree.entry(s.start).or_default() += 1;
+            *degree.entry(s.end).or_default() += 1;
+        }
+        let mut changed = false;
+        for (i, s) in net.segments.iter().enumerate() {
+            if active[i] && (degree[&s.start] == 1 || degree[&s.end] == 1) {
+                active[i] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     let mut out_of: HashMap<u32, Vec<usize>> = HashMap::new();
-    for h in 0..2 * n {
+    for h in (0..2 * n).filter(|h| active[h / 2]) {
         out_of.entry(from(h)).or_default().push(h);
     }
     for list in out_of.values_mut() {
@@ -623,7 +658,7 @@ pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
     }
     let mut seen = vec![false; 2 * n];
     let mut result = Vec::new();
-    for start in 0..2 * n {
+    for start in (0..2 * n).filter(|h| active[h / 2]) {
         if seen[start] {
             continue;
         }
@@ -687,37 +722,100 @@ pub fn loop_path(net: &VectorNetwork, l: &[u32]) -> Option<BezPath> {
     Some(path)
 }
 
+/// Закрашена ли точка областью: сумма поворотов её петель по её правилу.
+fn region_covers(net: &VectorNetwork, r: &VectorRegion, p: Point) -> bool {
+    let w: i32 = r
+        .loops
+        .iter()
+        .filter_map(|l| loop_path(net, l))
+        .map(|path| path.winding(p))
+        .sum();
+    match r.rule {
+        FillRule::NonZero => w != 0,
+        FillRule::EvenOdd => w.rem_euclid(2) == 1,
+    }
+}
+
+/// Точка внутри грани `face`, не лежащая ни в одной из `smaller` (более мелких
+/// граней — вложенных частей): перебор сетки по рамке, всё гуще.
+fn interior_point(path: &BezPath, smaller: &[BezPath]) -> Option<Point> {
+    let b = path.bounding_box();
+    for n in [8u32, 32, 128] {
+        for iy in 0..n {
+            for ix in 0..n {
+                let p = Point::new(
+                    b.x0 + b.width() * (ix as f64 + 0.5) / n as f64,
+                    b.y0 + b.height() * (iy as f64 + 0.5) / n as f64,
+                );
+                if path.winding(p) != 0 && smaller.iter().all(|s| s.winding(p) == 0) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// «Заливка области» (B) в точке `at` (координаты сети): самая маленькая грань
-/// под точкой. Залита петлёй какой-то области — заливка снимается (петля
-/// уходит), иначе — новая область с заливками узла (у узла без заливок — серая,
-/// как у новой фигуры). `None` — под точкой нет замкнутой грани.
+/// под точкой. Если под точкой что-то залито, заливка снимается ровно с этой
+/// грани: каждая область, закрашивающая точку, заменяется областью из остальных
+/// граней сети, которые она закрашивала (с теми же заливками; грани не
+/// перекрываются, поэтому правило — `NonZero`). Иначе — новая область с
+/// заливками узла (у узла без заливок — серая, как у новой фигуры). `None` —
+/// под точкой нет замкнутой грани. Предел: грань, вложенная внутрь другой
+/// закрашенной грани той же области, при снятии заливки внешней не вычитается.
 pub fn toggle_fill(net: &VectorNetwork, at: Point, node_has_fills: bool) -> Option<VectorNetwork> {
-    let face = faces(net)
+    let all: Vec<(Vec<u32>, BezPath)> = faces(net)
         .into_iter()
         .filter_map(|f| {
             let path = loop_path(net, &f)?;
-            (path.winding(at) != 0).then(|| (path.area().abs(), f))
+            Some((f, path))
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0))?
-        .1;
-    let key: HashSet<u32> = face.iter().copied().collect();
+        .collect();
+    let clicked = all
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, path))| path.winding(at) != 0)
+        .min_by(|a, b| a.1 .1.area().abs().total_cmp(&b.1 .1.area().abs()))?
+        .0;
     let mut out = net.clone();
-    let mut removed = false;
-    for r in &mut out.regions {
-        let before = r.loops.len();
-        r.loops
-            .retain(|l| l.iter().copied().collect::<HashSet<u32>>() != key);
-        removed |= r.loops.len() != before;
-    }
-    if removed {
+    if net.regions.iter().any(|r| region_covers(net, r, at)) {
+        // Внутренние точки остальных граней — по ним решаем, что осталось залитым.
+        let inner: Vec<Option<Point>> = all
+            .iter()
+            .enumerate()
+            .map(|(i, (_, path))| {
+                let smaller: Vec<BezPath> = all
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, (_, p))| *j != i && p.area().abs() < path.area().abs())
+                    .map(|(_, (_, p))| p.clone())
+                    .collect();
+                interior_point(path, &smaller)
+            })
+            .collect();
+        for (r, old) in out.regions.iter_mut().zip(&net.regions) {
+            if !region_covers(net, old, at) {
+                continue;
+            }
+            r.rule = FillRule::NonZero;
+            r.loops = all
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != clicked)
+                .filter(|(i, _)| inner[*i].is_some_and(|p| region_covers(net, old, p)))
+                .map(|(_, (f, _))| f.clone())
+                .collect();
+        }
         out.regions.retain(|r| !r.loops.is_empty());
-        return Some(out);
+    } else {
+        out.regions.push(VectorRegion {
+            rule: FillRule::NonZero,
+            loops: vec![all[clicked].0.clone()],
+            fills: (!node_has_fills).then(|| vec![Fill::solid(Color::SHAPE_GRAY)]),
+        });
     }
-    out.regions.push(VectorRegion {
-        rule: FillRule::NonZero,
-        loops: vec![face],
-        fills: (!node_has_fills).then(|| vec![Fill::solid(Color::SHAPE_GRAY)]),
-    });
+    debug_assert!(out.validate().is_ok(), "{:?}", out.validate());
     Some(out)
 }
 
