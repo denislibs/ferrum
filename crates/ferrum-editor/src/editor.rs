@@ -30,7 +30,7 @@ use crate::tools::{
     sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, TextTool,
     Tool, ToolKind, ToolOverlay,
 };
-use crate::vector_edit::{VectorEdit, VectorTool};
+use crate::vector_edit::{Drag, VectorEdit, VectorTool};
 
 /// Раскладка правимого текста и её ключ: узел, версия узла, поколение шрифтов.
 pub(crate) type EditLayout = ((NodeId, u64, u64), Arc<TextLayout>);
@@ -411,6 +411,9 @@ impl Editor {
         // привязки — её.
         let vector = self.vector_overlay();
         if let Some(v) = &self.vector_edit {
+            if let Some(Drag::Marquee { rect, .. }) = &v.drag {
+                t.marquee = *rect;
+            }
             t.snap_lines = v.snap_lines.clone();
         }
         let editing = text.is_some() || self.vector_edit.is_some();
@@ -712,6 +715,10 @@ impl Editor {
         {
             if let [id] = self.selection[..] {
                 if self.start_text_edit(id, EnterAt::All) {
+                    return;
+                }
+                // Enter по вектору или фигуре — правка вектора (как в Figma).
+                if self.start_vector_edit(id) {
                     return;
                 }
             }

@@ -24,7 +24,7 @@ use ferrum_doc::{
 use ferrum_render::VectorEditOverlay;
 use ferrum_scene::shape::local_transform;
 use ferrum_scene::Draft;
-use kurbo::{Affine, Line, Point, Vec2};
+use kurbo::{Affine, Line, Point, Rect, Vec2};
 
 use crate::editor::{Editor, EditorEvent};
 use crate::geometry::{decompose_with, snap_angle};
@@ -65,7 +65,9 @@ impl VectorSelection {
 
     /// Точки, которые двигает перетаскивание: выделенные и концы выделенных сегментов.
     pub fn moving_points(&self, net: &VectorNetwork) -> Vec<u32> {
-        let mut out: BTreeSet<u32> = self.points.clone();
+        let mut out: BTreeSet<u32> = (self.points.iter().copied())
+            .filter(|&i| (i as usize) < net.points.len())
+            .collect();
         for &s in &self.segments {
             if let Some(seg) = net.segments.get(s as usize) {
                 out.insert(seg.start);
@@ -76,7 +78,7 @@ impl VectorSelection {
     }
 
     /// Убирает номера за пределами сети (после отмены или чужой правки).
-    fn clamp(&mut self, net: &VectorNetwork) {
+    pub(crate) fn clamp(&mut self, net: &VectorNetwork) {
         let (p, s) = (net.points.len() as u32, net.segments.len() as u32);
         self.points.retain(|&i| i < p);
         self.segments.retain(|&i| i < s);
@@ -109,6 +111,34 @@ pub(crate) struct PenPath {
 /// Перетаскивание в правке.
 #[derive(Debug, Clone)]
 pub(crate) enum Drag {
+    /// Точки (и концы выделенных сегментов): `anchor` — точка под курсором в
+    /// мире, по ней — привязки.
+    Points {
+        start_screen: Point,
+        start_world: Point,
+        anchor: Point,
+        origin: VectorNetwork,
+        moved: bool,
+    },
+    /// Ручка сегмента.
+    Handle {
+        seg: usize,
+        end: HandleEnd,
+        origin: VectorNetwork,
+    },
+    /// Изгиб сегмента (Ctrl/Cmd).
+    Bend {
+        seg: usize,
+        t: f64,
+        start_world: Point,
+        origin: VectorNetwork,
+    },
+    /// Рамка выделения точек.
+    Marquee {
+        start_world: Point,
+        base: VectorSelection,
+        rect: Option<Rect>,
+    },
     /// Протяжка пера: ручки только что поставленной точки.
     PenHandle {
         point: u32,
@@ -158,16 +188,22 @@ pub(crate) struct VectorEdit {
 }
 
 impl VectorEdit {
-    fn to_shape(&self, world: Point) -> Point {
+    pub(crate) fn to_shape(&self, world: Point) -> Point {
         self.world.inverse() * world
     }
 
-    fn to_world(&self, p: Point) -> Point {
+    pub(crate) fn to_world(&self, p: Point) -> Point {
         self.world * p
+    }
+
+    /// Линейная часть мир → форма (для сдвигов).
+    pub(crate) fn vec_to_shape(&self, v: Vec2) -> Vec2 {
+        let inv = self.world.inverse();
+        (inv * v.to_point()) - (inv * Point::ZERO)
     }
 }
 
-fn point_of(net: &VectorNetwork, i: u32) -> Point {
+pub(crate) fn point_of(net: &VectorNetwork, i: u32) -> Point {
     let p = &net.points[i as usize];
     Point::new(p.x, p.y)
 }
@@ -768,6 +804,8 @@ impl Editor {
                 v.work.points.pop();
             }
         }
+        // Выделение не ссылается на убранные точки.
+        v.sel.clamp(&v.work);
         if v.id.is_none() && v.work.segments.is_empty() {
             v.pen.dirty = false;
             v.work = VectorNetwork::default();
@@ -821,6 +859,7 @@ impl Editor {
             v.work.segments.truncate(s as usize);
         }
         v.work.points.pop();
+        v.sel.clamp(&v.work);
         v.pen.last = prev;
         v.pen.pending_out = None;
         v.sel = VectorSelection {
@@ -848,33 +887,66 @@ impl Editor {
                 self.pen_pointer_down(e);
                 true
             }
-            _ => {
-                self.end_vector_edit();
-                false
+            Some(VectorTool::Bucket) => {
+                self.bucket_click(e);
+                true
             }
+            Some(VectorTool::Select) => self.vector_select_down(e),
+            None => false,
         }
     }
 
     /// Движение указателя в правке (с кнопкой и без).
     pub(crate) fn vector_pointer_move(&mut self, e: &PointerEvent) {
-        if self.vector_tool() == Some(VectorTool::Pen) {
-            self.pen_pointer_move(e);
+        match self.vector_tool() {
+            Some(VectorTool::Pen) => self.pen_pointer_move(e),
+            Some(VectorTool::Select) => self.vector_select_move(e),
+            _ => {}
         }
     }
 
     /// Отпускание кнопки в правке.
-    pub(crate) fn vector_pointer_up(&mut self, _e: &PointerEvent) {
-        if self.vector_tool() == Some(VectorTool::Pen) {
-            self.pen_pointer_up();
+    pub(crate) fn vector_pointer_up(&mut self, e: &PointerEvent) {
+        match self.vector_tool() {
+            Some(VectorTool::Pen) => self.pen_pointer_up(),
+            Some(VectorTool::Select) => self.vector_select_up(e),
+            _ => {}
         }
     }
 
     /// Клавиша в правке. `false` — не её: дальше по раскладке.
     pub(crate) fn vector_key(&mut self, e: &KeyEvent) -> bool {
         let plain = e.modifiers == Modifiers::NONE || e.modifiers == Modifiers::SHIFT;
+        // Во время жеста — только модификаторы; Esc отменяет жест.
+        if self.vector_edit.as_ref().is_some_and(|v| v.drag.is_some()) {
+            if e.code == "Escape" {
+                self.cancel_vector_drag();
+            }
+            return true;
+        }
         match e.code.as_str() {
             "Escape" | "Enter" | "NumpadEnter" if plain && !e.repeat => {
                 self.vector_escape();
+                true
+            }
+            // Shift+Delete — удаление с разрывом (без Shift — команда раскладки).
+            "Delete" | "Backspace" if e.modifiers == Modifiers::SHIFT => {
+                self.vector_delete(true);
+                true
+            }
+            // «Заливка области»: B включает и выключает её.
+            "KeyB" if e.modifiers == Modifiers::NONE && !e.repeat => {
+                // У нового пути пера областей ещё нет.
+                if self.vector_edit_node().is_some() {
+                    self.finish_pen_path();
+                    if let Some(v) = &mut self.vector_edit {
+                        v.tool = if v.tool == VectorTool::Bucket {
+                            VectorTool::Select
+                        } else {
+                            VectorTool::Bucket
+                        };
+                    }
+                }
                 true
             }
             _ => false,
@@ -892,7 +964,8 @@ impl Editor {
             self.exit_pen_tool();
             return;
         }
-        if v.tool == VectorTool::Pen && (v.pen.last.is_some() || v.pen.dirty) {
+        if v.tool != VectorTool::Select {
+            // Перо и заливка области — к выделению точек (путь пера записан).
             self.finish_pen_path();
             if let Some(v) = &mut self.vector_edit {
                 v.tool = VectorTool::Select;
@@ -908,8 +981,17 @@ impl Editor {
         let Some(v) = &mut self.vector_edit else {
             return;
         };
-        v.drag = None;
-        v.snap_lines.clear();
+        match v.drag.take() {
+            Some(Drag::Points { origin, .. })
+            | Some(Drag::Handle { origin, .. })
+            | Some(Drag::Bend { origin, .. }) => {
+                v.work = origin;
+                v.snap_lines.clear();
+                self.scene.clear_preview();
+            }
+            Some(Drag::Marquee { base, .. }) => v.sel = base,
+            Some(Drag::PenHandle { .. }) | None => {}
+        }
     }
 
     /// Курсор над холстом в правке.

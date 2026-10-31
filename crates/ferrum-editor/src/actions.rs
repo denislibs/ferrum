@@ -37,6 +37,15 @@ enum Arrange {
 impl Editor {
     pub(crate) fn run(&mut self, cmd: CommandId) {
         use CommandId as C;
+        // Правка вектора перехватывает свои команды (удаление, сдвиг, Esc…).
+        if self.vector_edit.is_some() && self.vector_command(cmd) {
+            return;
+        }
+        // Сохранение пишет и открытый путь пера; остальные невидовые команды
+        // правка уже закончила в `vector_command`.
+        if cmd == C::Save {
+            self.finish_pen_path();
+        }
         match cmd {
             C::ToolMove => self.set_tool(ToolKind::Move),
             C::ToolFrame => self.set_tool(ToolKind::Frame),
