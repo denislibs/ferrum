@@ -28,6 +28,15 @@ export const MAX_FAMILY_NAME = 256;
 export const MAX_FONT_FAMILIES = 4096;
 export const MAX_FONT_FACES = 1000;
 
+/** Правка текста: размер шрифта 1…10 000, интерлиньяж и трекинг в пикселях, интервал и отступ
+ * абзаца — как `MAX_FONT_SIZE` ядра. Ядро значения вне пределов отклоняет ошибкой, поэтому
+ * секция «Текст» зажимает всё, что шлёт, этими же числами. Проценты ядро держит литералами
+ * в `core/text.rs` (интерлиньяж 0…10 000, трекинг ±1000). */
+export const MIN_FONT_SIZE = 1;
+export const MAX_FONT_SIZE = 10_000;
+export const MAX_LINE_HEIGHT_PERCENT = 10_000;
+export const MAX_LETTER_SPACING_PERCENT = 1000;
+
 /** Мегабайты с округлением вверх: «предел 64 МБ, получено 64 МБ» сбивало бы с толку. */
 export const mb = (bytes: number): number => Math.ceil(bytes / MIB);
 /** Килобайты с округлением вверх. */

@@ -9,9 +9,12 @@ import {
   MAX_FONT_BYTES,
   MAX_FONT_FACES,
   MAX_FONT_FAMILIES,
+  MAX_FONT_SIZE,
   MAX_IMAGE_SIDE,
   MAX_JOURNAL_ENTRIES,
   MAX_KEYMAP_BYTES,
+  MAX_LETTER_SPACING_PERCENT,
+  MAX_LINE_HEIGHT_PERCENT,
   MAX_NAME_CHARS,
   MAX_SETTINGS_BYTES,
   tooLarge,
@@ -23,7 +26,7 @@ const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8'
 function rustConst(file: string, name: string): number {
   const m = new RegExp(`pub const ${name}: \\w+ = ([^;]+);`).exec(read(file));
   if (!m) throw new Error(`нет ${name} в ${file}`);
-  const expr = m[1].replace(/_/g, '').trim();
+  const expr = m[1].replace(/_/g, '').replace(/\.0$/, '').trim();
   const shift = /^(\d+)\s*<<\s*(\d+)$/.exec(expr);
   if (shift) return Number(shift[1]) * 2 ** Number(shift[2]);
   if (!/^\d+(\s*\*\s*\d+)*$/.test(expr)) throw new Error(`не разобрать ${name} = ${expr}`);
@@ -45,6 +48,11 @@ test('пределы совпадают с константами ядра', () 
   expect(rustConst(`${CRATES}ferrum-text/src/fonts.rs`, 'MAX_FAMILY_NAME')).toBe(MAX_FAMILY_NAME);
   expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_FAMILIES')).toBe(MAX_FONT_FAMILIES);
   expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_FACES')).toBe(MAX_FONT_FACES);
+  // Правка текста: ядро отклоняет значения вне пределов, секция «Текст» зажимает теми же числами.
+  expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_SIZE')).toBe(MAX_FONT_SIZE);
+  const text = read(`${CRATES}ferrum-wasm/src/core/text.rs`);
+  expect(text).toContain(`finite_in(d.value, 0.0, ${MAX_LINE_HEIGHT_PERCENT}.0`.replace(/(\d)(?=(\d{3})+\.)/g, '$1_'));
+  expect(text).toContain(`finite_in(d.value, -${MAX_LETTER_SPACING_PERCENT}.0, ${MAX_LETTER_SPACING_PERCENT}.0`);
   // Десктоп отдаёт список системных шрифтов уже в этих пределах.
   const desktop = '../../desktop/src-tauri/src/fonts.rs';
   expect(rustConst(desktop, 'MAX_FONT_FAMILIES')).toBe(MAX_FONT_FAMILIES);

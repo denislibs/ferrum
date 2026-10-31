@@ -15,6 +15,7 @@ import { NumberField, type EditTarget } from './number-field';
 import type { FieldInput } from './number';
 import { MissingFontsSection } from './missing-fonts';
 import { FillsSection, PageSection, StrokesSection } from './paints';
+import { TextSection } from './text-section';
 
 /** Правка; `target` — кого правят с начала жеста (без него — текущее выделение). */
 export function sendEdit(
@@ -56,14 +57,25 @@ export function PropertiesPanel(props: { theme: 'dark' | 'light' }) {
       <Show
         when={count() > 0}
         fallback={
-          <>
-            <MissingFontsSection />
-            <PageSection theme={props.theme} />
-          </>
+          <Show
+            when={ed.store.state.text.editing && ed.store.state.textStyle}
+            fallback={
+              <>
+                <MissingFontsSection />
+                <PageSection theme={props.theme} />
+              </>
+            }
+          >
+            {/* Новый текст (инструмент T) до первого символа: стиль — заранее. */}
+            <TextSection />
+          </Show>
         }
       >
         <PositionSection edit={edit} val={val} />
         <AppearanceSection edit={edit} />
+        <Show when={ed.store.state.textStyle}>
+          <TextSection />
+        </Show>
         <FillsSection />
         <StrokesSection />
       </Show>

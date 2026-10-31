@@ -2,7 +2,8 @@
 // страницы, которых нет ни во вшитых, ни в системных, с заменой одним действием
 // (одна правка — один шаг отмены). Список и каталог семейств присылает ядро;
 // панель показывает их и шлёт `replaceMissingFont`. Как в Figma — на панели
-// «Дизайн» без выделения.
+// «Дизайн» без выделения. «Показать системные шрифты» — в выборе шрифта секции
+// «Текст» (этап 2).
 
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import type { FontChoice, MissingFontDto } from '../wasm/ferrum_wasm';
@@ -74,16 +75,10 @@ export function MissingFontsSection() {
   const ed = useEditor();
   const list = () => ed.store.state.missingFonts;
   const catalog = createMemo(() => [...ed.store.state.fontCatalog].sort((a, b) => a.family.localeCompare(b.family)));
-  const sys = () => ed.store.state.systemFonts;
   return (
     <Show when={list().length > 0}>
       <Section title={`Отсутствующие шрифты (${list().length})`}>
         <For each={list()}>{(f) => <MissingRow font={f} catalog={catalog()} />}</For>
-        <Show when={sys().supported && !sys().shown}>
-          <button class="fe-btn fe-btn--soft fe-btn--wide" onClick={() => ed.showSystemFonts()}>
-            Показать системные шрифты
-          </button>
-        </Show>
       </Section>
     </Show>
   );
