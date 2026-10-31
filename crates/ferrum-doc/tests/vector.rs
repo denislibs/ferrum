@@ -252,3 +252,30 @@ fn invalid_network_in_file_hides_the_node_and_opens_read_only() {
         assert!(reopened.walk().is_empty(), "узел с неверной сетью скрыт");
     }
 }
+
+#[test]
+fn containers_and_text_cannot_be_converted_to_a_vector() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let ids = doc
+        .transact(page, vec![], |tx| {
+            let frame = tx.create_node(None, None, NodeKind::Frame)?;
+            let group = tx.create_node(None, None, NodeKind::Group)?;
+            let text = tx.create_node(None, None, NodeKind::Text)?;
+            Ok(vec![frame, group, text])
+        })
+        .unwrap();
+    for id in ids {
+        let err = doc.transact(page, vec![], |tx| {
+            tx.convert_to_vector(id, Arc::new(triangle()))?;
+            Ok(vec![])
+        });
+        match err {
+            Err(DocError::NotConvertible(s)) => assert_eq!(s, id.to_string()),
+            other => panic!("{other:?}"),
+        }
+        assert!(DocError::NotConvertible(id.to_string())
+            .to_string()
+            .contains("нельзя превратить в вектор"));
+    }
+}

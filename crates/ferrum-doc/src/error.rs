@@ -32,6 +32,8 @@ pub enum DocError {
     Corrupted(String),
     #[error("Узел {0} — не текст")]
     NotText(String),
+    #[error("Узел {0} нельзя превратить в вектор")]
+    NotConvertible(String),
     #[error("Текст длиннее 100 000 символов — правка не применена")]
     TextTooLong,
     #[error("В тексте больше 10 000 участков со стилями — правка не применена")]

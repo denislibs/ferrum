@@ -8,6 +8,7 @@ mod actions;
 pub mod clipboard;
 pub mod commands;
 mod editor;
+mod flatten;
 pub mod geometry;
 pub mod input;
 pub mod keymap;

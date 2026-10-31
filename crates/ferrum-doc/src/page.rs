@@ -646,7 +646,7 @@ impl PageDoc {
     ) -> DocResult<()> {
         let before = self.props(id)?;
         if before.text.is_some() || matches!(before.kind, NodeKind::Frame | NodeKind::Group) {
-            return Err(DocError::NotText(id.to_string()));
+            return Err(DocError::NotConvertible(id.to_string()));
         }
         check_vector(&net)?;
         let mut after = before;

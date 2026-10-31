@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use ferrum_doc::{Fill, NodeId, NodeKind, Props, PropsPatch, Stroke};
+use ferrum_doc::{Fill, NodeId, NodeKind, Props, PropsPatch, Stroke, StrokeCap, StrokeJoin};
 use ferrum_scene::shape::COORD_LIMIT;
 use ferrum_scene::{Scene, Slot};
 use kurbo::{Affine, Point, Rect};
@@ -58,6 +58,14 @@ pub enum PanelEdit {
     ClipContent(bool),
     /// Ширина и высота сразу (пресет фрейма) — одним шагом.
     Size { w: f64, h: f64 },
+    /// Стиль обводки: окончания начала и конца, соединение, предел острого
+    /// угла (`None` — не трогать). У групп и текста стиля нет — пропускаются.
+    StrokeStyle {
+        cap_start: Option<StrokeCap>,
+        cap_end: Option<StrokeCap>,
+        join: Option<StrokeJoin>,
+        miter_limit: Option<f64>,
+    },
 }
 
 /// Фаза правки: превью жеста, запись одним шагом или отмена жеста.
@@ -363,6 +371,25 @@ fn patches(g: &PanelGesture, edit: &PanelEdit) -> Vec<(NodeId, PropsPatch)> {
                         t.id,
                         PropsPatch {
                             fills: Some(fills.clone()),
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+            PanelEdit::StrokeStyle {
+                cap_start,
+                cap_end,
+                join,
+                miter_limit,
+            } => {
+                if kind != NodeKind::Group && kind != NodeKind::Text {
+                    out.push((
+                        t.id,
+                        PropsPatch {
+                            stroke_cap_start: *cap_start,
+                            stroke_cap_end: *cap_end,
+                            stroke_join: *join,
+                            stroke_miter_limit: *miter_limit,
                             ..Default::default()
                         },
                     ));

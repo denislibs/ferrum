@@ -57,6 +57,8 @@ impl Editor {
             C::ToolHand => self.set_tool(ToolKind::Hand),
             C::ToolText => self.set_tool(ToolKind::Text),
             C::ToolPen => self.set_tool(ToolKind::Pen),
+            C::ToolArrow => self.set_tool(ToolKind::Arrow),
+            C::Flatten => self.flatten(),
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
@@ -182,7 +184,7 @@ impl Editor {
     }
 
     /// Выделение верхнего уровня в порядке отрисовки, снизу вверх.
-    fn ordered_selection(&self) -> Vec<NodeId> {
+    pub(crate) fn ordered_selection(&self) -> Vec<NodeId> {
         let mut ids: Vec<(Vec<u32>, NodeId)> = top_level(&self.scene, &self.selection)
             .into_iter()
             .filter_map(|id| self.scene.slot(id).map(|s| (self.scene.order_key(s), id)))

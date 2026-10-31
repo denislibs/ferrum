@@ -813,6 +813,7 @@ impl Editor {
             ToolKind::Rect => Box::new(DrawTool::new(Shape::Rect)),
             ToolKind::Ellipse => Box::new(DrawTool::new(Shape::Ellipse)),
             ToolKind::Line => Box::new(DrawTool::new(Shape::Line)),
+            ToolKind::Arrow => Box::new(DrawTool::new(Shape::Arrow)),
             ToolKind::Hand => Box::new(HandTool::new()),
             ToolKind::Text => Box::new(TextTool::new()),
             ToolKind::Pen => Box::new(SelectTool::new()),
