@@ -283,7 +283,7 @@ impl Document {
             // иначе страница пропала бы из документа и не попала бы в сохранение.
             let page = PageDoc::load(&u.snapshot, u.scene.as_deref())?;
             // Узлы неизвестного типа скрыты от модели; правка могла бы их потерять.
-            if page.has_unknown_nodes() {
+            if page.has_unknown_nodes() || page.has_oversized_text() {
                 self.read_only = true;
             }
             self.unloaded.remove(&id);
@@ -525,7 +525,7 @@ impl Document {
                 Ok(complete) => lost |= !complete,
                 Err(_) => lost = true,
             }
-            if page.has_unknown_nodes() {
+            if page.has_unknown_nodes() || page.has_oversized_text() {
                 self.read_only = true;
             }
         }

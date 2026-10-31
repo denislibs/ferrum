@@ -345,6 +345,66 @@ impl TextContent {
         out
     }
 
+    /// Участки диапазона символов `range` (фрагмент: перевод строки в конце не
+    /// добавляется). Диапазон за концом текста обрезается.
+    pub fn slice(&self, range: std::ops::Range<usize>) -> Vec<TextRun> {
+        let mut out: Vec<TextRun> = Vec::new();
+        let mut at = 0;
+        for r in &self.runs {
+            let n = r.text.chars().count();
+            let (lo, hi) = (range.start.max(at), range.end.min(at + n));
+            if lo < hi {
+                let text: String = r.text.chars().skip(lo - at).take(hi - lo).collect();
+                match out.last_mut() {
+                    Some(last) if last.attrs == r.attrs => last.text.push_str(&text),
+                    _ => out.push(TextRun {
+                        text,
+                        attrs: r.attrs.clone(),
+                    }),
+                }
+            }
+            at += n;
+            if at >= range.end {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Разметка символа в позиции `at`; за концом — разметка последнего символа
+    /// (перевода строки).
+    pub fn attrs_at(&self, at: usize) -> &TextAttrs {
+        static PLAIN: std::sync::OnceLock<TextAttrs> = std::sync::OnceLock::new();
+        let mut pos = 0;
+        for r in &self.runs {
+            let n = r.text.chars().count();
+            if at < pos + n {
+                return &r.attrs;
+            }
+            pos += n;
+        }
+        self.runs
+            .last()
+            .map(|r| &r.attrs)
+            .unwrap_or_else(|| PLAIN.get_or_init(TextAttrs::default))
+    }
+
+    /// Соседние участки с одной разметкой сливаются, пустые выбрасываются: так
+    /// содержимое из буфера обмена или панели сравнивается с документом.
+    pub fn normalize(&mut self) {
+        let mut out: Vec<TextRun> = Vec::with_capacity(self.runs.len());
+        for r in std::mem::take(&mut self.runs) {
+            if r.text.is_empty() {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last) if last.attrs == r.attrs => last.text.push_str(&r.text),
+                _ => out.push(r),
+            }
+        }
+        self.runs = out;
+    }
+
     /// Границы участков в символах, по порядку.
     pub fn run_ranges(&self) -> Vec<std::ops::Range<usize>> {
         let mut at = 0;

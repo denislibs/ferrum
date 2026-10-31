@@ -26,7 +26,9 @@ use crate::codec;
 use crate::error::{DocError, DocResult};
 use crate::loro_ext;
 use crate::scene_cache::SceneRow;
-use crate::text::{AttrKey, TextAttrs, TextContent, TextData, MAX_TEXT_CHARS, MAX_TEXT_RUNS};
+use crate::text::{
+    AttrKey, TextAttrs, TextContent, TextData, TextRun, MAX_TEXT_CHARS, MAX_TEXT_RUNS,
+};
 use crate::text_codec;
 use crate::types::*;
 
@@ -112,6 +114,9 @@ pub struct PageDoc {
     journal: RefCell<Option<Vec<Inverse>>>,
     /// При загрузке встретились узлы неизвестного типа (см. `rebuild_from_loro`).
     unknown_nodes: Cell<bool>,
+    /// Есть текст сверх пределов (спека 3): из файла чужой или старой сборки.
+    /// Правка такого текста нарушила бы пределы, поэтому документ — только для чтения.
+    oversized_text: Cell<bool>,
     /// Изображения, на которые ссылаются скрытые узлы неизвестного типа и их
     /// потомки. Зеркало их не видит, но при сохранении эти байты терять нельзя.
     hidden_refs: RefCell<Vec<String>>,
@@ -196,6 +201,7 @@ impl PageDoc {
             state: RefCell::default(),
             journal: RefCell::default(),
             unknown_nodes: Cell::default(),
+            oversized_text: Cell::default(),
             hidden_refs: RefCell::default(),
             from_cache: Cell::default(),
         }
@@ -226,6 +232,7 @@ impl PageDoc {
     fn rebuild_from_loro(&self) -> DocResult<()> {
         let mut state = State::default();
         let mut unknown = false;
+        let mut oversized = false;
         let mut hidden_refs = Vec::new();
         let mut stack = self.tree.children(TreeParentId::Root).unwrap_or_default();
         while let Some(tid) = stack.pop() {
@@ -239,6 +246,10 @@ impl PageDoc {
                 }
                 Err(e) => return Err(e),
             };
+            oversized |= props
+                .text
+                .as_ref()
+                .is_some_and(|t| t.content.check_limits().is_err());
             state.insert(id, tid, props);
             stack.extend(
                 self.tree
@@ -248,6 +259,7 @@ impl PageDoc {
         }
         *self.state.borrow_mut() = state;
         self.unknown_nodes.set(unknown);
+        self.oversized_text.set(oversized);
         hidden_refs.sort();
         hidden_refs.dedup();
         *self.hidden_refs.borrow_mut() = hidden_refs;
@@ -278,6 +290,22 @@ impl PageDoc {
     /// Есть ли на странице узлы неизвестного типа, скрытые от модели.
     pub fn has_unknown_nodes(&self) -> bool {
         self.unknown_nodes.get()
+    }
+
+    /// Есть ли на странице текст сверх пределов (`MAX_TEXT_CHARS`, `MAX_TEXT_RUNS`).
+    pub fn has_oversized_text(&self) -> bool {
+        self.oversized_text.get()
+    }
+
+    /// Только для тестов: текст узла в Loro без проверки пределов (как в файле
+    /// чужой сборки).
+    #[doc(hidden)]
+    pub fn force_text_for_tests(&self, id: NodeId, text: &str) {
+        let tid = self.tid(id).expect("узел есть");
+        let t = text_codec::text_container(&self.tree.get_meta(tid).expect("карта узла"))
+            .expect("текст узла");
+        t.insert(0, text).expect("вставка в Loro");
+        self.doc.commit();
     }
 
     /// Shallow-снапшот: текущее состояние без истории правок. Меньше полного,
@@ -511,6 +539,20 @@ impl PageDoc {
     /// Правка, которая ничего не меняет (те же значения), не пишется и не
     /// записывает обратную операцию: транзакция без изменений шага не создаёт.
     pub(crate) fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
+        // Содержимое текста — своей правкой (обратная дельта в журнале отмены),
+        // остальное — патчем свойств. У не текста содержимое пропускается.
+        if let Some(content) = &patch.content {
+            if self.props(id)?.text.is_some() {
+                self.set_text_content(id, content)?;
+            }
+            return self.set_props(
+                id,
+                &PropsPatch {
+                    content: None,
+                    ..patch.clone()
+                },
+            );
+        }
         let tid = self.tid(id)?;
         let before = self.props(id)?;
         // Свойства текста есть только у текста: у остальных узлов их не пишем.
@@ -655,6 +697,32 @@ impl PageDoc {
         }
     }
 
+    /// Вставка участков с точной разметкой каждого (вставка из буфера обмена со
+    /// стилями) в позицию `at`; после последнего перевода строки — нельзя.
+    pub(crate) fn insert_runs(&self, id: NodeId, at: usize, runs: &[TextRun]) -> DocResult<()> {
+        let len = self.text_len(id)?;
+        if at >= len {
+            return Err(DocError::TextRange(at, len));
+        }
+        let mut delta = Vec::new();
+        if at > 0 {
+            delta.push(TextDelta::Retain {
+                retain: at,
+                attributes: None,
+            });
+        }
+        for r in runs.iter().filter(|r| !r.text.is_empty()) {
+            delta.push(TextDelta::Insert {
+                insert: r.text.clone(),
+                attributes: Some(text_codec::attrs_to_loro(&r.attrs)),
+            });
+        }
+        if delta.len() == usize::from(at > 0) {
+            return Ok(());
+        }
+        self.apply_text_delta(id, &delta)
+    }
+
     /// Удаление диапазона символов. Последний перевод строки не удаляется.
     pub(crate) fn delete_text(&self, id: NodeId, range: Range<usize>) -> DocResult<()> {
         let len = self.text_len(id)?;
@@ -723,6 +791,9 @@ impl PageDoc {
                 attrs: TextAttrs::default(),
             });
         }
+        // Сравнение — со слитыми участками: иначе то же содержимое, разбитое
+        // по-другому, давало бы пустой шаг отмены.
+        content.normalize();
         if self.props(id)?.text.as_ref().map(|t| &t.content) == Some(&content) {
             return Ok(());
         }
@@ -1127,6 +1198,11 @@ impl<'a> Tx<'a> {
     /// Содержимое текста целиком.
     pub fn set_text_content(&self, id: NodeId, content: &TextContent) -> DocResult<()> {
         self.page.set_text_content(id, content)
+    }
+
+    /// Вставка участков с их разметкой в позицию `at` (символы Unicode).
+    pub fn insert_runs(&self, id: NodeId, at: usize, runs: &[TextRun]) -> DocResult<()> {
+        self.page.insert_runs(id, at, runs)
     }
 }
 

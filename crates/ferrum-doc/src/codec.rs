@@ -208,6 +208,8 @@ pub(crate) fn write_props(map: &LoroMap, p: &Props) -> DocResult<()> {
         fills: Some(p.fills.clone()),
         strokes: Some(p.strokes.clone()),
         text: p.text.as_ref().map(|t| t.props.clone()),
+        // Содержимое пишется ниже, в новый контейнер.
+        content: None,
     };
     write_patch(map, &patch)?;
     // Содержимое — в новый `LoroText` узла: узел только что создан (или

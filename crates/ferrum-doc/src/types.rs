@@ -7,7 +7,7 @@ use std::sync::Arc;
 use loro::TreeID;
 
 use crate::error::DocError;
-use crate::text::{TextData, TextProps, TEXT_COLOR};
+use crate::text::{TextContent, TextData, TextProps, TEXT_COLOR};
 
 /// Идентификатор узла. Обёртка над `TreeID` Loro: уникален и при совместной работе.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -297,6 +297,10 @@ pub struct PropsPatch {
     /// Свойства текста целиком (содержимое правится `Tx::insert_text` и соседями).
     /// У не текста пропускается.
     pub text: Option<TextProps>,
+    /// Содержимое текста целиком (`Tx::set_text_content` той же правкой): превью
+    /// сцены показывает составляемый текст IME и стиль участка до отпускания поля
+    /// панели. У не текста пропускается.
+    pub content: Option<TextContent>,
 }
 
 impl PropsPatch {
@@ -320,6 +324,10 @@ impl PropsPatch {
             strokes: self.strokes.as_ref().map(|_| before.strokes.clone()),
             text: match (&self.text, &before.text) {
                 (Some(_), Some(t)) => Some(t.props.clone()),
+                _ => None,
+            },
+            content: match (&self.content, &before.text) {
+                (Some(_), Some(t)) => Some(t.content.clone()),
                 _ => None,
             },
         }
@@ -360,8 +368,14 @@ impl PropsPatch {
         if let Some(v) = &self.strokes {
             p.strokes = v.clone();
         }
-        if let (Some(v), Some(t)) = (&self.text, &mut p.text) {
-            Arc::make_mut(t).props = v.clone();
+        if let Some(t) = &mut p.text {
+            if self.text.is_some() || self.content.is_some() {
+                // Новый `Arc`: общий с зеркалом `TextData` не копируется дважды.
+                *t = Arc::new(TextData {
+                    props: self.text.clone().unwrap_or_else(|| t.props.clone()),
+                    content: self.content.clone().unwrap_or_else(|| t.content.clone()),
+                });
+            }
         }
     }
 }
