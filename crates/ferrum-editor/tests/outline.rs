@@ -748,3 +748,60 @@ fn path_network_splits_a_loop_made_of_one_curve() {
     assert_eq!(net.segments.len(), 2);
     assert_eq!(net.regions[0].loops.len(), 1);
 }
+
+#[test]
+fn boolean_with_text_is_recomputed_when_fonts_arrive() {
+    use ferrum_text::{group, read_faces, Fonts, SourceKind};
+    // Реестр знает вшитый Inter, но байтов ещё нет.
+    let fonts = Fonts::shared();
+    let files = [
+        "inter/Inter-Variable.ttf",
+        "inter/Inter-Italic-Variable.ttf",
+    ];
+    {
+        let mut f = fonts.borrow_mut();
+        let faces = files
+            .iter()
+            .flat_map(|r| read_faces(&font_file(r), r))
+            .collect::<Vec<_>>();
+        f.add_catalog(SourceKind::Bundled, group(faces));
+    }
+    let mut h = H::new();
+    h.ed.set_fonts(fonts.clone());
+    let t = h.add(None, NodeKind::Text, patch(100.0, 100.0, 200.0, 50.0));
+    h.ed.transact(|tx| {
+        tx.set_text_content(t, &TextContent::plain("Ok"))?;
+        Ok(vec![])
+    })
+    .unwrap();
+    let r = h.rect(None, 400.0, 100.0, 20.0, 20.0);
+    h.ed.select(&[t, r]);
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    let area = |h: &mut H| {
+        h.ed.scene()
+            .node(g)
+            .unwrap()
+            .boolean
+            .as_ref()
+            .unwrap()
+            .contours
+            .to_path()
+            .area()
+            .abs()
+    };
+    assert!(
+        (area(&mut h) - 400.0).abs() < 1e-6,
+        "пока только прямоугольник"
+    );
+    // Байты пришли (поколение реестра сменилось) — следующий кадр с глифами.
+    {
+        let mut f = fonts.borrow_mut();
+        for rel in files {
+            f.load("Inter", rel, font_file(rel)).unwrap();
+        }
+    }
+    h.hover(10.0, 10.0);
+    // «Ok» кеглем по умолчанию (12) — десятки квадратных пикселей.
+    assert!(area(&mut h) > 420.0, "глифы в результате: {}", area(&mut h));
+}

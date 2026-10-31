@@ -254,7 +254,7 @@ fn events() -> Vec<CoreEvent> {
             rows: vec![LayerRow {
                 id: "1@2".into(),
                 name: "Фон".into(),
-                kind: NodeType::Rect,
+                kind: NodeType::Boolean,
                 depth: 1,
                 has_children: false,
                 expanded: false,
@@ -264,6 +264,7 @@ fn events() -> Vec<CoreEvent> {
                 locked: false,
                 ancestor_hidden: false,
                 ancestor_locked: true,
+                boolean_op: Some(ferrum_wasm::summary::BooleanOpDto::Subtract),
             }],
             reveal: Some(0),
         },
@@ -406,8 +407,11 @@ fn field_names_match_typescript() {
     .unwrap()["rows"][0];
     assert_eq!(row["hasChildren"], json!(false));
     assert_eq!(row["ancestorLocked"], json!(true));
+    assert_eq!(row["kind"], json!("boolean"));
+    assert_eq!(row["booleanOp"], json!("subtract"));
     let s = serde_json::to_value(Summary::empty()).unwrap();
     assert_eq!(s["cornerRadius"], json!(null));
+    assert_eq!(s["booleanOp"], json!(null));
     assert_eq!(s["opacity"], json!({"value": 1.0, "mixed": false}));
 }
 
