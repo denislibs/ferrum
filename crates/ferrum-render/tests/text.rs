@@ -5,7 +5,9 @@
 mod common;
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use common::*;
 use ferrum_doc::*;
@@ -364,4 +366,83 @@ fn raster_catches_up_deferred_text_layout() {
     assert_eq!(second.text_layouts, 1, "{second:?}");
     assert_eq!(second.text_glyphs, 2, "{second:?}");
     assert!(!second.needs_another_frame, "{second:?}");
+}
+
+/// Картинка 16×8 из полос: красная слева, синяя справа.
+fn two_tone() -> Arc<ferrum_render::Pixmap> {
+    let mut img = ferrum_render::Pixmap::new(16, 8);
+    for y in 0..8 {
+        for x in 0..16u16 {
+            let (r, b) = if x < 8 { (255, 0) } else { (0, 255) };
+            img.set_pixel(x, y, vello_cpu::color::PremulRgba8 { r, g: 0, b, a: 255 });
+        }
+    }
+    Arc::new(img)
+}
+
+#[test]
+fn image_fill_and_strokes_paint_glyphs() {
+    let fonts = fonts(true);
+    let mut p = Page::new();
+    let text = TextContent::plain("IIII");
+    let bold = props(48.0, TextSizing::Fixed);
+    let mut bold = bold;
+    bold.style.font = FontName::new("Inter", "Black");
+    // Заливка изображением по рамке узла: слева красное, справа синее.
+    let a = add_text(&mut p, 10.0, 10.0, 100.0, 60.0, text.clone(), bold.clone());
+    p.edit(
+        a,
+        PropsPatch {
+            fills: Some(vec![Fill::image("two-tone")]),
+            ..Default::default()
+        },
+    );
+    // Без заливки, с обводкой по центру зелёного цвета в 3 px.
+    let b = add_text(&mut p, 130.0, 10.0, 100.0, 60.0, text, bold);
+    p.edit(
+        b,
+        PropsPatch {
+            fills: Some(vec![]),
+            strokes: Some(vec![Stroke {
+                color: Color::rgba(0, 160, 0, 255),
+                width: 3.0,
+                align: StrokeAlign::Center,
+            }]),
+            ..Default::default()
+        },
+    );
+    let images: HashMap<String, Arc<ferrum_render::Pixmap>> =
+        [("two-tone".to_string(), two_tone())].into();
+    // Без часов: оба текста раскладываются в этом же кадре при любой нагрузке.
+    let mut r = renderer(&fonts);
+    r.set_clock(None);
+    let img = render_with(&mut r, &p.scene(), &camera(240.0, 80.0), &images);
+    let count = |x0: u16, x1: u16, f: &dyn Fn([u8; 4]) -> bool| {
+        (x0..x1)
+            .flat_map(|x| (10..70).map(move |y| (x, y)))
+            .filter(|&(x, y)| f(px(&img, x, y)))
+            .count()
+    };
+    let red = |c: [u8; 4]| c[0] > 200 && c[2] < 60;
+    let blue = |c: [u8; 4]| c[2] > 200 && c[0] < 60;
+    let green = |c: [u8; 4]| c[1] > 120 && c[0] < 60 && c[2] < 60;
+    // Глифы левой половины рамки — красные, правой — синие; между глифами — фон.
+    assert!(
+        count(10, 60, &red) > 100,
+        "красных: {}",
+        count(10, 60, &red)
+    );
+    assert!(
+        count(60, 110, &blue) > 20,
+        "синих: {}",
+        count(60, 110, &blue)
+    );
+    assert_eq!(count(10, 60, &blue), 0);
+    // Обводка без заливки: зелёный контур, середина буквы — фон.
+    assert!(
+        count(130, 230, &green) > 100,
+        "зелёных: {}",
+        count(130, 230, &green)
+    );
+    golden("text_paints", &img);
 }

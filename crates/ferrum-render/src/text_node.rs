@@ -1,16 +1,21 @@
 //! Рисование текстового узла (спека подсистемы 3, раздел 6): глифы — заливка
 //! контуров `skrifa` через трейт бэкенда (как подписи оверлеев), украшения —
 //! прямоугольники, мелкий текст — полосы по строкам (LOD, как Figma при отдалении).
+//! Этап 2: заливки узла по порядку (цвет и изображение по рамке узла), заливка
+//! участка из разметки, обводки текста — по контуру глифов (снаружи — под
+//! заливкой, по центру и внутри — над ней, внутри — с обрезкой по глифам).
 
 use std::time::Duration;
 
-use ferrum_doc::{Props, TextSizing};
-use ferrum_text::{text_color, Fonts, LineBox, TextLayout};
-use kurbo::{Affine, Rect};
+use ferrum_doc::{Fill as Paint, FillKind, Props, StrokeAlign, TextSizing};
+use ferrum_text::{text_color, Fonts, GlyphRun, LineBox, TextLayout};
+use kurbo::{Affine, BezPath, Rect, Stroke};
 use vello_cpu::peniko::Fill;
 
-use crate::backend::{RenderBackend, Rgba};
-use crate::display::color;
+use crate::backend::{ImageKey, ImagePaint, RenderBackend, Rgba};
+use crate::display::{color, IMAGE_PLACEHOLDER};
+use crate::draw::place_image;
+use crate::image::ImageProvider;
 
 /// Строка ниже стольких пикселей устройства рисуется полосой.
 pub const TEXT_LOD_PX: f64 = 3.0;
@@ -67,41 +72,159 @@ pub(crate) fn estimate_lines(p: &Props) -> Vec<LineBox> {
         .collect()
 }
 
-/// Глифы и украшения раскладки. `to_device` — локальные координаты узла →
-/// пиксели устройства.
-pub(crate) fn paint_glyphs(
+/// Матрица глифа: позиция на базовой линии, синтетический наклон, масштаб из
+/// единиц шрифта (ось y шрифта — вверх).
+fn glyph_transform(fonts: &mut Fonts, run: &GlyphRun, x: f32, y: f32) -> Affine {
+    let k = run.size as f64 / fonts.units_per_em(&run.font);
+    // Синтетический курсив: наклон контура вправо на угол `skew`.
+    let skew = run.skew.map_or(Affine::IDENTITY, |deg| {
+        Affine::skew(-(deg as f64).to_radians().tan(), 0.0)
+    });
+    Affine::translate((x as f64, y as f64)) * skew * Affine::scale_non_uniform(k, -k)
+}
+
+/// Контур глифов прогонов одним путём в координатах узла (заливка изображением
+/// и обводка).
+fn glyphs_path<'a>(fonts: &mut Fonts, runs: impl Iterator<Item = &'a GlyphRun>) -> BezPath {
+    let mut out = BezPath::new();
+    for run in runs {
+        for g in &run.glyphs {
+            let path = fonts.outline(&run.font, g.id, &run.coords);
+            let t = glyph_transform(fonts, run, g.x, g.y);
+            out.extend(path.elements().iter().map(|e| t * *e));
+        }
+    }
+    out
+}
+
+/// Заливка глифов прогона краской `paint`. Изображение — по рамке узла `area`;
+/// `false` — картинки ещё нет (нарисована заглушка).
+#[allow(clippy::too_many_arguments)]
+fn fill_run(
     backend: &mut impl RenderBackend,
     fonts: &mut Fonts,
-    layout: &TextLayout,
+    run: &GlyphRun,
+    paint: &Paint,
+    area: Rect,
     to_device: Affine,
     alpha: f32,
-) {
-    for run in &layout.runs {
-        let upem = fonts.units_per_em(&run.font);
-        let k = run.size as f64 / upem;
-        // Синтетический курсив: наклон контура вправо на угол `skew`.
-        let skew = run.skew.map_or(Affine::IDENTITY, |deg| {
-            Affine::skew(-(deg as f64).to_radians().tan(), 0.0)
-        });
-        backend.set_color(color(run.color).multiply_alpha(alpha));
+    images: &dyn ImageProvider,
+) -> bool {
+    let a = alpha * paint.opacity.clamp(0.0, 1.0) as f32;
+    let image = match (paint.kind, &paint.image_hash) {
+        (FillKind::Image, Some(h)) => Some(h),
+        (FillKind::Image, None) => return true,
+        (FillKind::Solid, _) => None,
+    };
+    let Some(hash) = image else {
+        backend.set_color(color(paint.color).multiply_alpha(a));
         for g in &run.glyphs {
             let path = fonts.outline(&run.font, g.id, &run.coords);
             if path.elements().is_empty() {
                 continue;
             }
-            backend.set_transform(
-                to_device
-                    * Affine::translate((g.x as f64, g.y as f64))
-                    * skew
-                    * Affine::scale_non_uniform(k, -k),
-            );
+            backend.set_transform(to_device * glyph_transform(fonts, run, g.x, g.y));
             backend.fill_path(&path, Fill::NonZero);
+        }
+        return true;
+    };
+    let path = glyphs_path(fonts, std::iter::once(run));
+    backend.set_transform(to_device);
+    if !(area.width() > 0.0 && area.height() > 0.0) {
+        return true;
+    }
+    let Some(pixmap) = images.image(hash) else {
+        backend.set_color(IMAGE_PLACEHOLDER.multiply_alpha(a));
+        backend.fill_path(&path, Fill::NonZero);
+        return false;
+    };
+    let (iw, ih) = (pixmap.width() as f64, pixmap.height() as f64);
+    let (transform, extend, _) = place_image(paint.scale_mode, area, iw, ih);
+    backend.set_image(&ImagePaint {
+        key: ImageKey::for_hash(hash),
+        pixmap,
+        transform,
+        extend,
+        alpha: a,
+    });
+    backend.fill_path(&path, Fill::NonZero);
+    true
+}
+
+/// Глифы, украшения и обводки раскладки текста узла `props`. `to_device` —
+/// локальные координаты узла → пиксели устройства. `false` — какая-то картинка
+/// заливки ещё не готова (кадр неполный).
+pub(crate) fn paint_glyphs(
+    backend: &mut impl RenderBackend,
+    fonts: &mut Fonts,
+    layout: &TextLayout,
+    props: &Props,
+    to_device: Affine,
+    alpha: f32,
+    images: &dyn ImageProvider,
+) -> bool {
+    let area = Rect::new(0.0, 0.0, props.w, props.h);
+    let fills: Vec<&Paint> = props
+        .fills
+        .iter()
+        .filter(|f| f.visible && f.opacity > 0.0)
+        .collect();
+    let strokes: Vec<_> = props
+        .strokes
+        .iter()
+        .filter(|s| s.width > 0.0 && s.color.a > 0)
+        .collect();
+    let outline = (!strokes.is_empty()).then(|| glyphs_path(fonts, layout.runs.iter()));
+    let stroke = |backend: &mut _, outside: bool| {
+        let Some(path) = &outline else { return };
+        for s in &strokes {
+            if (s.align == StrokeAlign::Outside) != outside {
+                continue;
+            }
+            backend_stroke(backend, path, s, to_device, alpha);
+        }
+    };
+    // Снаружи — под заливкой: заливка закрывает внутреннюю половину.
+    stroke(backend, true);
+    let mut ready = true;
+    for run in &layout.runs {
+        match &run.paint {
+            Some(p) => ready &= fill_run(backend, fonts, run, p, area, to_device, alpha, images),
+            None => {
+                for f in &fills {
+                    ready &= fill_run(backend, fonts, run, f, area, to_device, alpha, images);
+                }
+            }
         }
     }
     backend.set_transform(to_device);
     for d in &layout.decorations {
         backend.set_color(color(d.color).multiply_alpha(alpha));
         backend.fill_rect(&d.rect);
+    }
+    stroke(backend, false);
+    ready
+}
+
+/// Обводка контура глифов: по центру — как есть; внутри — двойной толщины с
+/// обрезкой по глифам; снаружи — двойной толщины (рисуется под заливкой).
+fn backend_stroke(
+    backend: &mut impl RenderBackend,
+    path: &BezPath,
+    s: &ferrum_doc::Stroke,
+    to_device: Affine,
+    alpha: f32,
+) {
+    backend.set_transform(to_device);
+    backend.set_color(color(s.color).multiply_alpha(alpha));
+    match s.align {
+        StrokeAlign::Center => backend.stroke_path(path, &Stroke::new(s.width)),
+        StrokeAlign::Outside => backend.stroke_path(path, &Stroke::new(2.0 * s.width)),
+        StrokeAlign::Inside => {
+            backend.push_clip(path);
+            backend.stroke_path(path, &Stroke::new(2.0 * s.width));
+            backend.pop_clip();
+        }
     }
 }
 

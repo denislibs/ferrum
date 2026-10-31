@@ -80,6 +80,9 @@ pub struct GlyphRun {
     /// Нормализованные координаты вариативного шрифта (биты `F2Dot14`).
     pub coords: Vec<i16>,
     pub color: Color,
+    /// Заливка участка (разметка `fill`): цвет или изображение; `None` — заливки
+    /// узла (спека 6: заливки диапазонов — этап 2).
+    pub paint: Option<Fill>,
     /// Синтетический наклон (курсив без своего файла), градусы.
     pub skew: Option<f32>,
     pub glyphs: Vec<PlacedGlyph>,
@@ -151,6 +154,8 @@ struct SpanStyle {
     decoration: Decoration,
     case: TextCase,
     color: Color,
+    /// Заливка участка из разметки (любого вида).
+    paint: Option<Fill>,
 }
 
 /// Где в раскладке лежит абзац (для выравнивания текста «авто» по ширине).
@@ -487,6 +492,7 @@ impl Fonts {
                 Some(f) if f.kind == FillKind::Solid => text_color(std::slice::from_ref(f)),
                 _ => default_color,
             },
+            paint: a.fill.clone(),
         }
     }
 
@@ -641,6 +647,7 @@ impl Fonts {
             decoration: Decoration::None,
             case: TextCase::None,
             color: like.color,
+            paint: like.paint.clone(),
         };
         let text = "…";
         let mut builder = self.lcx.ranged_builder(&mut self.fcx, text, 1.0, false);
@@ -782,6 +789,7 @@ fn collect_lines(
                     .map(|c| c.to_bits())
                     .collect(),
                 color,
+                paint: span.paint.clone(),
                 skew: synthesis.skew(),
                 glyphs,
             });
