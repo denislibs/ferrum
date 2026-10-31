@@ -280,3 +280,60 @@ fn scene_bounds_and_hit_test_follow_the_network() {
     assert_eq!(scene.hit_test(Point::new(60.0, 45.0), 1.0), Some(id));
     assert_eq!(scene.hit_test(Point::new(100.0, 25.0), 1.0), None);
 }
+
+#[test]
+fn fit_stays_finite_for_a_tiny_extent_in_a_huge_frame() {
+    let n = net(&[(0.0, 0.0), (1e-300, 5.0)], &[(0, 1)]);
+    let p = Props {
+        w: 1e9,
+        h: 10.0,
+        vector: Some(Arc::new(n)),
+        ..Props::defaults(NodeKind::Vector)
+    };
+    let c = fit(&p).as_coeffs();
+    assert!(c.iter().all(|v| v.is_finite()), "{c:?}");
+    let s = network_shape(&p);
+    for e in s.stroke.elements() {
+        let ok = match e {
+            PathEl::MoveTo(a) | PathEl::LineTo(a) => a.is_finite(),
+            _ => true,
+        };
+        assert!(ok, "{e:?}");
+    }
+    assert!(s
+        .ends
+        .iter()
+        .all(|e| e.point.is_finite() && e.dir.is_finite()));
+}
+
+#[test]
+fn end_direction_uses_the_far_handle_when_the_near_one_is_zero() {
+    let mut n = net(&[(0.0, 0.0), (10.0, 0.0)], &[(0, 1)]);
+    // Задана только дальняя ручка: p2 = (10, 10); p1 совпадает с p0.
+    n.segments[0].tangent_end = [0.0, 10.0];
+    let p = vector(n);
+    let s = network_shape(&p);
+    let r = std::f64::consts::FRAC_1_SQRT_2;
+    let start = s
+        .ends
+        .iter()
+        .find(|e| near(e.point, Point::new(0.0, 0.0)))
+        .unwrap();
+    assert!(
+        (start.dir - Vec2::new(-r, -r)).hypot() < 1e-9,
+        "{:?}",
+        start.dir
+    );
+
+    // Зеркально: задана только ближняя к началу ручка, конец — p3 - p1.
+    let mut n = net(&[(0.0, 0.0), (10.0, 0.0)], &[(0, 1)]);
+    n.segments[0].tangent_start = [0.0, 10.0];
+    let p = vector(n);
+    let s = network_shape(&p);
+    let end = s
+        .ends
+        .iter()
+        .find(|e| near(e.point, Point::new(10.0, 0.0)))
+        .unwrap();
+    assert!((end.dir - Vec2::new(r, -r)).hypot() < 1e-9, "{:?}", end.dir);
+}

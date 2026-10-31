@@ -18,8 +18,8 @@ use ferrum_doc::{
     VectorNetwork, VectorSegment,
 };
 use kurbo::{
-    Affine, BezPath, Cap, Circle, CubicBez, Join, Line, ParamCurve, ParamCurveDeriv,
-    ParamCurveNearest, PathSeg, Point, Rect, Shape, StrokeOpts, Vec2,
+    Affine, BezPath, Cap, Circle, CubicBez, Join, Line, ParamCurveNearest, PathSeg, Point, Rect,
+    Shape, StrokeOpts, Vec2,
 };
 
 use crate::shape::PATH_TOLERANCE;
@@ -68,16 +68,16 @@ pub fn fit(p: &Props) -> Affine {
     let Some(b) = network_bounds(net) else {
         return Affine::IDENTITY;
     };
-    let sx = if b.width() > 0.0 {
-        p.w / b.width()
-    } else {
-        1.0
+    // Крошечный размах в большой рамке даёт бесконечный масштаб — тогда 1.0.
+    let scale = |frame: f64, extent: f64| {
+        let k = frame / extent;
+        if extent > 0.0 && k.is_finite() {
+            k
+        } else {
+            1.0
+        }
     };
-    let sy = if b.height() > 0.0 {
-        p.h / b.height()
-    } else {
-        1.0
-    };
+    let (sx, sy) = (scale(p.w, b.width()), scale(p.h, b.height()));
     Affine::scale_non_uniform(sx, sy) * Affine::translate((-b.x0, -b.y0))
 }
 
@@ -136,9 +136,10 @@ fn tangent(seg: PathSeg, at_end: bool) -> Vec2 {
             if d.hypot2() > 1e-18 {
                 d
             } else {
-                let q = c.deriv().eval(if at_end { 1.0 } else { 0.0 });
-                if q.to_vec2().hypot2() > 1e-18 {
-                    q.to_vec2()
+                // Ближней ручки нет — идём к дальней, потом по хорде.
+                let far = if at_end { c.p3 - c.p1 } else { c.p2 - c.p0 };
+                if far.hypot2() > 1e-18 {
+                    far
                 } else {
                     c.p3 - c.p0
                 }
