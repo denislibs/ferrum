@@ -106,6 +106,13 @@ impl Editor {
     pub(crate) fn flatten(&mut self) {
         self.finish_vector_edit();
         let ids = self.ordered_selection();
+        // Результат булевой группы, посчитанный по частям (после жеста),
+        // зависит от истории правок — в документ пишется полный.
+        for id in &ids {
+            if let Some(slot) = self.scene.slot(*id) {
+                self.scene.force_full_booleans(slot);
+            }
+        }
         // Узлы-источники снизу вверх: выделенные фигуры и фигуры в выделенных группах.
         let mut leaves: Vec<NodeId> = Vec::new();
         let mut removed: Vec<NodeId> = Vec::new();

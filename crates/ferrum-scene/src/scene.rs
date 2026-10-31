@@ -623,6 +623,31 @@ impl Scene {
         }
     }
 
+    /// Полный пересчёт булевых групп поддерева `root` и булевых предков — если
+    /// среди них есть посчитанные по частям (после жеста). Результат по частям
+    /// зависит от истории правок; команды, что записывают его в документ
+    /// («Сплющить»), берут результат, равный `Scene::from_page`.
+    pub fn force_full_booleans(&mut self, root: Slot) {
+        let order = self.preorder(&[root]);
+        let is_partial = |s: &Self, x: Slot| s.at(x).boolean.as_ref().is_some_and(|b| b.partial);
+        if !order.iter().any(|&x| is_partial(self, x)) {
+            return;
+        }
+        let mut chain = Vec::new();
+        let mut up = self.at(root).parent;
+        while let Some(p) = up {
+            chain.push(p);
+            up = self.at(p).parent;
+        }
+        for &x in order.iter().rev().chain(chain.iter()) {
+            if self.at(x).props.kind == NodeKind::Boolean {
+                self.at_mut(x).boolean = None;
+            }
+            self.update_bounds(x, true);
+        }
+        self.flush_tree();
+    }
+
     /// Результат булевой группы. Формы детей, чей ключ (содержимое и
     /// положение) не сменился, берутся из прошлого результата. Пока идёт жест
     /// (превью) и сменилась ровно одна форма, остальные складываются один раз
@@ -665,6 +690,7 @@ impl Scene {
         let single = match (prev, &changed[..]) {
             (Some(p), [i])
                 if p.inputs.len() == inputs.len()
+                    && inputs.len() > 1
                     && (!self.preview.is_empty() || p.rest.as_ref().is_some_and(|r| r.0 == *i)) =>
             {
                 // Пустые формы в операции не участвуют — тогда без частей.

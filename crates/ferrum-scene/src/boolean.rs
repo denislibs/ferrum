@@ -134,8 +134,22 @@ fn ifill(rule: FillRule) -> IFillRule {
     }
 }
 
+/// Контур площадью меньше этого — не форма, а след округления `i_overlay`
+/// (`BOOLEAN_TOLERANCE`², доли миллионной на практике); результат операции их
+/// не содержит. Иначе вычитание в два приёма (`combine_rest` + `combine_with`)
+/// оставляло бы осколки там, где полный пересчёт даёт пустоту, а вложенная
+/// группа над ней считала бы себя непустой.
+pub const SLIVER_AREA: f64 = BOOLEAN_TOLERANCE * BOOLEAN_TOLERANCE;
+
+fn without_slivers(contours: Vec<Contour>) -> Vec<Contour> {
+    contours
+        .into_iter()
+        .filter(|c| c.len() >= 3 && signed_area(c).abs() >= SLIVER_AREA)
+        .collect()
+}
+
 fn collect(shapes: Vec<Vec<Contour>>) -> Contours {
-    Contours(shapes.into_iter().flatten().collect())
+    Contours(without_slivers(shapes.into_iter().flatten().collect()))
 }
 
 /// Приводит контуры с правилом `rule` к простым (`Contours`). Один контур
@@ -292,7 +306,9 @@ pub fn combine_rest(op: BooleanOp, inputs: &[Contours], skip: usize) -> (Rest, V
     (rest, pieces(shapes))
 }
 
-/// Результат по операции над остальными формами (`combine_rest`) и новой
+/// Результат по операции над остальными формами (`combine_rest`; форм всего
+/// не меньше двух — пустые части у пересечения значат «остальные не
+/// пересекаются», а не «остальных нет») и новой
 /// форме `changed`: части, чья рамка не задевает форму, остаются как есть (у
 /// пересечения — уходят), остальные — одной операцией с формой.
 pub fn combine_with(rest: Rest, parts: &[Piece], changed: &Contours) -> Contours {
@@ -330,7 +346,7 @@ pub fn combine_with(rest: Rest, parts: &[Piece], changed: &Contours) -> Contours
             .overlay(OverlayRule::Difference, IFillRule::NonZero),
     };
     out.extend(local.into_iter().flatten());
-    Contours(out)
+    Contours(without_slivers(out))
 }
 
 /// Форма заливки узла-листа в его локальных координатах (без детей): фигура —
