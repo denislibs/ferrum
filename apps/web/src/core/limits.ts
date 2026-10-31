@@ -37,6 +37,11 @@ export const MAX_FONT_SIZE = 10_000;
 export const MAX_LINE_HEIGHT_PERCENT = 10_000;
 export const MAX_LETTER_SPACING_PERCENT = 1000;
 
+/** Предел острого угла обводки — как `MITER_LIMIT_RANGE` ядра (`ferrum-doc`): значение вне
+ * пределов ядро отклоняет ошибкой, поэтому секция «Обводка» зажимает поле этими числами. */
+export const MIN_MITER_LIMIT = 1;
+export const MAX_MITER_LIMIT = 100;
+
 /** Мегабайты с округлением вверх: «предел 64 МБ, получено 64 МБ» сбивало бы с толку. */
 export const mb = (bytes: number): number => Math.ceil(bytes / MIB);
 /** Килобайты с округлением вверх. */

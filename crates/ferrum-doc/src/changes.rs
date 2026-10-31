@@ -45,7 +45,7 @@ impl Changes {
             match op {
                 Inverse::Delete(id) => self.created.push(*id),
                 Inverse::Restore(nodes) => self.deleted.extend(nodes.iter().map(|n| n.id)),
-                Inverse::Props(id, _) => self.props.push(*id),
+                Inverse::Props(id, _) | Inverse::Shape(id, _) => self.props.push(*id),
                 Inverse::Move { id, .. } => self.moved.push(*id),
                 Inverse::Text(id, _) => self.props.push(*id),
             }

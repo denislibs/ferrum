@@ -745,6 +745,17 @@ fn main() {
     );
 
     typing(&mut report);
+    vector_edit(
+        &mut report,
+        "Вектор 100 000 точек",
+        ferrum_doc::fixture::wavy_network(100_000),
+    );
+    paint_bucket(&mut report);
+    vector_edit(
+        &mut report,
+        "Кривой вектор 100 000 точек",
+        ferrum_doc::fixture::curvy_network(100_000, 2000.0),
+    );
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -765,6 +776,315 @@ fn main() {
     if failed {
         std::process::exit(1);
     }
+}
+
+/// Правка вектора из 100 000 точек (подсистема 3, этап 3): перетаскивание точки в
+/// режиме правки — кадр жеста (превью сцены с новой рамкой) и запись одним шагом.
+fn vector_edit(report: &mut Report, label: &str, net: ferrum_doc::VectorNetwork) {
+    use std::sync::Arc;
+    let mut ed =
+        Editor::new(Document::new(), None, VIEWPORT, 1.0, Platform::Mac).expect("страница");
+    let b = ferrum_scene::vector::network_bounds(&net).unwrap();
+    let id = ed
+        .transact(|tx| {
+            let id = tx.create_node(None, None, ferrum_doc::NodeKind::Vector)?;
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    w: Some(b.width()),
+                    h: Some(b.height()),
+                    vector: Some(Arc::new(net.clone())),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![id])
+        })
+        .unwrap()[0];
+    let mut cam = Camera::new(VIEWPORT, 1.0);
+    cam.fit(kurbo::Rect::new(0.0, 0.0, b.width(), b.height()), 48.0);
+    ed.set_camera(cam);
+    ed.select(&[]);
+    ed.take_events();
+    // Наведение: движения указателя по вектору (через контур и внутрь) — каждое
+    // проверяет попадание в сеть, кадр рисует подсветку её контура.
+    let mut clock = Clock(0.0);
+    let center = ed
+        .camera()
+        .world_to_screen(Point::new(b.width() / 2.0, b.height() / 2.0));
+    // Точка 0 сети — на правом краю, в середине по высоте.
+    let right = {
+        let n = ed.scene().node(id).unwrap();
+        let m = n.world * ferrum_scene::vector::fit(&n.props);
+        ed.camera()
+            .world_to_screen(m * Point::new(net.points[0].x, net.points[0].y))
+    };
+    let hovers: Vec<Duration> = (0..MOVES)
+        .map(|i| {
+            let t = i as f64 / (MOVES - 1) as f64 * 1.05;
+            let p = Point::new(
+                center.x + (right.x - center.x) * t,
+                center.y + 0.3 * i as f64,
+            );
+            timed(&mut ed, Input::PointerMove(clock.at(p)))
+        })
+        .collect();
+    report.gate_median(
+        &format!("{label}: наведение — движение указателя"),
+        &hovers,
+        2.0,
+    );
+    report.info(
+        &format!("{label}: наведение, худшее движение (первое строит контуры)"),
+        ms(worst(&hovers)),
+    );
+    // Указатель на контуре: вектор под ним.
+    ed.handle(Input::PointerMove(clock.at(right)));
+    report.check(
+        &format!("{label}: наведение находит вектор"),
+        ed.overlay().hover == Some(id),
+        format!("{:?}", ed.overlay().hover.is_some()),
+        "найден",
+    );
+    {
+        let (w, h) = ed.camera().device_size();
+        let mut backend = ferrum_render::CpuBackend::new(w, h);
+        let mut renderer = ferrum_render::Renderer::new();
+        let overlay = ed.overlay();
+        renderer.render(
+            &mut backend,
+            ed.scene(),
+            ed.camera(),
+            &overlay,
+            &ferrum_render::NoImages,
+            None,
+        );
+        let frames: Vec<Duration> = (0..7)
+            .map(|_| {
+                let t = Instant::now();
+                renderer.render(
+                    &mut backend,
+                    ed.scene(),
+                    ed.camera(),
+                    &overlay,
+                    &ferrum_render::NoImages,
+                    None,
+                );
+                t.elapsed()
+            })
+            .collect();
+        report.gate_median(
+            &format!("{label}: кадр с подсветкой наведения"),
+            &frames,
+            16.7,
+        );
+    }
+    ed.start_vector_edit(id);
+    ed.take_events();
+    let steps = ed.step_count();
+    // Точка на правом краю эллипса (точка 0 сети — справа, в середине по высоте).
+    let n = ed.scene().node(id).unwrap().clone();
+    let m = n.world * ferrum_scene::vector::fit(&n.props);
+    let p0 = net.points[0];
+    let from = ed.camera().world_to_screen(m * Point::new(p0.x, p0.y));
+    timed(&mut ed, Input::PointerDown(clock.at(from)));
+    let mut moves = Vec::new();
+    for i in 1..=MOVES {
+        let e = clock.at(Point::new(from.x + i as f64, from.y + 0.5 * i as f64));
+        moves.push(timed(&mut ed, Input::PointerMove(e)));
+    }
+    let end = Point::new(from.x + MOVES as f64, from.y + 0.5 * MOVES as f64);
+    let commit = timed(&mut ed, Input::PointerUp(clock.at(end)));
+    report.gate_median(
+        &format!("{label}: перетаскивание точки, кадр жеста"),
+        &moves,
+        16.0,
+    );
+    report.gate(
+        &format!("{label}: отпускание — запись одним шагом"),
+        commit,
+        50.0,
+    );
+    report.check(
+        &format!("{label}: перетаскивание точки — один шаг отмены"),
+        ed.step_count() == steps + 1,
+        format!("{}", ed.step_count() - steps),
+        "1",
+    );
+    // Перетаскивание точки при приближении: каждое движение — превью сцены и
+    // кадр (контур обводки строится заново у видимой части).
+    let fit_camera = ed.camera().clone();
+    for mul in [8.0, 64.0] {
+        let world = {
+            let n = ed.scene().node(id).unwrap();
+            let m = n.world * ferrum_scene::vector::fit(&n.props);
+            let p = ed.vector_work().unwrap().points[0];
+            m * Point::new(p.x, p.y)
+        };
+        let mut cam = fit_camera.clone();
+        cam.set_zoom(fit_camera.zoom() * mul);
+        cam.set_center(world);
+        ed.set_camera(cam);
+        let (w, h) = ed.camera().device_size();
+        let mut backend = ferrum_render::CpuBackend::new(w, h);
+        let mut renderer = ferrum_render::Renderer::new();
+        let mut frame = |ed: &Editor| {
+            renderer.render(
+                &mut backend,
+                ed.scene(),
+                ed.camera(),
+                &ed.overlay(),
+                &ferrum_render::NoImages,
+                None,
+            );
+        };
+        frame(&ed);
+        let at = ed.camera().world_to_screen(world);
+        timed(&mut ed, Input::PointerDown(clock.at(at)));
+        let steps_before = ed.step_count();
+        let moves: Vec<Duration> = (1..=20)
+            .map(|i| {
+                let t = Instant::now();
+                // Шаг — единица мира (привязка к пикселям), туда и обратно.
+                let dx = mul * (1 + i % 2) as f64;
+                ed.handle(Input::PointerMove(clock.at(Point::new(at.x + dx, at.y))));
+                frame(&ed);
+                let d = t.elapsed();
+                ed.take_events();
+                d
+            })
+            .collect();
+        timed(
+            &mut ed,
+            Input::PointerUp(clock.at(Point::new(at.x + mul, at.y))),
+        );
+        report.gate_median(
+            &format!("{label}: перетаскивание точки при ×{mul} — движение и кадр"),
+            &moves,
+            16.7,
+        );
+        report.check(
+            &format!("{label}: перетаскивание точки при ×{mul} записано одним шагом"),
+            ed.step_count() == steps_before + 1,
+            format!("{}", ed.step_count() - steps_before),
+            "1",
+        );
+    }
+    ed.set_camera(fit_camera);
+    // Ctrl/Cmd+A в правке: выделены все точки — команда, оверлей и кадр.
+    let (w, h) = ed.camera().device_size();
+    let mut backend = ferrum_render::CpuBackend::new(w, h);
+    let mut renderer = ferrum_render::Renderer::new();
+    let mut draw = |ed: &Editor, backend: &mut ferrum_render::CpuBackend| {
+        renderer.render(
+            backend,
+            ed.scene(),
+            ed.camera(),
+            &ed.overlay(),
+            &ferrum_render::NoImages,
+            None,
+        );
+    };
+    draw(&ed, &mut backend);
+    let t = Instant::now();
+    ed.execute(CommandId::SelectAll);
+    draw(&ed, &mut backend);
+    let select_all = t.elapsed();
+    ed.take_events();
+    report.gate(
+        &format!("{label}: Ctrl/Cmd+A в правке — команда и кадр"),
+        select_all,
+        16.7,
+    );
+    report.check(
+        &format!("{label}: Ctrl/Cmd+A выделяет все точки"),
+        ed.vector_selection().map(|s| s.points.len()) == Some(net.points.len()),
+        format!("{:?}", ed.vector_selection().map(|s| s.points.len())),
+        "все",
+    );
+    let frames: Vec<Duration> = (0..7)
+        .map(|_| {
+            let t = Instant::now();
+            draw(&ed, &mut backend);
+            t.elapsed()
+        })
+        .collect();
+    report.gate_median(
+        &format!("{label}: кадр правки, все точки выделены"),
+        &frames,
+        16.7,
+    );
+}
+
+/// «Заливка области» на сети из 24 999 квадратов в рамке (100 000 точек): щелчок
+/// ищет участок и закрашивающие области у точки, а не сравнивает каждый контур
+/// с каждой гранью.
+fn paint_bucket(report: &mut Report) {
+    use ferrum_editor::vector_ops::toggle_fill;
+    // Область на первые 9 999 квадратов (предел — 10 000 петель на сеть).
+    let mut net = ferrum_doc::fixture::squares_network(24_999);
+    net.regions.push(ferrum_doc::VectorRegion {
+        rule: ferrum_doc::FillRule::NonZero,
+        loops: (0..9_999u32)
+            .map(|i| (4 * i..4 * i + 4).collect())
+            .collect(),
+        fills: None,
+    });
+    let timed = |net: &ferrum_doc::VectorNetwork, at: Point| {
+        let t = Instant::now();
+        let r = toggle_fill(net, at, false);
+        (t.elapsed(), r)
+    };
+    // Квадрат 0 — в (5, 5); квадрат 20 000 — в строке 125 сетки 159 × 159.
+    let (inside, outside, between) = (
+        Point::new(10.0, 10.0),
+        Point::new(
+            (20_000 % 159) as f64 * 20.0 + 10.0,
+            (20_000 / 159) as f64 * 20.0 + 10.0,
+        ),
+        Point::new(17.0, 17.0),
+    );
+    let (d, rest) = timed(&net, inside);
+    report.gate(
+        "Заливка области, 24 999 квадратов: снятие с одного из 9 999 залитых одной областью",
+        d,
+        100.0,
+    );
+    report.check(
+        "Заливка области: остальные 9 998 квадратов залиты",
+        rest.as_ref()
+            .is_some_and(|r| r.regions.len() == 1 && r.regions[0].loops.len() == 9_998),
+        format!(
+            "{:?}",
+            rest.as_ref()
+                .map(|r| r.regions.iter().map(|r| r.loops.len()).collect::<Vec<_>>())
+        ),
+        "[9998]",
+    );
+    let (d, new) = timed(&net, outside);
+    report.gate(
+        "Заливка области, 24 999 квадратов: новая область в незалитом квадрате",
+        d,
+        100.0,
+    );
+    report.check(
+        "Заливка области: новая область добавлена",
+        new.as_ref().is_some_and(|r| r.regions.len() == 2),
+        format!("{:?}", new.as_ref().map(|r| r.regions.len())),
+        "2",
+    );
+    // Рамка с 24 999 дырами — больше предела петель: отказ, сеть не меняется.
+    let (d, framed) = timed(&net, between);
+    report.gate(
+        "Заливка области, 24 999 квадратов: щелчок в рамку (отказ по пределу петель)",
+        d,
+        100.0,
+    );
+    report.check(
+        "Заливка области: рамка с 24 999 дырами не записана",
+        framed.is_none(),
+        format!("{:?}", framed.is_some()),
+        "отказ",
+    );
 }
 
 /// Шрифт вшитого Inter для замера ввода (файл сборки интерфейса).

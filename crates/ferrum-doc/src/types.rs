@@ -8,6 +8,7 @@ use loro::TreeID;
 
 use crate::error::DocError;
 use crate::text::{TextContent, TextData, TextProps, TEXT_COLOR};
+use crate::vector::{StrokeCap, StrokeJoin, StrokeStyle, VectorNetwork};
 
 /// Идентификатор узла. Обёртка над `TreeID` Loro: уникален и при совместной работе.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,6 +95,8 @@ pub enum NodeKind {
     Line,
     Image,
     Text,
+    /// Векторная сеть (спека подсистемы 3, раздел 9).
+    Vector,
 }
 
 impl NodeKind {
@@ -106,6 +109,7 @@ impl NodeKind {
             NodeKind::Line => "line",
             NodeKind::Image => "image",
             NodeKind::Text => "text",
+            NodeKind::Vector => "vector",
         }
     }
 
@@ -118,6 +122,7 @@ impl NodeKind {
             "line" => NodeKind::Line,
             "image" => NodeKind::Image,
             "text" => NodeKind::Text,
+            "vector" => NodeKind::Vector,
             _ => return None,
         })
     }
@@ -132,6 +137,7 @@ impl NodeKind {
             NodeKind::Line => "Линия",
             NodeKind::Image => "Изображение",
             NodeKind::Text => "Текст",
+            NodeKind::Vector => "Вектор",
         }
     }
 }
@@ -222,8 +228,14 @@ pub struct Props {
     pub flip_y: bool,
     pub fills: Vec<Fill>,
     pub strokes: Vec<Stroke>,
+    /// Окончания, соединение и предел острого угла — общие для всех обводок узла
+    /// (как в Figma). Нейтральные — без окончаний, острый стык, предел 4.
+    pub stroke_style: StrokeStyle,
     /// Текст и его свойства — только у `NodeKind::Text`.
     pub text: Option<Arc<TextData>>,
+    /// Сеть — только у `NodeKind::Vector`. `Arc`: правка свойств узла не копирует
+    /// 100 000 точек, а сравнение одной и той же сети — по указателю.
+    pub vector: Option<Arc<VectorNetwork>>,
 }
 
 impl Props {
@@ -248,6 +260,17 @@ impl Props {
             NodeKind::Image => (100.0, 100.0, vec![], vec![]),
             // Размер пустого текста ставит редактор по раскладке; цвет — чёрный.
             NodeKind::Text => (0.0, 0.0, vec![Fill::solid(TEXT_COLOR)], vec![]),
+            // Как у пера Figma: без заливки, чёрная обводка 1 по центру.
+            NodeKind::Vector => (
+                0.0,
+                0.0,
+                vec![],
+                vec![Stroke {
+                    color: Color::BLACK,
+                    width: 1.0,
+                    align: StrokeAlign::Center,
+                }],
+            ),
         };
         Props {
             kind,
@@ -266,7 +289,9 @@ impl Props {
             flip_y: false,
             fills,
             strokes,
+            stroke_style: StrokeStyle::default(),
             text: (kind == NodeKind::Text).then(|| Arc::new(TextData::default())),
+            vector: (kind == NodeKind::Vector).then(|| Arc::new(VectorNetwork::default())),
         }
     }
 
@@ -301,6 +326,15 @@ pub struct PropsPatch {
     /// сцены показывает составляемый текст IME и стиль участка до отпускания поля
     /// панели. У не текста пропускается.
     pub content: Option<TextContent>,
+    /// Окончания обводки в начале и в конце открытых путей, соединение и предел
+    /// острого угла — ключами узла по отдельности (совместная правка не затирает
+    /// соседний ключ).
+    pub stroke_cap_start: Option<StrokeCap>,
+    pub stroke_cap_end: Option<StrokeCap>,
+    pub stroke_join: Option<StrokeJoin>,
+    pub stroke_miter_limit: Option<f64>,
+    /// Сеть целиком (значение узла заменяется). У не вектора пропускается.
+    pub vector: Option<Arc<VectorNetwork>>,
 }
 
 impl PropsPatch {
@@ -328,6 +362,16 @@ impl PropsPatch {
             },
             content: match (&self.content, &before.text) {
                 (Some(_), Some(t)) => Some(t.content.clone()),
+                _ => None,
+            },
+            stroke_cap_start: self.stroke_cap_start.map(|_| before.stroke_style.cap_start),
+            stroke_cap_end: self.stroke_cap_end.map(|_| before.stroke_style.cap_end),
+            stroke_join: self.stroke_join.map(|_| before.stroke_style.join),
+            stroke_miter_limit: self
+                .stroke_miter_limit
+                .map(|_| before.stroke_style.miter_limit),
+            vector: match (&self.vector, &before.vector) {
+                (Some(_), Some(v)) => Some(v.clone()),
                 _ => None,
             },
         }
@@ -368,6 +412,23 @@ impl PropsPatch {
         if let Some(v) = &self.strokes {
             p.strokes = v.clone();
         }
+        let s = &mut p.stroke_style;
+        if let Some(v) = self.stroke_cap_start {
+            s.cap_start = v;
+        }
+        if let Some(v) = self.stroke_cap_end {
+            s.cap_end = v;
+        }
+        if let Some(v) = self.stroke_join {
+            s.join = v;
+        }
+        if let Some(v) = self.stroke_miter_limit {
+            s.miter_limit = v;
+        }
+        if let (Some(v), Some(dst)) = (&self.vector, &mut p.vector) {
+            *dst = v.clone();
+        }
+
         if let Some(t) = &mut p.text {
             if self.text.is_some() || self.content.is_some() {
                 // Новый `Arc`: общий с зеркалом `TextData` не копируется дважды.

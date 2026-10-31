@@ -115,3 +115,113 @@ pub fn fill_texts(page: &Tx, texts: usize) -> DocResult<Vec<NodeId>> {
     }
     Ok(ids)
 }
+
+/// Сеть для замеров (подсистема 3, этап 3): замкнутый волнистый контур из `n`
+/// точек по эллипсу 2000 × 1000 (как обведённая карта или скан), каждый
+/// четвёртый сегмент — кривая, одна область по всей петле. Меньше трёх точек —
+/// без петли и области (0 — пустая сеть, 1 — одна точка, 2 — один сегмент).
+pub fn wavy_network(n: usize) -> crate::VectorNetwork {
+    use crate::{FillRule, VectorNetwork, VectorPoint, VectorRegion, VectorSegment};
+    let points = (0..n)
+        .map(|i| {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            let r = 1.0 + 0.01 * (i as f64 * 0.005).sin();
+            VectorPoint::new(1000.0 + 1000.0 * r * a.cos(), 500.0 + 500.0 * r * a.sin())
+        })
+        .collect();
+    let count = if n >= 3 { n } else { n.saturating_sub(1) };
+    let segments = (0..count as u32)
+        .map(|i| {
+            let mut s = VectorSegment::line(i, (i + 1) % n as u32);
+            if i % 4 == 0 {
+                s.tangent_start = [0.01, -0.01];
+                s.tangent_end = [-0.01, 0.01];
+            }
+            s
+        })
+        .collect();
+    VectorNetwork {
+        points,
+        segments,
+        regions: if n >= 3 {
+            vec![VectorRegion {
+                rule: FillRule::NonZero,
+                loops: vec![(0..n as u32).collect()],
+                fills: None,
+            }]
+        } else {
+            vec![]
+        },
+    }
+}
+
+/// Сеть для замеров с настоящими кривыми: замкнутый контур из `n` точек по
+/// окружности радиуса `radius`, каждый сегмент — кубическая кривая, выгнутая
+/// наружу на полхорды (как обведённая карта с плавными линиями), одна область
+/// по всей петле. Меньше трёх точек — без петли и области, как `wavy_network`.
+pub fn curvy_network(n: usize, radius: f64) -> crate::VectorNetwork {
+    use crate::{FillRule, VectorNetwork, VectorPoint, VectorRegion, VectorSegment};
+    let points: Vec<VectorPoint> = (0..n)
+        .map(|i| {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            VectorPoint::new(radius + radius * a.cos(), radius + radius * a.sin())
+        })
+        .collect();
+    let count = if n >= 3 { n } else { n.saturating_sub(1) };
+    let segments = (0..count as u32)
+        .map(|i| {
+            let j = (i + 1) % n as u32;
+            let (a, b) = (points[i as usize], points[j as usize]);
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            // Нормаль наружу: ручки выгибают кривую на полхорды.
+            let (nx, ny) = (dy * 0.6, -dx * 0.6);
+            VectorSegment {
+                start: i,
+                end: j,
+                tangent_start: [dx * 0.3 + nx, dy * 0.3 + ny],
+                tangent_end: [-dx * 0.3 + nx, -dy * 0.3 + ny],
+            }
+        })
+        .collect();
+    VectorNetwork {
+        points,
+        segments,
+        regions: if n >= 3 {
+            vec![VectorRegion {
+                rule: FillRule::NonZero,
+                loops: vec![(0..n as u32).collect()],
+                fills: None,
+            }]
+        } else {
+            vec![]
+        },
+    }
+}
+
+/// Сеть для замеров «Заливки области»: `k` квадратов 10 × 10 сеткой с шагом 20
+/// (`k` связных частей, от (5, 5)) внутри квадратной рамки вокруг всех них (ещё
+/// одна часть, последние 4 точки и сегмента). Квадрат `i` — точки и сегменты
+/// `4i..4i + 4`. Без областей.
+pub fn squares_network(k: usize) -> crate::VectorNetwork {
+    use crate::{VectorNetwork, VectorPoint, VectorSegment};
+    let mut n = VectorNetwork::default();
+    let side = ((k as f64).sqrt().ceil() as usize).max(1);
+    let square = |n: &mut VectorNetwork, x: f64, y: f64, s: f64| {
+        let b = n.points.len() as u32;
+        for (dx, dy) in [(0.0, 0.0), (s, 0.0), (s, s), (0.0, s)] {
+            n.points.push(VectorPoint::new(x + dx, y + dy));
+        }
+        for j in 0..4u32 {
+            n.segments.push(VectorSegment::line(b + j, b + (j + 1) % 4));
+        }
+    };
+    for i in 0..k {
+        let (x, y) = (
+            (i % side) as f64 * 20.0 + 5.0,
+            (i / side) as f64 * 20.0 + 5.0,
+        );
+        square(&mut n, x, y, 10.0);
+    }
+    square(&mut n, 0.0, 0.0, side as f64 * 20.0);
+    n
+}

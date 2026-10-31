@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use ferrum_doc::{Changes, NodeId, NodeKind, PageDoc, Props, PropsPatch, SceneRow};
 use kurbo::{Affine, Point, Rect};
@@ -14,6 +14,7 @@ use rstar::primitives::{GeomWithData, Rectangle};
 use rstar::{RStarInsertionStrategy, RTree, RTreeParams, SelectionFunction, AABB};
 
 use crate::shape::{self, Geometry};
+use crate::vector::{self, PathShape};
 
 /// Индекс узла в плотной таблице сцены. Освободившиеся индексы переиспользуются,
 /// поэтому хранить их дольше одного кадра нельзя — для этого есть `NodeId`.
@@ -91,11 +92,24 @@ pub struct SceneNode {
     /// Растёт при любом изменении в поддереве (свойства, состав, положение детей):
     /// по нему рендер понимает, что растровый кэш фрейма устарел.
     pub subtree_version: u64,
+    /// Контуры обводки по контуру (`vector::path_shape`), построенные при первом
+    /// запросе и общие для попадания, подсветки и списка отрисовки: сеть в
+    /// 100 000 точек строится ~7 мс, и каждое движение указателя над ней их бы
+    /// строило. Сбрасываются вместе с `version`.
+    path: OnceLock<Option<Arc<PathShape>>>,
 }
 
 impl SceneNode {
     pub fn geometry(&self) -> Geometry {
         shape::geometry(&self.props)
+    }
+
+    /// Контуры обводки по контуру — из кэша узла (`None` — узел обводится
+    /// кольцами).
+    pub fn path_shape(&self) -> Option<&Arc<PathShape>> {
+        self.path
+            .get_or_init(|| vector::path_shape(&self.props).map(Arc::new))
+            .as_ref()
     }
 }
 
@@ -357,6 +371,7 @@ impl Scene {
             subtree_bounds: None,
             version,
             subtree_version: version,
+            path: OnceLock::new(),
         };
         let slot = match self.free.pop() {
             Some(s) => {
@@ -465,7 +480,7 @@ impl Scene {
                 .reduce(|a, b| a.union(b)),
             _ => geom.bounds(),
         };
-        let outset = geom.stroke_outset(&n.props.strokes);
+        let outset = shape::stroke_outset(&n.props);
         let world_bounds =
             local_bounds.map(|b| n.world.transform_rect_bbox(b.inflate(outset, outset)));
         // Фрейм с обрезкой: дети не выходят за него, перебирать их не нужно.
@@ -756,6 +771,7 @@ impl Scene {
         let n = self.at_mut(slot);
         if looks_different(&n.props, &props) {
             n.version = version;
+            n.path = OnceLock::new();
         }
         // Тот же `Arc` (правка нетекстовых свойств) — сравнение бесплатно.
         let text_changed = match (&n.props.text, &props.text) {
@@ -994,7 +1010,12 @@ impl Scene {
             }
             cur = a.parent;
         }
-        shape::hit(&n.props, n.world.inverse() * point, tolerance)
+        shape::hit_shape(
+            &n.props,
+            n.path_shape().map(|s| &**s),
+            n.world.inverse() * point,
+            tolerance,
+        )
     }
 
     /// Ключ порядка отрисовки: позиции от корня до узла. Больше — выше на экране;
@@ -1044,7 +1065,13 @@ fn looks_different(a: &Props, b: &Props) -> bool {
         || a.corner_radius != b.corner_radius
         || a.fills != b.fills
         || a.strokes != b.strokes
+        || a.stroke_style != b.stroke_style
         || a.text != b.text
+        || match (&a.vector, &b.vector) {
+            // Та же сеть (правка других свойств) — без сравнения точек.
+            (Some(x), Some(y)) => !Arc::ptr_eq(x, y) && x != y,
+            (x, y) => x.is_some() != y.is_some(),
+        }
 }
 
 fn aabb(r: Rect) -> AABB<[f64; 2]> {

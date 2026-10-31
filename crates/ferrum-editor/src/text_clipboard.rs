@@ -267,6 +267,7 @@ impl Editor {
         if text.is_empty() {
             return Ok(());
         }
+        self.begin_doc_edit();
         let content = TextContent::plain(&text);
         content.check_limits()?;
         let mut p = Props::defaults(NodeKind::Text);
@@ -281,7 +282,6 @@ impl Editor {
         let center = target_box.map_or(self.view_center(), |b| b.center());
         let origin = target_world.inverse() * (center - Vec2::new(p.w / 2.0, p.h / 2.0));
         (p.x, p.y) = (origin.x.round(), origin.y.round());
-        self.cancel_gesture();
         // Отказ документа (только чтение) `commit` сам отдаёт событием `Error`.
         self.ctx()
             .commit(|tx, _| Ok(vec![tx.create_with_props(target, None, &p)?]));

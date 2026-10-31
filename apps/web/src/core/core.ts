@@ -83,6 +83,10 @@ export function cssCursor(kind: CursorKind, angle: number): string {
       return 'alias';
     case 'text':
       return 'text';
+    case 'pen':
+      return 'crosshair';
+    case 'bucket':
+      return 'cell';
     case 'resize': {
       const a = ((angle % 180) + 180) % 180;
       if (a < 22.5 || a >= 157.5) return 'ew-resize';

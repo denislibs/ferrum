@@ -474,3 +474,62 @@ fn hostile_group_size_is_dropped() {
     assert!(g.flip_x);
     assert_eq!((p.nodes[1].props.w, p.nodes[1].props.h), (10.0, 10.0));
 }
+
+#[test]
+fn vector_and_stroke_style_round_trip_and_are_checked() {
+    use ferrum_doc::{StrokeCap, StrokeJoin, VectorNetwork, VectorPoint, VectorSegment};
+    use std::sync::Arc;
+    let mut v = Props::defaults(NodeKind::Vector);
+    v.w = 30.0;
+    v.stroke_style.cap_end = StrokeCap::ArrowLines;
+    v.stroke_style.join = StrokeJoin::Round;
+    v.stroke_style.miter_limit = 10.0;
+    v.vector = Some(Arc::new(VectorNetwork {
+        points: vec![VectorPoint::new(0.0, 0.0), VectorPoint::new(30.0, 0.0)],
+        segments: vec![VectorSegment::line(0, 1)],
+        regions: vec![],
+    }));
+    let p = ClipPayload {
+        nodes: vec![ClipNode {
+            parent: None,
+            props: v,
+        }],
+        images: vec![],
+        bounds: Rect::new(0.0, 0.0, 30.0, 0.0),
+    };
+    let bytes = p.encode();
+    let json = json_of(&bytes);
+    assert!(json.contains("\"strokeCapEnd\":\"arrowLines\""), "{json}");
+    assert!(
+        !json.contains("strokeCapStart"),
+        "нейтральное не пишется: {json}"
+    );
+    assert_eq!(ClipPayload::decode(&bytes).unwrap(), p);
+    // Чужие данные: неизвестное окончание, предел вне диапазона, битая сеть.
+    for (from, to) in [
+        ("\"arrowLines\"", "\"arrow\""),
+        ("\"strokeMiterLimit\":10.0", "\"strokeMiterLimit\":1000.0"),
+        ("\"vector\":\"", "\"vector\":\"AAAA"),
+    ] {
+        let bad = json.replace(from, to);
+        assert_ne!(bad, json);
+        assert!(
+            matches!(
+                ClipPayload::decode(&with_json(&bad)),
+                Err(ClipboardError::Corrupted(_))
+            ),
+            "{to}"
+        );
+    }
+    // Узел без поля сети — пустой вектор, а не ошибка.
+    let empty = ClipPayload::decode(&with_json(&doc_json(
+        &[node_json(None, "vector")],
+        &[],
+        "[0.0,0.0,10.0,10.0]",
+    )))
+    .unwrap();
+    assert_eq!(
+        empty.nodes[0].props.vector.as_deref(),
+        Some(&VectorNetwork::default())
+    );
+}

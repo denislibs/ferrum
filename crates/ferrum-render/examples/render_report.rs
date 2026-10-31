@@ -290,6 +290,200 @@ fn text_section(report: &mut Report) {
     );
 }
 
+/// Векторы (подсистема 3, этап 3): сеть из 100 000 точек с областью и обводкой
+/// рисуется в бюджете кадра; правка одной точки — новый контур и кадр.
+fn vector_section(report: &mut Report) {
+    use std::sync::Arc;
+    const POINTS: usize = 100_000;
+    let net = ferrum_doc::fixture::wavy_network(POINTS);
+    let b = ferrum_scene::vector::network_bounds(&net).unwrap();
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let id = doc
+        .transact(page, vec![], |tx| {
+            let id = tx.create_node(None, None, NodeKind::Vector)?;
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    w: Some(b.width()),
+                    h: Some(b.height()),
+                    fills: Some(vec![ferrum_doc::Fill::solid(ferrum_doc::Color::SHAPE_GRAY)]),
+                    vector: Some(Arc::new(net.clone())),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![id])
+        })
+        .unwrap()[0];
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let mut camera = Camera::new(VIEWPORT, 1.0);
+    camera.fit(kurbo::Rect::new(0.0, 0.0, b.width(), b.height()), 48.0);
+    let (w, h) = camera.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    let mut renderer = Renderer::new();
+    let t = Instant::now();
+    renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+    report.gate(
+        "Вектор 100 000 точек: первый кадр (контуры и обводка строятся)",
+        t.elapsed(),
+        16.7,
+        "≤ 16.7 мс",
+    );
+    let (steady, _) = frame(&mut renderer, &mut backend, &scene, &camera);
+    report.gate(
+        "Вектор 100 000 точек: кадр (контуры в кэше)",
+        steady,
+        16.7,
+        "≤ 16.7 мс",
+    );
+    // Правка одной точки: документ, сцена и кадр с новым контуром.
+    let mut edited = net.clone();
+    edited.points[POINTS / 3].x += 15.0;
+    let edited = Arc::new(edited);
+    let t = Instant::now();
+    doc.transact(page, vec![], |tx| {
+        tx.set_props(
+            id,
+            &PropsPatch {
+                vector: Some(edited.clone()),
+                ..Default::default()
+            },
+        )
+        .map(|_| vec![])
+    })
+    .unwrap();
+    let changes = doc.take_changes(page);
+    scene.apply(&changes, doc.page(page).unwrap());
+    let (w, h) = camera.device_size();
+    backend.reset(w, h);
+    renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+    report.gate(
+        "Вектор 100 000 точек: правка точки — запись, сцена и кадр",
+        t.elapsed(),
+        16.7,
+        "≤ 16.7 мс",
+    );
+    // Режим правки: сеть тонкой линией, выделенная точка, ручки.
+    let overlay = Overlay {
+        vector_edit: Some(ferrum_render::VectorEditOverlay {
+            transform: scene.node(id).unwrap().world
+                * ferrum_scene::vector::fit(&scene.node(id).unwrap().props),
+            net: edited.clone(),
+            points: vec![POINTS as u32 / 3],
+            segments: vec![],
+            handles: vec![],
+            selected_handles: vec![],
+            rubber: None,
+        }),
+        ..Default::default()
+    };
+    let runs = (0..7)
+        .map(|_| {
+            let t = Instant::now();
+            renderer.render(&mut backend, &scene, &camera, &overlay, &NoImages, None);
+            t.elapsed()
+        })
+        .collect();
+    report.gate(
+        "Вектор 100 000 точек: кадр правки (сеть и точки в оверлее)",
+        median(runs),
+        16.7,
+        "≤ 16.7 мс",
+    );
+}
+
+/// Вектор с настоящими кривыми (каждый из 100 000 сегментов выгнут): упрощение
+/// под масштаб не раздувает контуры на приближении, точные контуры строятся один
+/// раз и дальше не перестраиваются.
+fn curvy_vector_section(report: &mut Report) {
+    use std::sync::Arc;
+    const POINTS: usize = 100_000;
+    const RADIUS: f64 = 2000.0;
+    let net = ferrum_doc::fixture::curvy_network(POINTS, RADIUS);
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let mut props = ferrum_doc::Props::defaults(NodeKind::Vector);
+    let b = ferrum_scene::vector::network_bounds(&net).unwrap();
+    (props.w, props.h) = (b.width(), b.height());
+    props.fills = vec![ferrum_doc::Fill::solid(ferrum_doc::Color::SHAPE_GRAY)];
+    props.strokes = vec![ferrum_doc::Stroke {
+        color: ferrum_doc::Color::BLACK,
+        width: 2.0,
+        align: ferrum_doc::StrokeAlign::Center,
+    }];
+    props.vector = Some(Arc::new(net));
+    doc.transact(page, vec![], |tx| {
+        Ok(vec![tx.create_with_props(None, None, &props)?])
+    })
+    .unwrap();
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    // Точный контур обводки — для сравнения с перестройкой на приближении.
+    let shape = ferrum_scene::vector::network_shape(&props);
+    let t = Instant::now();
+    let exact =
+        ferrum_scene::vector::stroke_outline(&shape, &props.strokes[0], &props.stroke_style);
+    let exact_ms = t.elapsed();
+    report.info(
+        "Кривой вектор 100 000 точек: точный контур обводки (для сравнения)",
+        format!("{} ({} элементов)", ms(exact_ms), exact.elements().len()),
+    );
+    let mut camera = Camera::new(VIEWPORT, 1.0);
+    camera.fit(b, 48.0);
+    let (w, h) = camera.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    let mut renderer = Renderer::new();
+    let t = Instant::now();
+    renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+    report.gate(
+        "Кривой вектор 100 000 точек: первый кадр целиком",
+        t.elapsed(),
+        16.7,
+        "≤ 16.7 мс",
+    );
+    let (steady, _) = frame(&mut renderer, &mut backend, &scene, &camera);
+    report.gate(
+        "Кривой вектор 100 000 точек: кадр целиком (контуры в кэше)",
+        steady,
+        16.7,
+        "≤ 16.7 мс",
+    );
+    // Приближение до предела на краю контура: упрощать нечего, контуры точные.
+    camera.set_center(Point::new(2.0 * RADIUS, RADIUS));
+    let mut rebuild = Duration::ZERO;
+    let mut zoom = camera.zoom();
+    while zoom < ferrum_render::MAX_ZOOM {
+        zoom = (zoom * 2.0).min(ferrum_render::MAX_ZOOM);
+        camera.set_zoom(zoom);
+        let t = Instant::now();
+        renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+        rebuild = rebuild.max(t.elapsed());
+    }
+    report.gate(
+        "Кривой вектор 100 000 точек: худший кадр приближения до ×256 (перестройка контуров)",
+        rebuild,
+        exact_ms.as_secs_f64() * 1000.0 * 1.5 + 16.7,
+        "≤ 1.5 × точного контура + кадр",
+    );
+    let (steady, _) = frame(&mut renderer, &mut backend, &scene, &camera);
+    report.gate(
+        "Кривой вектор 100 000 точек: кадр при ×256 (контуры в кэше)",
+        steady,
+        16.7,
+        "≤ 16.7 мс",
+    );
+    let built = ferrum_scene::vector::simplify(&shape, 0.25 / 256.0);
+    report.0.push(Row {
+        metric: "Кривой вектор 100 000 точек: элементов пути при ×256 / точного".into(),
+        value: format!(
+            "{} / {}",
+            built.stroke.elements().len(),
+            shape.stroke.elements().len()
+        ),
+        limit: "не больше точного",
+        pass: Some(built.stroke.elements().len() <= shape.stroke.elements().len()),
+    });
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -866,6 +1060,8 @@ fn main() {
     }
 
     text_section(&mut report);
+    vector_section(&mut report);
+    curvy_vector_section(&mut report);
 
     // Экспорт фрейма @3x — справочно.
     let first_frame = scene.at(scene.roots()[0]).id;

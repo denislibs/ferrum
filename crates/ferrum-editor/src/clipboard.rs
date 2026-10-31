@@ -11,6 +11,10 @@
 //! побайтно та же, что у сборок до отражения, а копия из такой сборки разбирается
 //! с `false`. Версия формата поэтому не менялась: старая сборка, получив копию с
 //! отражением, вставит её неотражённой, но без ошибки и без небезопасных данных.
+//! Так же добавлены стиль обводки (`strokeCapStart`, `strokeCapEnd`, `strokeJoin`,
+//! `strokeMiterLimit` — только не нейтральные) и сеть вектора (`vector` — base64
+//! двоичной формы `VectorNetwork`): сборка без векторов пропускает узел «vector»
+//! как неизвестный.
 //!
 //! Вставка не доверяет данным: размеры и количества ограничены, длины проверяются
 //! до копирования, числа приводятся к пределам сцены, ссылки на родителя — только
@@ -22,7 +26,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ferrum_doc::{
-    Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign, TextData,
+    Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign, StrokeCap,
+    StrokeJoin, StrokeStyle, TextData, VectorNetwork, DEFAULT_MITER_LIMIT, MITER_LIMIT_RANGE,
 };
 use ferrum_scene::shape;
 use kurbo::Rect;
@@ -112,6 +117,17 @@ struct JsonNode {
     /// не знает и пропускает узел «text» как неизвестный (версия формата та же).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stroke_cap_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stroke_cap_end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stroke_join: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stroke_miter_limit: Option<f64>,
+    /// Сеть вектора: base64 двоичной формы — только у вектора.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vector: Option<String>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -239,6 +255,18 @@ impl ClipPayload {
                             })
                             .collect(),
                         text: p.text.as_ref().map(|t| t.to_json()),
+                        stroke_cap_start: Some(p.stroke_style.cap_start)
+                            .filter(|c| *c != StrokeCap::None)
+                            .map(|c| c.as_str().to_string()),
+                        stroke_cap_end: Some(p.stroke_style.cap_end)
+                            .filter(|c| *c != StrokeCap::None)
+                            .map(|c| c.as_str().to_string()),
+                        stroke_join: Some(p.stroke_style.join)
+                            .filter(|j| *j != StrokeJoin::Miter)
+                            .map(|j| j.as_str().to_string()),
+                        stroke_miter_limit: Some(p.stroke_style.miter_limit)
+                            .filter(|m| *m != DEFAULT_MITER_LIMIT),
+                        vector: p.vector.as_ref().map(|v| v.to_base64()),
                     }
                 })
                 .collect(),
@@ -458,6 +486,23 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
             align,
         });
     }
+    let cap = |s: Option<String>| match s {
+        None => Ok(StrokeCap::None),
+        Some(s) => StrokeCap::parse(&s).ok_or_else(|| corrupted("окончание обводки")),
+    };
+    let stroke_style = StrokeStyle {
+        cap_start: cap(n.stroke_cap_start)?,
+        cap_end: cap(n.stroke_cap_end)?,
+        join: match n.stroke_join {
+            None => StrokeJoin::Miter,
+            Some(s) => StrokeJoin::parse(&s).ok_or_else(|| corrupted("соединение обводки"))?,
+        },
+        miter_limit: match n.stroke_miter_limit {
+            None => DEFAULT_MITER_LIMIT,
+            Some(v) if MITER_LIMIT_RANGE.contains(&v) => v,
+            Some(_) => return Err(corrupted("предел острого угла")),
+        },
+    };
     let mut props = Props {
         kind,
         name: n.name.chars().take(MAX_NAME).collect(),
@@ -481,6 +526,15 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
                 TextData::from_json(json).map_err(|e| corrupted(e.to_string()))?,
             )),
             (NodeKind::Text, None) => Some(Arc::new(TextData::default())),
+            _ => None,
+        },
+        stroke_style,
+        // Сеть — только у вектора; пределы и связность проверяет `from_base64`.
+        vector: match (kind, n.vector.as_deref()) {
+            (NodeKind::Vector, Some(s)) => Some(Arc::new(
+                VectorNetwork::from_base64(s).map_err(|e| corrupted(e.to_string()))?,
+            )),
+            (NodeKind::Vector, None) => Some(Arc::new(VectorNetwork::default())),
             _ => None,
         },
     };
@@ -542,5 +596,11 @@ pub fn full_patch(p: &Props) -> PropsPatch {
         strokes: Some(p.strokes.clone()),
         text: p.text.as_ref().map(|t| t.props.clone()),
         content: None,
+        // Нейтральные значения у нового узла уже есть: не пишутся.
+        stroke_cap_start: Some(p.stroke_style.cap_start).filter(|c| *c != StrokeCap::None),
+        stroke_cap_end: Some(p.stroke_style.cap_end).filter(|c| *c != StrokeCap::None),
+        stroke_join: Some(p.stroke_style.join).filter(|j| *j != StrokeJoin::Miter),
+        stroke_miter_limit: Some(p.stroke_style.miter_limit).filter(|m| *m != DEFAULT_MITER_LIMIT),
+        vector: p.vector.clone(),
     }
 }

@@ -14,6 +14,12 @@ pub enum CommandId {
     ToolHand,
     /// «Текст» (подсистема 3).
     ToolText,
+    /// «Перо» (подсистема 3, этап 3).
+    ToolPen,
+    /// «Стрелка»: линия со стрелкой на конце.
+    ToolArrow,
+    /// «Сплющить»: выделение — в один вектор.
+    Flatten,
     /// Рука, пока клавиша удерживается (по умолчанию Space).
     HandHold,
     ToolImage,
@@ -120,6 +126,8 @@ pub const COMMANDS: &[Command] = &[
     cmd(C::ToolLine, "tool.line", "Линия", &["KeyL"]),
     cmd(C::ToolHand, "tool.hand", "Рука", &["KeyH"]),
     cmd(C::ToolText, "tool.text", "Текст", &["KeyT"]),
+    cmd(C::ToolPen, "tool.pen", "Перо", &["KeyP"]),
+    cmd(C::ToolArrow, "tool.arrow", "Стрелка", &["Shift+KeyL"]),
     cmd(
         C::HandHold,
         "tool.hand_hold",
@@ -171,6 +179,7 @@ pub const COMMANDS: &[Command] = &[
         "Разгруппировать",
         &["Mod+Shift+KeyG"],
     ),
+    cmd(C::Flatten, "object.flatten", "Сплющить", &["Mod+KeyE"]),
     cmd(
         C::FrameSelection,
         "object.frame_selection",

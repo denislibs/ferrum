@@ -896,6 +896,24 @@ impl Tool for SelectTool {
                     self.state = State::Idle;
                     return;
                 }
+                // Двойной щелчок по вектору или фигуре — правка вектора; но
+                // сначала, как в Figma, — на уровень глубже (в группу или фрейм).
+                let same_level = Self::pick_at(cx, &cache.parents, e.point, e.modifiers, false)
+                    == Some(id)
+                    || cx.selection.contains(&id);
+                let shape = same_level
+                    && cx.scene.slot(id).is_some_and(|s| {
+                        matches!(
+                            cx.scene.at(s).props.kind,
+                            NodeKind::Vector | NodeKind::Rect | NodeKind::Ellipse | NodeKind::Line
+                        ) && !locked(cx.scene, s)
+                    });
+                if shape {
+                    cx.selection.set(vec![id]);
+                    cx.out.edit_vector = Some(id);
+                    self.state = State::Idle;
+                    return;
+                }
             }
         }
         let target = if let Some((hit, _)) = Self::box_hit(cx, sbox, e.point) {

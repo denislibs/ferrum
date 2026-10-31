@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use ferrum_doc::{Fill, NodeId, NodeKind, Props, PropsPatch, Stroke};
+use ferrum_doc::{Fill, NodeId, NodeKind, Props, PropsPatch, Stroke, StrokeCap, StrokeJoin};
 use ferrum_scene::shape::COORD_LIMIT;
 use ferrum_scene::{Scene, Slot};
 use kurbo::{Affine, Point, Rect};
@@ -58,6 +58,14 @@ pub enum PanelEdit {
     ClipContent(bool),
     /// Ширина и высота сразу (пресет фрейма) — одним шагом.
     Size { w: f64, h: f64 },
+    /// Стиль обводки: окончания начала и конца, соединение, предел острого
+    /// угла (`None` — не трогать). У групп и текста стиля нет — пропускаются.
+    StrokeStyle {
+        cap_start: Option<StrokeCap>,
+        cap_end: Option<StrokeCap>,
+        join: Option<StrokeJoin>,
+        miter_limit: Option<f64>,
+    },
 }
 
 /// Фаза правки: превью жеста, запись одним шагом или отмена жеста.
@@ -368,6 +376,25 @@ fn patches(g: &PanelGesture, edit: &PanelEdit) -> Vec<(NodeId, PropsPatch)> {
                     ));
                 }
             }
+            PanelEdit::StrokeStyle {
+                cap_start,
+                cap_end,
+                join,
+                miter_limit,
+            } => {
+                if kind != NodeKind::Group && kind != NodeKind::Text {
+                    out.push((
+                        t.id,
+                        PropsPatch {
+                            stroke_cap_start: *cap_start,
+                            stroke_cap_end: *cap_end,
+                            stroke_join: *join,
+                            stroke_miter_limit: *miter_limit,
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
             PanelEdit::Strokes(strokes) => {
                 if kind != NodeKind::Group {
                     out.push((
@@ -446,6 +473,18 @@ impl Editor {
             Some(ids) => me.alive(ids),
             None => me.selection.to_vec(),
         };
+        // Открытый путь пера записывается раньше превью и правки: превью панели
+        // заменило бы его превью, а его запись — затёрла бы правку. Жест холста
+        // при заданных `ids` не трогается — только путь.
+        if phase != Phase::Cancel {
+            // Протяжка ручки пера кончается вместе с путём (её ручка уже в пути и
+            // записывается с ним), иначе следующие движения правили бы
+            // записанный путь мимо документа.
+            if self.vector_edit.as_ref().is_some_and(|v| v.pen.dirty) {
+                self.cancel_vector_drag();
+            }
+            self.finish_pen_path();
+        }
         match phase {
             Phase::Cancel => self.cancel_panel(),
             Phase::Preview => {
@@ -503,7 +542,7 @@ impl Editor {
 
     /// Скрыть или заблокировать узлы (кнопки строки слоя) одним шагом.
     pub fn set_flags(&mut self, ids: &[NodeId], visible: Option<bool>, locked: Option<bool>) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let ids = self.alive(ids);
         if ids.is_empty() || (visible.is_none() && locked.is_none()) {
             return;
@@ -525,7 +564,7 @@ impl Editor {
 
     /// Переименование слоя одним шагом; пустое или то же имя ничего не меняет.
     pub fn rename_node(&mut self, id: NodeId, name: &str) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let Some(name) = clean_name(name) else {
             return;
         };
@@ -551,7 +590,7 @@ impl Editor {
     /// на экране. Один шаг; перенос узла внутрь самого себя или в лист ничего не
     /// делает. Возвращает, изменился ли документ.
     pub fn move_layers(&mut self, ids: &[NodeId], target: DropTarget) -> bool {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let ids = top_level(&self.scene, &self.alive(ids));
         let anchor = match target {
             DropTarget::Above(a) | DropTarget::Below(a) | DropTarget::Into(a) => a,

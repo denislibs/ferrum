@@ -435,6 +435,7 @@ fn scene_cache_roundtrips_every_field() {
         NodeKind::Line,
         NodeKind::Image,
         NodeKind::Text,
+        NodeKind::Vector,
     ];
     doc.transact(page, vec![], |p| {
         let mut parent = None;
@@ -508,6 +509,16 @@ fn scene_cache_roundtrips_every_field() {
                     }),
                     // Содержимое — ниже, своими правками.
                     content: None,
+                    stroke_cap_start: Some(StrokeCap::ALL[i % 7]),
+                    stroke_cap_end: Some(StrokeCap::ALL[(i + 3) % 7]),
+                    stroke_join: Some(StrokeJoin::ALL[i % 3]),
+                    stroke_miter_limit: Some(1.5 + f),
+                    // У не вектора пропускается.
+                    vector: Some(std::sync::Arc::new(VectorNetwork {
+                        points: vec![VectorPoint::new(0.0, 0.0), VectorPoint::new(f, 7.0)],
+                        segments: vec![VectorSegment::line(0, 1)],
+                        regions: vec![],
+                    })),
                 },
             )?;
             if kind == NodeKind::Text {

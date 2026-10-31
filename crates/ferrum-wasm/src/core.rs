@@ -121,6 +121,8 @@ fn tool_kind(t: Tool) -> ToolKind {
         Tool::Hand => ToolKind::Hand,
         Tool::Image => ToolKind::Image,
         Tool::Text => ToolKind::Text,
+        Tool::Pen => ToolKind::Pen,
+        Tool::Arrow => ToolKind::Arrow,
     }
 }
 
@@ -134,6 +136,8 @@ fn tool(k: ToolKind) -> Tool {
         ToolKind::Hand => Tool::Hand,
         ToolKind::Image => Tool::Image,
         ToolKind::Text => Tool::Text,
+        ToolKind::Pen => Tool::Pen,
+        ToolKind::Arrow => Tool::Arrow,
     }
 }
 
@@ -147,6 +151,8 @@ fn cursor(c: Cursor) -> (CursorKind, f64) {
         Cursor::Resize { angle } => (CursorKind::Resize, angle),
         Cursor::Rotate { angle } => (CursorKind::Rotate, angle),
         Cursor::Text => (CursorKind::Text, 0.0),
+        Cursor::Pen => (CursorKind::Pen, 0.0),
+        Cursor::Bucket => (CursorKind::Bucket, 0.0),
     }
 }
 

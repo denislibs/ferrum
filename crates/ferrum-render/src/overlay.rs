@@ -114,6 +114,46 @@ pub struct TextEditOverlay {
 /// Прозрачность заливки выделения текста (спека подсистемы 3, раздел 7).
 pub const TEXT_SELECTION_ALPHA: f32 = 0.25;
 
+/// Радиус точки сети в правке вектора и ручки — CSS-пиксели.
+pub const VECTOR_POINT_RADIUS: f64 = 3.5;
+pub const VECTOR_HANDLE_RADIUS: f64 = 2.5;
+/// Больше стольких точек на экране не рисуются невыделенные: сеть в 100 000
+/// точек при отдалении была бы сплошной кашей кружков (и дорогим кадром). Больше
+/// стольких выделенных или ручек на экране — не рисуются и они (выделение видно
+/// по сети, обведённой толще).
+pub const VECTOR_MAX_POINTS_DRAWN: usize = 5000;
+
+/// Правка вектора (подсистема 3, этап 3): сеть, точки, ручки и резинка пера.
+/// Всё — в координатах формы узла.
+#[derive(Debug, Clone)]
+pub struct VectorEditOverlay {
+    /// Координаты формы → мир.
+    pub transform: Affine,
+    pub net: std::sync::Arc<ferrum_doc::VectorNetwork>,
+    /// Выделенные точки и сегменты.
+    pub points: Vec<u32>,
+    pub segments: Vec<u32>,
+    /// Видимые ручки: сегмент и `true` — у его начала.
+    pub handles: Vec<(u32, bool)>,
+    pub selected_handles: Vec<(u32, bool)>,
+    /// Резинка пера: от последней точки пути к курсору.
+    pub rubber: Option<(Point, Point)>,
+}
+
+impl PartialEq for VectorEditOverlay {
+    /// Сеть сравнивается по указателю (одна и та же — равна, без обхода 100 000
+    /// точек), иначе по значению.
+    fn eq(&self, o: &Self) -> bool {
+        self.transform == o.transform
+            && (std::sync::Arc::ptr_eq(&self.net, &o.net) || self.net == o.net)
+            && self.points == o.points
+            && self.segments == o.segments
+            && self.handles == o.handles
+            && self.selected_handles == o.selected_handles
+            && self.rubber == o.rubber
+    }
+}
+
 /// Что показать поверх содержимого. Заполняет редактор (этап 3).
 #[derive(Debug, Clone)]
 pub struct Overlay {
@@ -132,6 +172,8 @@ pub struct Overlay {
     pub measurements: Vec<Measure>,
     /// Правка текста: курсор и выделение внутри текстового узла.
     pub text_edit: Option<TextEditOverlay>,
+    /// Правка вектора: сеть, точки и ручки.
+    pub vector_edit: Option<VectorEditOverlay>,
 }
 
 impl Default for Overlay {
@@ -146,6 +188,7 @@ impl Default for Overlay {
             pixel_grid: true,
             measurements: Vec::new(),
             text_edit: None,
+            vector_edit: None,
         }
     }
 }
@@ -200,7 +243,9 @@ pub(crate) fn draw(
         !overlay.selection.contains(h) && scene.slot(*h).is_some_and(|s| scene.is_visible(s))
     });
     if let Some(id) = hover {
-        if let Some(outline) = node_outline(scene, id, view) {
+        let (w, h) = backend.size();
+        let screen = Rect::new(0.0, 0.0, w as f64, h as f64).inflate(8.0 * dpr, 8.0 * dpr);
+        if let Some(outline) = node_outline(scene, id, view, screen) {
             backend.set_transform(Affine::IDENTITY);
             backend.set_color(theme.select);
             backend.stroke_path(&outline, &Stroke::new(1.5 * dpr));
@@ -228,6 +273,9 @@ pub(crate) fn draw(
     }
     if let Some(t) = &overlay.text_edit {
         text_edit(backend, view, dpr, theme, t);
+    }
+    if let Some(v) = &overlay.vector_edit {
+        vector_edit(backend, view, dpr, theme, v);
     }
     selection(backend, text, scene, camera, overlay);
     measurements(backend, text, camera, overlay);
@@ -288,8 +336,178 @@ fn text_edit(
     }
 }
 
+/// Правка вектора: все сегменты тонкой линией, выделенные — толще, ручки
+/// выделенного — линией с кружком, точки — кружками (выделенные залиты).
+/// Рисуется только видимое на экране.
+fn vector_edit(
+    backend: &mut impl RenderBackend,
+    view: Affine,
+    dpr: f64,
+    theme: &OverlayTheme,
+    v: &VectorEditOverlay,
+) {
+    let to_device = view * v.transform;
+    let (w, h) = backend.size();
+    let screen = Rect::new(0.0, 0.0, w as f64, h as f64).inflate(8.0 * dpr, 8.0 * dpr);
+    let net = &*v.net;
+    let pt = |i: u32| {
+        let p = &net.points[i as usize];
+        Point::new(p.x, p.y)
+    };
+    // Сегменты по порядку: если сегмент начинается там, где кончился прежний, путь
+    // продолжается без нового подпути (так большую сеть можно упростить целиком).
+    let seg_path = |i: usize, path: &mut BezPath, last: &mut Option<Point>| {
+        let s = &net.segments[i];
+        let (a, b) = (to_device * pt(s.start), to_device * pt(s.end));
+        let ta =
+            to_device * (pt(s.start) + kurbo::Vec2::new(s.tangent_start[0], s.tangent_start[1]));
+        let tb = to_device * (pt(s.end) + kurbo::Vec2::new(s.tangent_end[0], s.tangent_end[1]));
+        let bb = Rect::from_points(a, b).union_pt(ta).union_pt(tb);
+        if bb.x1 < screen.x0 || bb.x0 > screen.x1 || bb.y1 < screen.y0 || bb.y0 > screen.y1 {
+            *last = None;
+            return;
+        }
+        if *last != Some(a) {
+            path.move_to(a);
+        }
+        *last = Some(b);
+        if s.is_straight() {
+            path.line_to(b);
+        } else {
+            path.curve_to(ta, tb, b);
+        }
+    };
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.select);
+    let mut all = BezPath::new();
+    let mut last = None;
+    for i in 0..net.segments.len() {
+        seg_path(i, &mut all, &mut last);
+    }
+    // Большая сеть — ломаной с точностью в четверть пикселя устройства (как списки
+    // отображения): тысячи сегментов меньше пикселя обводить по одному незачем.
+    if all.elements().len() > ferrum_scene::vector::SIMPLIFY_MIN_ELEMENTS {
+        all = ferrum_scene::vector::simplify_path(&all, crate::display::LOD_TOLERANCE_PX);
+    }
+    backend.stroke_path(&all, &Stroke::new(dpr));
+    if !v.segments.is_empty() {
+        let mut sel = BezPath::new();
+        let mut last = None;
+        for &i in &v.segments {
+            if (i as usize) < net.segments.len() {
+                seg_path(i as usize, &mut sel, &mut last);
+            }
+        }
+        backend.stroke_path(&sel, &Stroke::new(2.0 * dpr));
+    }
+    if let Some((a, b)) = v.rubber {
+        let mut r = BezPath::new();
+        r.move_to(to_device * a);
+        r.line_to(to_device * b);
+        backend.stroke_path(&r, &Stroke::new(dpr));
+    }
+    // Точки на экране; при толпе — только выделенные.
+    let visible: Vec<u32> = (0..net.points.len() as u32)
+        .filter(|&i| screen.contains(to_device * pt(i)))
+        .collect();
+    let selected_visible = visible
+        .iter()
+        .filter(|i| v.points.binary_search(i).is_ok())
+        .count();
+    // Выделенных на экране больше предела (Ctrl/Cmd+A на большой сети): кружки и
+    // ручки по одному не рисуются — выделение видно по сети, обведённой толще.
+    if selected_visible > VECTOR_MAX_POINTS_DRAWN {
+        backend.set_color(theme.select);
+        backend.stroke_path(&all, &Stroke::new(2.0 * dpr));
+        return;
+    }
+    // Ручки на экране: линия от точки и кружок на конце — тремя путями на все.
+    let handle_r = VECTOR_HANDLE_RADIUS * dpr;
+    let mut chosen = v.selected_handles.clone();
+    chosen.sort_unstable();
+    let mut lines = BezPath::new();
+    let mut plain = BezPath::new();
+    let mut picked = BezPath::new();
+    let mut drawn = 0;
+    for &(i, at_start) in &v.handles {
+        let Some(s) = net.segments.get(i as usize) else {
+            continue;
+        };
+        let (p, t) = if at_start {
+            (pt(s.start), s.tangent_start)
+        } else {
+            (pt(s.end), s.tangent_end)
+        };
+        let a = to_device * p;
+        let b = to_device * (p + kurbo::Vec2::new(t[0], t[1]));
+        if !Rect::from_points(a, b).overlaps(screen) {
+            continue;
+        }
+        drawn += 1;
+        if drawn > VECTOR_MAX_POINTS_DRAWN {
+            // Ручек на экране больше предела — не рисуется ни одна.
+            lines = BezPath::new();
+            plain = BezPath::new();
+            picked = BezPath::new();
+            break;
+        }
+        lines.move_to(a);
+        lines.line_to(b);
+        let circle = kurbo::Circle::new(b, handle_r).path_elements(0.1);
+        if chosen.binary_search(&(i, at_start)).is_ok() {
+            picked.extend(circle);
+        } else {
+            plain.extend(circle);
+        }
+    }
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.select);
+    backend.stroke_path(&lines, &Stroke::new(dpr));
+    backend.set_color(theme.handle_fill);
+    backend.fill_path(&plain, Fill::NonZero);
+    backend.set_color(theme.select);
+    backend.fill_path(&picked, Fill::NonZero);
+    backend.stroke_path(&plain, &Stroke::new(dpr));
+    backend.stroke_path(&picked, &Stroke::new(dpr));
+    let crowd = visible.len() > VECTOR_MAX_POINTS_DRAWN;
+    let r = VECTOR_POINT_RADIUS * dpr;
+    let mut filled = BezPath::new();
+    let mut hollow = BezPath::new();
+    // Невыделенная точка ближе радиуса к последней нарисованной невыделенной
+    // слилась бы с ней: густая сеть при приближении — сотни кружков вместо
+    // тысяч в одной каше (соседи по номеру обычно соседи и на экране).
+    let mut last_hollow: Option<Point> = None;
+    for i in visible {
+        let selected = v.points.binary_search(&i).is_ok();
+        if crowd && !selected {
+            continue;
+        }
+        let at = to_device * pt(i);
+        if !selected {
+            if last_hollow.is_some_and(|q| (q - at).hypot() < r) {
+                continue;
+            }
+            last_hollow = Some(at);
+        }
+        let c = kurbo::Circle::new(at, r);
+        if selected {
+            filled.extend(c.path_elements(0.1));
+        } else {
+            hollow.extend(c.path_elements(0.1));
+        }
+    }
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.handle_fill);
+    backend.fill_path(&hollow, Fill::NonZero);
+    backend.set_color(theme.select);
+    backend.stroke_path(&hollow, &Stroke::new(dpr));
+    backend.fill_path(&filled, Fill::NonZero);
+    backend.set_color(theme.handle_fill);
+    backend.stroke_path(&filled, &Stroke::new(dpr));
+}
+
 /// Контур формы узла в пикселях устройства; у группы — рамка её границ.
-fn node_outline(scene: &Scene, id: NodeId, view: Affine) -> Option<BezPath> {
+fn node_outline(scene: &Scene, id: NodeId, view: Affine, screen: Rect) -> Option<BezPath> {
     let n = scene.node(id)?;
     let to_device = view * n.world;
     let mut path = BezPath::new();
@@ -299,12 +517,53 @@ fn node_outline(scene: &Scene, id: NodeId, view: Affine) -> Option<BezPath> {
             path.line_to(to_device * Point::new(len, 0.0));
         }
         Geometry::None => path = to_device * n.local_bounds?.to_path(0.1),
+        // Вектор подсвечивается своей сетью (контуры из кэша узла), а не рамкой.
+        Geometry::Vector(_) => path = device_path(&n.path_shape()?.stroke, to_device, screen),
         geom => {
             geom.fill_path_into(&mut path);
             path.apply_affine(to_device);
         }
     }
     Some(path)
+}
+
+/// Путь в пикселях устройства для подсветки: сегменты, чья рамка ручек не
+/// задевает экран, отброшены; большой путь — с точностью в четверть пикселя
+/// (как списки отображения). Сеть в 100 000 точек иначе обводилась бы целиком
+/// на каждом кадре, пока указатель над ней.
+fn device_path(path: &BezPath, to_device: Affine, screen: Rect) -> BezPath {
+    use kurbo::PathSeg;
+    let mut out = BezPath::new();
+    let mut last: Option<Point> = None;
+    for seg in path.segments() {
+        let seg = to_device * seg;
+        let (start, end, bb) = match seg {
+            PathSeg::Line(l) => (l.p0, l.p1, Rect::from_points(l.p0, l.p1)),
+            PathSeg::Quad(q) => (q.p0, q.p2, Rect::from_points(q.p0, q.p2).union_pt(q.p1)),
+            PathSeg::Cubic(c) => (
+                c.p0,
+                c.p3,
+                Rect::from_points(c.p0, c.p3).union_pt(c.p1).union_pt(c.p2),
+            ),
+        };
+        if !bb.overlaps(screen) {
+            last = None;
+            continue;
+        }
+        if last != Some(start) {
+            out.move_to(start);
+        }
+        last = Some(end);
+        match seg {
+            PathSeg::Line(l) => out.line_to(l.p1),
+            PathSeg::Quad(q) => out.quad_to(q.p1, q.p2),
+            PathSeg::Cubic(c) => out.curve_to(c.p1, c.p2, c.p3),
+        }
+    }
+    if out.elements().len() > ferrum_scene::vector::SIMPLIFY_MIN_ELEMENTS {
+        out = ferrum_scene::vector::simplify_path(&out, crate::display::LOD_TOLERANCE_PX);
+    }
+    out
 }
 
 /// Целые мировые координаты линий сетки на отрезке `lo..=hi`. Число линий задаётся

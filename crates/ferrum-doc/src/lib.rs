@@ -16,6 +16,7 @@ mod scene_cache;
 mod text;
 mod text_codec;
 mod types;
+mod vector;
 
 pub use changes::Changes;
 pub use document::{Document, Restore, SCHEMA_VERSION};
@@ -27,6 +28,7 @@ pub use page::{PageDoc, Tx};
 pub use scene_cache::SceneRow;
 pub use text::*;
 pub use types::*;
+pub use vector::*;
 
 #[doc(hidden)]
 pub mod fixture;

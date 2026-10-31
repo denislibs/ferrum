@@ -39,6 +39,8 @@ impl Editor {
 
     /// Переименование; пустое имя ничего не меняет.
     pub fn rename_page(&mut self, id: PageId, name: &str) -> DocResult<()> {
+        // Шаг правки — после шага открытого пути пера (см. `begin_doc_edit`).
+        self.finish_pen_path();
         match clean_name(name) {
             Some(name) => self.doc.rename_page(id, &name),
             None => Ok(()),
@@ -52,6 +54,7 @@ impl Editor {
         if pages.len() <= 1 {
             return Err(ferrum_doc::DocError::LastPage);
         }
+        self.finish_pen_path();
         if id == self.page {
             let at = pages.iter().position(|(p, _)| *p == id).unwrap_or(0);
             let next = if at + 1 < pages.len() { at + 1 } else { at - 1 };
@@ -63,6 +66,7 @@ impl Editor {
     /// Имя документа (шапка панели, имя файла); пустое ничего не меняет.
     /// Возвращает имя после правки.
     pub fn set_document_name(&mut self, name: &str) -> DocResult<String> {
+        self.finish_pen_path();
         if let Some(name) = clean_name(name) {
             self.doc.set_name(&name)?;
         }
@@ -76,6 +80,7 @@ impl Editor {
 
     /// Задаёт фон страницы. Холст перерисовывается, если страница текущая.
     pub fn set_page_background(&mut self, id: PageId, color: Option<Color>) -> DocResult<()> {
+        self.finish_pen_path();
         self.doc.set_page_background(id, color)?;
         if id == self.page {
             self.out.events.push(EditorEvent::NeedsRedraw);

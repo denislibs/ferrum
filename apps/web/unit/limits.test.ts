@@ -15,7 +15,9 @@ import {
   MAX_KEYMAP_BYTES,
   MAX_LETTER_SPACING_PERCENT,
   MAX_LINE_HEIGHT_PERCENT,
+  MAX_MITER_LIMIT,
   MAX_NAME_CHARS,
+  MIN_MITER_LIMIT,
   MIN_FONT_SIZE,
   MAX_SETTINGS_BYTES,
   tooLarge,
@@ -55,6 +57,10 @@ test('пределы совпадают с константами ядра', () 
   const text = read(`${CRATES}ferrum-wasm/src/core/text.rs`);
   expect(text).toContain(`finite_in(d.value, 0.0, ${MAX_LINE_HEIGHT_PERCENT}.0`.replace(/(\d)(?=(\d{3})+\.)/g, '$1_'));
   expect(text).toContain(`finite_in(d.value, -${MAX_LETTER_SPACING_PERCENT}.0, ${MAX_LETTER_SPACING_PERCENT}.0`);
+  // Предел острого угла обводки (подсистема 3, этап 3).
+  expect(read(`${CRATES}ferrum-doc/src/vector.rs`)).toContain(
+    `MITER_LIMIT_RANGE: std::ops::RangeInclusive<f64> = ${MIN_MITER_LIMIT}.0..=${MAX_MITER_LIMIT}.0;`,
+  );
   // Десктоп отдаёт список системных шрифтов уже в этих пределах.
   const desktop = '../../desktop/src-tauri/src/fonts.rs';
   expect(rustConst(desktop, 'MAX_FONT_FAMILIES')).toBe(MAX_FONT_FAMILIES);

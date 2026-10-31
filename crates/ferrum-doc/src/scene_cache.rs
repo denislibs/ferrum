@@ -12,6 +12,7 @@ use loro::TreeID;
 use crate::binary::{Reader, Writer};
 use crate::text::*;
 use crate::types::*;
+use crate::vector::*;
 
 /// Узел страницы в порядке обхода в глубину: родитель всегда раньше детей.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +44,9 @@ fn kind_code(k: NodeKind) -> u8 {
         // Третья версия таблицы (`SCENE_CACHE_VERSION = 3`): у строки текста после
         // обводок — свойства текста и содержимое (`write_text`).
         NodeKind::Text => 6,
+        // Четвёртая версия (`SCENE_CACHE_VERSION = 4`): у каждой строки после
+        // обводок — стиль обводки, у вектора после него — сеть (`write_vector`).
+        NodeKind::Vector => 7,
     }
 }
 
@@ -55,6 +59,7 @@ fn kind_from(c: u8) -> Option<NodeKind> {
         NodeKind::Line,
         NodeKind::Image,
         NodeKind::Text,
+        NodeKind::Vector,
     ]
     .get(c as usize)
     .copied()
@@ -116,14 +121,24 @@ pub(crate) fn encode(rows: &[SceneRow]) -> Option<Vec<u8>> {
                 StrokeAlign::Outside => 2,
             });
         }
+        let s = &p.stroke_style;
+        w.u8(code(&StrokeCap::ALL, s.cap_start));
+        w.u8(code(&StrokeCap::ALL, s.cap_end));
+        w.u8(code(&StrokeJoin::ALL, s.join));
+        w.f64(s.miter_limit);
         if let Some(t) = &p.text {
             write_text(&mut w, t)?;
+        }
+        if let Some(v) = &p.vector {
+            let bytes = v.encode();
+            w.u32(u32::try_from(bytes.len()).ok()?);
+            w.bytes(&bytes);
         }
     }
     Some(w.buf)
 }
 
-fn write_fill(w: &mut Writer, f: &Fill) -> Option<()> {
+pub(crate) fn write_fill(w: &mut Writer, f: &Fill) -> Option<()> {
     w.u8(match f.kind {
         FillKind::Solid => 0,
         FillKind::Image => 1,
@@ -139,7 +154,7 @@ fn write_fill(w: &mut Writer, f: &Fill) -> Option<()> {
     w.str16(f.image_hash.as_deref().unwrap_or(""))
 }
 
-fn read_fill(r: &mut Reader) -> Option<Fill> {
+pub(crate) fn read_fill(r: &mut Reader) -> Option<Fill> {
     let kind = if r.u8()? == 1 {
         FillKind::Image
     } else {
@@ -433,8 +448,23 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
                 align,
             });
         }
+        let stroke_style = StrokeStyle {
+            cap_start: decode_enum(&StrokeCap::ALL, r.u8()?)?,
+            cap_end: decode_enum(&StrokeCap::ALL, r.u8()?)?,
+            join: decode_enum(&StrokeJoin::ALL, r.u8()?)?,
+            miter_limit: Some(r.f64()?).filter(|v| MITER_LIMIT_RANGE.contains(v))?,
+        };
         let text = match kind {
             NodeKind::Text => Some(Arc::new(read_text(&mut r)?)),
+            _ => None,
+        };
+        // Сеть из файла — те же проверки, что у читателя Loro; неверная —
+        // кэш отбрасывается, и страница читается из Loro (узел там скрывается).
+        let vector = match kind {
+            NodeKind::Vector => {
+                let n = r.u32()? as usize;
+                Some(Arc::new(VectorNetwork::decode(r.take(n)?).ok()?))
+            }
             _ => None,
         };
         let [x, y, w, h, rotation, opacity, corner_radius] = nums;
@@ -459,7 +489,9 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
                 flip_y: flags & FLAG_FLIP_Y != 0,
                 fills,
                 strokes,
+                stroke_style,
                 text,
+                vector,
             },
         });
     }

@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferrum_doc::{NodeId, NodeKind, ScaleMode};
+use ferrum_doc::{FillRule, NodeId, NodeKind, ScaleMode};
 use ferrum_scene::shape::Geometry;
+use ferrum_scene::vector::StrokeClip;
 use ferrum_scene::{Scene, SceneNode, Slot};
 use ferrum_text::{Fonts, LayoutRequest, TextLayout};
 use kurbo::{Affine, BezPath, Point, Rect};
@@ -110,7 +111,7 @@ enum Visit {
     Exit {
         clip: bool,
         layer: bool,
-        stroke: Option<(Slot, Option<DisplayList>)>,
+        stroke: Option<(Slot, Option<Box<DisplayList>>)>,
     },
 }
 
@@ -331,6 +332,7 @@ impl Painter {
                     }
                     if let Some((slot, held)) = stroke {
                         let n = scene.at(slot);
+                        let held = held.map(|b| *b);
                         self.draw_own(backend, ctx, slot, n, 1.0, Part::Strokes, held);
                     }
                     if layer {
@@ -396,7 +398,8 @@ impl Painter {
                     backend.push_clip(&self.path);
                     self.stats.clips += 1;
                 }
-                let stroke = (split && !n.props.strokes.is_empty()).then_some((slot, held));
+                let stroke =
+                    (split && !n.props.strokes.is_empty()).then_some((slot, held.map(Box::new)));
                 stack.push(Visit::Exit {
                     clip,
                     layer,
@@ -453,12 +456,15 @@ impl Painter {
         }
         let i = slot as usize;
         let split = part != Part::All;
+        // Видимая часть в локальных координатах узла: контур обводки большого
+        // вектора строится только у неё.
+        let view = ctx.cull.map(|c| n.world.inverse().transform_rect_bbox(c));
         backend.set_transform(ctx.transform * n.world);
         if part != Part::Strokes {
             self.stats.drawn += 1;
         }
         if let Some(mut list) = held {
-            list.paths();
+            list.paths_at(ctx.scale, view);
             self.play(backend, &list, alpha, ctx, part);
             return None;
         }
@@ -470,7 +476,7 @@ impl Painter {
                 self.stats.lists_built += 1;
             }
             let mut list = DisplayList::build(n, split);
-            list.paths();
+            list.paths_at(ctx.scale, view);
             self.play(backend, &list, alpha, ctx, part);
             if ctx.retain {
                 list.last_used = self.frame;
@@ -484,7 +490,7 @@ impl Painter {
         }
         let mut list = self.lists[i].take().expect("проверено выше");
         list.last_used = self.frame;
-        list.paths();
+        list.paths_at(ctx.scale, view);
         self.play(backend, &list, alpha, ctx, part);
         self.lists[i] = Some(list);
         None
@@ -826,8 +832,13 @@ fn replay(
         missing_image: false,
         layered: false,
     };
-    let single_paint =
-        list.items.len() == 1 && !matches!(list.items[0], Item::FilledInsideStroke { .. });
+    // Одна краска — одна заливка; у обводки по контуру с окончаниями фигуры
+    // перекрывают путь, поэтому прозрачность умножать в краску нельзя.
+    let single_paint = list.items.len() == 1
+        && matches!(
+            list.items[0],
+            Item::Fill(_) | Item::Stroke(..) | Item::Region { .. }
+        );
     if alpha < 1.0 && !single_paint && !list.items.is_empty() {
         backend.push_opacity_layer(alpha);
         info.layered = true;
@@ -853,7 +864,7 @@ fn replay_items(
         .as_ref()
         .expect("контуры построены до воспроизведения");
     for (item, item_path) in list.items.iter().zip(&paths.items) {
-        let is_fill = matches!(item, Item::Fill(_));
+        let is_fill = matches!(item, Item::Fill(_) | Item::Region { .. });
         match part {
             Part::Fills if !is_fill => continue,
             Part::Strokes if is_fill => continue,
@@ -903,6 +914,87 @@ fn replay_items(
                 if let Some(ring) = item_path {
                     backend.set_color(c.multiply_alpha(alpha));
                     backend.fill_path(ring, Fill::EvenOdd);
+                }
+            }
+            Item::Region { region, paint } => {
+                let (Some(path), Some(ps)) = (item_path, list.path.as_deref().map(|p| &p.shape))
+                else {
+                    continue;
+                };
+                let rule = match ps.regions[*region].rule {
+                    FillRule::NonZero => Fill::NonZero,
+                    FillRule::EvenOdd => Fill::EvenOdd,
+                };
+                match paint {
+                    Paint::Solid(c) => {
+                        backend.set_color(c.multiply_alpha(alpha));
+                        backend.fill_path(path, rule);
+                    }
+                    Paint::Image {
+                        hash,
+                        mode,
+                        alpha: a,
+                    } => {
+                        // Изображение — по рамке узла, как у фигур; область его обрезает.
+                        let Some(area) = geom.bounds() else { continue };
+                        if !(area.width() > 0.0 && area.height() > 0.0) {
+                            continue;
+                        }
+                        let Some(pixmap) = images.image(hash) else {
+                            info.missing_image = true;
+                            backend.set_color(IMAGE_PLACEHOLDER.multiply_alpha(a * alpha));
+                            backend.fill_path(path, rule);
+                            continue;
+                        };
+                        let (iw, ih) = (pixmap.width() as f64, pixmap.height() as f64);
+                        let (transform, extend, fit) = place_image(*mode, area, iw, ih);
+                        backend.set_image(&ImagePaint {
+                            key: ImageKey::for_hash(hash),
+                            pixmap,
+                            transform,
+                            extend,
+                            alpha: a * alpha,
+                        });
+                        match fit {
+                            Some(rect) => {
+                                backend.push_clip(path);
+                                backend.fill_rect(&rect);
+                                backend.pop_clip();
+                            }
+                            None => backend.fill_path(path, rule),
+                        }
+                    }
+                }
+            }
+            Item::PathStroke { color, clip, .. } => {
+                let Some(outline) = item_path else { continue };
+                let clip_path = match clip {
+                    StrokeClip::None => None,
+                    StrokeClip::Inside => paths.inside.as_ref(),
+                    StrokeClip::Outside => paths.outside.as_ref(),
+                };
+                // Окончания и стыки перекрывают путь: полупрозрачная обводка —
+                // слоем, иначе перекрытия темнее.
+                let a = color.components[3] * alpha;
+                let layered = a < 1.0;
+                if layered {
+                    backend.push_opacity_layer(a);
+                }
+                if let Some(c) = clip_path {
+                    backend.push_clip(c);
+                }
+                backend.set_color(if layered {
+                    color.with_alpha(1.0)
+                } else {
+                    *color
+                });
+                backend.fill_path(outline, Fill::NonZero);
+                if clip_path.is_some() {
+                    backend.pop_clip();
+                }
+                if layered {
+                    backend.pop_layer();
+                    info.layered = true;
                 }
             }
             Item::FilledInsideStroke {

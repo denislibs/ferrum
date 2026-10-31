@@ -37,6 +37,17 @@ enum Arrange {
 impl Editor {
     pub(crate) fn run(&mut self, cmd: CommandId) {
         use CommandId as C;
+        // Команда с зажатой кнопкой: жест отменяется, а не записывается.
+        self.cancel_stale_vector_drag();
+        // Правка вектора перехватывает свои команды (удаление, сдвиг, Esc…).
+        if self.vector_edit.is_some() && self.vector_command(cmd) {
+            return;
+        }
+        // Сохранение пишет и открытый путь пера; остальные невидовые команды
+        // правка уже закончила в `vector_command`.
+        if cmd == C::Save {
+            self.finish_pen_path();
+        }
         match cmd {
             C::ToolMove => self.set_tool(ToolKind::Move),
             C::ToolFrame => self.set_tool(ToolKind::Frame),
@@ -45,6 +56,9 @@ impl Editor {
             C::ToolLine => self.set_tool(ToolKind::Line),
             C::ToolHand => self.set_tool(ToolKind::Hand),
             C::ToolText => self.set_tool(ToolKind::Text),
+            C::ToolPen => self.set_tool(ToolKind::Pen),
+            C::ToolArrow => self.set_tool(ToolKind::Arrow),
+            C::Flatten => self.flatten(),
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
@@ -170,7 +184,7 @@ impl Editor {
     }
 
     /// Выделение верхнего уровня в порядке отрисовки, снизу вверх.
-    fn ordered_selection(&self) -> Vec<NodeId> {
+    pub(crate) fn ordered_selection(&self) -> Vec<NodeId> {
         let mut ids: Vec<(Vec<u32>, NodeId)> = top_level(&self.scene, &self.selection)
             .into_iter()
             .filter_map(|id| self.scene.slot(id).map(|s| (self.scene.order_key(s), id)))
@@ -579,7 +593,7 @@ impl Editor {
     /// новые идентификаторы и выделяются. Данные не доверенные; при ошибке документ
     /// и история не меняются.
     pub fn paste(&mut self, bytes: &[u8]) -> Result<(), ClipboardError> {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let payload = match ClipPayload::decode(bytes) {
             Ok(p) => p,
             Err(e) => {
@@ -655,7 +669,7 @@ impl Editor {
     /// Изображение из системного буфера или перетащенного файла: встаёт в центр
     /// видимой части (или выделенного фрейма) в исходном размере.
     pub fn insert_image(&mut self, hash: &str, width: f64, height: f64) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let ok = |v: f64| v.is_finite() && v > 0.0;
         if !ok(width) || !ok(height) {
             self.out
@@ -684,7 +698,7 @@ impl Editor {
     /// Фрейм из пресета (раздел 7.5): справа от содержимого страницы, выделяется,
     /// камера переезжает к нему, если его не видно.
     pub fn add_frame_preset(&mut self, preset: &FramePreset) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let (x, y) = match self.scene.bounds() {
             Some(b) => ((b.x1 + PRESET_GAP).round(), b.y0.round()),
             None => {

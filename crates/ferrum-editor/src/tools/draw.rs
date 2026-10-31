@@ -1,4 +1,5 @@
-//! Рисование фигур: фрейм (F, A), прямоугольник (R), эллипс (O), линия (L) и
+//! Рисование фигур: фрейм (F, A), прямоугольник (R), эллипс (O), линия (L),
+//! стрелка (Shift+L — линия со стрелкой на конце, как в Figma) и
 //! размещение изображения (Ctrl/Cmd+Shift+K). Пока кнопка нажата, фигура — черновик
 //! сцены; при отпускании она создаётся одной транзакцией и выделяется, а редактор
 //! возвращается к «Перемещению», как в Figma. Shift — квадрат, круг или линия с
@@ -7,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use ferrum_doc::{Fill, NodeId, NodeKind, Props};
+use ferrum_doc::{Fill, NodeId, NodeKind, Props, StrokeCap};
 use ferrum_scene::Draft;
 use kurbo::{Affine, Point, Rect, Vec2};
 
@@ -32,6 +33,8 @@ pub enum Shape {
     Rect,
     Ellipse,
     Line,
+    /// Линия с окончанием `arrowLines` на конце.
+    Arrow,
     /// Изображение по хэшу байтов (байты кладёт в документ интерфейс) и его
     /// исходный размер: клик ставит его в этом размере, перетаскивание сохраняет
     /// пропорции.
@@ -48,7 +51,7 @@ impl Shape {
             Shape::Frame => NodeKind::Frame,
             Shape::Rect => NodeKind::Rect,
             Shape::Ellipse => NodeKind::Ellipse,
-            Shape::Line => NodeKind::Line,
+            Shape::Line | Shape::Arrow => NodeKind::Line,
             Shape::Image { .. } => NodeKind::Image,
         }
     }
@@ -101,6 +104,9 @@ impl DrawTool {
         let mut props = Props::defaults(kind);
         if let Shape::Image { hash, .. } = &self.shape {
             props.fills = vec![Fill::image(hash.clone())];
+        }
+        if self.shape == Shape::Arrow {
+            props.stroke_style.cap_end = StrokeCap::ArrowLines;
         }
         let inv = start.parent_world.inverse();
         if kind == NodeKind::Line {
@@ -160,7 +166,7 @@ impl DrawTool {
     fn click_props(&self, start: &Start) -> Props {
         let (w, h) = match &self.shape {
             Shape::Image { width, height, .. } => (*width, *height),
-            Shape::Line => (CLICK_SIZE, 0.0),
+            Shape::Line | Shape::Arrow => (CLICK_SIZE, 0.0),
             _ => (CLICK_SIZE, CLICK_SIZE),
         };
         let b = start.world + Vec2::new(w, h);
@@ -227,6 +233,7 @@ impl Tool for DrawTool {
             Shape::Rect => ToolKind::Rect,
             Shape::Ellipse => ToolKind::Ellipse,
             Shape::Line => ToolKind::Line,
+            Shape::Arrow => ToolKind::Arrow,
             Shape::Image { .. } => ToolKind::Image,
         }
     }

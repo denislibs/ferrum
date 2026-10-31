@@ -18,7 +18,7 @@ use crate::protocol::{
     KeymapEntry, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
     EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
 };
-use crate::summary::{summarize, MAX_PAINTS};
+use crate::summary::{cap_of, join_of, summarize, MAX_PAINTS};
 
 /// Наибольший размер картинки из буфера обмена (`PasteImage`).
 pub const MAX_PASTE_BYTES: usize = 64 << 20;
@@ -160,6 +160,29 @@ fn panel_edit(e: &Edit) -> Result<PanelEdit, String> {
                 return Err("Размер — не число".into());
             }
             PanelEdit::Size { w: *w, h: *h }
+        }
+        Edit::StrokeStyle {
+            cap_start,
+            cap_end,
+            join,
+            miter_limit,
+        } => {
+            if cap_start.is_none() && cap_end.is_none() && join.is_none() && miter_limit.is_none() {
+                return Err("В правке стиля обводки нет изменений".into());
+            }
+            // Недоверенный ввод: предел вне диапазона — отказ, а не подгонка
+            // (панель зажимает значения сама, `limits.ts`).
+            if let Some(m) = miter_limit {
+                if !(m.is_finite() && ferrum_doc::MITER_LIMIT_RANGE.contains(m)) {
+                    return Err("Предел острого угла — от 1 до 100".into());
+                }
+            }
+            PanelEdit::StrokeStyle {
+                cap_start: cap_start.map(cap_of),
+                cap_end: cap_end.map(cap_of),
+                join: join.map(join_of),
+                miter_limit: *miter_limit,
+            }
         }
     })
 }

@@ -1,7 +1,7 @@
 // Плавающий тулбар внизу по центру холста (раскладка UI3): перемещение, фрейм с
-// пресетами, фигуры (последняя выбранная на кнопке), отключённые перо, текст и
-// комментарии — с подсказкой, когда они появятся. Рука (H, удержание Space)
-// работает с клавиатуры и в тулбар не выносится.
+// пресетами, фигуры со стрелкой (последняя выбранная на кнопке), перо, текст и
+// отключённые комментарии — с подсказкой, когда они появятся. Рука (H, удержание
+// Space) работает с клавиатуры и в тулбар не выносится.
 
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import type { Tool } from '../wasm/ferrum_wasm';
@@ -10,17 +10,17 @@ import { Caret, Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { roving } from './roving';
 
-type Shape = 'rect' | 'ellipse' | 'line' | 'image';
+type Shape = 'rect' | 'ellipse' | 'line' | 'arrow' | 'image';
 
 const SHAPES: { tool: Shape; name: string; command: string; icon: IconName }[] = [
   { tool: 'rect', name: 'Прямоугольник', command: 'tool.rect', icon: 'rect' },
   { tool: 'ellipse', name: 'Эллипс', command: 'tool.ellipse', icon: 'ellipse' },
   { tool: 'line', name: 'Линия', command: 'tool.line', icon: 'line' },
+  { tool: 'arrow', name: 'Стрелка', command: 'tool.arrow', icon: 'arrow' },
   { tool: 'image', name: 'Изображение', command: 'tool.image', icon: 'image' },
 ];
 
 const LATER: { name: string; key: string; when: string; icon: IconName }[] = [
-  { name: 'Перо', key: 'P', when: 'подсистема 3', icon: 'pen' },
   { name: 'Комментарии', key: 'C', when: 'подсистема 4', icon: 'comment' },
 ];
 
@@ -129,6 +129,17 @@ export function Toolbar() {
           <Caret />
         </button>
       </div>
+      <button
+        class="fe-tool"
+        aria-pressed={tool() === 'pen'}
+        aria-label="Перо"
+        data-tip="Перо"
+        data-command="tool.pen"
+        data-tip-side="top"
+        onClick={() => setTool('pen')}
+      >
+        <Icon name="pen" />
+      </button>
       <button
         class="fe-tool"
         aria-pressed={tool() === 'text'}
