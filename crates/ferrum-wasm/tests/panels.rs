@@ -473,9 +473,10 @@ fn bind_conflict_replace_reset_and_import() {
         ["Не удалось импортировать раскладку: это не файл раскладки Ferrum (JSON)"],
         "без английского текста разбора"
     );
+    // Неизвестная команда (Scale — этап 5 подсистемы 3) и непонятное сочетание.
     core.command(Command::Bind {
-        command: "tool.pen".into(),
-        shortcut: "KeyP".into(),
+        command: "tool.scale".into(),
+        shortcut: "KeyK".into(),
         replace: true,
     });
     core.command(Command::Bind {

@@ -14,6 +14,8 @@ pub enum CommandId {
     ToolHand,
     /// «Текст» (подсистема 3).
     ToolText,
+    /// «Перо» (подсистема 3, этап 3).
+    ToolPen,
     /// Рука, пока клавиша удерживается (по умолчанию Space).
     HandHold,
     ToolImage,
@@ -120,6 +122,7 @@ pub const COMMANDS: &[Command] = &[
     cmd(C::ToolLine, "tool.line", "Линия", &["KeyL"]),
     cmd(C::ToolHand, "tool.hand", "Рука", &["KeyH"]),
     cmd(C::ToolText, "tool.text", "Текст", &["KeyT"]),
+    cmd(C::ToolPen, "tool.pen", "Перо", &["KeyP"]),
     cmd(
         C::HandHold,
         "tool.hand_hold",

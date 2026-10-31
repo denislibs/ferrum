@@ -114,6 +114,30 @@ pub struct TextEditOverlay {
 /// Прозрачность заливки выделения текста (спека подсистемы 3, раздел 7).
 pub const TEXT_SELECTION_ALPHA: f32 = 0.25;
 
+/// Радиус точки сети в правке вектора и ручки — CSS-пиксели.
+pub const VECTOR_POINT_RADIUS: f64 = 3.5;
+pub const VECTOR_HANDLE_RADIUS: f64 = 2.5;
+/// Больше стольких точек на экране не рисуются невыделенные: сеть в 100 000
+/// точек при отдалении была бы сплошной кашей кружков (и дорогим кадром).
+pub const VECTOR_MAX_POINTS_DRAWN: usize = 5000;
+
+/// Правка вектора (подсистема 3, этап 3): сеть, точки, ручки и резинка пера.
+/// Всё — в координатах формы узла.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorEditOverlay {
+    /// Координаты формы → мир.
+    pub transform: Affine,
+    pub net: std::sync::Arc<ferrum_doc::VectorNetwork>,
+    /// Выделенные точки и сегменты.
+    pub points: Vec<u32>,
+    pub segments: Vec<u32>,
+    /// Видимые ручки: сегмент и `true` — у его начала.
+    pub handles: Vec<(u32, bool)>,
+    pub selected_handles: Vec<(u32, bool)>,
+    /// Резинка пера: от последней точки пути к курсору.
+    pub rubber: Option<(Point, Point)>,
+}
+
 /// Что показать поверх содержимого. Заполняет редактор (этап 3).
 #[derive(Debug, Clone)]
 pub struct Overlay {
@@ -132,6 +156,8 @@ pub struct Overlay {
     pub measurements: Vec<Measure>,
     /// Правка текста: курсор и выделение внутри текстового узла.
     pub text_edit: Option<TextEditOverlay>,
+    /// Правка вектора: сеть, точки и ручки.
+    pub vector_edit: Option<VectorEditOverlay>,
 }
 
 impl Default for Overlay {
@@ -146,6 +172,7 @@ impl Default for Overlay {
             pixel_grid: true,
             measurements: Vec::new(),
             text_edit: None,
+            vector_edit: None,
         }
     }
 }
@@ -229,6 +256,9 @@ pub(crate) fn draw(
     if let Some(t) = &overlay.text_edit {
         text_edit(backend, view, dpr, theme, t);
     }
+    if let Some(v) = &overlay.vector_edit {
+        vector_edit(backend, view, dpr, theme, v);
+    }
     selection(backend, text, scene, camera, overlay);
     measurements(backend, text, camera, overlay);
 }
@@ -286,6 +316,123 @@ fn text_edit(
         path.line_to(b);
         backend.stroke_path(&path, &Stroke::new(dpr));
     }
+}
+
+/// Правка вектора: все сегменты тонкой линией, выделенные — толще, ручки
+/// выделенного — линией с кружком, точки — кружками (выделенные залиты).
+/// Рисуется только видимое на экране.
+fn vector_edit(
+    backend: &mut impl RenderBackend,
+    view: Affine,
+    dpr: f64,
+    theme: &OverlayTheme,
+    v: &VectorEditOverlay,
+) {
+    let to_device = view * v.transform;
+    let (w, h) = backend.size();
+    let screen = Rect::new(0.0, 0.0, w as f64, h as f64).inflate(8.0 * dpr, 8.0 * dpr);
+    let net = &*v.net;
+    let pt = |i: u32| {
+        let p = &net.points[i as usize];
+        Point::new(p.x, p.y)
+    };
+    let seg_path = |i: usize, path: &mut BezPath| {
+        let s = &net.segments[i];
+        let (a, b) = (to_device * pt(s.start), to_device * pt(s.end));
+        let ta =
+            to_device * (pt(s.start) + kurbo::Vec2::new(s.tangent_start[0], s.tangent_start[1]));
+        let tb = to_device * (pt(s.end) + kurbo::Vec2::new(s.tangent_end[0], s.tangent_end[1]));
+        let bb = Rect::from_points(a, b).union_pt(ta).union_pt(tb);
+        if bb.x1 < screen.x0 || bb.x0 > screen.x1 || bb.y1 < screen.y0 || bb.y0 > screen.y1 {
+            return;
+        }
+        path.move_to(a);
+        if s.is_straight() {
+            path.line_to(b);
+        } else {
+            path.curve_to(ta, tb, b);
+        }
+    };
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.select);
+    let mut all = BezPath::new();
+    for i in 0..net.segments.len() {
+        seg_path(i, &mut all);
+    }
+    backend.stroke_path(&all, &Stroke::new(dpr));
+    if !v.segments.is_empty() {
+        let mut sel = BezPath::new();
+        for &i in &v.segments {
+            if (i as usize) < net.segments.len() {
+                seg_path(i as usize, &mut sel);
+            }
+        }
+        backend.stroke_path(&sel, &Stroke::new(2.0 * dpr));
+    }
+    if let Some((a, b)) = v.rubber {
+        let mut r = BezPath::new();
+        r.move_to(to_device * a);
+        r.line_to(to_device * b);
+        backend.stroke_path(&r, &Stroke::new(dpr));
+    }
+    // Ручки: линия от точки и кружок на конце.
+    let handle_r = VECTOR_HANDLE_RADIUS * dpr;
+    for &(i, at_start) in &v.handles {
+        let Some(s) = net.segments.get(i as usize) else {
+            continue;
+        };
+        let (p, t) = if at_start {
+            (pt(s.start), s.tangent_start)
+        } else {
+            (pt(s.end), s.tangent_end)
+        };
+        let a = to_device * p;
+        let b = to_device * (p + kurbo::Vec2::new(t[0], t[1]));
+        let mut line = BezPath::new();
+        line.move_to(a);
+        line.line_to(b);
+        backend.set_transform(Affine::IDENTITY);
+        backend.set_color(theme.select);
+        backend.stroke_path(&line, &Stroke::new(dpr));
+        let circle = kurbo::Circle::new(b, handle_r).to_path(0.1);
+        let selected = v.selected_handles.contains(&(i, at_start));
+        backend.set_color(if selected {
+            theme.select
+        } else {
+            theme.handle_fill
+        });
+        backend.fill_path(&circle, Fill::NonZero);
+        backend.set_color(theme.select);
+        backend.stroke_path(&circle, &Stroke::new(dpr));
+    }
+    // Точки: видимые; при толпе на экране — только выделенные.
+    let visible: Vec<u32> = (0..net.points.len() as u32)
+        .filter(|&i| screen.contains(to_device * pt(i)))
+        .collect();
+    let crowd = visible.len() > VECTOR_MAX_POINTS_DRAWN;
+    let r = VECTOR_POINT_RADIUS * dpr;
+    let mut filled = BezPath::new();
+    let mut hollow = BezPath::new();
+    for i in visible {
+        let selected = v.points.binary_search(&i).is_ok();
+        if crowd && !selected {
+            continue;
+        }
+        let c = kurbo::Circle::new(to_device * pt(i), r);
+        if selected {
+            filled.extend(c.path_elements(0.1));
+        } else {
+            hollow.extend(c.path_elements(0.1));
+        }
+    }
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.handle_fill);
+    backend.fill_path(&hollow, Fill::NonZero);
+    backend.set_color(theme.select);
+    backend.stroke_path(&hollow, &Stroke::new(dpr));
+    backend.fill_path(&filled, Fill::NonZero);
+    backend.set_color(theme.handle_fill);
+    backend.stroke_path(&filled, &Stroke::new(dpr));
 }
 
 /// Контур формы узла в пикселях устройства; у группы — рамка её границ.

@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ferrum_doc::{Changes, DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
-use ferrum_render::{Camera, Measure, Overlay, OverlayTheme, TextEditOverlay};
+use ferrum_render::{Camera, Measure, Overlay, OverlayTheme, TextEditOverlay, VectorEditOverlay};
 use ferrum_scene::Scene;
 use ferrum_text::{Fonts, SharedFonts, TextLayout};
 use kurbo::{Point, Size, Vec2};
@@ -30,6 +30,7 @@ use crate::tools::{
     sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, TextTool,
     Tool, ToolKind, ToolOverlay,
 };
+use crate::vector_edit::{VectorEdit, VectorTool};
 
 /// Раскладка правимого текста и её ключ: узел, версия узла, поколение шрифтов.
 pub(crate) type EditLayout = ((NodeId, u64, u64), Arc<TextLayout>);
@@ -134,6 +135,8 @@ struct FrameKey {
     measures: Vec<Measure>,
     /// Правка текста: курсор (с миганием), выделение, превью IME.
     text: Option<TextEditOverlay>,
+    /// Правка вектора: сеть, выделенные точки, ручки, резинка пера.
+    vector: Option<VectorEditOverlay>,
 }
 
 pub struct Editor {
@@ -174,6 +177,8 @@ pub struct Editor {
     pub(crate) now_ms: f64,
     /// Указатель над правимым текстом: курсор — текстовый.
     pub(crate) text_hover: bool,
+    /// Правка вектора и перо (спека подсистемы 3, раздел 9).
+    pub(crate) vector_edit: Option<VectorEdit>,
 }
 
 impl Editor {
@@ -212,6 +217,7 @@ impl Editor {
                 pixel_grid: true,
                 measures: Vec::new(),
                 text: None,
+                vector: None,
             },
         };
         Ok(Editor {
@@ -240,6 +246,7 @@ impl Editor {
             edit_layout_cache: RefCell::new(None),
             now_ms: 0.0,
             text_hover: false,
+            vector_edit: None,
         })
     }
 
@@ -294,8 +301,13 @@ impl Editor {
         self.selection.version()
     }
 
+    /// Инструмент для интерфейса: перо в правке вектора — «Перо».
     pub fn tool_kind(&self) -> ToolKind {
-        self.tool.kind()
+        if self.vector_tool() == Some(VectorTool::Pen) {
+            ToolKind::Pen
+        } else {
+            self.tool.kind()
+        }
     }
 
     pub fn keymap(&self) -> &Keymap {
@@ -341,7 +353,9 @@ impl Editor {
 
     /// Идёт ли жест (кнопка нажата).
     pub fn is_busy(&self) -> bool {
-        self.tool.is_busy() || self.pan.is_some()
+        self.tool.is_busy()
+            || self.pan.is_some()
+            || self.vector_edit.as_ref().is_some_and(|v| v.drag.is_some())
     }
 
     pub fn take_events(&mut self) -> Vec<EditorEvent> {
@@ -381,6 +395,8 @@ impl Editor {
             } else {
                 Cursor::Default
             }
+        } else if let Some(c) = self.vector_cursor() {
+            c
         } else {
             self.tool.cursor()
         }
@@ -388,10 +404,16 @@ impl Editor {
 
     /// Описание оверлея для рендера.
     pub fn overlay(&self) -> Overlay {
-        let t = self.tool.overlay();
+        let mut t = self.tool.overlay();
         // Правка текста: вместо рамки с ручками — рамка текста и курсор.
         let text = self.text_overlay().map(|o| o.overlay);
-        let editing = text.is_some();
+        // Правка вектора: сеть с точками вместо рамки; рамка выделения точек и
+        // привязки — её.
+        let vector = self.vector_overlay();
+        if let Some(v) = &self.vector_edit {
+            t.snap_lines = v.snap_lines.clone();
+        }
+        let editing = text.is_some() || self.vector_edit.is_some();
         Overlay {
             theme: self.theme.clone(),
             selection: if editing {
@@ -410,6 +432,7 @@ impl Editor {
             pixel_grid: self.settings.pixel_grid,
             measurements: self.measures.clone(),
             text_edit: text,
+            vector_edit: vector,
         }
     }
 
@@ -518,6 +541,10 @@ impl Editor {
                 if self.text_edit.is_some() && self.text_pointer_down(&e) {
                     return;
                 }
+                // Правка вектора и перо — так же.
+                if self.vector_edit.is_some() && self.vector_pointer_down(&e) {
+                    return;
+                }
                 // Нажатие без отпускания предыдущего (событие потеряно) — прежний
                 // жест отменяется, а не записывается.
                 if self.tool.is_busy() {
@@ -539,6 +566,14 @@ impl Editor {
                     }
                     self.start_text_edit(id, EnterAt::Point(world));
                 }
+                // Двойной щелчок по вектору или фигуре — правка вектора.
+                if let Some(id) = self.out.edit_vector.take() {
+                    if self.tool.is_busy() {
+                        let (tool, mut cx) = self.split();
+                        tool.cancel(&mut cx);
+                    }
+                    self.start_vector_edit(id);
+                }
             }
         }
     }
@@ -559,6 +594,10 @@ impl Editor {
             // Инструмент не опрашивается: его ручки скрыты, hover не меняется.
             return;
         }
+        if self.vector_edit.is_some() {
+            self.vector_pointer_move(&e);
+            return;
+        }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
     }
@@ -573,6 +612,10 @@ impl Editor {
         }
         if self.text_edit.as_ref().is_some_and(|t| t.drag.is_some()) {
             self.text_pointer_up(&e);
+            return;
+        }
+        if self.vector_edit.is_some() {
+            self.vector_pointer_up(&e);
             return;
         }
         if e.button != PointerButton::Primary || !self.tool.is_busy() {
@@ -644,6 +687,11 @@ impl Editor {
             self.text_key(&e.code, e.modifiers);
             return;
         }
+        // Правка вектора: свои клавиши (Esc, Enter, Delete, B), остальное — по
+        // раскладке (её команды правка перехватывает в `run`).
+        if self.vector_edit.is_some() && self.vector_key(&e) {
+            return;
+        }
         if self.is_busy() {
             // Во время жеста клавиши только меняют модификаторы; Esc отменяет жест.
             // Esc здесь — физическая клавиша (раздел 7.1), а не команда раскладки:
@@ -708,6 +756,7 @@ impl Editor {
     /// не меняются.
     pub fn cancel_gesture(&mut self) {
         self.cancel_panel();
+        self.cancel_vector_drag();
         if let Some(mut hand) = self.pan.take() {
             hand.cancel(&mut self.ctx());
         }
@@ -721,6 +770,34 @@ impl Editor {
     pub fn set_tool(&mut self, kind: ToolKind) {
         self.cancel_gesture();
         self.end_text_edit();
+        // Перо в правке — перо внутри неё; «Перемещение» в правке узла —
+        // выделение точек. Остальные инструменты правку заканчивают.
+        if kind == ToolKind::Pen {
+            self.tool = Box::new(SelectTool::new());
+            self.held = None;
+            self.hover = None;
+            self.start_pen();
+            self.emit();
+            return;
+        }
+        if kind == ToolKind::Move
+            && self
+                .vector_edit
+                .as_ref()
+                .is_some_and(|v| !v.from_pen_tool && v.id.is_some())
+        {
+            self.finish_pen_path();
+            if let Some(v) = &mut self.vector_edit {
+                v.tool = VectorTool::Select;
+            }
+            self.emit();
+            return;
+        }
+        if let Some(id) = self.finish_vector_edit() {
+            if self.scene.slot(id).is_some() {
+                self.selection.set(vec![id]);
+            }
+        }
         self.held = None;
         self.hover = None;
         self.tool = match kind {
@@ -731,6 +808,7 @@ impl Editor {
             ToolKind::Line => Box::new(DrawTool::new(Shape::Line)),
             ToolKind::Hand => Box::new(HandTool::new()),
             ToolKind::Text => Box::new(TextTool::new()),
+            ToolKind::Pen => Box::new(SelectTool::new()),
             // Изображению нужны хэш и размер: интерфейс сначала выбирает файл.
             ToolKind::Image => {
                 self.out.events.push(EditorEvent::RequestImage);
@@ -799,9 +877,12 @@ impl Editor {
     pub fn select(&mut self, ids: &[NodeId]) {
         self.cancel_gesture();
         let sel = self.alive(ids);
-        // Другое выделение из панели слоёв заканчивает правку текста.
+        // Другое выделение из панели слоёв заканчивает правку текста и вектора.
         if self.text_edit.as_ref().is_some_and(|t| sel != [t.id]) {
             self.end_text_edit();
+        }
+        if self.vector_edit.is_some() && self.vector_edit_node().is_none_or(|id| sel != [id]) {
+            self.finish_vector_edit();
         }
         self.selection.set(sel);
         self.emit();
@@ -845,6 +926,7 @@ impl Editor {
     pub fn set_page(&mut self, page: PageId) -> DocResult<()> {
         self.cancel_gesture();
         self.finish_text_edit();
+        self.finish_vector_edit();
         // Изменения всех страниц уже в сценах или не нужны: новая сцена строится
         // по документу целиком.
         for (p, _) in self.doc.pages() {
@@ -862,6 +944,13 @@ impl Editor {
     }
 
     pub(crate) fn undo_redo(&mut self, redo: bool) {
+        // Путь пера: отмена убирает его последнюю точку, а не шаг истории.
+        if !redo && self.pen_undo_point() {
+            return;
+        }
+        // Незаписанный путь пера записывается раньше отмены: иначе он остался
+        // бы поверх отменённого документа.
+        self.finish_pen_path();
         // Жест держит превью и черновики на узлах, которые отмена может убрать.
         self.cancel_gesture();
         let result = if redo {
@@ -944,10 +1033,12 @@ impl Editor {
         // Правимый текст удалён (отмена, чужая правка): правка кончается; курсор
         // за концом текста (его укоротили) — к концу.
         self.clamp_text_edit();
+        // Правимый вектор изменился (запись, отмена, панель) — сеть заново.
+        self.resync_vector_edit();
         self.update_measures();
         let now = Seen {
             selection: self.selection.version(),
-            tool: self.tool.kind(),
+            tool: self.tool_kind(),
             cursor: self.cursor(),
             frame: FrameKey {
                 scene: self.scene.change_counter(),
@@ -960,6 +1051,7 @@ impl Editor {
                 pixel_grid: self.settings.pixel_grid,
                 measures: self.measures.clone(),
                 text: self.text_overlay().map(|o| o.overlay),
+                vector: self.vector_overlay(),
             },
         };
         if now.selection != self.seen.selection {

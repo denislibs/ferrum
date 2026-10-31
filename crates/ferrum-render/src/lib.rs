@@ -32,8 +32,9 @@ pub use ferrum_text::{Fonts, SharedFonts};
 pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, GPU_ATLAS_SIDE};
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use overlay::{
-    format_size, Measure, MeasureKind, Overlay, OverlayTheme, TextEditOverlay, HANDLE_SIZE,
-    LABEL_SIZE, MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, TEXT_SELECTION_ALPHA,
+    format_size, Measure, MeasureKind, Overlay, OverlayTheme, TextEditOverlay, VectorEditOverlay,
+    HANDLE_SIZE, LABEL_SIZE, MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, TEXT_SELECTION_ALPHA,
+    VECTOR_HANDLE_RADIUS, VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
 };
 pub use text::{Label, TextEngine, ONEST};
 pub use text_node::{TEXT_GREEK_ALPHA, TEXT_LAYOUT_TIME_PER_FRAME, TEXT_LOD_PX};

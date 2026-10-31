@@ -24,6 +24,7 @@ pub mod text_edit;
 mod text_input;
 mod text_style;
 pub mod tools;
+pub mod vector_edit;
 pub mod vector_ops;
 
 pub use actions::{FIT_PADDING_PX, PRESET_GAP};
@@ -41,3 +42,4 @@ pub use text_edit::{EnterAt, TextEditInfo, CARET_BLINK_MS};
 pub use text_input::TextInputKind;
 pub use text_style::{Mixed, TextPropsPatch, TextStylePatch, TextStyleSummary};
 pub use tools::{Cursor, Tool, ToolKind, ToolOverlay};
+pub use vector_edit::{VectorSelection, VectorTool};

@@ -500,7 +500,7 @@ pub fn move_points(net: &VectorNetwork, points: &[u32], d: Vec2) -> VectorNetwor
 }
 
 /// Какой конец сегмента: ручка у начала или у конца.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HandleEnd {
     Start,
     End,

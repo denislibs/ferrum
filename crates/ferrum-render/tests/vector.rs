@@ -351,3 +351,54 @@ fn outside_stroke_keeps_the_miter_tip_of_a_sharp_corner() {
     // лежит выше рамки пути на 16 > `2w + 1 = 13`.
     assert_px(&img, 40, 4, [0, 0, 0], 8);
 }
+
+#[test]
+fn vector_edit_overlay() {
+    use ferrum_render::{Overlay, VectorEditOverlay};
+    use kurbo::{Affine, Point};
+    let scene = Page::new().scene();
+    // Треугольник: сегмент 1 — кривая; выделена точка 1, её ручка видна и выделена.
+    let mut net = VectorNetwork {
+        points: vec![
+            VectorPoint::new(0.0, 0.0),
+            VectorPoint::new(100.0, 0.0),
+            VectorPoint::new(50.0, 80.0),
+        ],
+        segments: vec![
+            VectorSegment::line(0, 1),
+            VectorSegment::line(1, 2),
+            VectorSegment::line(2, 0),
+        ],
+        regions: vec![],
+    };
+    net.segments[1].tangent_start = [30.0, 30.0];
+    let overlay = Overlay {
+        frame_labels: false,
+        pixel_grid: false,
+        vector_edit: Some(VectorEditOverlay {
+            transform: Affine::translate((20.0, 20.0)),
+            net: Arc::new(net),
+            points: vec![1],
+            segments: vec![0],
+            handles: vec![(1, true)],
+            selected_handles: vec![],
+            rubber: Some((Point::new(50.0, 80.0), Point::new(130.0, 90.0))),
+        }),
+        ..Default::default()
+    };
+    let img = render_overlay(&scene, &camera(180.0, 120.0), &overlay, WHITE);
+    let select = [0x4a, 0xa3, 0xff];
+    // Невыделенная точка (20, 20) — белая середина, выделенная (120, 20) — залита.
+    assert_px(&img, 20, 20, [255, 255, 255], 30);
+    assert_px(&img, 120, 20, select, 30);
+    // Выделенный сегмент — 2 px по верхней стороне, середина его видна.
+    assert_px(&img, 70, 20, select, 30);
+    // Ручка точки 1: кружок в (150, 50) — белая середина, линия к нему.
+    assert_px(&img, 150, 50, [255, 255, 255], 40);
+    assert_px(&img, 135, 35, select, 90);
+    // Резинка пера от (70, 100) к (150, 110).
+    assert_px(&img, 110, 105, select, 90);
+    // Внутри треугольника — фон.
+    assert_px(&img, 70, 50, [255, 255, 255], 0);
+    golden("vector_edit", &img);
+}
