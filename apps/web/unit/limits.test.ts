@@ -16,6 +16,7 @@ import {
   MAX_LETTER_SPACING_PERCENT,
   MAX_LINE_HEIGHT_PERCENT,
   MAX_NAME_CHARS,
+  MIN_FONT_SIZE,
   MAX_SETTINGS_BYTES,
   tooLarge,
 } from '../src/core/limits';
@@ -50,6 +51,7 @@ test('пределы совпадают с константами ядра', () 
   expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_FACES')).toBe(MAX_FONT_FACES);
   // Правка текста: ядро отклоняет значения вне пределов, секция «Текст» зажимает теми же числами.
   expect(rustConst(`${CRATES}ferrum-wasm/src/protocol.rs`, 'MAX_FONT_SIZE')).toBe(MAX_FONT_SIZE);
+  expect(read(`${CRATES}ferrum-wasm/src/core/text.rs`)).toContain(`finite_in(v, ${MIN_FONT_SIZE}.0, MAX_FONT_SIZE, "Размер шрифта")`);
   const text = read(`${CRATES}ferrum-wasm/src/core/text.rs`);
   expect(text).toContain(`finite_in(d.value, 0.0, ${MAX_LINE_HEIGHT_PERCENT}.0`.replace(/(\d)(?=(\d{3})+\.)/g, '$1_'));
   expect(text).toContain(`finite_in(d.value, -${MAX_LETTER_SPACING_PERCENT}.0, ${MAX_LETTER_SPACING_PERCENT}.0`);

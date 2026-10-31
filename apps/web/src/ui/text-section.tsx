@@ -18,6 +18,7 @@ import {
   formatSpacing,
   PARAGRAPH_INDENT_RANGE,
   PARAGRAPH_SPACING_RANGE,
+  isImeKey,
   parseSpacing,
   SIZE_RANGE,
   styleFor,
@@ -29,6 +30,16 @@ const MIXED = 'Смешанные';
 function target(ed: Editor, t?: EditTarget): { ids: string[] | undefined } {
   if (ed.store.state.text.editing) return { ids: undefined };
   return { ids: (t ?? captureEdit(ed).target).ids };
+}
+
+/** Правка текста на холсте: после выбора в панели фокус возвращается в поле правки — набор
+ * продолжается в тексте (как в Figma). Вне правки фокус остаётся где был. */
+function backToText(ed: Editor) {
+  if (!ed.store.state.text.editing) return;
+  queueMicrotask(() => {
+    const field = ed.core.keyTarget;
+    if (field instanceof HTMLElement) field.focus({ preventScroll: true });
+  });
 }
 
 function sendStyle(ed: Editor, patch: TextStylePatchDto, phase: EditPhase, t?: EditTarget) {
@@ -48,13 +59,18 @@ function SpacingField(props: {
   auto: boolean;
   onCommit: (v: SpacingDto) => void;
 }) {
+  const ed = useEditor();
   let input!: HTMLInputElement;
+  // Применяется только набранное: у «Смешанных» показанное пусто, и «пусто» — это «Авто».
+  let dirty = false;
   const shown = () => (props.mixed ? '' : formatSpacing(props.value));
   createEffect(() => {
     if (document.activeElement !== input) input.value = shown();
   });
   const commit = () => {
-    const v = parseSpacing(input.value, props.auto);
+    const typed = dirty;
+    dirty = false;
+    const v = typed ? parseSpacing(input.value, props.auto) : null;
     if (v && (props.mixed || v.unit !== props.value.unit || v.value !== props.value.value)) props.onCommit(v);
     input.value = shown();
   };
@@ -67,13 +83,17 @@ function SpacingField(props: {
         aria-label={props.label === 'LH' ? 'Интерлиньяж' : 'Трекинг'}
         placeholder={props.mixed ? MIXED : ''}
         onFocus={(e) => e.currentTarget.select()}
+        onInput={() => (dirty = true)}
         onBlur={commit}
         onKeyDown={(e) => {
+          if (isImeKey(e)) return;
           if (e.key === 'Enter') {
             e.preventDefault();
             commit();
+            backToText(ed);
           } else if (e.key === 'Escape') {
             e.preventDefault();
+            dirty = false;
             input.value = shown();
             input.blur();
           }
@@ -91,6 +111,7 @@ function Choice<T extends string>(props: {
   items: { value: T; name: string; icon: IconName }[];
   onPick: (v: T) => void;
 }) {
+  const ed = useEditor();
   return (
     <div class="fe-segmented fe-segmented--icons" role="radiogroup" aria-label={props.label}>
       <For each={props.items}>
@@ -101,7 +122,10 @@ function Choice<T extends string>(props: {
             aria-checked={!props.mixed && props.value === it.value}
             aria-label={it.name}
             data-tip={it.name}
-            onClick={() => props.onPick(it.value)}
+            onClick={() => {
+              props.onPick(it.value);
+              backToText(ed);
+            }}
           >
             <Icon name={it.icon} />
           </button>
@@ -116,14 +140,26 @@ export function TextSection() {
   const s = () => ed.store.state.textStyle!;
   const [picking, setPicking] = createSignal(false);
   const styles = () => ed.store.state.fontCatalog.find((c) => c.family === s().family.value)?.styles ?? [];
+  // Текущее начертание, которого нет в списке (шрифт не найден), показывается как есть.
+  const styleOptions = () => {
+    if (s().family.mixed) return [];
+    const list = styles();
+    return s().style.mixed || list.includes(s().style.value) ? list : [s().style.value, ...list];
+  };
   const pickFamily = (family: string) => {
     setPicking(false);
     sendStyle(ed, { family, style: styleFor(ed.store.state.fontCatalog, family, s().style.value) }, 'commit');
+    backToText(ed);
+  };
+  const closePicker = () => {
+    setPicking(false);
+    backToText(ed);
   };
   const toggle = (key: 'decoration' | 'list', on: string, off: string) => {
     const cur = s()[key];
     const next = !cur.mixed && cur.value === on ? off : on;
     sendStyle(ed, { [key]: next } as TextStylePatchDto, 'commit');
+    backToText(ed);
   };
   const pressed = (key: 'decoration' | 'list', v: string) => !s()[key].mixed && s()[key].value === v;
   return (
@@ -141,23 +177,26 @@ export function TextSection() {
         <Caret />
       </button>
       <Show when={picking()}>
-        <FontPicker current={s().family.value} onPick={pickFamily} onClose={() => setPicking(false)} />
+        <FontPicker current={s().family.mixed ? '' : s().family.value} onPick={pickFamily} onClose={closePicker} />
       </Show>
       <div class="fe-grid2">
         <select
           class="fe-select"
           aria-label="Начертание"
-          value={s().style.mixed ? '' : s().style.value}
-          onChange={(e) =>
-            !s().family.mixed && sendStyle(ed, { family: s().family.value, style: e.currentTarget.value }, 'commit')
-          }
+          // Семейства разные — списка начертаний нет: поле выключено и показывает «Смешанное».
+          disabled={s().family.mixed}
+          onChange={(e) => {
+            if (s().family.mixed) return;
+            sendStyle(ed, { family: s().family.value, style: e.currentTarget.value }, 'commit');
+            backToText(ed);
+          }}
         >
-          <Show when={s().style.mixed}>
-            <option value="" disabled>
-              {MIXED}
+          <Show when={s().family.mixed || s().style.mixed}>
+            <option value="" disabled selected>
+              {s().family.mixed ? 'Смешанное' : MIXED}
             </option>
           </Show>
-          <For each={styles()}>{(st) => <option value={st}>{st}</option>}</For>
+          <For each={styleOptions()}>{(st) => <option value={st} selected={!s().style.mixed && st === s().style.value}>{st}</option>}</For>
         </select>
         <NumberField
           label="Aa"
@@ -246,7 +285,10 @@ export function TextSection() {
           class="fe-select fe-row__grow"
           aria-label="Регистр"
           value={s().case.mixed ? '' : s().case.value}
-          onChange={(e) => sendStyle(ed, { case: e.currentTarget.value as TextStylePatchDto['case'] }, 'commit')}
+          onChange={(e) => {
+            sendStyle(ed, { case: e.currentTarget.value as TextStylePatchDto['case'] }, 'commit');
+            backToText(ed);
+          }}
         >
           <Show when={s().case.mixed}>
             <option value="" disabled>

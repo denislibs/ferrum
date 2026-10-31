@@ -358,6 +358,7 @@
   font-size: 13px;
 }
 .fe-fonts__row:hover,
+.fe-fonts__row--active,
 .fe-fonts__row[aria-selected='true'] {
   background: var(--surface-hover);
 }

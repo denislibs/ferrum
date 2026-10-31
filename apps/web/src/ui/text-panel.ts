@@ -4,11 +4,11 @@
 
 import type { FontChoice, SpacingDto } from '../wasm/ferrum_wasm';
 import { defaultStyle } from '../core/fonts';
-import { MAX_FONT_SIZE, MAX_LETTER_SPACING_PERCENT, MAX_LINE_HEIGHT_PERCENT } from '../core/limits';
+import { MAX_FONT_SIZE, MAX_LETTER_SPACING_PERCENT, MAX_LINE_HEIGHT_PERCENT, MIN_FONT_SIZE } from '../core/limits';
 import { clamp, formatNumber, type FieldInput } from './number';
 
 /** Пределы числовых полей секции — те же, что проверяет ядро (оно отклоняет, не зажимает). */
-export const SIZE_RANGE = [1, MAX_FONT_SIZE] as const;
+export const SIZE_RANGE = [MIN_FONT_SIZE, MAX_FONT_SIZE] as const;
 export const PARAGRAPH_SPACING_RANGE = [0, MAX_FONT_SIZE] as const;
 export const PARAGRAPH_INDENT_RANGE = [-MAX_FONT_SIZE, MAX_FONT_SIZE] as const;
 
@@ -86,4 +86,18 @@ export function rowWindow(scrollTop: number, height: number, row: number, total:
   const overscan = 6;
   const start = Math.max(0, Math.floor(scrollTop / row) - overscan);
   return { start, end: Math.min(total, start + Math.ceil(height / row) + 2 * overscan) };
+}
+
+/** Клавиша — часть составления IME (Enter подтверждает вариант, а не команда поля). */
+export function isImeKey(e: { isComposing: boolean; keyCode: number }): boolean {
+  return e.isComposing || e.keyCode === 229;
+}
+
+/** Следующая строка-семейство от `from` в сторону `dir` (-1 вверх, 1 вниз); `from` -1 — нет текущей.
+ * Заголовки пропускаются, у края остаётся на месте. */
+export function stepRow(rows: readonly FontRow[], from: number, dir: 1 | -1): number {
+  for (let i = from + dir; i >= 0 && i < rows.length; i += dir) {
+    if (rows[i].kind === 'font') return i;
+  }
+  return from;
 }

@@ -3,7 +3,7 @@
 
 import { expect, test } from '@playwright/test';
 import { MAX_FONT_SIZE, MAX_LETTER_SPACING_PERCENT, MAX_LINE_HEIGHT_PERCENT, MIN_FONT_SIZE } from '../src/core/limits';
-import { clampSpacing, fieldValue, fontRows, formatSpacing, parseSpacing, rowWindow, styleFor } from '../src/ui/text-panel';
+import { clampSpacing, fieldValue, fontRows, formatSpacing, parseSpacing, isImeKey, rowWindow, stepRow, styleFor } from '../src/ui/text-panel';
 
 test('интерлиньяж и трекинг: авто, проценты, пиксели', () => {
   expect(parseSpacing('Авто', true)).toEqual({ unit: 'auto', value: 0 });
@@ -77,4 +77,17 @@ test('значение числового поля зажимается, в то
   expect(fieldValue({ kind: 'add', delta: 5 }, 12, ...size)).toBe(17);
   expect(fieldValue({ kind: 'add', delta: -50 }, 12, 0, MAX_FONT_SIZE)).toBe(0);
   expect(fieldValue({ kind: 'add', delta: -50000 }, 0, -MAX_FONT_SIZE, MAX_FONT_SIZE)).toBe(-10000);
+});
+
+test('Enter подтверждения IME — не команда; стрелки шагают по семействам, минуя заголовки', () => {
+  expect(isImeKey({ isComposing: true, keyCode: 13 })).toBe(true);
+  expect(isImeKey({ isComposing: false, keyCode: 229 })).toBe(true);
+  expect(isImeKey({ isComposing: false, keyCode: 13 })).toBe(false);
+  const rows = fontRows(catalog, ['Comic Sans'], ''); // #В документе, Comic, #Вшитые, Inter, Roboto, #Системные, Arial
+  expect(stepRow(rows, -1, 1)).toBe(1);
+  expect(stepRow(rows, 1, 1)).toBe(3);
+  expect(stepRow(rows, 4, 1)).toBe(6);
+  expect(stepRow(rows, 6, 1)).toBe(6);
+  expect(stepRow(rows, 3, -1)).toBe(1);
+  expect(stepRow(rows, 1, -1)).toBe(1);
 });
