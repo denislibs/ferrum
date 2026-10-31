@@ -168,3 +168,86 @@ fn fragment_with_line_breaks_continues_the_list_of_the_split_paragraph() {
         assert_eq!(c.attrs_at(6).list, Some(kind));
     }
 }
+
+/// Два пункта списка «a», «b» (нужный вид) и обычный абзац «xyz» в другом узле;
+/// возвращает байты копии обоих пунктов и узел-цель с курсором после «xy».
+fn list_fragment_and_target(h: &mut H, src: ListKind, dst: Option<ListKind>) -> (Vec<u8>, NodeId) {
+    let s = add_text(h, 100.0, 100.0, "a\nb", 24.0);
+    let list = TextAttrs {
+        list: Some(src),
+        ..Default::default()
+    };
+    h.ed.transact(|tx| {
+        tx.format_text(s, 0..4, &list, &[])?;
+        Ok(vec![s])
+    })
+    .unwrap();
+    h.key("Enter", none());
+    h.key("Home", ctrl());
+    for _ in 0..3 {
+        h.key("ArrowRight", shift());
+    }
+    h.ed.execute(CommandId::Copy);
+    let (bytes, _) = take_text_clip(h).expect("копия");
+    h.key("Escape", none());
+    let t = add_text(h, 100.0, 300.0, "xyz", 24.0);
+    if let Some(k) = dst {
+        let list = TextAttrs {
+            list: Some(k),
+            ..Default::default()
+        };
+        h.ed.transact(|tx| {
+            tx.format_text(t, 3..4, &list, &[])?;
+            Ok(vec![t])
+        })
+        .unwrap();
+    }
+    h.key("Enter", none());
+    h.key("Home", none());
+    h.key("ArrowRight", none());
+    h.key("ArrowRight", none());
+    (bytes, t)
+}
+
+#[test]
+fn pasted_list_items_keep_their_list_in_a_plain_paragraph() {
+    let mut h = text_h();
+    let (bytes, id) = list_fragment_and_target(&mut h, ListKind::Bullet, None);
+    h.ed.paste(&bytes).unwrap();
+    let c = h.props(id).text.unwrap().content.clone();
+    assert_eq!(c.text(), "xya\nbz\n");
+    assert_eq!(c.attrs_at(3).list, Some(ListKind::Bullet));
+    assert_eq!(
+        c.attrs_at(6).list,
+        None,
+        "конец разрезанного абзаца — прежний"
+    );
+}
+
+#[test]
+fn pasted_ordered_items_stay_ordered_inside_a_bullet_item() {
+    let mut h = text_h();
+    let (bytes, id) = list_fragment_and_target(&mut h, ListKind::Ordered, Some(ListKind::Bullet));
+    h.ed.paste(&bytes).unwrap();
+    let c = h.props(id).text.unwrap().content.clone();
+    assert_eq!(c.attrs_at(3).list, Some(ListKind::Ordered));
+    assert_eq!(c.attrs_at(6).list, Some(ListKind::Bullet));
+}
+
+#[test]
+fn cut_while_fonts_load_reports_and_leaves_clipboard_and_text_alone() {
+    let mut h = text_h();
+    let id = bold_text(&mut h);
+    h.ed.take_events();
+    let fonts = ferrum_text::Fonts::shared();
+    h.ed.set_fonts(fonts);
+    h.ed.execute(CommandId::Cut);
+    let events = h.ed.take_events();
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, EditorEvent::ClipboardText { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, EditorEvent::Error(m) if m.contains("Шрифт"))));
+    assert_eq!(h.props(id).text.unwrap().content.text(), "Привет\n");
+}

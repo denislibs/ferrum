@@ -58,12 +58,17 @@ impl Editor {
                         .push(EditorEvent::ClipboardText { bytes, plain });
                 }
             }
+            // Вырезание: в буфер — только если удаление состоится.
+            C::Cut if self.text_edit.is_some() && self.doc.is_read_only() => {}
             C::Cut if self.text_edit.is_some() => {
                 if let Some((bytes, plain)) = self.copy_text() {
-                    self.out
-                        .events
-                        .push(EditorEvent::ClipboardText { bytes, plain });
-                    let _ = self.text_input(crate::TextInputKind::DeleteBackward, "");
+                    match self.text_input(crate::TextInputKind::DeleteBackward, "") {
+                        Ok(()) => self
+                            .out
+                            .events
+                            .push(EditorEvent::ClipboardText { bytes, plain }),
+                        Err(e) => self.out.events.push(EditorEvent::Error(e.to_string())),
+                    }
                 }
             }
             C::Copy => {

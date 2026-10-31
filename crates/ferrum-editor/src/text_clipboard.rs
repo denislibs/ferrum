@@ -98,8 +98,9 @@ fn payload_runs(payload: &ClipPayload, target: &Props) -> Option<Vec<TextRun>> {
     Some(out)
 }
 
-/// Участки, разрезанные по переводам строк: у «\n» — заданные список и уровень,
-/// у остальных символов абзацной разметки нет.
+/// Участки, разрезанные по переводам строк: у «\n» — список и уровень источника,
+/// а если их нет — заданные (разрезаемого абзаца); у остальных символов
+/// абзацной разметки нет.
 fn relist(
     runs: &[TextRun],
     list: Option<ferrum_doc::ListKind>,
@@ -117,8 +118,8 @@ fn relist(
                 out.push(TextRun {
                     text: "\n".into(),
                     attrs: TextAttrs {
-                        list,
-                        indent,
+                        list: r.attrs.list.or(list),
+                        indent: r.attrs.indent.or(indent),
                         ..plain.clone()
                     },
                 });
@@ -220,8 +221,8 @@ impl Editor {
         let Some(content) = before.text.as_ref().map(|x| x.content.clone()) else {
             return false;
         };
-        // Каждый «\n» вставки берёт список и уровень разрезаемого абзаца (как при
-        // наборе и вставке обычного текста), а не абзаца-источника.
+        // «\n» вставки сохраняет список и уровень источника; без них — продолжает
+        // список разрезаемого абзаца (как при наборе и вставке обычного текста).
         let runs = if runs.iter().any(|r| r.text.contains('\n')) {
             let end = (range.end..content.char_len())
                 .find(|i| char_at(&content, *i) == Some('\n'))
@@ -244,10 +245,8 @@ impl Editor {
             }
             tx.insert_runs(id, range.start, &runs)
         });
-        if let Err(TextError::Pending) = r {
-            self.out
-                .events
-                .push(EditorEvent::Error(TextError::Pending.to_string()));
+        if let Err(e) = r {
+            self.out.events.push(EditorEvent::Error(e.to_string()));
         }
         self.emit();
         true
