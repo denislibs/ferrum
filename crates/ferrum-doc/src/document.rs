@@ -161,6 +161,13 @@ impl Document {
         self.read_only
     }
 
+    /// Только для тестов: документ становится «только чтение», как при
+    /// загрузке страницы с неизвестными узлами.
+    #[doc(hidden)]
+    pub fn force_read_only_for_tests(&mut self) {
+        self.read_only = true;
+    }
+
     fn writable(&self) -> DocResult<()> {
         if self.read_only {
             Err(DocError::ReadOnly)

@@ -395,7 +395,7 @@ fn multiline_insert_into_a_list_item_makes_list_paragraphs() {
 }
 
 #[test]
-fn delete_while_the_font_loads_reports_instead_of_dropping_silently() {
+fn delete_while_the_font_loads_is_reported_for_retry_instead_of_dropped() {
     let mut h = text_h();
     let id = add_text(&mut h, 100.0, 100.0, "abc", 24.0);
     h.key("Enter", none());
@@ -420,12 +420,9 @@ fn delete_while_the_font_loads_reports_instead_of_dropping_silently() {
     h.ed.set_fonts(fonts);
     h.key("Backspace", none());
     let events = h.ed.take_events();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, EditorEvent::Error(m) if m.contains("Шрифт"))),
-        "{events:?}"
-    );
+    // Не молча: ядро узнаёт об отложенной клавише и повторит её по приходу шрифтов.
+    assert!(h.ed.take_text_pending(), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, EditorEvent::Error(_))));
     assert_eq!(text_of(&mut h, id), "abc\n", "документ не менялся");
     assert!(h.ed.is_editing_text());
 }
@@ -450,4 +447,26 @@ fn draft_without_its_parent_ends_the_edit_instead_of_retrying() {
     h.ed.text_input(TextInputKind::Insert, "x").unwrap();
     assert!(h.ed.take_events().is_empty());
     assert!(h.ed.page_doc().walk().is_empty());
+}
+
+#[test]
+fn refused_exit_delete_does_not_count_a_step() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "", 24.0);
+    let steps = h.ed.step_count();
+    h.key("Enter", none());
+    assert!(h.ed.is_editing_text());
+    // Документ стал «только чтение» посреди правки: удаление пустого текста
+    // при выходе не записывается — и шаг не считается.
+    h.ed.document_mut_for_tests().force_read_only_for_tests();
+    h.ed.take_events();
+    h.key("Escape", none());
+    assert!(!h.ed.is_editing_text());
+    assert!(h.ed.scene().node(id).is_some());
+    assert_eq!(h.ed.step_count(), steps, "счётчик шагов идёт за историей");
+    assert!(h
+        .ed
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, EditorEvent::Error(_))));
 }

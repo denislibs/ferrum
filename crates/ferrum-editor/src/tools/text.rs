@@ -2,6 +2,8 @@
 //! «авто по ширине» с курсором, протяжка — текст фиксированного размера по рамке.
 //! Текст встаёт в самый глубокий фрейм под точкой начала. В документ он попадёт
 //! с первым символом: до того — черновик правки (`Editor::start_draft_text`).
+//! Нажатие на существующий (не заблокированный) текст, как в Figma, — его правка
+//! с курсором в точке нажатия, а не новый текст поверх.
 
 use std::collections::HashSet;
 
@@ -11,7 +13,7 @@ use kurbo::{Affine, Point, Rect};
 use super::{Ctx, Cursor, Flow, Tool, ToolKind, ToolOverlay, DRAG_THRESHOLD_PX};
 use crate::geometry::decompose_with;
 use crate::input::{Modifiers, PointerEvent};
-use crate::selection::drop_frame_at;
+use crate::selection::{drop_frame_at, top_hit};
 
 /// Рамка меньше стольких пикселей мира по любой оси — это щелчок.
 const MIN_FIXED: f64 = 1.0;
@@ -86,7 +88,20 @@ impl Tool for TextTool {
     }
 
     fn pointer_down(&mut self, cx: &mut Ctx, e: &PointerEvent) {
-        let world = Self::snap(cx, cx.to_world(e.point));
+        let at = cx.to_world(e.point);
+        // Текст под точкой — правка его (редактор войдёт в неё по `edit_text`).
+        if let Some(slot) = top_hit(cx.scene, at, cx.tolerance()) {
+            let node = cx.scene.at(slot);
+            if node.props.kind == NodeKind::Text {
+                let id = node.id;
+                cx.selection.set(vec![id]);
+                cx.out.edit_text = Some((id, at));
+                *cx.hover = None;
+                self.state = State::Idle;
+                return;
+            }
+        }
+        let world = Self::snap(cx, at);
         let parent = drop_frame_at(cx.scene, world, cx.tolerance(), &HashSet::new());
         let parent_world = parent
             .and_then(|p| cx.scene.node(p))

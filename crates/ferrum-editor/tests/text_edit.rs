@@ -259,3 +259,31 @@ fn held_enter_does_not_enter_editing() {
     h.ev(Input::KeyDown(e));
     assert!(!h.ed.is_editing_text());
 }
+
+#[test]
+fn text_tool_on_a_text_edits_it_at_the_point() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "Привет мир", 24.0);
+    h.ed.select(&[]);
+    let nodes = h.ed.scene().len();
+    let steps = h.ed.step_count();
+    let (x, y) = at_index(&h, id, 3);
+    h.key("KeyT", none());
+    assert_eq!(h.ed.tool_kind(), ToolKind::Text);
+    // Как в Figma: инструмент «Текст» по тексту — его правка, а не новый текст.
+    h.click(x + 1.0, y, none());
+    assert!(h.ed.is_editing_text());
+    let i = info(&h);
+    assert!(!i.draft, "не черновик нового текста");
+    assert_eq!(i.id, id);
+    assert_eq!(sel_range(&h), (3, 3));
+    assert_eq!(h.sel(), vec![id]);
+    assert_eq!(h.ed.scene().len(), nodes);
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(h.ed.tool_kind(), ToolKind::Move);
+    // Мимо текста — по-прежнему новый текст.
+    h.key("Escape", none());
+    h.key("KeyT", none());
+    h.click(400.0, 400.0, none());
+    assert!(info(&h).draft);
+}

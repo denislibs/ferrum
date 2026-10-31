@@ -932,8 +932,11 @@ impl Editor {
             }
             _ => return false,
         };
-        if let Err(e) = result {
-            self.out.events.push(EditorEvent::Error(e.to_string()));
+        match result {
+            Ok(()) => {}
+            // Шрифты грузятся: ничего не сделано, ядро повторит клавишу.
+            Err(TextError::Pending) => self.out.text_pending = true,
+            Err(e) => self.out.events.push(EditorEvent::Error(e.to_string())),
         }
         true
     }

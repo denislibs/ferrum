@@ -239,14 +239,18 @@ impl Editor {
             return true;
         }
         let caret = range.start + runs.iter().map(|r| r.text.chars().count()).sum::<usize>();
-        let r = self.apply_text_edit(&before, next, range.start, caret, 5, |tx, id| {
+        let r = self.apply_text_edit(&before, next, range.start, caret, None, |tx, id| {
             if !range.is_empty() {
                 tx.delete_text(id, range.clone())?;
             }
             tx.insert_runs(id, range.start, &runs)
         });
-        if let Err(e) = r {
-            self.out.events.push(EditorEvent::Error(e.to_string()));
+        match r {
+            Ok(()) => {}
+            // Шрифты грузятся: ничего не вставлено, ядро повторит вставку.
+            Err(TextError::Pending) => self.out.text_pending = true,
+            // Отказ документа `apply_text_edit` уже отдала событием.
+            Err(TextError::Doc(_)) => {}
         }
         self.emit();
         true

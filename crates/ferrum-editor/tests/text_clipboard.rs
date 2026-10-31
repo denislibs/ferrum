@@ -235,10 +235,11 @@ fn pasted_ordered_items_stay_ordered_inside_a_bullet_item() {
 }
 
 #[test]
-fn cut_while_fonts_load_reports_and_leaves_clipboard_and_text_alone() {
+fn cut_while_fonts_load_waits_and_leaves_clipboard_and_text_alone() {
     let mut h = text_h();
     let id = bold_text(&mut h);
     h.ed.take_events();
+    assert!(!h.ed.take_text_pending());
     let fonts = ferrum_text::Fonts::shared();
     h.ed.set_fonts(fonts);
     h.ed.execute(CommandId::Cut);
@@ -246,8 +247,43 @@ fn cut_while_fonts_load_reports_and_leaves_clipboard_and_text_alone() {
     assert!(!events
         .iter()
         .any(|e| matches!(e, EditorEvent::ClipboardText { .. })));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, EditorEvent::Error(m) if m.contains("Шрифт"))));
+    // Не ошибка: ядро поставит «Вырезать» в очередь и повторит по приходу шрифтов.
+    assert!(!events.iter().any(|e| matches!(e, EditorEvent::Error(_))));
+    assert!(h.ed.take_text_pending());
+    assert!(!h.ed.take_text_pending(), "признак снимается чтением");
     assert_eq!(h.props(id).text.unwrap().content.text(), "Привет\n");
+}
+
+#[test]
+fn every_paste_is_its_own_undo_step() {
+    let mut h = text_h();
+    bold_text(&mut h);
+    h.ed.execute(CommandId::Copy);
+    let (bytes, _) = take_text_clip(&mut h).unwrap();
+    h.key("Escape", none());
+    let other = add_text(&mut h, 100.0, 300.0, "ab", 12.0);
+    h.key("Enter", none());
+    h.key("End", none());
+    let steps = h.ed.step_count();
+    // Время не идёт: склейка набора сработала бы.
+    h.ed.paste(&bytes).unwrap();
+    h.ed.paste(&bytes).unwrap();
+    h.ed.text_input(TextInputKind::Paste, "12").unwrap();
+    h.ed.text_input(TextInputKind::Paste, "34").unwrap();
+    h.ed.text_input(TextInputKind::Insert, "x").unwrap();
+    h.ed.text_input(TextInputKind::Insert, "y").unwrap();
+    assert_eq!(text_of(&mut h, other), "abиветивет1234xy\n");
+    assert_eq!(
+        h.ed.step_count(),
+        steps + 5,
+        "каждая вставка — свой шаг, набор после вставки — новый"
+    );
+    h.key("KeyZ", ctrl());
+    assert_eq!(text_of(&mut h, other), "abиветивет1234\n");
+    h.key("KeyZ", ctrl());
+    assert_eq!(text_of(&mut h, other), "abиветивет12\n");
+    h.key("KeyZ", ctrl());
+    assert_eq!(text_of(&mut h, other), "abиветивет\n");
+    h.key("KeyZ", ctrl());
+    assert_eq!(text_of(&mut h, other), "abивет\n");
 }

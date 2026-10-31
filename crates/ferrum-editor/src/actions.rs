@@ -67,7 +67,10 @@ impl Editor {
                             .out
                             .events
                             .push(EditorEvent::ClipboardText { bytes, plain }),
-                        Err(e) => self.out.events.push(EditorEvent::Error(e.to_string())),
+                        // Шрифты грузятся: ничего не сделано, ядро повторит команду.
+                        Err(crate::TextError::Pending) => self.out.text_pending = true,
+                        // Отказ документа `apply_text_edit` уже отдала событием.
+                        Err(crate::TextError::Doc(_)) => {}
                     }
                 }
             }

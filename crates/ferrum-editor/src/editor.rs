@@ -247,6 +247,13 @@ impl Editor {
         &self.doc
     }
 
+    /// Только для тестов: документ для правки мимо редактора (например, перевод
+    /// в «только чтение» посреди правки текста).
+    #[doc(hidden)]
+    pub fn document_mut_for_tests(&mut self) -> &mut Document {
+        &mut self.doc
+    }
+
     /// Правки документа с прошлого вызова одной пачкой журнала автосохранения
     /// (этап 6); `None` — правок нет.
     pub fn take_journal(&mut self) -> DocResult<Option<Vec<u8>>> {
@@ -339,6 +346,13 @@ impl Editor {
 
     pub fn take_events(&mut self) -> Vec<EditorEvent> {
         std::mem::take(&mut self.out.events)
+    }
+
+    /// Было ли с прошлого вызова действие правки текста, не применённое из-за
+    /// загрузки шрифтов (документ не тронут). Ядро ставит это действие в очередь
+    /// правок, ждущих шрифтов, и повторит его по приходу байтов.
+    pub fn take_text_pending(&mut self) -> bool {
+        std::mem::take(&mut self.out.text_pending)
     }
 
     /// Камера целиком (восстановление вида страницы, тесты).
@@ -511,11 +525,17 @@ impl Editor {
                 }
                 let (tool, mut cx) = self.split();
                 tool.pointer_down(&mut cx, &e);
-                // Двойной щелчок по тексту: инструмент просит войти в правку.
+                // Двойной щелчок по тексту (или нажатие инструментом «Текст»):
+                // инструмент просит войти в правку.
                 if let Some((id, world)) = self.out.edit_text.take() {
                     if self.tool.is_busy() {
                         let (tool, mut cx) = self.split();
                         tool.cancel(&mut cx);
+                    }
+                    // Инструмент «Текст» своё сделал — после правки снова «Перемещение».
+                    if self.tool.kind() == ToolKind::Text {
+                        self.set_tool(ToolKind::Move);
+                        self.selection.set(vec![id]);
                     }
                     self.start_text_edit(id, EnterAt::Point(world));
                 }

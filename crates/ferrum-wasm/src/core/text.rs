@@ -4,7 +4,7 @@
 //! ввода ≤ 64 КБ, клавиша ≤ 64 байт, имена шрифтов ≤ 256 байт, числа конечны и в
 //! пределах, неизвестные ключи правки отвергает разбор (`deny_unknown_fields`).
 //! Правка, которой нужны ещё не загруженные шрифты, ждёт в общей очереди правок
-//! шрифтов (порядок команд текста сохраняется).
+//! шрифтов; за ней ждут и следующие команды и ввод (порядок действий сохраняется).
 
 use ferrum_doc::{
     AlignH, AlignV, Decoration, FontName, LetterSpacing, LineHeight, ListKind, NodeId, TextCase,
@@ -287,8 +287,16 @@ impl Core {
     /// Время ядра (мс): мигание курсора и склейка ввода в один шаг. Worker
     /// передаёт `performance.now()` в начале кадра и перед командой.
     pub fn set_time(&mut self, now_ms: f64) {
+        self.now_ms = now_ms;
         self.editor.set_time(now_ms);
-        if self.editor.is_editing_text() {
+        let overdue = self
+            .font_state
+            .waiting_since
+            .is_some_and(|t| now_ms - t > super::fonts::FONT_WAIT_MS);
+        if overdue {
+            self.give_up_waiting_fonts();
+            self.drain_editor();
+        } else if self.editor.is_editing_text() {
             self.drain_editor();
         }
     }

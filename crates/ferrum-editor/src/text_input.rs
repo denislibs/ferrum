@@ -142,10 +142,10 @@ impl Editor {
                 if text.is_empty() {
                     Ok(())
                 } else {
-                    self.replace_selection(&text, false)
+                    self.replace_selection(&text, false, kind == TextInputKind::Paste)
                 }
             }
-            TextInputKind::Paragraph => self.replace_selection("\n", true),
+            TextInputKind::Paragraph => self.replace_selection("\n", true, false),
             TextInputKind::Compose => {
                 self.compose(data);
                 Ok(())
@@ -174,10 +174,15 @@ impl Editor {
         self.doc.page(self.page).ok()?.props(id).ok()
     }
 
-    /// Заменяет выделение текстом `text` одной правкой (набор и вставка подряд —
-    /// один шаг). `paragraph` — новый абзац: перевод строки получает список и
+    /// Заменяет выделение текстом `text` одной правкой (набор подряд — один шаг,
+    /// вставка `paste` — всегда свой). `paragraph` — новый абзац: перевод строки получает список и
     /// уровень текущего абзаца.
-    fn replace_selection(&mut self, text: &str, paragraph: bool) -> Result<(), TextError> {
+    fn replace_selection(
+        &mut self,
+        text: &str,
+        paragraph: bool,
+        paste: bool,
+    ) -> Result<(), TextError> {
         let Some(before) = self.edit_doc_props() else {
             return Ok(());
         };
@@ -231,7 +236,7 @@ impl Editor {
             next,
             range.start,
             caret,
-            style_print(merge_kind, &attrs),
+            (!paste).then(|| style_print(merge_kind, &attrs)),
             |tx, id| {
                 if !range.is_empty() {
                     tx.delete_text(id, range.clone())?;
@@ -317,7 +322,10 @@ impl Editor {
             next,
             from,
             caret,
-            style_print(if backward { 3 } else { 4 }, &TextAttrs::default()),
+            Some(style_print(
+                if backward { 3 } else { 4 },
+                &TextAttrs::default(),
+            )),
             |tx, id| tx.delete_text(id, range.clone()),
         )
     }
@@ -333,7 +341,7 @@ impl Editor {
         }
         next = splice(&next, newline..newline + 1, &runs);
         let caret = self.text_edit.as_ref().expect("правка идёт").focus.index;
-        self.apply_text_edit(before, next, caret, caret, 0, |tx, id| {
+        self.apply_text_edit(before, next, caret, caret, Some(0), |tx, id| {
             tx.format_text(
                 id,
                 newline..newline + 1,
@@ -345,15 +353,17 @@ impl Editor {
 
     /// Правка текста одной транзакцией: `edit` меняет содержимое (`next` — каким
     /// оно станет: по нему считается размер рамки до транзакции), размер — той же
-    /// транзакцией. Ввод подряд склеивается в один шаг. Черновик инструмента T
-    /// становится узлом документа с первой правкой.
+    /// транзакцией. Ввод подряд склеивается в один шаг (`style` — отпечаток вида
+    /// правки и стиля); `style: None` — вставка: свой шаг, не склеивается ни с
+    /// прошлой правкой, ни со следующей. Черновик инструмента T становится узлом
+    /// документа с первой правкой.
     pub(crate) fn apply_text_edit(
         &mut self,
         before: &Props,
         next: TextContent,
         from: usize,
         caret: usize,
-        style: u64,
+        style: Option<u64>,
         edit: impl FnOnce(&Tx, NodeId) -> DocResult<()>,
     ) -> Result<(), TextError> {
         let mut after = before.clone();
@@ -371,11 +381,12 @@ impl Editor {
             node: t.merge.map_or(id, |m| m.node),
             before: from,
             after: caret,
-            style,
+            style: style.unwrap_or_default(),
             at_ms: self.now_ms,
         };
         // Склейка — только с собственной прошлой правкой этого же сеанса правки.
-        let merged = t.merge_steps == self.out.steps
+        let merged = style.is_some()
+            && t.merge_steps == self.out.steps
             && t.merge.is_some_and(|prev| prev.continues(&merge))
             && draft_free(t);
         if !merged {
@@ -426,7 +437,8 @@ impl Editor {
         t.anchor = caret;
         t.focus = Caret::at(caret);
         t.goal_x = None;
-        t.merge = Some(merge);
+        // После вставки склеивать не с чем: следующая правка — новый шаг.
+        t.merge = style.map(|_| merge);
         t.merge_steps = steps;
         Ok(())
     }
@@ -556,11 +568,15 @@ impl Editor {
                 },
             ),
             None => {
-                self.out.steps += 1;
-                self.doc.transact(page, vec![id], |tx| {
+                let r = self.doc.transact(page, vec![id], |tx| {
                     tx.delete_nodes(&[id])?;
                     Ok(vec![])
-                })
+                });
+                // Шаг — только если удаление записано: счётчик идёт за историей.
+                if r.is_ok() {
+                    self.out.steps += 1;
+                }
+                r
             }
         };
         sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
@@ -622,9 +638,9 @@ impl Editor {
                     TextInputKind::DeleteForward
                 };
                 // Ошибку документа `apply_text_edit` уже отправила событием; шрифт ещё
-                // грузится — удаление не применено, и пользователь видит причину.
-                if let Err(e @ TextError::Pending) = self.text_input(kind, "") {
-                    self.out.events.push(EditorEvent::Error(e.to_string()));
+                // грузится — удаление не применено, ядро повторит клавишу.
+                if let Err(TextError::Pending) = self.text_input(kind, "") {
+                    self.out.text_pending = true;
                 }
                 true
             }

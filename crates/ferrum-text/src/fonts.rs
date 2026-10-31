@@ -430,6 +430,36 @@ impl Fonts {
         self.fail(family, file);
     }
 
+    /// Ответа на запросы не дождались: каждый запрошенный файл — как не
+    /// полученный (`load_failed`), а не пришедший список вшитых — пустым.
+    /// Шрифты раскладываются запасным; поздние байты всё равно примутся.
+    /// Возвращает имена семейств, от которых отказались.
+    pub fn give_up_loading(&mut self) -> Vec<String> {
+        let requested: Vec<(String, String)> = self
+            .families
+            .values()
+            .flat_map(|f| {
+                f.files
+                    .iter()
+                    .filter(|(_, s)| s.state == FileState::Requested)
+                    .map(|(file, _)| (f.name.clone(), file.clone()))
+            })
+            .collect();
+        let mut names: Vec<String> = Vec::new();
+        for (family, file) in requested {
+            self.fail(&family, &file);
+            if !names.contains(&family) {
+                names.push(family);
+            }
+        }
+        if !self.bundled_ready {
+            self.bundled_ready = true;
+            self.generation += 1;
+        }
+        names.sort();
+        names
+    }
+
     fn fail(&mut self, family: &str, file: &str) {
         if let Some(slot) = self
             .families

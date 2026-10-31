@@ -514,3 +514,272 @@ fn ids_are_bounded() {
         "идентификатор",
     );
 }
+
+// Очередь ждущих шрифтов: пока набор ждёт шрифта, всё следующее — щелчки,
+// клавиши кольца, «Вырезать», вставка, отмена — встаёт за ним, а не обгоняет.
+
+fn text_of(c: &Core, id: &str) -> String {
+    let id = id.parse().unwrap();
+    c.editor()
+        .scene()
+        .node(id)
+        .unwrap()
+        .props
+        .text
+        .as_ref()
+        .unwrap()
+        .content
+        .text()
+}
+
+fn roboto_files(events: &[CoreEvent]) -> Vec<String> {
+    events
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::FontRequest { family, files, .. } if family == "Roboto" => {
+                Some(files.clone())
+            }
+            _ => None,
+        })
+        .expect("запрос Roboto")
+}
+
+fn serve_roboto(c: &mut Core, files: &[String]) {
+    for f in files {
+        c.load_font_for_tests("Roboto", f, font_file(f));
+    }
+}
+
+/// Правка «Привет» с курсором в конце; стиль набора — Roboto (ещё не загружен):
+/// набор «!» ждёт шрифта. Возвращает файлы запроса Roboto.
+fn typing_waits_for_roboto(c: &mut Core, id: &str) -> Vec<String> {
+    c.command(Command::TextEditStart { id: id.into() });
+    key(c, "End", KeyMods::default());
+    c.command(Command::SetTextStyle {
+        patch: TextStylePatchDto {
+            family: Some("Roboto".into()),
+            style: Some("Regular".into()),
+            ..Default::default()
+        },
+        phase: EditPhase::Commit,
+        ids: None,
+    });
+    input(c, TextInputKindDto::Insert, "!");
+    assert_eq!(text_of(c, id), "Привет\n", "набор ждёт шрифта");
+    roboto_files(&c.take_events())
+}
+
+/// Точка мира на экране (CSS-пиксели холста).
+fn screen(c: &Core, x: f64, y: f64) -> kurbo::Point {
+    c.editor().camera().world_to_screen(kurbo::Point::new(x, y))
+}
+
+fn click(c: &mut Core, at: kurbo::Point, t: f64) {
+    use ferrum_editor::{Input, Modifiers, PointerEvent};
+    c.handle(Input::PointerDown(PointerEvent::new(
+        at,
+        Modifiers::NONE,
+        t,
+    )));
+    c.handle(Input::PointerUp(PointerEvent::new(
+        at,
+        Modifiers::NONE,
+        t + 5.0,
+    )));
+}
+
+#[test]
+fn click_while_typing_waits_for_a_font_does_not_move_the_typing() {
+    let (mut c, id) = core();
+    let files = typing_waits_for_roboto(&mut c, &id);
+    // Щелчок в начало текста, пока «!» ждёт: курсор сдвинется после набора.
+    let at = screen(&c, 21.0, 32.0);
+    click(&mut c, at, 10_000.0);
+    assert_eq!(text_of(&c, &id), "Привет\n");
+    serve_roboto(&mut c, &files);
+    assert_eq!(text_of(&c, &id), "Привет!\n", "набор — в прежней точке");
+    let (editing, sel, _) = caret(&c.take_events()).unwrap();
+    assert!(editing);
+    assert_eq!(sel, Some([0, 0]), "щелчок — после набора");
+}
+
+#[test]
+fn outside_click_while_typing_waits_applies_the_typing_then_ends_the_edit() {
+    let (mut c, id) = core();
+    let files = typing_waits_for_roboto(&mut c, &id);
+    let at = screen(&c, 600.0, 500.0);
+    click(&mut c, at, 10_000.0);
+    assert!(c.editor().is_editing_text(), "щелчок мимо ждёт набора");
+    serve_roboto(&mut c, &files);
+    assert_eq!(text_of(&c, &id), "Привет!\n", "набор не потерян");
+    assert!(!c.editor().is_editing_text(), "затем правка кончилась");
+    let events = c.take_events();
+    assert!(!caret(&events).unwrap().0);
+    assert!(errors(&events).is_empty(), "{events:?}");
+}
+
+#[test]
+fn cut_while_typing_waits_runs_after_the_typing() {
+    let (mut c, id) = core();
+    let files = typing_waits_for_roboto(&mut c, &id);
+    key(
+        &mut c,
+        "Home",
+        KeyMods {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    c.command(Command::Execute {
+        command: "edit.cut".into(),
+    });
+    let events = c.take_events();
+    assert!(errors(&events).is_empty(), "{events:?}");
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Clipboard { .. })));
+    serve_roboto(&mut c, &files);
+    let events = c.take_events();
+    let plain = events.iter().find_map(|e| match e {
+        CoreEvent::Clipboard { plain, .. } => plain.clone(),
+        _ => None,
+    });
+    assert_eq!(plain.as_deref(), Some("Привет!"), "{events:?}");
+    assert_eq!(text_of(&c, &id), "\n");
+}
+
+/// Документ с текстом «Привет» шрифтом Roboto — файл без загруженного Roboto.
+fn roboto_document() -> Vec<u8> {
+    let (mut c, id) = core();
+    let files = typing_waits_for_roboto(&mut c, &id);
+    serve_roboto(&mut c, &files);
+    key(&mut c, "Escape", KeyMods::default());
+    c.command(Command::SetTextStyle {
+        patch: TextStylePatchDto {
+            family: Some("Roboto".into()),
+            style: Some("Regular".into()),
+            ..Default::default()
+        },
+        phase: EditPhase::Commit,
+        ids: Some(vec![id]),
+    });
+    c.take_events();
+    c.command(Command::Save);
+    c.take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Saved { bytes } => Some(bytes.into_vec()),
+            _ => None,
+        })
+        .expect("файл")
+}
+
+#[test]
+fn cut_and_delete_of_a_loading_font_wait_for_it_and_succeed() {
+    let bytes = roboto_document();
+    let (mut c, _) = core();
+    c.command(Command::Open {
+        bytes: serde_bytes::ByteBuf::from(bytes),
+    });
+    let files = roboto_files(&c.take_events());
+    let id = c.editor().scene().iter().next().unwrap().1.id.to_string();
+    c.command(Command::TextEditStart { id: id.clone() });
+    // Всё выделено: «Вырезать» ждёт Roboto — без ошибки и без буфера.
+    c.command(Command::Execute {
+        command: "edit.cut".into(),
+    });
+    let events = c.take_events();
+    assert!(errors(&events).is_empty(), "{events:?}");
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Clipboard { .. })));
+    input(&mut c, TextInputKindDto::Insert, "Да");
+    serve_roboto(&mut c, &files);
+    let events = c.take_events();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        CoreEvent::Clipboard { plain: Some(p), .. } if p.as_str() == "Привет!"
+    )));
+    assert_eq!(text_of(&c, &id), "Да\n", "вырезано, затем набор");
+}
+
+#[test]
+fn ring_backspace_while_the_font_loads_waits_for_it() {
+    use ferrum_editor::{Input, KeyEvent, Modifiers};
+    let bytes = roboto_document();
+    let (mut c, _) = core();
+    c.command(Command::Open {
+        bytes: serde_bytes::ByteBuf::from(bytes),
+    });
+    let files = roboto_files(&c.take_events());
+    let id = c.editor().scene().iter().next().unwrap().1.id.to_string();
+    c.command(Command::TextEditStart { id: id.clone() });
+    // Фокус ушёл с поля: Backspace приходит клавишей кольца.
+    c.handle(Input::KeyDown(KeyEvent::new("Backspace", Modifiers::NONE)));
+    c.handle(Input::KeyUp(KeyEvent::new("Backspace", Modifiers::NONE)));
+    let events = c.take_events();
+    assert!(errors(&events).is_empty(), "{events:?}");
+    assert_eq!(text_of(&c, &id), "Привет!\n");
+    serve_roboto(&mut c, &files);
+    assert_eq!(text_of(&c, &id), "\n");
+}
+
+#[test]
+fn waiting_queue_is_bounded() {
+    use ferrum_editor::{Input, KeyEvent, Modifiers};
+    let (mut c, id) = core();
+    let files = typing_waits_for_roboto(&mut c, &id);
+    for _ in 0..3000 {
+        c.handle(Input::KeyDown(KeyEvent::new("ShiftLeft", Modifiers::NONE)));
+        c.handle(Input::KeyUp(KeyEvent::new("ShiftLeft", Modifiers::NONE)));
+    }
+    let events = c.take_events();
+    assert_eq!(errors(&events).len(), 1, "одна ошибка о сброшенной очереди");
+    assert!(errors(&events)[0].contains("Шрифты загружаются слишком долго"));
+    serve_roboto(&mut c, &files);
+    assert_eq!(
+        text_of(&c, &id),
+        "Привет\n",
+        "сброшенный набор не применяется"
+    );
+    // После сброса ввод снова идёт напрямую.
+    input(&mut c, TextInputKindDto::Insert, "?");
+    assert_eq!(text_of(&c, &id), "Привет?\n");
+}
+
+#[test]
+fn unanswered_font_request_times_out_with_the_fallback() {
+    let (mut c, id) = core();
+    c.set_time(1_000.0);
+    let files = typing_waits_for_roboto(&mut c, &id);
+    c.set_time(10_000.0);
+    assert_eq!(text_of(&c, &id), "Привет\n", "ещё ждём");
+    c.set_time(16_500.0);
+    assert_eq!(
+        text_of(&c, &id),
+        "Привет!\n",
+        "не дождались — запасным шрифтом"
+    );
+    let events = c.take_events();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Log { message } if message.contains("Roboto"))));
+    // Очередь пуста: ввод идёт напрямую; поздние байты всё равно принимаются.
+    input(&mut c, TextInputKindDto::Insert, "?");
+    assert_eq!(text_of(&c, &id), "Привет!?\n");
+    serve_roboto(&mut c, &files);
+    assert!(c
+        .take_events()
+        .iter()
+        .all(|e| !matches!(e, CoreEvent::Error { .. })));
+}
+
+fn errors(events: &[CoreEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            CoreEvent::Error { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}

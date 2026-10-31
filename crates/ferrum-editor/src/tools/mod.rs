@@ -166,6 +166,10 @@ pub(crate) struct Outbox {
     pub edit_text: Option<(NodeId, Point)>,
     /// Инструмент «Текст» закончил: новый текст (родитель и свойства) в правку.
     pub new_text: Option<(Option<NodeId>, Props)>,
+    /// Действие правки текста (клавиша удаления, «Вырезать», вставка фрагмента)
+    /// не применено: шрифты ещё грузятся. Ядро повторит то же действие, когда
+    /// они придут (`Editor::take_text_pending`).
+    pub text_pending: bool,
 }
 
 /// Сколько применённых пачек изменений копится до `Editor::take_applied`.
