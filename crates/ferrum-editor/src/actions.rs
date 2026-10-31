@@ -593,7 +593,7 @@ impl Editor {
     /// новые идентификаторы и выделяются. Данные не доверенные; при ошибке документ
     /// и история не меняются.
     pub fn paste(&mut self, bytes: &[u8]) -> Result<(), ClipboardError> {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let payload = match ClipPayload::decode(bytes) {
             Ok(p) => p,
             Err(e) => {
@@ -669,7 +669,7 @@ impl Editor {
     /// Изображение из системного буфера или перетащенного файла: встаёт в центр
     /// видимой части (или выделенного фрейма) в исходном размере.
     pub fn insert_image(&mut self, hash: &str, width: f64, height: f64) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let ok = |v: f64| v.is_finite() && v > 0.0;
         if !ok(width) || !ok(height) {
             self.out
@@ -698,7 +698,7 @@ impl Editor {
     /// Фрейм из пресета (раздел 7.5): справа от содержимого страницы, выделяется,
     /// камера переезжает к нему, если его не видно.
     pub fn add_frame_preset(&mut self, preset: &FramePreset) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let (x, y) = match self.scene.bounds() {
             Some(b) => ((b.x1 + PRESET_GAP).round(), b.y0.round()),
             None => {

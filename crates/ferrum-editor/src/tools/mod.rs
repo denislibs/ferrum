@@ -156,6 +156,9 @@ pub struct Ctx<'a> {
     pub(crate) out: &'a mut Outbox,
     /// Реестр шрифтов: ресайз текста считает высоту по раскладке.
     pub(crate) fonts: &'a SharedFonts,
+    /// У правки вектора открыт незаписанный путь пера (проверка пролога
+    /// `Editor::begin_doc_edit`).
+    pub(crate) pen_open: bool,
 }
 
 /// Исходящее: события для интерфейса, счётчики.
@@ -230,6 +233,10 @@ impl Ctx<'_> {
     where
         F: FnOnce(&Tx, &Scene) -> DocResult<Vec<NodeId>>,
     {
+        debug_assert!(
+            !self.pen_open,
+            "правка документа при открытом пути пера: нет Editor::begin_doc_edit"
+        );
         self.scene.clear_preview();
         let scene: &Scene = self.scene;
         let result = self

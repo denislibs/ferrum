@@ -441,6 +441,7 @@ impl Editor {
 
     /// Разделяет редактор на инструмент и контекст для него.
     pub(crate) fn split(&mut self) -> (&mut Box<dyn Tool>, Ctx<'_>) {
+        let pen_open = self.vector_edit.as_ref().is_some_and(|v| v.pen.dirty);
         let Editor {
             doc,
             page,
@@ -458,6 +459,7 @@ impl Editor {
         (
             tool,
             Ctx {
+                pen_open,
                 doc,
                 page: *page,
                 scene,
@@ -773,6 +775,16 @@ impl Editor {
         }
     }
 
+    /// Пролог каждой правки документа не с холста (панели, слои, вставка):
+    /// открытый путь пера записывается своим шагом раньше неё (как в Figma) —
+    /// иначе его запись по свойствам узла на начало пути затёрла бы правку, —
+    /// затем жест отменяется. `Ctx::commit` в отладочной сборке проверяет, что
+    /// пролог был: открытого пути при записи нет.
+    pub(crate) fn begin_doc_edit(&mut self) {
+        self.finish_pen_path();
+        self.cancel_gesture();
+    }
+
     /// Выбирает инструмент (тулбар, горячая клавиша). Жест текущего отменяется.
     pub fn set_tool(&mut self, kind: ToolKind) {
         self.cancel_gesture();
@@ -866,10 +878,7 @@ impl Editor {
     where
         F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
     {
-        // Открытый путь пера записывается до правки панели (как в Figma): иначе
-        // он затёр бы её своей записью по старым свойствам узла.
-        self.finish_pen_path();
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let before = self.selection.to_vec();
         let result = self.doc.transact(self.page, before, f);
         let changed = sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);

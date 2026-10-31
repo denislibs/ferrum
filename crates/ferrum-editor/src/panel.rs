@@ -473,6 +473,12 @@ impl Editor {
             Some(ids) => me.alive(ids),
             None => me.selection.to_vec(),
         };
+        // Открытый путь пера записывается раньше превью и правки: превью панели
+        // заменило бы его превью, а его запись — затёрла бы правку. Жест холста
+        // при заданных `ids` не трогается — только путь.
+        if phase != Phase::Cancel {
+            self.finish_pen_path();
+        }
         match phase {
             Phase::Cancel => self.cancel_panel(),
             Phase::Preview => {
@@ -530,7 +536,7 @@ impl Editor {
 
     /// Скрыть или заблокировать узлы (кнопки строки слоя) одним шагом.
     pub fn set_flags(&mut self, ids: &[NodeId], visible: Option<bool>, locked: Option<bool>) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let ids = self.alive(ids);
         if ids.is_empty() || (visible.is_none() && locked.is_none()) {
             return;
@@ -552,7 +558,7 @@ impl Editor {
 
     /// Переименование слоя одним шагом; пустое или то же имя ничего не меняет.
     pub fn rename_node(&mut self, id: NodeId, name: &str) {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let Some(name) = clean_name(name) else {
             return;
         };
@@ -578,7 +584,7 @@ impl Editor {
     /// на экране. Один шаг; перенос узла внутрь самого себя или в лист ничего не
     /// делает. Возвращает, изменился ли документ.
     pub fn move_layers(&mut self, ids: &[NodeId], target: DropTarget) -> bool {
-        self.cancel_gesture();
+        self.begin_doc_edit();
         let ids = top_level(&self.scene, &self.alive(ids));
         let anchor = match target {
             DropTarget::Above(a) | DropTarget::Below(a) | DropTarget::Into(a) => a,

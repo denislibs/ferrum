@@ -324,61 +324,154 @@ fn closing_drag_mirrors_both_handles_of_the_first_point() {
     assert!((jump[0] - incoming[0]).abs() < 1e-9 && (jump[1] - incoming[1]).abs() < 1e-9);
 }
 
-#[test]
-fn panel_edit_during_an_open_path_survives_the_commit() {
-    // Вектор: панель двигает и растягивает узел посреди пути.
-    let mut h = H::new();
+/// Вектор-линия (100, 100)–(200, 100) для правок посреди пути пера.
+fn line_vector(h: &mut H) -> NodeId {
     let net = VectorNetwork {
         points: vec![VectorPoint::new(0.0, 0.0), VectorPoint::new(100.0, 0.0)],
         segments: vec![VectorSegment::line(0, 1)],
         regions: vec![],
     };
-    let id = h.add(
+    h.add(
         None,
         NodeKind::Vector,
         PropsPatch {
             vector: Some(Arc::new(net)),
-            ..patch(100.0, 100.0, 100.0, 100.0)
+            ..patch(100.0, 100.0, 100.0, 0.0)
         },
-    );
+    )
+}
+
+/// Открытый путь пера на `id`: продолжение из точки (200, 100) в (200, 200).
+fn open_path(h: &mut H, id: NodeId) {
     assert!(h.ed.start_vector_edit(id));
     h.key("KeyP", Modifiers::NONE);
-    h.click(100.0, 100.0, Modifiers::NONE);
-    h.click(100.0, 200.0, Modifiers::NONE);
-    h.set(
-        id,
-        PropsPatch {
-            opacity: Some(0.5),
-            ..Default::default()
-        },
-    );
+    h.click(200.0, 100.0, Modifiers::NONE);
+    h.click(200.0, 200.0, Modifiers::NONE);
+}
+
+fn number(field: NumField, value: f64) -> PanelEdit {
+    PanelEdit::Number {
+        field,
+        value,
+        relative: false,
+    }
+}
+
+#[test]
+fn panel_edit_during_an_open_path_survives_the_commit() {
+    // Настоящий путь панели (`edit_selection`), а не `Editor::transact`: X и W
+    // посреди пути не откатываются записью пути.
+    let mut h = H::new();
+    let id = line_vector(&mut h);
+    open_path(&mut h, id);
+    let steps = h.ed.step_count();
+    h.ed.edit_selection(&number(NumField::X, 400.0), Phase::Commit);
+    assert_eq!(h.ed.step_count(), steps + 2, "путь, затем правка панели");
     h.key("Escape", Modifiers::NONE);
     let p = h.props(id);
-    assert_eq!(p.opacity, 0.5, "правка панели не затёрта");
+    assert_eq!(p.x, 400.0, "X из панели не затёрт");
     assert_eq!(
         p.vector.as_deref().unwrap().segments.len(),
         2,
         "путь записан"
     );
+    // Отмена убирает правку панели, путь остаётся.
+    h.key("KeyZ", ctrl());
+    let p = h.props(id);
+    assert_eq!(p.x, 100.0);
+    assert_eq!(p.vector.as_deref().unwrap().segments.len(), 2);
+
+    let mut h = H::new();
+    let id = line_vector(&mut h);
+    open_path(&mut h, id);
+    h.ed.edit_selection(&number(NumField::W, 50.0), Phase::Commit);
+    h.key("Escape", Modifiers::NONE);
+    let p = h.props(id);
+    assert_eq!((p.w, p.h), (50.0, 100.0), "W из панели не затёрт");
+
+    // Превью панели посреди пути: путь записан до превью, превью — по новой рамке.
+    let mut h = H::new();
+    let id = line_vector(&mut h);
+    open_path(&mut h, id);
+    h.ed.edit_selection(&number(NumField::Y, 300.0), Phase::Preview);
+    assert_eq!(
+        h.ed.scene().node(id).unwrap().props.h,
+        100.0,
+        "путь в документе"
+    );
+    h.ed.edit_selection(&number(NumField::Y, 300.0), Phase::Commit);
+    h.key("Escape", Modifiers::NONE);
+    let p = h.props(id);
+    assert_eq!((p.y, p.h), (300.0, 100.0));
+
     // Фигура: заливка из панели переходит в новый вектор.
     let mut h = H::new();
     let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
     assert!(h.ed.start_vector_edit(r));
     h.key("KeyP", Modifiers::NONE);
     h.click(150.0, 100.0, Modifiers::NONE);
+    h.ed.edit_selection(&number(NumField::Opacity, 0.25), Phase::Commit);
+    h.key("Escape", Modifiers::NONE);
+    let p = h.props(r);
+    assert_eq!(p.opacity, 0.25);
+    assert_eq!(p.vector.as_deref().unwrap().points.len(), 5);
+}
+
+#[test]
+fn layer_routes_during_an_open_path_finish_it_first() {
+    // Перенос в повёрнутый фрейм: узел остаётся на экране, путь не откатывает перенос.
+    let mut h = H::new();
+    let f = h.frame(None, 0.0, 0.0, 1000.0, 1000.0);
     h.set(
-        r,
+        f,
         PropsPatch {
-            name: Some("Из панели".into()),
-            opacity: Some(0.25),
+            x: Some(50.0),
             ..Default::default()
         },
     );
+    let id = line_vector(&mut h);
+    open_path(&mut h, id);
+    assert!(h.ed.move_layers(&[id], DropTarget::Into(f)));
     h.key("Escape", Modifiers::NONE);
-    let id = only_vector(&mut h);
     let p = h.props(id);
-    assert_eq!((p.name.as_str(), p.opacity), ("Из панели", 0.25));
-    assert_eq!(p.vector.as_deref().unwrap().points.len(), 5);
+    assert_eq!(h.ed.page_doc().parent(id), Some(f));
+    assert_eq!((p.x, p.y), (50.0, 100.0), "на экране на месте");
+    assert_eq!(p.vector.as_deref().unwrap().segments.len(), 2);
+
+    // Блокировка из строки слоя: путь записан до неё, блокировка не снята.
+    let mut h = H::new();
+    let id = line_vector(&mut h);
+    open_path(&mut h, id);
+    h.ed.set_flags(&[id], None, Some(true));
+    h.key("Escape", Modifiers::NONE);
+    let p = h.props(id);
+    assert!(p.locked);
+    assert_eq!(p.vector.as_deref().unwrap().segments.len(), 2);
+
+    // Переименование и вставка — так же: путь записан своим шагом.
+    let mut h = H::new();
+    let id = line_vector(&mut h);
+    open_path(&mut h, id);
+    h.ed.rename_node(id, "Путь");
+    let p = h.props(id);
+    assert_eq!(p.name, "Путь");
+    assert_eq!(
+        p.vector.as_deref().unwrap().segments.len(),
+        2,
+        "путь записан"
+    );
+    h.ed.select(&[id]);
+    let bytes = h.ed.copy().unwrap();
+    assert!(h.ed.start_vector_edit(id));
+    h.key("KeyP", Modifiers::NONE);
+    h.click(200.0, 200.0, Modifiers::NONE);
+    h.click(300.0, 200.0, Modifiers::NONE);
+    h.ed.paste(&bytes).unwrap();
+    assert_eq!(
+        h.props(id).vector.as_deref().unwrap().segments.len(),
+        3,
+        "второй путь записан до вставки"
+    );
 }
 
 #[test]
