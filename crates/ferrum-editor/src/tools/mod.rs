@@ -9,12 +9,14 @@
 mod draw;
 mod hand;
 pub(crate) mod select;
+mod text;
 
 pub use draw::{DrawTool, Shape};
 pub use hand::HandTool;
 pub use select::SelectTool;
+pub use text::TextTool;
 
-use ferrum_doc::{Changes, DocResult, Document, NodeId, PageId, Tx};
+use ferrum_doc::{Changes, DocResult, Document, NodeId, PageId, Props, Tx};
 use ferrum_render::Camera;
 use ferrum_scene::Scene;
 use kurbo::{Line, Point, Rect};
@@ -35,6 +37,8 @@ pub enum ToolKind {
     Line,
     Hand,
     Image,
+    /// «Текст» (T): новый текст щелчком или рамкой.
+    Text,
 }
 
 /// Курсор над холстом. Углы — в градусах на экране: 0 — горизонтальная стрелка
@@ -157,6 +161,8 @@ pub(crate) struct Outbox {
     pub applied: Vec<Changes>,
     /// Двойной щелчок по тексту: войти в его правку с курсором в точке мира.
     pub edit_text: Option<(NodeId, Point)>,
+    /// Инструмент «Текст» закончил: новый текст (родитель и свойства) в правку.
+    pub new_text: Option<(Option<NodeId>, Props)>,
 }
 
 /// Сколько применённых пачек изменений копится до `Editor::take_applied`.

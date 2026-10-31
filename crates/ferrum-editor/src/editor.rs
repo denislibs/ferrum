@@ -27,8 +27,8 @@ use crate::measure::{measure, AltState, MeasureCache};
 use crate::panel::PanelGesture;
 use crate::text_edit::{EnterAt, TextEdit};
 use crate::tools::{
-    sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, Tool,
-    ToolKind, ToolOverlay,
+    sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, TextTool,
+    Tool, ToolKind, ToolOverlay,
 };
 
 /// Раскладка правимого текста и её ключ: узел, версия узла, поколение шрифтов.
@@ -555,6 +555,10 @@ impl Editor {
         if tool.pointer_up(&mut cx, &e) == Flow::Finished {
             self.set_tool(ToolKind::Move);
         }
+        // Инструмент «Текст» поставил новый текст: правка с курсором в нём.
+        if let Some((parent, props)) = self.out.new_text.take() {
+            self.start_draft_text(parent, props);
+        }
     }
 
     fn wheel(&mut self, e: WheelEvent) {
@@ -699,6 +703,7 @@ impl Editor {
             ToolKind::Ellipse => Box::new(DrawTool::new(Shape::Ellipse)),
             ToolKind::Line => Box::new(DrawTool::new(Shape::Line)),
             ToolKind::Hand => Box::new(HandTool::new()),
+            ToolKind::Text => Box::new(TextTool::new()),
             // Изображению нужны хэш и размер: интерфейс сначала выбирает файл.
             ToolKind::Image => {
                 self.out.events.push(EditorEvent::RequestImage);

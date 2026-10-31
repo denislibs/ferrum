@@ -54,6 +54,7 @@ pub enum Tool {
     Line,
     Hand,
     Image,
+    Text,
 }
 
 /// Тема оверлеев.

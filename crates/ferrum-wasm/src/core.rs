@@ -115,6 +115,7 @@ fn tool_kind(t: Tool) -> ToolKind {
         Tool::Line => ToolKind::Line,
         Tool::Hand => ToolKind::Hand,
         Tool::Image => ToolKind::Image,
+        Tool::Text => ToolKind::Text,
     }
 }
 
@@ -127,6 +128,7 @@ fn tool(k: ToolKind) -> Tool {
         ToolKind::Line => Tool::Line,
         ToolKind::Hand => Tool::Hand,
         ToolKind::Image => Tool::Image,
+        ToolKind::Text => Tool::Text,
     }
 }
 

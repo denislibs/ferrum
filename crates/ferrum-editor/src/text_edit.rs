@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use ferrum_doc::{NodeId, NodeKind, TextAttrs, TextContent};
+use ferrum_doc::{NodeId, NodeKind, Props, TextAttrs, TextContent, TextMerge};
 use ferrum_render::TextEditOverlay;
 use ferrum_text::{
     next_word_end, paragraph_range, prev_word_start, word_range, Caret, LayoutRequest, TextLayout,
@@ -40,10 +40,20 @@ pub(crate) enum Unit {
     Paragraph,
 }
 
+/// Узел черновика инструмента T: в документе его нет, пока не набран первый
+/// символ (пустой новый текст при выходе исчезает без шага отмены).
+#[derive(Debug, Clone)]
+pub(crate) struct DraftText {
+    pub parent: Option<NodeId>,
+    pub props: Props,
+}
+
 /// Состояние правки текста.
 #[derive(Debug, Clone)]
 pub(crate) struct TextEdit {
     pub id: NodeId,
+    /// Новый текст инструмента T, ещё не в документе.
+    pub draft: Option<DraftText>,
     /// Начало выделения (неподвижный конец) и курсор.
     pub anchor: usize,
     pub focus: Caret,
@@ -60,12 +70,17 @@ pub(crate) struct TextEdit {
     pub clicks: Option<(f64, Point, u8)>,
     /// С какого момента курсор горит (мигание начинается заново после действия).
     pub blink_from: f64,
+    /// Метка последней правки ввода: продолжение склеивается в один шаг.
+    pub merge: Option<TextMerge>,
+    /// Шагов редактора на момент `merge`: другой шаг между — склейки нет.
+    pub merge_steps: u64,
 }
 
 impl TextEdit {
     pub fn new(id: NodeId, anchor: usize, focus: usize, now: f64) -> TextEdit {
         TextEdit {
             id,
+            draft: None,
             anchor,
             focus: Caret::at(focus),
             goal_x: None,
@@ -74,6 +89,8 @@ impl TextEdit {
             drag: None,
             clicks: None,
             blink_from: now,
+            merge: None,
+            merge_steps: 0,
         }
     }
 
@@ -89,6 +106,8 @@ impl TextEdit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextEditInfo {
     pub id: NodeId,
+    /// Узел ещё черновик (новый текст до первого символа).
+    pub draft: bool,
     pub anchor: usize,
     pub focus: usize,
     /// Прямоугольник курсора в CSS-пикселях холста.
@@ -119,6 +138,7 @@ impl Editor {
         });
         Some(TextEditInfo {
             id: t.id,
+            draft: t.draft.is_some(),
             anchor: t.anchor,
             focus: t.focus.index,
             caret: caret.unwrap_or(Rect::ZERO),
@@ -145,9 +165,13 @@ impl Editor {
         k.is_multiple_of(2)
     }
 
-    /// Содержимое правимого узла в документе (без превью IME).
+    /// Содержимое правимого узла в документе (без превью IME); у черновика —
+    /// его собственное.
     pub(crate) fn edit_content(&self) -> Option<TextContent> {
         let t = self.text_edit.as_ref()?;
+        if let Some(d) = &t.draft {
+            return d.props.text.as_ref().map(|x| x.content.clone());
+        }
         let n = self.scene.node(t.id)?;
         let doc = self.doc.loaded_page(self.page)?.props(n.id).ok()?;
         doc.text.as_ref().map(|x| x.content.clone())
@@ -253,13 +277,14 @@ impl Editor {
         true
     }
 
-    /// Выход из правки (Esc, команда): узел остаётся выделенным.
+    /// Выход из правки (Esc, команда): узел остаётся выделенным; пустой текст
+    /// удаляется (`finish_text_edit`).
     pub fn end_text_edit(&mut self) {
         let Some(id) = self.text_edit.as_ref().map(|t| t.id) else {
             return;
         };
         self.finish_text_edit();
-        if self.scene.slot(id).is_some() {
+        if self.scene.slot(id).is_some() && !self.scene.is_draft(id) {
             self.selection.set(vec![id]);
         }
         self.emit();
@@ -388,8 +413,15 @@ impl Editor {
             return;
         };
         if self.scene.slot(t.id).is_none() {
-            self.text_edit = None;
-            self.text_hover = false;
+            if t.draft.is_some() {
+                // Черновик убран вместе с превью чужого жеста — вернуть.
+                self.restore_draft();
+            } else {
+                // Узла нет: правка кончается, превью IME уходит вместе с ней.
+                self.text_edit = None;
+                self.text_hover = false;
+                self.scene.clear_preview();
+            }
             return;
         }
         let Some(content) = self.edit_content() else {
@@ -429,23 +461,15 @@ impl Editor {
         handled
     }
 
-    /// Клавиши правки, кроме хода курсора: Esc — выход (`text_input` добавляет
-    /// удаление, отмену, списки и форматирование).
-    fn text_command_key(&mut self, code: &str, _mods: Modifiers) -> bool {
+    /// Клавиши правки, кроме хода курсора: Esc — выход, удаление и отмена —
+    /// `text_edit_key` (модуль `text_input`).
+    fn text_command_key(&mut self, code: &str, mods: Modifiers) -> bool {
         match code {
             "Escape" => {
                 self.end_text_edit();
                 true
             }
-            _ => false,
-        }
-    }
-
-    /// Заканчивает правку без выделения узла: превью IME убирается.
-    pub(crate) fn finish_text_edit(&mut self) {
-        self.text_hover = false;
-        if self.text_edit.take().is_some() {
-            self.scene.clear_preview();
+            _ => self.text_edit_key(code, mods),
         }
     }
 

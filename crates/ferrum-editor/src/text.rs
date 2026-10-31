@@ -89,6 +89,40 @@ pub fn fit_size(fonts: &mut Fonts, p: &Props) -> Result<Option<(f64, f64)>, Text
     }))
 }
 
+/// Размер и положение рамки после правки текста `before` → `after` (у
+/// `AutoWidth` и `AutoHeight` — по раскладке `after`; `Fixed` — без изменений).
+/// Текст «авто по ширине» растёт от своего выравнивания: по центру — в обе
+/// стороны, справа — влево (как в Figma). Пустой патч — менять нечего.
+pub(crate) fn fit_patch(
+    fonts: &mut Fonts,
+    before: &Props,
+    after: &Props,
+) -> Result<PropsPatch, TextPending> {
+    let Some((w, h)) = fit_size(fonts, after)? else {
+        return Ok(PropsPatch::default());
+    };
+    let mut patch = PropsPatch::default();
+    if w != before.w {
+        patch.w = Some(w);
+        let k = match after.text_props().map(|t| (t.sizing, t.align_h)) {
+            Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Center)) => 0.5,
+            Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Right)) => 1.0,
+            _ => 0.0,
+        };
+        if k > 0.0 {
+            // Сдвиг вдоль оси x узла (с его поворотом) в координатах родителя.
+            let v = kurbo::Affine::rotate(-before.rotation.to_radians())
+                * kurbo::Point::new(-(w - before.w) * k, 0.0);
+            patch.x = Some(before.x + v.x);
+            patch.y = Some(before.y + v.y);
+        }
+    }
+    if h != before.h {
+        patch.h = Some(h);
+    }
+    Ok(patch)
+}
+
 /// Ресайз текста рамкой (ручки, поля W/H, масштаб группы) переводит его в
 /// `Fixed`: размер больше не по тексту. Этап 2 добавит правила Figma для
 /// горизонтального ресайза (`AutoHeight`) вместе с режимом размера в панели.

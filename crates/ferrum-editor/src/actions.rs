@@ -44,6 +44,7 @@ impl Editor {
             C::ToolEllipse => self.set_tool(ToolKind::Ellipse),
             C::ToolLine => self.set_tool(ToolKind::Line),
             C::ToolHand => self.set_tool(ToolKind::Hand),
+            C::ToolText => self.set_tool(ToolKind::Text),
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
