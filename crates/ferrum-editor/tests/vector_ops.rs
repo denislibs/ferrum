@@ -393,3 +393,107 @@ fn paint_bucket_on_a_ring_clears_the_ring_not_the_hole() {
     assert!(!filled_at(&r, ring) && !filled_at(&r, hole));
     assert_round_trips(&r);
 }
+
+/// Квадрат 0..100 и квадрат 30..70 внутри него (две связные части, без областей).
+fn nested_squares() -> VectorNetwork {
+    net(
+        &[
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 100.0),
+            (0.0, 100.0),
+            (30.0, 30.0),
+            (70.0, 30.0),
+            (70.0, 70.0),
+            (30.0, 70.0),
+        ],
+        &[
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+        ],
+    )
+}
+
+#[test]
+fn paint_bucket_ignores_a_bridge_between_nested_squares() {
+    // Мост из угла внешнего квадрата к углу внутреннего не ограничивает грань.
+    let mut n = nested_squares();
+    n.segments.push(VectorSegment::line(0, 4));
+    for f in faces(&n) {
+        let mut s = f.clone();
+        s.sort();
+        s.dedup();
+        assert_eq!(s.len(), f.len(), "сегмент дважды в грани {f:?}");
+    }
+    let (ring, hole) = (Point::new(10.0, 50.0), Point::new(50.0, 50.0));
+    let r = toggle_fill(&n, ring, false).unwrap();
+    assert_round_trips(&r);
+    assert!(filled_at(&r, ring) && !filled_at(&r, hole));
+    let h = toggle_fill(&n, hole, false).unwrap();
+    assert_round_trips(&h);
+    assert!(!filled_at(&h, ring) && filled_at(&h, hole));
+    // Залитое кольцо + щелчок в дыру — залито всё; снова в кольцо — только дыра.
+    let both = toggle_fill(&r, hole, false).unwrap();
+    assert_round_trips(&both);
+    assert!(filled_at(&both, ring) && filled_at(&both, hole));
+    let only_hole = toggle_fill(&both, ring, false).unwrap();
+    assert_round_trips(&only_hole);
+    assert!(!filled_at(&only_hole, ring) && filled_at(&only_hole, hole));
+}
+
+#[test]
+fn paint_bucket_on_a_separate_square_keeps_the_hole_of_a_ring_empty() {
+    let mut n = nested_squares();
+    let o = n.points.len() as u32;
+    for (x, y) in [(200.0, 0.0), (300.0, 0.0), (300.0, 100.0), (200.0, 100.0)] {
+        n.points.push(VectorPoint::new(x, y));
+    }
+    for i in 0..4 {
+        n.segments.push(VectorSegment::line(o + i, o + (i + 1) % 4));
+    }
+    n.regions.push(VectorRegion {
+        rule: FillRule::EvenOdd,
+        loops: vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9, 10, 11]],
+        fills: Some(vec![Fill::solid(Color::SHAPE_GRAY)]),
+    });
+    let (ring, hole, side) = (
+        Point::new(10.0, 50.0),
+        Point::new(50.0, 50.0),
+        Point::new(250.0, 50.0),
+    );
+    assert!(filled_at(&n, ring) && !filled_at(&n, hole) && filled_at(&n, side));
+    let r = toggle_fill(&n, side, false).unwrap();
+    assert_round_trips(&r);
+    assert!(filled_at(&r, ring), "кольцо осталось");
+    assert!(!filled_at(&r, hole), "дыра пуста");
+    assert!(!filled_at(&r, side), "квадрат снят");
+    assert_eq!(r.regions[0].fills, n.regions[0].fills);
+}
+
+#[test]
+fn paint_bucket_clears_an_inner_square_inside_a_filled_one() {
+    let mut n = nested_squares();
+    n.regions.push(VectorRegion {
+        rule: FillRule::NonZero,
+        loops: vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7]],
+        fills: Some(vec![Fill::solid(Color::SHAPE_GRAY)]),
+    });
+    let (ring, hole) = (Point::new(10.0, 50.0), Point::new(50.0, 50.0));
+    assert!(filled_at(&n, ring) && filled_at(&n, hole));
+    let r = toggle_fill(&n, hole, false).unwrap();
+    assert_round_trips(&r);
+    assert!(filled_at(&r, ring) && !filled_at(&r, hole));
+    let again = toggle_fill(&r, hole, false).unwrap();
+    assert_round_trips(&again);
+    assert!(filled_at(&again, ring) && filled_at(&again, hole));
+    // Снятие внешней части оставляет внутренний квадрат залитым.
+    let outer = toggle_fill(&n, ring, false).unwrap();
+    assert_round_trips(&outer);
+    assert!(!filled_at(&outer, ring) && filled_at(&outer, hole));
+}

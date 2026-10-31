@@ -13,7 +13,9 @@ use ferrum_doc::{
     VectorRegion, VectorSegment,
 };
 use ferrum_scene::vector::{fit, network_bounds, segment_curve};
-use kurbo::{Affine, BezPath, CubicBez, ParamCurve, PathSeg, Point, Shape, Vec2};
+use kurbo::{
+    Affine, BezPath, CubicBez, ParamCurve, ParamCurveNearest, PathSeg, Point, Shape, Vec2,
+};
 
 /// Доля радиуса для ручек дуги в четверть окружности.
 const KAPPA: f64 = 0.552_284_749_830_793_4;
@@ -594,10 +596,77 @@ pub fn bend(net: &VectorNetwork, seg: usize, t: f64, d: Vec2) -> VectorNetwork {
     out
 }
 
-/// Грани сети как плоского графа (сегменты без пересечений): петли сегментов,
-/// ограничивающие внутренние области; внешняя грань каждой связной части не
-/// входит. Обход: из полуребра u→v к следующему по углу касательной в v.
-pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
+/// Мосты сети: сегменты, после удаления которых сеть распадается (висячие
+/// цепочки и перемычки между циклами). Они не ограничивают ни одну грань —
+/// с обеих сторон у них одна и та же грань. Тарьян по рёбрам (кратные сегменты
+/// между двумя точками мостами не считаются), без рекурсии.
+fn bridges(net: &VectorNetwork) -> Vec<bool> {
+    let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); net.points.len()];
+    for (i, s) in net.segments.iter().enumerate() {
+        if s.start != s.end {
+            adj[s.start as usize].push((s.end as usize, i));
+            adj[s.end as usize].push((s.start as usize, i));
+        }
+    }
+    let mut out = vec![false; net.segments.len()];
+    let mut disc = vec![usize::MAX; net.points.len()];
+    let mut low = vec![0usize; net.points.len()];
+    let mut time = 0;
+    for root in 0..net.points.len() {
+        if disc[root] != usize::MAX {
+            continue;
+        }
+        disc[root] = time;
+        low[root] = time;
+        time += 1;
+        // (точка, сегмент, которым в неё пришли, следующий номер в списке)
+        let mut stack = vec![(root, usize::MAX, 0usize)];
+        while let Some(top) = stack.last_mut() {
+            let (v, via, k) = *top;
+            if let Some(&(w, e)) = adj[v].get(k) {
+                top.2 += 1;
+                if e == via {
+                    continue;
+                }
+                if disc[w] == usize::MAX {
+                    disc[w] = time;
+                    low[w] = time;
+                    time += 1;
+                    stack.push((w, e, 0));
+                } else {
+                    low[v] = low[v].min(disc[w]);
+                }
+            } else {
+                stack.pop();
+                if let Some(&(u, _, _)) = stack.last() {
+                    low[u] = low[u].min(low[v]);
+                    if low[v] > disc[u] {
+                        out[via] = true;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Обход одной грани плоского графа: сегменты по ходу, контур, знаковая площадь
+/// (kurbo: у внутренних граней < 0, у внешней грани связной части > 0) и
+/// связная часть.
+struct Walk {
+    segs: Vec<u32>,
+    path: BezPath,
+    area: f64,
+    part: usize,
+    /// Точка сети на контуре — представитель связной части.
+    at: Point,
+}
+
+/// Все грани сети без мостов (из полуребра u→v к следующему по углу
+/// касательной в v). Без мостов каждый сегмент разделяет две разные грани, так
+/// что ни одна грань не проходит сегмент дважды. Вырожденные (нулевой площади)
+/// не входят.
+fn face_walks(net: &VectorNetwork) -> Vec<Walk> {
     let n = net.segments.len();
     // Полуребро 2i — сегмент i от начала, 2i+1 — от конца.
     let from = |h: usize| {
@@ -622,35 +691,28 @@ pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
         };
         (q - p).atan2()
     };
-    // Висячие сегменты (с концом степени 1) не ограничивают грань — обход
-    // вошёл бы в них и вышел обратно, повторив сегмент: отбрасываем их до
-    // обхода, пока такие находятся.
-    let mut active = vec![true; n];
-    loop {
-        let mut degree: HashMap<u32, usize> = HashMap::new();
-        for s in net
-            .segments
-            .iter()
-            .zip(&active)
-            .filter(|(_, a)| **a)
-            .map(|(s, _)| s)
-        {
-            *degree.entry(s.start).or_default() += 1;
-            *degree.entry(s.end).or_default() += 1;
+    let bridge = bridges(net);
+    let active = |i: usize| !bridge[i] && net.segments[i].start != net.segments[i].end;
+    // Связные части по оставшимся сегментам.
+    let mut parent: Vec<usize> = (0..net.points.len()).collect();
+    fn root(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
         }
-        let mut changed = false;
-        for (i, s) in net.segments.iter().enumerate() {
-            if active[i] && (degree[&s.start] == 1 || degree[&s.end] == 1) {
-                active[i] = false;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
+        x
+    }
+    for (i, s) in net.segments.iter().enumerate() {
+        if active(i) {
+            let (a, b) = (
+                root(&mut parent, s.start as usize),
+                root(&mut parent, s.end as usize),
+            );
+            parent[a] = b;
         }
     }
     let mut out_of: HashMap<u32, Vec<usize>> = HashMap::new();
-    for h in (0..2 * n).filter(|h| active[h / 2]) {
+    for h in (0..2 * n).filter(|h| active(h / 2)) {
         out_of.entry(from(h)).or_default().push(h);
     }
     for list in out_of.values_mut() {
@@ -658,7 +720,7 @@ pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
     }
     let mut seen = vec![false; 2 * n];
     let mut result = Vec::new();
-    for start in (0..2 * n).filter(|h| active[h / 2]) {
+    for start in (0..2 * n).filter(|h| active(h / 2)) {
         if seen[start] {
             continue;
         }
@@ -679,12 +741,31 @@ pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
             continue;
         }
         let path = face_path(net, &face);
-        // Внутренние грани обходятся против часовой на экране (площадь kurbo < 0).
-        if path.area() < -1e-9 {
-            result.push(face.iter().map(|h| (h / 2) as u32).collect());
+        let area = path.area();
+        if area.abs() <= 1e-9 {
+            continue;
         }
+        let p = from(start);
+        result.push(Walk {
+            segs: face.iter().map(|h| (h / 2) as u32).collect(),
+            path,
+            area,
+            part: root(&mut parent, p as usize),
+            at: pt(net, p),
+        });
     }
     result
+}
+
+/// Грани сети как плоского графа (сегменты без пересечений): петли сегментов,
+/// ограничивающие внутренние области; внешняя грань каждой связной части не
+/// входит, мосты и висячие цепочки — тоже (сегмент в грани не повторяется).
+pub fn faces(net: &VectorNetwork) -> Vec<Vec<u32>> {
+    face_walks(net)
+        .into_iter()
+        .filter(|w| w.area < 0.0)
+        .map(|w| w.segs)
+        .collect()
 }
 
 /// Контур грани по полурёбрам.
@@ -722,6 +803,117 @@ pub fn loop_path(net: &VectorNetwork, l: &[u32]) -> Option<BezPath> {
     Some(path)
 }
 
+/// Неделимый участок, который видит «Заливка области»: внутренняя грань минус
+/// внешние контуры связных частей, лежащих прямо в ней (дыры). Участки не
+/// перекрываются и вместе покрывают всё, что могут залить петли сети.
+struct Atom {
+    /// Номер внутренней грани в обходах.
+    outer: usize,
+    /// Номера внешних контуров вложенных частей.
+    holes: Vec<usize>,
+}
+
+impl Atom {
+    fn contains(&self, walks: &[Walk], p: Point) -> bool {
+        walks[self.outer].path.winding(p) != 0
+            && self.holes.iter().all(|&h| walks[h].path.winding(p) == 0)
+    }
+
+    /// Петли участка: его грань и дыры (по правилу `EvenOdd` — ровно участок).
+    fn loops(&self, walks: &[Walk]) -> Vec<Vec<u32>> {
+        std::iter::once(self.outer)
+            .chain(self.holes.iter().copied())
+            .map(|i| walks[i].segs.clone())
+            .collect()
+    }
+
+    /// Точка внутри участка подальше от его границ: сетка по рамке, всё гуще;
+    /// из точек участка — с наибольшим расстоянием до контура.
+    fn inner_point(&self, walks: &[Walk]) -> Option<Point> {
+        let outer = &walks[self.outer].path;
+        let b = outer.bounding_box();
+        let edges: Vec<PathSeg> = std::iter::once(self.outer)
+            .chain(self.holes.iter().copied())
+            .flat_map(|i| walks[i].path.segments())
+            .collect();
+        let tiny = 1e-9 * (b.width() + b.height()).max(1.0);
+        for n in [8u32, 32, 128] {
+            let mut best: Option<(f64, Point)> = None;
+            for iy in 0..n {
+                for ix in 0..n {
+                    let p = Point::new(
+                        b.x0 + b.width() * (ix as f64 + 0.5) / n as f64,
+                        b.y0 + b.height() * (iy as f64 + 0.5) / n as f64,
+                    );
+                    if !self.contains(walks, p) {
+                        continue;
+                    }
+                    let clear = edges
+                        .iter()
+                        .map(|e| e.nearest(p, 1e-9).distance_sq)
+                        .fold(f64::INFINITY, f64::min);
+                    if best.is_none_or(|(c, _)| clear > c) {
+                        best = Some((clear, p));
+                    }
+                }
+            }
+            if let Some((c, p)) = best {
+                if c.sqrt() > tiny {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Неделимые участки: каждой внутренней грани — дыры из внешних контуров тех
+/// связных частей, для которых она самая маленькая охватывающая грань чужой
+/// части.
+fn atoms(walks: &[Walk]) -> Vec<Atom> {
+    let mut out: Vec<Atom> = (0..walks.len())
+        .filter(|&i| walks[i].area < 0.0)
+        .map(|outer| Atom {
+            outer,
+            holes: Vec::new(),
+        })
+        .collect();
+    for (o, w) in walks.iter().enumerate().filter(|(_, w)| w.area > 0.0) {
+        let host = out
+            .iter_mut()
+            .filter(|a| {
+                let f = &walks[a.outer];
+                f.part != w.part && f.path.winding(w.at) != 0
+            })
+            .min_by(|a, b| {
+                walks[a.outer]
+                    .area
+                    .abs()
+                    .total_cmp(&walks[b.outer].area.abs())
+            });
+        if let Some(a) = host {
+            a.holes.push(o);
+        }
+    }
+    out
+}
+
+/// Петли области из набора участков (правило `EvenOdd`): одинаковые петли
+/// попарно сокращаются — при чётно-нечётном правиле пара ничего не меняет.
+fn atom_loops<'a>(walks: &[Walk], set: impl Iterator<Item = &'a Atom>) -> Vec<Vec<u32>> {
+    let mut loops: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+    for l in set.flat_map(|a| a.loops(walks)) {
+        let mut key = l.clone();
+        key.sort_unstable();
+        if let Some(k) = loops.iter().position(|(other, _)| *other == key) {
+            loops.remove(k);
+        } else {
+            loops.push((key, l));
+        }
+    }
+    loops.into_iter().map(|(_, l)| l).collect()
+}
+
 /// Закрашена ли точка областью: сумма поворотов её петель по её правилу.
 fn region_covers(net: &VectorNetwork, r: &VectorRegion, p: Point) -> bool {
     let w: i32 = r
@@ -736,87 +928,49 @@ fn region_covers(net: &VectorNetwork, r: &VectorRegion, p: Point) -> bool {
     }
 }
 
-/// Точка внутри грани `face`, не лежащая ни в одной из `smaller` (более мелких
-/// граней — вложенных частей): перебор сетки по рамке, всё гуще.
-fn interior_point(path: &BezPath, smaller: &[BezPath]) -> Option<Point> {
-    let b = path.bounding_box();
-    for n in [8u32, 32, 128] {
-        for iy in 0..n {
-            for ix in 0..n {
-                let p = Point::new(
-                    b.x0 + b.width() * (ix as f64 + 0.5) / n as f64,
-                    b.y0 + b.height() * (iy as f64 + 0.5) / n as f64,
-                );
-                if path.winding(p) != 0 && smaller.iter().all(|s| s.winding(p) == 0) {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// «Заливка области» (B) в точке `at` (координаты сети): самая маленькая грань
-/// под точкой. Если под точкой что-то залито, заливка снимается ровно с этой
-/// грани: каждая область, закрашивающая точку, заменяется областью из остальных
-/// граней сети, которые она закрашивала (с теми же заливками; грани не
-/// перекрываются, поэтому правило — `NonZero`). Иначе — новая область с
-/// заливками узла (у узла без заливок — серая, как у новой фигуры). `None` —
-/// под точкой нет замкнутой грани. Предел: грань, вложенная внутрь другой
-/// закрашенной грани той же области, при снятии заливки внешней не вычитается.
+/// «Заливка области» (B) в точке `at` (координаты сети) переключает ровно тот
+/// неделимый участок, по которому щёлкнули (грань минус вложенные в неё части),
+/// остальное выглядит как прежде. Участок залит (его закрашивает какая-то
+/// область) — каждая такая область переписывается участками, которые она
+/// закрашивала, кроме этого (те же заливки, правило `EvenOdd`, петли — грани
+/// участков и их дыры). Не залит — новая область из него с заливками узла (у
+/// узла без заливок — серая, как у новой фигуры). `None` — под точкой нет
+/// замкнутой грани или результат не прошёл бы проверку сети (тогда сеть не
+/// меняется).
 pub fn toggle_fill(net: &VectorNetwork, at: Point, node_has_fills: bool) -> Option<VectorNetwork> {
-    let all: Vec<(Vec<u32>, BezPath)> = faces(net)
-        .into_iter()
-        .filter_map(|f| {
-            let path = loop_path(net, &f)?;
-            Some((f, path))
-        })
+    let walks = face_walks(net);
+    let atoms = atoms(&walks);
+    let clicked = atoms.iter().position(|a| a.contains(&walks, at))?;
+    let covering: Vec<usize> = (0..net.regions.len())
+        .filter(|&i| region_covers(net, &net.regions[i], at))
         .collect();
-    let clicked = all
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, path))| path.winding(at) != 0)
-        .min_by(|a, b| a.1 .1.area().abs().total_cmp(&b.1 .1.area().abs()))?
-        .0;
     let mut out = net.clone();
-    if net.regions.iter().any(|r| region_covers(net, r, at)) {
-        // Внутренние точки остальных граней — по ним решаем, что осталось залитым.
-        let inner: Vec<Option<Point>> = all
-            .iter()
-            .enumerate()
-            .map(|(i, (_, path))| {
-                let smaller: Vec<BezPath> = all
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, (_, p))| *j != i && p.area().abs() < path.area().abs())
-                    .map(|(_, (_, p))| p.clone())
-                    .collect();
-                interior_point(path, &smaller)
-            })
-            .collect();
-        for (r, old) in out.regions.iter_mut().zip(&net.regions) {
-            if !region_covers(net, old, at) {
-                continue;
-            }
-            r.rule = FillRule::NonZero;
-            r.loops = all
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != clicked)
-                .filter(|(i, _)| inner[*i].is_some_and(|p| region_covers(net, old, p)))
-                .map(|(_, (f, _))| f.clone())
-                .collect();
-        }
-        out.regions.retain(|r| !r.loops.is_empty());
-    } else {
+    if covering.is_empty() {
         out.regions.push(VectorRegion {
-            rule: FillRule::NonZero,
-            loops: vec![all[clicked].0.clone()],
+            rule: FillRule::EvenOdd,
+            loops: atom_loops(&walks, std::iter::once(&atoms[clicked])),
             fills: (!node_has_fills).then(|| vec![Fill::solid(Color::SHAPE_GRAY)]),
         });
+    } else {
+        // Внутренние точки остальных участков — по ним решаем, что залито.
+        let inner: Vec<Option<Point>> = atoms
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i != clicked).then(|| a.inner_point(&walks)).flatten())
+            .collect();
+        for &ri in &covering {
+            let old = &net.regions[ri];
+            let kept = atoms
+                .iter()
+                .zip(&inner)
+                .filter(|(_, p)| p.is_some_and(|p| region_covers(net, old, p)))
+                .map(|(a, _)| a);
+            out.regions[ri].rule = FillRule::EvenOdd;
+            out.regions[ri].loops = atom_loops(&walks, kept);
+        }
+        out.regions.retain(|r| !r.loops.is_empty());
     }
-    debug_assert!(out.validate().is_ok(), "{:?}", out.validate());
-    Some(out)
+    out.validate().is_ok().then_some(out)
 }
 
 /// Сплющивание: сети узлов (каждая — в координатах формы своего узла, с
