@@ -43,6 +43,11 @@ export interface KeyLike {
   altKey: boolean;
   shiftKey: boolean;
   isComposing: boolean;
+  /** Устаревший код: 229 у клавиши, которую забрал IME (Safari шлёт её после
+   * `compositionend` с `isComposing: false`). */
+  keyCode?: number;
+  /** AltGr (Windows сообщает его как Ctrl+Alt). */
+  altGraph?: boolean;
 }
 
 /** Сочетания, которые оставляем браузеру и в правке (перезагрузка, инструменты). */
@@ -54,10 +59,12 @@ function browserKey(e: KeyLike): boolean {
 
 export function textKeyAction(e: KeyLike, platform: Platform): TextKeyAction {
   // Составление IME: клавиши — его (Enter подтверждает, Esc отменяет).
-  if (e.isComposing || e.key === 'Process' || e.key === 'Dead') return 'browser';
+  if (e.isComposing || e.keyCode === 229 || e.key === 'Process' || e.key === 'Dead') return 'browser';
+  // AltGr — это набор символа (ł, Ł, €), а не сочетание.
+  if (e.altGraph) return 'browser';
   const primary = platform === 'mac' ? e.metaKey : e.ctrlKey;
   if (NAV.has(e.code)) return 'core';
-  if (primary && e.altKey && ALIGN.has(e.code)) return 'core';
+  if (primary && e.altKey && !e.shiftKey && ALIGN.has(e.code)) return 'core';
   if (browserKey(e)) return 'browser';
   // Ctrl+Y — повтор на Windows и Linux.
   if (platform !== 'mac' && e.ctrlKey && !e.altKey && !e.shiftKey && e.code === 'KeyY') return 'core';
@@ -65,6 +72,8 @@ export function textKeyAction(e: KeyLike, platform: Platform): TextKeyAction {
     if (CORE_MOD.has(e.code)) return 'core';
     if (e.code === 'KeyX' && e.shiftKey) return 'core';
     if (CLIPBOARD.has(e.code) && !e.shiftKey) return 'browser';
+    // Ctrl/Cmd+Shift+V — «вставить как обычный текст»: событие вставки, стиль у курсора.
+    if (e.code === 'KeyV' && e.shiftKey) return 'browser';
     // Сохранить — обработчик редактора; остальные команды в правке не действуют.
     if (e.code === 'KeyS') return 'browser';
     return 'block';

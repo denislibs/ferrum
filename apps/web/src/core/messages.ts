@@ -163,10 +163,10 @@ export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transfer
   return { cmd: { ...cmd, bytes } as Command, transfer: [bytes.buffer as ArrayBuffer] };
 }
 
-/** Команды правки текста: идут после ввода, положенного в кольцо до них
+/** Команды правки текста (и вставка, копирование, вырезание — `execute`): идут после ввода, положенного в кольцо до них
  * (щелчок в тексте, затем набор), — основной поток досылает ввод, worker вычитывает
  * кольцо перед такой командой. */
-const TEXT_COMMANDS: ReadonlySet<string> = new Set(['textEditStart', 'textEditEnd', 'textInput', 'textKey', 'setTextStyle', 'setTextProps']);
+const TEXT_COMMANDS: ReadonlySet<string> = new Set(['textEditStart', 'textEditEnd', 'textInput', 'textKey', 'setTextStyle', 'setTextProps', 'paste', 'execute']);
 
 export function isTextCommand(cmd: Command): boolean {
   return typeof cmd === 'object' && cmd !== null && TEXT_COMMANDS.has(cmd.type);

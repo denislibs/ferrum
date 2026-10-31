@@ -85,12 +85,13 @@ test('стрелки, Backspace и выделение Shift — в позици�
   expect(await copyAll(page)).toBe('YXb');
 });
 
-test('IME: составление — превью без шага, конец составления — текст', async ({ page }) => {
+test('IME: составление — превью без шага, конец составления — текст, поле пустое', async ({ page }) => {
   await openApp(page, 0);
   const steps = (await live(page)).steps + 1;
   await newText(page, 100, 300);
   await page.keyboard.type('a');
   await liveWhen(page, `l.steps === ${steps}`);
+  const field = page.locator('.fe-text-input');
   const compose = (type: string, data: string) =>
     page.evaluate(
       ({ type, data }) => document.querySelector('.fe-text-input')!.dispatchEvent(new CompositionEvent(type, { data, bubbles: true })),
@@ -103,9 +104,46 @@ test('IME: составление — превью без шага, конец �
   // Превью — не правка: шагов не прибавилось.
   await page.waitForTimeout(100);
   expect((await live(page)).steps).toBe(steps);
-  await compose('compositionend', 'кот');
-  await liveWhen(page, `l.steps >= ${steps}`);
+  // Порядок Safari и Firefox: после compositionend приходят beforeinput и input с текстом.
+  await page.evaluate(() => {
+    const f = document.querySelector('.fe-text-input') as HTMLTextAreaElement;
+    f.value = 'кот';
+    f.dispatchEvent(new CompositionEvent('compositionend', { data: 'кот', bubbles: true }));
+    f.value = 'кот';
+    f.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertFromComposition', data: 'кот', bubbles: true, cancelable: true }));
+    f.dispatchEvent(new InputEvent('input', { inputType: 'insertFromComposition', data: 'кот', bubbles: true }));
+  });
   expect(await copyAll(page)).toBe('aкот');
+  expect(await field.inputValue()).toBe('');
+  // Составление — прибавка к тому же шагу ввода: одна отмена убирает и «a», и «кот».
+  const l = await live(page);
+  expect(l.steps).toBe(steps);
+  await page.keyboard.press('ControlOrMeta+z');
+  await liveWhen(page, `l.canUndo === 0`);
+});
+
+test('Safari: Esc и Backspace сразу после compositionend — IME, не правка', async ({ page }) => {
+  await openApp(page, 0);
+  await newText(page, 100, 300);
+  await page.keyboard.type('ab');
+  const send = (type: string, data: string) =>
+    page.evaluate(
+      ({ type, data }) => document.querySelector('.fe-text-input')!.dispatchEvent(new CompositionEvent(type, { data, bubbles: true })),
+      { type, data },
+    );
+  await send('compositionstart', '');
+  await send('compositionupdate', 'x');
+  // compositionend раньше клавиши, у клавиши isComposing: false (порядок WebKit).
+  await page.evaluate(() => {
+    const f = document.querySelector('.fe-text-input')!;
+    f.dispatchEvent(new CompositionEvent('compositionend', { data: '', bubbles: true }));
+    for (const code of ['Escape', 'Backspace']) {
+      f.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, bubbles: true, cancelable: true }));
+    }
+  });
+  await page.waitForTimeout(100);
+  expect((await ui(page)).text.editing).toBe(true);
+  expect(await copyAll(page)).toBe('ab');
 });
 
 test('ввод подряд — один шаг: Ctrl/Cmd+Z в правке убирает новый текст целиком', async ({ page }) => {
@@ -156,6 +194,29 @@ test('двойной щелчок по тексту — правка; щелчо
   await page.keyboard.type('!');
   await page.mouse.click(empty.x, empty.y);
   await expect.poll(async () => (await ui(page)).text.editing).toBe(false);
+});
+
+test.describe('без разрешения на чтение буфера', () => {
+  test.use({ permissions: [] });
+  test('чужой обычный текст в правке — без чтения буфера и без разрешения', async ({ page }) => {
+    await openApp(page, 0);
+    await newText(page, 100, 300);
+    // Любое асинхронное чтение буфера при вставке чужого текста — провал (оно спрашивает доступ).
+    await page.evaluate(() => {
+      (window as unknown as { asyncReads: number }).asyncReads = 0;
+      navigator.clipboard.read = async () => {
+        (window as unknown as { asyncReads: number }).asyncReads++;
+        return [];
+      };
+    });
+    await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'чужой');
+      document.querySelector('.fe-text-input')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    expect(await copyAll(page)).toBe('чужой');
+    expect(await page.evaluate(() => (window as unknown as { asyncReads: number }).asyncReads)).toBe(0);
+  });
 });
 
 test.describe('буфер обмена', () => {

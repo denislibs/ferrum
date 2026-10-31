@@ -26,6 +26,10 @@ export function installTextInput(ed: Editor, stage: HTMLElement, canvas: HTMLCan
   stage.appendChild(field);
   let editing = false;
   let composing = false;
+  // Safari шлёт `compositionend` раньше клавиши, которая составление закончила (у неё
+  // `isComposing: false`): эта клавиша — IME, а не ход курсора или удаление.
+  let justComposed = false;
+  let justTimer = 0;
 
   const send = ed.send.bind(ed);
   const clear = () => {
@@ -33,7 +37,21 @@ export function installTextInput(ed: Editor, stage: HTMLElement, canvas: HTMLCan
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
-    const action = textKeyAction(e, ed.platform);
+    if (composing || justComposed) return;
+    const action = textKeyAction(
+      {
+        code: e.code,
+        key: e.key,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        isComposing: e.isComposing,
+        keyCode: e.keyCode,
+        altGraph: e.getModifierState?.('AltGraph') ?? false,
+      },
+      ed.platform,
+    );
     if (action === 'browser') return;
     e.preventDefault();
     // Клавиша обработана здесь: обработчики окна (горячие клавиши ядра) её не видят.
@@ -66,6 +84,9 @@ export function installTextInput(ed: Editor, stage: HTMLElement, canvas: HTMLCan
   };
   const onCompositionEnd = (e: CompositionEvent) => {
     composing = false;
+    justComposed = true;
+    window.clearTimeout(justTimer);
+    justTimer = window.setTimeout(() => (justComposed = false), 0);
     send({ type: 'textInput', kind: 'commit', data: e.data });
     field.value = '';
   };
@@ -76,14 +97,24 @@ export function installTextInput(ed: Editor, stage: HTMLElement, canvas: HTMLCan
   field.addEventListener('compositionupdate', onCompositionUpdate);
   field.addEventListener('compositionend', onCompositionEnd);
   field.addEventListener('input', onInput);
+  // Сцена не прокручивается (overflow: hidden не мешает прокрутке к полю).
+  const onStageScroll = () => {
+    if (stage.scrollTop !== 0) stage.scrollTop = 0;
+    if (stage.scrollLeft !== 0) stage.scrollLeft = 0;
+  };
+  stage.addEventListener('scroll', onStageScroll);
 
   const off = ed.core.on((e) => {
     if (e.type !== 'textCaret') return;
     if (e.editing && e.rect) {
       // Поле — под курсором (CSS-пиксели холста; холст — в начале сцены).
       const [x, y, , h] = e.rect;
-      field.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-      field.style.height = `${Math.max(1, Math.round(h))}px`;
+      // Не за краем сцены: иначе браузер прокрутит её к полю при составлении.
+      const fh = Math.min(Math.max(1, Math.round(h)), Math.max(1, stage.clientHeight));
+      const fx = Math.min(Math.max(0, Math.round(x)), Math.max(0, stage.clientWidth - 1));
+      const fy = Math.min(Math.max(0, Math.round(y)), Math.max(0, stage.clientHeight - fh));
+      field.style.transform = `translate(${fx}px, ${fy}px)`;
+      field.style.height = `${fh}px`;
       ed.core.keyTarget = field;
       // Фокус — полю, если он не в панели (правка шрифта из панели не прерывает правку).
       const active = document.activeElement;
@@ -109,6 +140,8 @@ export function installTextInput(ed: Editor, stage: HTMLElement, canvas: HTMLCan
     field.removeEventListener('compositionupdate', onCompositionUpdate);
     field.removeEventListener('compositionend', onCompositionEnd);
     field.removeEventListener('input', onInput);
+    stage.removeEventListener('scroll', onStageScroll);
+    window.clearTimeout(justTimer);
     field.remove();
   };
 }
