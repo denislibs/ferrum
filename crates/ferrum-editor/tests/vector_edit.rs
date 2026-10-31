@@ -375,7 +375,8 @@ fn double_click_sets_the_edit_vector_outbox_and_enters_edit_mode() {
 #[test]
 fn lost_pointer_up_does_not_leak_into_the_next_edit() {
     let mut h = H::new();
-    let id = square(&mut h, false);
+    // Прямоугольник, ещё не ставший вектором: у вектора resync и так восстанавливает сеть.
+    let id = h.rect(None, 100.0, 100.0, 100.0, 100.0);
     h.ed.start_vector_edit(id);
     // Протяжка точки без отпускания, затем щелчок по другой точке и сдвиг.
     h.drag_hold((200.0, 200.0), (250.0, 250.0), Modifiers::NONE);
