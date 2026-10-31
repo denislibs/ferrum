@@ -8,7 +8,7 @@ use ferrum_wasm::core::Core;
 use ferrum_wasm::layers::NodeType;
 use ferrum_wasm::protocol::*;
 use ferrum_wasm::summary::BooleanOpDto;
-use kurbo::Size;
+use kurbo::{Shape, Size};
 
 fn core() -> Core {
     let mut c = Core::new(
@@ -51,16 +51,25 @@ fn run(c: &mut Core, command: &str) -> Vec<CoreEvent> {
 /// Два прямоугольника инструментом R, оба выделены. Зум демо — 0,5: в мире
 /// это 200 × 200 с перекрытием 100.
 fn two_rects(c: &mut Core) {
-    for (i, x) in [100.0, 150.0].into_iter().enumerate() {
-        c.command(Command::SetTool { tool: Tool::Rect });
-        drag(c, (x, 100.0), (x + 100.0, 200.0), 1000.0 * (i + 1) as f64);
-    }
-    let ids: Vec<String> = c
+    let before: Vec<String> = c
         .editor()
         .scene()
         .iter()
         .map(|(_, n)| n.id.to_string())
         .collect();
+    for (i, x) in [100.0, 150.0].into_iter().enumerate() {
+        c.command(Command::SetTool { tool: Tool::Rect });
+        drag(c, (x, 100.0), (x + 100.0, 200.0), 1000.0 * (i + 1) as f64);
+    }
+    // Только созданные здесь узлы, а не всё, что есть в сцене.
+    let ids: Vec<String> = c
+        .editor()
+        .scene()
+        .iter()
+        .map(|(_, n)| n.id.to_string())
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(ids.len(), 2);
     c.command(Command::Select {
         ids,
         mode: SelectMode::Replace,
@@ -132,4 +141,159 @@ fn boolean_and_outline_commands_are_in_the_keymap() {
         let e = commands.iter().find(|e| e.key == key).expect(key);
         assert_eq!(e.bindings, vec![binding.to_string()], "{key}");
     }
+}
+
+fn font_file(rel: &str) -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/web/public/fonts")
+        .join(rel);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+const INTER: [&str; 2] = [
+    "inter/Inter-Variable.ttf",
+    "inter/Inter-Italic-Variable.ttf",
+];
+
+/// Ядро с каталогом вшитого Inter, но без байтов шрифта.
+fn core_with_inter_catalog() -> Core {
+    let mut c = core();
+    let faces = INTER
+        .iter()
+        .flat_map(|r| ferrum_text::read_faces(&font_file(r), r))
+        .collect::<Vec<_>>();
+    let families = ferrum_text::group(faces)
+        .into_iter()
+        .map(|f| FontFamilyDto {
+            family: f.family,
+            faces: f
+                .faces
+                .into_iter()
+                .map(|x| FontFaceDto {
+                    style: x.style,
+                    weight: Some(x.weight as f64),
+                    italic: Some(x.italic),
+                    stretch: Some(x.stretch as f64),
+                    file: x.file,
+                    index: Some(x.index),
+                })
+                .collect(),
+        })
+        .collect();
+    c.command(Command::FontsAvailable {
+        source: FontSource::Bundled,
+        families,
+    });
+    c.take_events();
+    c
+}
+
+fn boolean_area(c: &Core) -> f64 {
+    c.editor()
+        .scene()
+        .iter()
+        .find_map(|(_, n)| n.boolean.as_ref())
+        .expect("булева группа")
+        .contours
+        .to_path()
+        .area()
+        .abs()
+}
+
+/// Шрифт пришёл через `LoadFont` — булева группа с текстом получает глифы
+/// сразу, без ввода и команд, и сводка выделенной группы обновляется.
+#[test]
+fn font_arrival_recomputes_boolean_with_text_and_refreshes_summary() {
+    // Документ с булевой группой «прямоугольник + текст» (шрифт загружен).
+    let mut a = core_with_inter_catalog();
+    a.command(Command::TestCreateText {
+        x: 600.0,
+        y: 450.0,
+        text: "Ok".into(),
+        font: None,
+        size: Some(64.0),
+        sizing: None,
+        width: None,
+        height: None,
+    });
+    let ev = a.take_events();
+    for e in &ev {
+        if let CoreEvent::FontRequest { family, files, .. } = e {
+            for f in files {
+                a.load_font_for_tests(family, f, font_file(f));
+            }
+        }
+    }
+    a.take_events();
+    // Прямоугольник левее текста.
+    a.command(Command::SetTool { tool: Tool::Rect });
+    drag(&mut a, (300.0, 260.0), (320.0, 280.0), 1000.0);
+    let ids: Vec<String> = a
+        .editor()
+        .scene()
+        .iter()
+        .map(|(_, n)| n.id.to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    a.command(Command::Select {
+        ids,
+        mode: SelectMode::Replace,
+    });
+    a.take_events();
+    run(&mut a, "object.boolean_union");
+    let full_area = boolean_area(&a);
+    a.command(Command::Snapshot { thumbnail: false });
+    let bytes = a
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Snapshot { bytes, .. } => Some(bytes),
+            _ => None,
+        })
+        .expect("снимок");
+
+    // Тот же документ в ядре, где байтов шрифта ещё нет.
+    let mut c = core_with_inter_catalog();
+    c.command(Command::Open { bytes });
+    let requests = c.take_events();
+    let gid = c
+        .editor()
+        .scene()
+        .iter()
+        .find(|(_, n)| n.boolean.is_some())
+        .map(|(_, n)| n.id.to_string())
+        .expect("булева группа");
+    c.command(Command::Select {
+        ids: vec![gid],
+        mode: SelectMode::Replace,
+    });
+    let before = summary(&c.take_events()).expect("сводка");
+    let area_before = boolean_area(&c);
+    assert!(
+        area_before < full_area * 0.7,
+        "без шрифта — только прямоугольник: {area_before} из {full_area}"
+    );
+
+    // Шрифт приходит по настоящему пути LoadFont — и больше ничего.
+    let mut after = None;
+    for e in &requests {
+        if let CoreEvent::FontRequest { family, files, .. } = e {
+            for f in files {
+                c.load_font_for_tests(family, f, font_file(f));
+                after = summary(&c.take_events()).or(after);
+            }
+        }
+    }
+    let area_after = boolean_area(&c);
+    assert!(
+        (area_after - full_area).abs() < full_area * 0.01,
+        "глифы в результате: {area_after} против {full_area}"
+    );
+    let after = after.expect("сводка после прихода шрифта");
+    assert!(
+        after.w.value > before.w.value + 20.0,
+        "ширина в сводке: {} -> {}",
+        before.w.value,
+        after.w.value
+    );
 }

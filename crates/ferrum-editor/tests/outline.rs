@@ -750,7 +750,7 @@ fn path_network_splits_a_loop_made_of_one_curve() {
 }
 
 #[test]
-fn boolean_with_text_is_recomputed_when_fonts_arrive() {
+fn boolean_with_text_is_recomputed_on_the_next_emit_after_fonts_arrive() {
     use ferrum_text::{group, read_faces, Fonts, SourceKind};
     // Реестр знает вшитый Inter, но байтов ещё нет.
     let fonts = Fonts::shared();
@@ -802,6 +802,15 @@ fn boolean_with_text_is_recomputed_when_fonts_arrive() {
         }
     }
     h.hover(10.0, 10.0);
-    // «Ok» кеглем по умолчанию (12) — десятки квадратных пикселей.
-    assert!(area(&mut h) > 420.0, "глифы в результате: {}", area(&mut h));
+    let lazy = area(&mut h);
+    assert!(lazy > 420.0, "глифы в результате: {lazy}");
+    // Полный пересчёт (смена операции туда и обратно) даёт ту же площадь:
+    // результат не частичный.
+    h.key("KeyS", alt_shift());
+    h.key("KeyU", alt_shift());
+    let full = area(&mut h);
+    assert!(
+        (lazy - full).abs() <= full * 0.01,
+        "отложенный пересчёт {lazy} против полного {full}"
+    );
 }
