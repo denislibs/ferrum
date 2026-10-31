@@ -484,6 +484,156 @@ fn curvy_vector_section(report: &mut Report) {
     });
 }
 
+/// Булева группа из 1000 перекрывающихся кругов (спека подсистемы 3, раздел 10:
+/// булевы операции на 1000 контуров ≤ 50 мс): каждый круг задевает до восьми
+/// соседей — тысячи пересечений.
+pub fn circles_boolean(doc: &mut Document, page: PageId, op: ferrum_doc::BooleanOp) -> NodeId {
+    doc.transact(page, vec![], |tx| {
+        let b = tx.create_node(None, None, NodeKind::Boolean)?;
+        tx.set_props(
+            b,
+            &PropsPatch {
+                boolean_op: Some(op),
+                ..Default::default()
+            },
+        )?;
+        for i in 0..1000 {
+            let e = tx.create_node(Some(b), None, NodeKind::Ellipse)?;
+            tx.set_props(
+                e,
+                &PropsPatch {
+                    x: Some((i % 40) as f64 * 15.0),
+                    y: Some((i / 40) as f64 * 15.0),
+                    w: Some(20.0),
+                    h: Some(20.0),
+                    ..Default::default()
+                },
+            )?;
+        }
+        Ok(vec![b])
+    })
+    .unwrap()[0]
+}
+
+fn boolean_section(report: &mut Report) {
+    use ferrum_doc::BooleanOp;
+    use ferrum_scene::boolean::{combine, flatten_path, normalize, BOOLEAN_TOLERANCE};
+    // Операция сама по себе: формы кругов уже раздроблены.
+    let circles: Vec<_> = (0..1000)
+        .map(|i| {
+            let c = kurbo::Circle::new(
+                ((i % 40) as f64 * 15.0 + 10.0, (i / 40) as f64 * 15.0 + 10.0),
+                10.0,
+            );
+            normalize(
+                flatten_path(&kurbo::Shape::to_path(&c, 1e-3), BOOLEAN_TOLERANCE),
+                ferrum_doc::FillRule::NonZero,
+            )
+        })
+        .collect();
+    for op in BooleanOp::ALL {
+        let runs = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                std::hint::black_box(combine(op, &circles));
+                t.elapsed()
+            })
+            .collect();
+        report.gate(
+            &format!("Булева операция «{}»: 1000 кругов", op.name()),
+            median(runs),
+            50.0,
+            "≤ 50 мс",
+        );
+    }
+    // Пересечение, у которого общее у всех не пусто: 1000 кругов радиуса 10 со
+    // сдвигом по 0,005 — каждый шаг режет почти весь результат.
+    let stacked: Vec<_> = (0..1000)
+        .map(|i| {
+            let c = kurbo::Circle::new((10.0 + 0.005 * i as f64, 10.0), 10.0);
+            normalize(
+                flatten_path(&kurbo::Shape::to_path(&c, 1e-3), BOOLEAN_TOLERANCE),
+                ferrum_doc::FillRule::NonZero,
+            )
+        })
+        .collect();
+    let runs = (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            std::hint::black_box(combine(BooleanOp::Intersect, &stacked));
+            t.elapsed()
+        })
+        .collect();
+    report.gate(
+        "Булева операция «Пересечение»: 1000 почти совпадающих кругов",
+        median(runs),
+        50.0,
+        "≤ 50 мс",
+    );
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let b = circles_boolean(&mut doc, page, BooleanOp::Union);
+    let build = median(
+        (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                std::hint::black_box(Scene::from_page(doc.page(page).unwrap()));
+                t.elapsed()
+            })
+            .collect(),
+    );
+    report.gate(
+        "Булева группа 1000 кругов: сцена с результатом (дробление и операция)",
+        build,
+        50.0,
+        "≤ 50 мс",
+    );
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let bounds = scene.node(b).unwrap().world_bounds.unwrap();
+    let mut camera = Camera::new(VIEWPORT, 1.0);
+    camera.fit(bounds, 48.0);
+    let (w, h) = camera.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    let mut renderer = Renderer::new();
+    renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+    let (steady, _) = frame(&mut renderer, &mut backend, &scene, &camera);
+    report.gate(
+        "Булева группа 1000 кругов: кадр (результат в кэше)",
+        steady,
+        16.7,
+        "≤ 16.7 мс",
+    );
+    // Правка одного ребёнка: запись, сцена (результат заново) и кадр.
+    let child = doc.page(page).unwrap().children(Some(b))[500];
+    let runs = (0..5)
+        .map(|k| {
+            let t = Instant::now();
+            doc.transact(page, vec![], |tx| {
+                tx.set_props(
+                    child,
+                    &PropsPatch {
+                        x: Some(3.0 * k as f64),
+                        ..Default::default()
+                    },
+                )
+                .map(|_| vec![])
+            })
+            .unwrap();
+            let changes = doc.take_changes(page);
+            scene.apply(&changes, doc.page(page).unwrap());
+            backend.reset(w, h);
+            renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+            t.elapsed()
+        })
+        .collect();
+    report.gate(
+        "Булева группа 1000 кругов: правка ребёнка — запись, сцена и кадр",
+        median(runs),
+        50.0,
+        "≤ 50 мс (кадр жеста — editor_report)",
+    );
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -1062,6 +1212,7 @@ fn main() {
     text_section(&mut report);
     vector_section(&mut report);
     curvy_vector_section(&mut report);
+    boolean_section(&mut report);
 
     // Экспорт фрейма @3x — справочно.
     let first_frame = scene.at(scene.roots()[0]).id;

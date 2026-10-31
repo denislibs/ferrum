@@ -233,6 +233,106 @@ pub fn combine(op: BooleanOp, inputs: &[Contours]) -> Contours {
     }
 }
 
+/// Связная часть формы: внешний контур с его дырами и рамка.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Piece {
+    pub bounds: Rect,
+    pub contours: Contours,
+}
+
+fn pieces(shapes: Vec<Vec<Contour>>) -> Vec<Piece> {
+    shapes
+        .into_iter()
+        .filter_map(|shape| {
+            let contours = Contours(shape);
+            Some(Piece {
+                bounds: contours.bounds()?,
+                contours,
+            })
+        })
+        .collect()
+}
+
+/// Что делать с одной изменившейся формой и операцией над остальными
+/// (`combine_rest`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rest {
+    /// Объединение остальных ∪ форма.
+    Union,
+    /// Исключение остальных ⊕ форма.
+    Exclude,
+    /// Пересечение остальных ∩ форма.
+    Intersect,
+    /// Вычитание (основа — не изменившаяся) − форма.
+    Minus,
+    /// Форма (изменилась основа вычитания) − объединение остальных.
+    From,
+}
+
+/// Операция над всеми формами, кроме `skip`, по частям — для пересчёта, когда
+/// меняется одна форма (жест над ребёнком большой булевой группы): дальше
+/// `combine_with` трогает только части у этой формы.
+pub fn combine_rest(op: BooleanOp, inputs: &[Contours], skip: usize) -> (Rest, Vec<Piece>) {
+    let others: Vec<Contours> = inputs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != skip)
+        .map(|(_, c)| c.clone())
+        .collect();
+    let (rest, op2) = match op {
+        BooleanOp::Union => (Rest::Union, BooleanOp::Union),
+        BooleanOp::Exclude => (Rest::Exclude, BooleanOp::Exclude),
+        BooleanOp::Intersect => (Rest::Intersect, BooleanOp::Intersect),
+        BooleanOp::Subtract if skip == 0 => (Rest::From, BooleanOp::Union),
+        BooleanOp::Subtract => (Rest::Minus, BooleanOp::Subtract),
+    };
+    let all = combine(op2, &others);
+    // По частям: внешние контуры с их дырами.
+    let shapes = FloatOverlay::with_subj(&all.0).overlay(OverlayRule::Subject, IFillRule::NonZero);
+    (rest, pieces(shapes))
+}
+
+/// Результат по операции над остальными формами (`combine_rest`) и новой
+/// форме `changed`: части, чья рамка не задевает форму, остаются как есть (у
+/// пересечения — уходят), остальные — одной операцией с формой.
+pub fn combine_with(rest: Rest, parts: &[Piece], changed: &Contours) -> Contours {
+    let Some(cb) = changed.bounds() else {
+        return match rest {
+            Rest::Intersect | Rest::From => Contours::default(),
+            _ => Contours(parts.iter().flat_map(|p| p.contours.0.clone()).collect()),
+        };
+    };
+    let touches = |b: &Rect| b.x0 <= cb.x1 && b.x1 >= cb.x0 && b.y0 <= cb.y1 && b.y1 >= cb.y0;
+    let mut near: Vec<Contour> = Vec::new();
+    let mut out: Vec<Contour> = Vec::new();
+    for p in parts {
+        if touches(&p.bounds) {
+            near.extend(p.contours.0.iter().cloned());
+        } else if !matches!(rest, Rest::Intersect | Rest::From) {
+            out.extend(p.contours.0.iter().cloned());
+        }
+    }
+    let local = match rest {
+        Rest::Union | Rest::Exclude => {
+            near.extend(changed.0.iter().cloned());
+            let rule = if rest == Rest::Union {
+                IFillRule::NonZero
+            } else {
+                IFillRule::EvenOdd
+            };
+            FloatOverlay::with_subj(&near).overlay(OverlayRule::Subject, rule)
+        }
+        Rest::Intersect => FloatOverlay::with_subj_and_clip(&near, &changed.0)
+            .overlay(OverlayRule::Intersect, IFillRule::NonZero),
+        Rest::Minus => FloatOverlay::with_subj_and_clip(&near, &changed.0)
+            .overlay(OverlayRule::Difference, IFillRule::NonZero),
+        Rest::From => FloatOverlay::with_subj_and_clip(&changed.0, &near)
+            .overlay(OverlayRule::Difference, IFillRule::NonZero),
+    };
+    out.extend(local.into_iter().flatten());
+    Contours(out)
+}
+
 /// Форма заливки узла-листа в его локальных координатах (без детей): фигура —
 /// её контур (у фрейма и изображения — прямоугольник), вектор — его области
 /// каждая своим правилом (`path` — контуры узла, `vector::path_shape`), текст —

@@ -113,11 +113,28 @@ pub struct SceneNode {
 }
 
 /// Результат булевой группы в её локальных координатах.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct BooleanOutline {
     pub contours: Contours,
     /// Форма для рендера и попадания: одна область и замкнутый путь обводки.
     pub shape: Arc<PathShape>,
+    op: ferrum_doc::BooleanOp,
+    /// Формы видимых детей в координатах группы с их ключами — для
+    /// пересчёта только сменившихся.
+    inputs: Vec<(u64, Arc<Contours>)>,
+    /// Операция над всеми, кроме одного ребёнка (номер, вид, части), — пока
+    /// жест двигает этого ребёнка.
+    rest: Option<Arc<(usize, boolean::Rest, Vec<boolean::Piece>)>>,
+    /// Посчитан по частям (жест над одним ребёнком и его запись).
+    partial: bool,
+}
+
+impl BooleanOutline {
+    /// Посчитан по частям — жест над одним ребёнком и его запись
+    /// (`Scene::boolean_outline`).
+    pub fn is_partial(&self) -> bool {
+        self.partial
+    }
 }
 
 impl SceneNode {
@@ -594,27 +611,97 @@ impl Scene {
         if key == n.content && (n.boolean.is_some() || n.props.kind != NodeKind::Boolean) {
             return;
         }
-        let outline = (n.props.kind == NodeKind::Boolean).then(|| {
-            let op = n.props.boolean_op.unwrap_or_default();
-            let inputs: Vec<Contours> = n
-                .children
-                .iter()
-                .filter(|&&c| self.at(c).props.visible)
-                .map(|&c| self.fill_of(c).transformed(self.at(c).local))
-                .filter(|c| !c.is_empty())
-                .collect();
-            let contours = boolean::combine(op, &inputs);
-            let shape = Arc::new(boolean::outline_shape(&contours));
-            Arc::new(BooleanOutline { contours, shape })
-        });
+        let outline = (n.props.kind == NodeKind::Boolean).then(|| self.boolean_outline(slot));
         let n = self.at_mut(slot);
         n.content = key;
         if let Some(o) = outline {
-            if n.boolean.as_ref() != Some(&o) {
+            if n.boolean.as_ref().map(|b| &b.contours) != Some(&o.contours) {
                 // Другой результат — другой вид: рендер строит список заново.
                 n.version = fresh_version();
             }
-            n.boolean = Some(o);
+            n.boolean = Some(Arc::new(o));
+        }
+    }
+
+    /// Результат булевой группы. Формы детей, чей ключ (содержимое и
+    /// положение) не сменился, берутся из прошлого результата. Пока идёт жест
+    /// (превью) и сменилась ровно одна форма, остальные складываются один раз
+    /// (`boolean::combine_rest`), а на каждое движение пересчитываются только
+    /// части у этой формы: правка ребёнка группы из 1000 кругов — доли
+    /// миллисекунды, а не 20 мс на кадр. Запись жеста (снятие превью и правка
+    /// документа — снова тот же ребёнок) берёт те же сложенные остальные и
+    /// полного пересчёта не делает; ключ записи, совпавший с последним превью,
+    /// не пересчитывает ничего. Другой ребёнок, несколько сразу или смена
+    /// операции без жеста — полный пересчёт. Результат по частям может
+    /// отличаться от полного на округление `i_overlay` (доли миллионной).
+    fn boolean_outline(&self, slot: Slot) -> BooleanOutline {
+        let n = self.at(slot);
+        let op = n.props.boolean_op.unwrap_or_default();
+        let prev = n.boolean.as_deref().filter(|b| b.op == op);
+        let mut changed = Vec::new();
+        let inputs: Vec<(u64, Arc<Contours>)> = n
+            .children
+            .iter()
+            .filter(|&&c| self.at(c).props.visible)
+            .enumerate()
+            .map(|(i, &c)| {
+                let cn = self.at(c);
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                cn.content.hash(&mut h);
+                for v in cn.local.as_coeffs() {
+                    v.to_bits().hash(&mut h);
+                }
+                let key = h.finish();
+                match prev.and_then(|p| p.inputs.get(i)).filter(|p| p.0 == key) {
+                    Some(p) => p.clone(),
+                    None => {
+                        changed.push(i);
+                        (key, Arc::new(self.fill_of(c).transformed(cn.local)))
+                    }
+                }
+            })
+            .collect();
+        let shapes: Vec<Contours> = inputs.iter().map(|(_, c)| (**c).clone()).collect();
+        let single = match (prev, &changed[..]) {
+            (Some(p), [i])
+                if p.inputs.len() == inputs.len()
+                    && (!self.preview.is_empty() || p.rest.as_ref().is_some_and(|r| r.0 == *i)) =>
+            {
+                // Пустые формы в операции не участвуют — тогда без частей.
+                let was = &p.inputs[*i].1;
+                (!was.is_empty() && !shapes[*i].is_empty() && shapes.iter().all(|c| !c.is_empty()))
+                    .then_some(*i)
+            }
+            _ => None,
+        };
+        let (contours, rest) = match single {
+            Some(i) => {
+                let rest = match prev.and_then(|p| p.rest.clone()).filter(|r| r.0 == i) {
+                    Some(r) => r,
+                    None => {
+                        let (mode, parts) = boolean::combine_rest(op, &shapes, i);
+                        Arc::new((i, mode, parts))
+                    }
+                };
+                (
+                    boolean::combine_with(rest.1, &rest.2, &shapes[i]),
+                    Some(rest),
+                )
+            }
+            None => {
+                let nonempty: Vec<Contours> =
+                    shapes.into_iter().filter(|c| !c.is_empty()).collect();
+                (boolean::combine(op, &nonempty), None)
+            }
+        };
+        let shape = Arc::new(boolean::outline_shape(&contours));
+        BooleanOutline {
+            partial: rest.is_some(),
+            contours,
+            shape,
+            op,
+            inputs,
+            rest,
         }
     }
 

@@ -410,3 +410,116 @@ fn text_uses_glyph_outlines_from_the_editor_and_refreshes() {
     ));
     assert!(scene.change_counter() > counter, "нужен новый кадр");
 }
+
+/// Сетка 6 × 5 перекрывающихся кругов (по 15, радиус 10) в булевой группе `op`.
+fn grid(op: BooleanOp) -> (Document, PageId, NodeId, Vec<NodeId>) {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let mut ids = doc
+        .transact(page, vec![], |tx| {
+            let b = tx.create_with_props(
+                None,
+                None,
+                &Props {
+                    boolean_op: Some(op),
+                    ..Props::defaults(NodeKind::Boolean)
+                },
+            )?;
+            let mut ids = vec![b];
+            for i in 0..30 {
+                let e = tx.create_node(Some(b), None, NodeKind::Ellipse)?;
+                tx.set_props(
+                    e,
+                    &patch((i % 6) as f64 * 15.0, (i / 6) as f64 * 15.0, 20.0, 20.0),
+                )?;
+                ids.push(e);
+            }
+            Ok(ids)
+        })
+        .unwrap();
+    let b = ids.remove(0);
+    (doc, page, b, ids)
+}
+
+#[test]
+fn gesture_on_one_child_recomputes_only_near_it_and_matches_the_full_result() {
+    for op in BooleanOp::ALL {
+        for moved in [0usize, 14] {
+            let (mut doc, page, b, kids) = grid(op);
+            let mut scene = Scene::from_page(doc.page(page).unwrap());
+            for dx in [3.0, 7.0, 40.0] {
+                scene.set_preview(&[(
+                    kids[moved],
+                    PropsPatch {
+                        x: Some((moved % 6) as f64 * 15.0 + dx),
+                        y: Some(-2.0),
+                        ..Default::default()
+                    },
+                )]);
+                // Тот же документ, записанный, — полный пересчёт.
+                doc.transact(page, vec![], |tx| {
+                    tx.set_props(
+                        kids[moved],
+                        &PropsPatch {
+                            x: Some((moved % 6) as f64 * 15.0 + dx),
+                            y: Some(-2.0),
+                            ..Default::default()
+                        },
+                    )?;
+                    Ok(vec![])
+                })
+                .unwrap();
+                let full = Scene::from_page(doc.page(page).unwrap());
+                let outline = scene.node(b).unwrap().boolean.clone().unwrap();
+                assert!(outline.is_partial(), "во время жеста — по частям");
+                let got = area(&outline.contours);
+                let want = area(&full.node(b).unwrap().boolean.as_ref().unwrap().contours);
+                assert!(
+                    (got - want).abs() < 1e-3 * want.max(1.0),
+                    "{op:?}, ребёнок {moved}, сдвиг {dx}: {got} ≠ {want}"
+                );
+                assert!(
+                    near(local_bounds(&scene, b), local_bounds(&full, b)),
+                    "{op:?} {moved} {dx}"
+                );
+            }
+            // Жест кончился (как у редактора: превью снято, документ записан) —
+            // без полного пересчёта: те же сложенные остальные.
+            scene.clear_preview();
+            let changes = doc.take_changes(page);
+            scene.apply(&changes, doc.page(page).unwrap());
+            let fresh = Scene::from_page(doc.page(page).unwrap());
+            let outline = scene.node(b).unwrap().boolean.clone().unwrap();
+            assert!(outline.is_partial(), "запись — по частям, {op:?} {moved}");
+            let want = area(&fresh.node(b).unwrap().boolean.as_ref().unwrap().contours);
+            assert!((area(&outline.contours) - want).abs() < 1e-3 * want.max(1.0));
+            assert!(near(local_bounds(&scene, b), local_bounds(&fresh, b)));
+            // Правка другого ребёнка без жеста — полный пересчёт, как у открытого.
+            doc.transact(page, vec![], |tx| {
+                tx.set_props(
+                    kids[(moved + 7) % kids.len()],
+                    &PropsPatch {
+                        y: Some(-5.0),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(vec![])
+            })
+            .unwrap();
+            let changes = doc.take_changes(page);
+            scene.apply(&changes, doc.page(page).unwrap());
+            assert!(!scene
+                .node(b)
+                .unwrap()
+                .boolean
+                .as_ref()
+                .unwrap()
+                .is_partial());
+            assert_eq!(
+                snapshot(&scene),
+                snapshot(&Scene::from_page(doc.page(page).unwrap())),
+                "{op:?} {moved}"
+            );
+        }
+    }
+}
