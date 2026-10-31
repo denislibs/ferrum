@@ -24,7 +24,7 @@ async function blank(page: Page): Promise<void> {
   await liveWhen(page, 'l.zoom === 1');
 }
 
-/** Тёмных пикселей в прямоугольнике экрана (обводки чёрные на белом фоне). */
+/** Серо-чёрных пикселей обводки в прямоугольнике экрана: тёмные и без цветового оттенка, синяя рамка выделения не считается. */
 async function darkIn(page: Page, at: { x: number; y: number }, w: number, h: number): Promise<number> {
   const png = (await page.screenshot({ clip: { x: at.x, y: at.y, width: w, height: h } })).toString('base64');
   return page.evaluate(async (png) => {
@@ -35,7 +35,7 @@ async function darkIn(page: Page, at: { x: number; y: number }, w: number, h: nu
     ctx.drawImage(bmp, 0, 0);
     const d = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
     let n = 0;
-    for (let i = 0; i < d.length; i += 4) if (d[i] < 160) n++;
+    for (let i = 0; i < d.length; i += 4) if (d[i] < 200 && Math.abs(d[i] - d[i + 2]) < 12) n++;
     return n;
   }, png);
 }
@@ -66,10 +66,12 @@ test('перо: щелчки и Enter — вектор одним шагом, о
   await expect(rows(page).first()).toHaveAccessibleName('Вектор');
   const s = await summary(page);
   expect([s.kind, s.w.value, s.h.value]).toEqual(['vector', 200, 100]);
-  // Отрезок нарисован (под рамкой выделения тоже): у верхней стороны вдали от ручек
-  // есть тёмные пиксели обводки и рамки.
-  const mid = await appScreen(page, l, l.cameraX - 53, l.cameraY - 53);
-  await expect.poll(() => darkIn(page, mid, 6, 6)).toBeGreaterThan(0);
+  // Выделение снято, чтобы рамка не мешала: у середины верхнего отрезка есть чёрные
+  // пиксели самой обводки.
+  await page.keyboard.press('Escape');
+  await expect.poll(async () => (await summary(page))?.kind ?? null).toBeNull();
+  const mid = await appScreen(page, l, l.cameraX, l.cameraY - 50);
+  await expect.poll(() => darkIn(page, { x: mid.x - 3, y: mid.y - 3 }, 6, 6)).toBeGreaterThan(0);
   await page.keyboard.press('ControlOrMeta+z');
   await liveWhen(page, `l.nodes === ${l.nodes}`);
 });

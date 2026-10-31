@@ -83,7 +83,7 @@ function StrokeStyleRows() {
                   onChange={(e) => send({ capStart: e.currentTarget.value as StrokeCapDto })}
                 >
                   <Show when={!s().capStart}>
-                    <option value="">Смешанное</option>
+                    <option value="" disabled hidden>Смешанное</option>
                   </Show>
                   <For each={CAPS}>{(c) => <option value={c.value}>{c.label}</option>}</For>
                 </select>
@@ -96,7 +96,7 @@ function StrokeStyleRows() {
                   onChange={(e) => send({ capEnd: e.currentTarget.value as StrokeCapDto })}
                 >
                   <Show when={!s().capEnd}>
-                    <option value="">Смешанное</option>
+                    <option value="" disabled hidden>Смешанное</option>
                   </Show>
                   <For each={CAPS}>{(c) => <option value={c.value}>{c.label}</option>}</For>
                 </select>
@@ -113,7 +113,7 @@ function StrokeStyleRows() {
                   onChange={(e) => send({ join: e.currentTarget.value as StrokeJoinDto })}
                 >
                   <Show when={!s().join}>
-                    <option value="">Смешанное</option>
+                    <option value="" disabled hidden>Смешанное</option>
                   </Show>
                   <For each={JOINS}>{(j) => <option value={j.value}>{j.label}</option>}</For>
                 </select>
