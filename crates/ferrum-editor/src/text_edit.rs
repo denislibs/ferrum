@@ -469,14 +469,15 @@ impl Editor {
     }
 
     /// Клавиши правки, кроме хода курсора: Esc — выход, удаление и отмена —
-    /// `text_edit_key` (модуль `text_input`).
+    /// `text_edit_key` (модуль `text_input`), форматирование и списки —
+    /// `text_format_key` (модуль `text_style`).
     fn text_command_key(&mut self, code: &str, mods: Modifiers) -> bool {
         match code {
             "Escape" => {
                 self.end_text_edit();
                 true
             }
-            _ => self.text_edit_key(code, mods),
+            _ => self.text_edit_key(code, mods) || self.text_format_key(code, mods),
         }
     }
 

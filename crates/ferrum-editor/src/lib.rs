@@ -22,6 +22,7 @@ pub mod text;
 mod text_clipboard;
 pub mod text_edit;
 mod text_input;
+mod text_style;
 pub mod tools;
 
 pub use actions::{FIT_PADDING_PX, PRESET_GAP};
@@ -37,4 +38,5 @@ pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
 pub use text::{fit_size, MissingFont, TextError, TextPending};
 pub use text_edit::{EnterAt, TextEditInfo, CARET_BLINK_MS};
 pub use text_input::TextInputKind;
+pub use text_style::{Mixed, TextPropsPatch, TextStylePatch, TextStyleSummary};
 pub use tools::{Cursor, Tool, ToolKind, ToolOverlay};
