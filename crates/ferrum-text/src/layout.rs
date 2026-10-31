@@ -98,10 +98,13 @@ pub struct LineBox {
 }
 
 /// Подчёркивание или зачёркивание — прямоугольник цвета текста.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecorationBox {
     pub rect: Rect,
     pub color: Color,
+    /// Заливка участка (как у глифов): украшение рисуется ею, а скрытая или
+    /// прозрачная — не рисуется вовсе; `None` — заливки узла.
+    pub paint: Option<Fill>,
 }
 
 /// Строка для правки текста: какие символы на ней, где она по вертикали и где
@@ -760,6 +763,7 @@ fn collect_lines(
                 out.decorations.push(DecorationBox {
                     rect: Rect::new(x0, top, x1, top + size),
                     color,
+                    paint: span.paint.clone(),
                 });
             }
             if style.strikethrough.is_some() {
@@ -768,6 +772,7 @@ fn collect_lines(
                 out.decorations.push(DecorationBox {
                     rect: Rect::new(x0, top, x1, top + size),
                     color,
+                    paint: span.paint.clone(),
                 });
             }
             if glyphs.is_empty() {

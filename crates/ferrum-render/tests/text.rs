@@ -750,3 +750,41 @@ fn missing_image_fill_draws_placeholder_and_requests_another_frame() {
     assert!(!stats.needs_another_frame, "{stats:?}");
     assert_eq!(count(&img, gray), 0);
 }
+
+#[test]
+fn decorations_follow_the_visible_paint_of_their_range() {
+    let underlined = |fill: Fill| TextContent {
+        runs: vec![TextRun {
+            text: "I\n".into(),
+            attrs: TextAttrs {
+                fill: Some(fill),
+                decoration: Some(Decoration::Underline),
+                ..Default::default()
+            },
+        }],
+    };
+    // Видимая заливка участка: подчёркивание есть и того же цвета.
+    let (img, _) = paint_frame(
+        underlined(Fill::solid(GREEN)),
+        Some(vec![Fill::solid(RED)]),
+        vec![],
+        &no_images(),
+    );
+    let (plain, _) = paint_frame(TextContent::plain("I"), Some(vec![]), vec![], &no_images());
+    assert_eq!(count(&plain, |c| !is_white(c)), 0);
+    assert!(count(&img, is_green) > 300, "{}", count(&img, is_green));
+    // Скрытая и прозрачная — ни глифов, ни подчёркивания (никакого чёрного).
+    let mut hidden = Fill::solid(GREEN);
+    hidden.visible = false;
+    let mut clear = Fill::solid(GREEN);
+    clear.opacity = 0.0;
+    for f in [hidden, clear] {
+        let (img, _) = paint_frame(
+            underlined(f),
+            Some(vec![Fill::solid(RED)]),
+            vec![],
+            &no_images(),
+        );
+        assert_eq!(count(&img, |c| !is_white(c)), 0);
+    }
+}

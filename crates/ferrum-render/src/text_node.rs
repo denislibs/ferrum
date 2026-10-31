@@ -192,8 +192,21 @@ pub(crate) fn paint_glyphs(
         }
     }
     backend.set_transform(to_device);
+    // Украшения берут ту же видимую краску, что и глифы; нет краски — не рисуются.
     for d in &layout.decorations {
-        backend.set_color(color(d.color).multiply_alpha(alpha));
+        let (c, a) = match &d.paint {
+            Some(p) if p.visible && p.opacity > 0.0 => {
+                let c = match p.kind {
+                    FillKind::Solid => color(p.color),
+                    FillKind::Image => color(d.color),
+                };
+                (c, alpha * p.opacity.clamp(0.0, 1.0) as f32)
+            }
+            Some(_) => continue,
+            None if fills.is_empty() => continue,
+            None => (color(d.color), alpha),
+        };
+        backend.set_color(c.multiply_alpha(a));
         backend.fill_rect(&d.rect);
     }
     // Обводки — поверх заливок, в порядке списка.
