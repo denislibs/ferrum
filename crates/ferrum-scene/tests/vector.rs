@@ -337,3 +337,85 @@ fn end_direction_uses_the_far_handle_when_the_near_one_is_zero() {
         .unwrap();
     assert!((end.dir - Vec2::new(r, -r)).hypot() < 1e-9, "{:?}", end.dir);
 }
+
+#[test]
+fn big_networks_are_simplified_to_the_tolerance_small_ones_are_not() {
+    let small = network_shape(&vector(net(
+        &[(0.0, 0.0), (50.0, 0.1), (100.0, 0.0)],
+        &[(0, 1), (1, 2)],
+    )));
+    assert_eq!(simplify(&small, 1.0), small, "маленький контур — как есть");
+    let p = vector(ferrum_doc::fixture::wavy_network(100_000));
+    let shape = network_shape(&p);
+    let s = simplify(&shape, 0.25);
+    let (before, after) = (shape.stroke.elements().len(), s.stroke.elements().len());
+    assert!(after * 20 < before, "{before} → {after}");
+    assert!(s.closed && s.regions.len() == 1);
+    // Каждая точка упрощённого пути — на исходном контуре (не дальше допуска).
+    for el in s.stroke.elements().iter().step_by(50) {
+        if let PathEl::LineTo(q) | PathEl::MoveTo(q) = el {
+            let d = distance_to(&shape.stroke, *q, 1.0).unwrap();
+            assert!(d <= 0.25, "{q:?}: {d}");
+        }
+    }
+}
+
+#[test]
+fn stroke_outset_without_paths_matches_the_built_shape() {
+    // Выступ считается по степеням точек, без контуров; он должен совпадать с
+    // посчитанным по готовой форме (окончания, замкнутость, соединение).
+    let by_shape = |p: &Props| {
+        let shape = network_shape(p);
+        p.strokes
+            .iter()
+            .filter(|s| s.width > 0.0)
+            .map(|s| {
+                let w = effective_width(&shape, s);
+                let join = if p.stroke_style.join == StrokeJoin::Miter {
+                    w / 2.0 * p.stroke_style.miter_limit.max(1.0)
+                } else {
+                    w / 2.0
+                };
+                shape
+                    .ends
+                    .iter()
+                    .map(|e| cap_extent(e.cap, w))
+                    .fold(join, f64::max)
+            })
+            .fold(0.0, f64::max)
+    };
+    let nets = [
+        net(&[(0.0, 0.0), (50.0, 0.0), (50.0, 40.0)], &[(0, 1), (1, 2)]),
+        net(
+            &[(0.0, 0.0), (50.0, 0.0), (50.0, 40.0)],
+            &[(0, 1), (1, 2), (2, 0)],
+        ),
+        net(
+            &[(0.0, 0.0), (50.0, 0.0), (50.0, 40.0), (0.0, 40.0)],
+            &[(0, 1), (1, 2), (2, 0), (2, 3)],
+        ),
+    ];
+    for n in nets {
+        for align in [
+            StrokeAlign::Center,
+            StrokeAlign::Inside,
+            StrokeAlign::Outside,
+        ] {
+            for (join, cap) in [
+                (StrokeJoin::Miter, StrokeCap::None),
+                (StrokeJoin::Round, StrokeCap::ArrowTriangle),
+            ] {
+                let mut p = vector(n.clone());
+                p.strokes = vec![Stroke {
+                    width: 3.0,
+                    align,
+                    color: Color::BLACK,
+                }];
+                p.stroke_style.join = join;
+                p.stroke_style.cap_start = cap;
+                p.stroke_style.cap_end = StrokeCap::Round;
+                assert_eq!(path_stroke_outset(&p), by_shape(&p), "{align:?} {join:?}");
+            }
+        }
+    }
+}

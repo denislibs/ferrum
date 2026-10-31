@@ -745,6 +745,7 @@ fn main() {
     );
 
     typing(&mut report);
+    vector_edit(&mut report);
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -765,6 +766,67 @@ fn main() {
     if failed {
         std::process::exit(1);
     }
+}
+
+/// Правка вектора из 100 000 точек (подсистема 3, этап 3): перетаскивание точки в
+/// режиме правки — кадр жеста (превью сцены с новой рамкой) и запись одним шагом.
+fn vector_edit(report: &mut Report) {
+    use std::sync::Arc;
+    let mut ed =
+        Editor::new(Document::new(), None, VIEWPORT, 1.0, Platform::Mac).expect("страница");
+    let net = ferrum_doc::fixture::wavy_network(100_000);
+    let b = ferrum_scene::vector::network_bounds(&net).unwrap();
+    let id = ed
+        .transact(|tx| {
+            let id = tx.create_node(None, None, ferrum_doc::NodeKind::Vector)?;
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    w: Some(b.width()),
+                    h: Some(b.height()),
+                    vector: Some(Arc::new(net.clone())),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![id])
+        })
+        .unwrap()[0];
+    let mut cam = Camera::new(VIEWPORT, 1.0);
+    cam.fit(kurbo::Rect::new(0.0, 0.0, b.width(), b.height()), 48.0);
+    ed.set_camera(cam);
+    ed.start_vector_edit(id);
+    ed.take_events();
+    let steps = ed.step_count();
+    // Точка на правом краю эллипса (точка 0 сети — справа, в середине по высоте).
+    let n = ed.scene().node(id).unwrap().clone();
+    let m = n.world * ferrum_scene::vector::fit(&n.props);
+    let p0 = net.points[0];
+    let from = ed.camera().world_to_screen(m * Point::new(p0.x, p0.y));
+    let mut clock = Clock(1000.0);
+    timed(&mut ed, Input::PointerDown(clock.at(from)));
+    let mut moves = Vec::new();
+    for i in 1..=MOVES {
+        let e = clock.at(Point::new(from.x + i as f64, from.y + 0.5 * i as f64));
+        moves.push(timed(&mut ed, Input::PointerMove(e)));
+    }
+    let end = Point::new(from.x + MOVES as f64, from.y + 0.5 * MOVES as f64);
+    let commit = timed(&mut ed, Input::PointerUp(clock.at(end)));
+    report.gate_median(
+        "Вектор 100 000 точек: перетаскивание точки, кадр жеста",
+        &moves,
+        16.0,
+    );
+    report.gate(
+        "Вектор 100 000 точек: отпускание — запись одним шагом",
+        commit,
+        50.0,
+    );
+    report.check(
+        "Перетаскивание точки — один шаг отмены",
+        ed.step_count() == steps + 1,
+        format!("{}", ed.step_count() - steps),
+        "1",
+    );
 }
 
 /// Шрифт вшитого Inter для замера ввода (файл сборки интерфейса).

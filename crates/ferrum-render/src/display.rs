@@ -85,6 +85,9 @@ pub struct DisplayList {
     pub split: bool,
     /// Номер кадра, в котором узел последний раз рисовался полностью.
     pub last_used: u64,
+    /// Точность, с которой построены контуры (`paths_at`): у больших векторов —
+    /// по масштабу кадра, у остальных — 0 (точно).
+    pub detail: f64,
     /// Контуры для обводки по контуру и областей вектора (`None` — кольца).
     /// Держится вместе со списком: по нему контуры строятся заново после
     /// вытеснения, без свойств узла.
@@ -97,6 +100,9 @@ pub struct PathSource {
     pub shape: PathShape,
     pub style: StrokeStyle,
 }
+
+/// Точность упрощённых контуров больших векторов — в пикселях устройства.
+pub const LOD_TOLERANCE_PX: f64 = 0.25;
 
 pub fn color(c: Color) -> Rgba {
     Rgba::from_rgba8(c.r, c.g, c.b, c.a)
@@ -213,6 +219,7 @@ impl DisplayList {
             paths: None,
             split,
             last_used: 0,
+            detail: 0.0,
             path: path_shape.map(|shape| {
                 Arc::new(PathSource {
                     shape,
@@ -222,12 +229,35 @@ impl DisplayList {
         }
     }
 
-    /// Контуры, построенные при первом обращении.
-    pub fn paths(&mut self) -> &Paths {
+    /// Контуры для кадра с масштабом `scale` (пикселей устройства на единицу мира):
+    /// у большого вектора — упрощённые до четверти пикселя ближайшего сверху
+    /// масштаба-степени двойки (перестраиваются, когда масштаб уходит за неё), у
+    /// остальных — точные и одни на все масштабы. `scale = 0` — точные.
+    pub fn paths_at(&mut self, scale: f64) -> &Paths {
+        let detail = match self.path.as_deref() {
+            Some(p)
+                if scale > 0.0
+                    && p.shape.stroke.elements().len() >= vector::SIMPLIFY_MIN_ELEMENTS =>
+            {
+                LOD_TOLERANCE_PX / 2f64.powf(scale.log2().ceil())
+            }
+            _ => 0.0,
+        };
+        if self.detail != detail {
+            self.paths = None;
+            self.detail = detail;
+        }
         let geom = self.geometry;
         let items = &self.items;
         let list = &self.items;
-        let ps = self.path.as_deref().map(|p| &p.shape);
+        let simplified = self
+            .path
+            .as_deref()
+            .filter(|_| detail > 0.0)
+            .map(|p| vector::simplify(&p.shape, detail));
+        let ps = simplified
+            .as_ref()
+            .or(self.path.as_deref().map(|p| &p.shape));
         let style = self.path.as_deref().map(|p| p.style).unwrap_or_default();
         self.paths.get_or_insert_with(|| {
             let mut shape = BezPath::new();

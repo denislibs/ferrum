@@ -336,7 +336,9 @@ fn vector_edit(
         let p = &net.points[i as usize];
         Point::new(p.x, p.y)
     };
-    let seg_path = |i: usize, path: &mut BezPath| {
+    // Сегменты по порядку: если сегмент начинается там, где кончился прежний, путь
+    // продолжается без нового подпути (так большую сеть можно упростить целиком).
+    let seg_path = |i: usize, path: &mut BezPath, last: &mut Option<Point>| {
         let s = &net.segments[i];
         let (a, b) = (to_device * pt(s.start), to_device * pt(s.end));
         let ta =
@@ -344,9 +346,13 @@ fn vector_edit(
         let tb = to_device * (pt(s.end) + kurbo::Vec2::new(s.tangent_end[0], s.tangent_end[1]));
         let bb = Rect::from_points(a, b).union_pt(ta).union_pt(tb);
         if bb.x1 < screen.x0 || bb.x0 > screen.x1 || bb.y1 < screen.y0 || bb.y0 > screen.y1 {
+            *last = None;
             return;
         }
-        path.move_to(a);
+        if *last != Some(a) {
+            path.move_to(a);
+        }
+        *last = Some(b);
         if s.is_straight() {
             path.line_to(b);
         } else {
@@ -356,15 +362,22 @@ fn vector_edit(
     backend.set_transform(Affine::IDENTITY);
     backend.set_color(theme.select);
     let mut all = BezPath::new();
+    let mut last = None;
     for i in 0..net.segments.len() {
-        seg_path(i, &mut all);
+        seg_path(i, &mut all, &mut last);
+    }
+    // Большая сеть — ломаной с точностью в четверть пикселя: тысячи сегментов
+    // меньше пикселя обводить по одному незачем.
+    if all.elements().len() > ferrum_scene::vector::SIMPLIFY_MIN_ELEMENTS {
+        all = ferrum_scene::vector::simplify_path(&all, 0.25 * dpr);
     }
     backend.stroke_path(&all, &Stroke::new(dpr));
     if !v.segments.is_empty() {
         let mut sel = BezPath::new();
+        let mut last = None;
         for &i in &v.segments {
             if (i as usize) < net.segments.len() {
-                seg_path(i as usize, &mut sel);
+                seg_path(i as usize, &mut sel, &mut last);
             }
         }
         backend.stroke_path(&sel, &Stroke::new(2.0 * dpr));

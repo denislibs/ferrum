@@ -290,6 +290,108 @@ fn text_section(report: &mut Report) {
     );
 }
 
+/// Векторы (подсистема 3, этап 3): сеть из 100 000 точек с областью и обводкой
+/// рисуется в бюджете кадра; правка одной точки — новый контур и кадр.
+fn vector_section(report: &mut Report) {
+    use std::sync::Arc;
+    const POINTS: usize = 100_000;
+    let net = ferrum_doc::fixture::wavy_network(POINTS);
+    let b = ferrum_scene::vector::network_bounds(&net).unwrap();
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let id = doc
+        .transact(page, vec![], |tx| {
+            let id = tx.create_node(None, None, NodeKind::Vector)?;
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    w: Some(b.width()),
+                    h: Some(b.height()),
+                    fills: Some(vec![ferrum_doc::Fill::solid(ferrum_doc::Color::SHAPE_GRAY)]),
+                    vector: Some(Arc::new(net.clone())),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![id])
+        })
+        .unwrap()[0];
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let mut camera = Camera::new(VIEWPORT, 1.0);
+    camera.fit(kurbo::Rect::new(0.0, 0.0, b.width(), b.height()), 48.0);
+    let (w, h) = camera.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    let mut renderer = Renderer::new();
+    let t = Instant::now();
+    renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+    report.gate(
+        "Вектор 100 000 точек: первый кадр (контуры и обводка строятся)",
+        t.elapsed(),
+        16.7,
+        "≤ 16.7 мс",
+    );
+    let (steady, _) = frame(&mut renderer, &mut backend, &scene, &camera);
+    report.gate(
+        "Вектор 100 000 точек: кадр (контуры в кэше)",
+        steady,
+        16.7,
+        "≤ 16.7 мс",
+    );
+    // Правка одной точки: документ, сцена и кадр с новым контуром.
+    let mut edited = net.clone();
+    edited.points[POINTS / 3].x += 15.0;
+    let edited = Arc::new(edited);
+    let t = Instant::now();
+    doc.transact(page, vec![], |tx| {
+        tx.set_props(
+            id,
+            &PropsPatch {
+                vector: Some(edited.clone()),
+                ..Default::default()
+            },
+        )
+        .map(|_| vec![])
+    })
+    .unwrap();
+    let changes = doc.take_changes(page);
+    scene.apply(&changes, doc.page(page).unwrap());
+    let (w, h) = camera.device_size();
+    backend.reset(w, h);
+    renderer.draw_scene(&mut backend, &scene, &camera, &NoImages);
+    report.gate(
+        "Вектор 100 000 точек: правка точки — запись, сцена и кадр",
+        t.elapsed(),
+        16.7,
+        "≤ 16.7 мс",
+    );
+    // Режим правки: сеть тонкой линией, выделенная точка, ручки.
+    let overlay = Overlay {
+        vector_edit: Some(ferrum_render::VectorEditOverlay {
+            transform: scene.node(id).unwrap().world
+                * ferrum_scene::vector::fit(&scene.node(id).unwrap().props),
+            net: edited.clone(),
+            points: vec![POINTS as u32 / 3],
+            segments: vec![],
+            handles: vec![],
+            selected_handles: vec![],
+            rubber: None,
+        }),
+        ..Default::default()
+    };
+    let runs = (0..7)
+        .map(|_| {
+            let t = Instant::now();
+            renderer.render(&mut backend, &scene, &camera, &overlay, &NoImages, None);
+            t.elapsed()
+        })
+        .collect();
+    report.gate(
+        "Вектор 100 000 точек: кадр правки (сеть и точки в оверлее)",
+        median(runs),
+        16.7,
+        "≤ 16.7 мс",
+    );
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -866,6 +968,7 @@ fn main() {
     }
 
     text_section(&mut report);
+    vector_section(&mut report);
 
     // Экспорт фрейма @3x — справочно.
     let first_frame = scene.at(scene.roots()[0]).id;

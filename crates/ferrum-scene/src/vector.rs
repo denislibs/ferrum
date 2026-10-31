@@ -18,8 +18,8 @@ use ferrum_doc::{
     VectorNetwork, VectorSegment,
 };
 use kurbo::{
-    Affine, BezPath, Cap, Circle, CubicBez, Join, Line, ParamCurveNearest, PathSeg, Point, Rect,
-    Shape, StrokeOpts, Vec2,
+    Affine, BezPath, Cap, Circle, CubicBez, Join, Line, ParamCurveNearest, PathEl, PathSeg, Point,
+    Rect, Shape, StrokeOpts, Vec2,
 };
 
 use crate::shape::PATH_TOLERANCE;
@@ -180,12 +180,7 @@ pub fn network_shape(p: &Props) -> PathShape {
     let fit = fit(p);
     let curve = |i: usize| fit_seg(fit, segment_curve(net, &net.segments[i]));
     let n = net.points.len();
-    // Сегменты каждой точки.
-    let mut incident: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, s) in net.segments.iter().enumerate() {
-        incident[s.start as usize].push(i);
-        incident[s.end as usize].push(i);
-    }
+    let incident = Incidence::new(net);
     let mut used = vec![false; net.segments.len()];
     let mut stroke = BezPath::new();
     // Цепочка от точки `from` по сегменту `first` до точки, где путь ветвится,
@@ -206,26 +201,32 @@ pub fn network_shape(p: &Props) -> PathShape {
             };
             push_seg(stroke, c);
             at = if forward { s.end } else { s.start } as usize;
-            if at == from && incident[at].len() == 2 {
+            if at == from && incident.of(at).len() == 2 {
                 stroke.close_path();
                 return;
             }
-            if incident[at].len() != 2 {
+            if incident.of(at).len() != 2 {
                 return;
             }
-            match incident[at].iter().find(|&&i| !used[i]) {
-                Some(&next) => seg = next,
+            match incident
+                .of(at)
+                .iter()
+                .map(|&i| i as usize)
+                .find(|&i| !used[i])
+            {
+                Some(next) => seg = next,
                 None => return,
             }
         }
     };
-    for (v, segs) in incident.iter().enumerate() {
+    for v in 0..n {
+        let segs = incident.of(v);
         if segs.len() == 2 {
             continue;
         }
         for &s in segs {
-            if !used[s] {
-                walk(v, s, &mut used, &mut stroke);
+            if !used[s as usize] {
+                walk(v, s as usize, &mut used, &mut stroke);
             }
         }
     }
@@ -237,9 +238,10 @@ pub fn network_shape(p: &Props) -> PathShape {
     }
     let mut ends = Vec::new();
     let mut junctions = Vec::new();
-    for (v, segs) in incident.iter().enumerate() {
-        match segs[..] {
+    for v in 0..n {
+        match *incident.of(v) {
             [s] => {
+                let s = s as usize;
                 let seg = &net.segments[s];
                 let is_start = seg.start as usize == v;
                 let c = curve(s);
@@ -295,6 +297,40 @@ pub fn network_shape(p: &Props) -> PathShape {
         ends,
         junctions,
         closed,
+    }
+}
+
+/// Сегменты каждой точки одним массивом (смещения по точкам): без вектора на
+/// точку — на сети в 100 000 точек это миллисекунды выделений памяти.
+struct Incidence {
+    offsets: Vec<u32>,
+    segs: Vec<u32>,
+}
+
+impl Incidence {
+    fn new(net: &VectorNetwork) -> Incidence {
+        let n = net.points.len();
+        let mut offsets = vec![0u32; n + 1];
+        for s in &net.segments {
+            offsets[s.start as usize + 1] += 1;
+            offsets[s.end as usize + 1] += 1;
+        }
+        for i in 0..n {
+            offsets[i + 1] += offsets[i];
+        }
+        let mut fill = offsets.clone();
+        let mut segs = vec![0u32; offsets[n] as usize];
+        for (i, s) in net.segments.iter().enumerate() {
+            for v in [s.start, s.end] {
+                segs[fill[v as usize] as usize] = i as u32;
+                fill[v as usize] += 1;
+            }
+        }
+        Incidence { offsets, segs }
+    }
+
+    fn of(&self, v: usize) -> &[u32] {
+        &self.segs[self.offsets[v] as usize..self.offsets[v + 1] as usize]
     }
 }
 
@@ -503,25 +539,53 @@ pub fn stroke_outline(shape: &PathShape, s: &Stroke, style: &StrokeStyle) -> Bez
     out
 }
 
+/// Окончания открытых концов узла и замкнут ли путь — без построения контуров
+/// (границы узла пересчитываются на каждую правку и кадр жеста).
+fn end_caps(p: &Props) -> (Vec<StrokeCap>, bool) {
+    let s = &p.stroke_style;
+    match p.kind {
+        NodeKind::Vector => {
+            let Some(net) = &p.vector else {
+                return (vec![], false);
+            };
+            let deg = net.degrees();
+            let (mut start, mut end) = (false, false);
+            for seg in &net.segments {
+                start |= deg[seg.start as usize] == 1;
+                end |= deg[seg.end as usize] == 1;
+            }
+            let caps = [(start, s.cap_start), (end, s.cap_end)]
+                .into_iter()
+                .filter_map(|(on, c)| on.then_some(c))
+                .collect::<Vec<_>>();
+            let closed = caps.is_empty() && !net.segments.is_empty();
+            (caps, closed)
+        }
+        NodeKind::Line => (vec![s.cap_start, s.cap_end], false),
+        _ => (vec![], true),
+    }
+}
+
 /// На сколько обводки узла по контуру выступают за рамку формы.
-pub fn path_stroke_outset(p: &Props, shape: &PathShape) -> f64 {
+pub fn path_stroke_outset(p: &Props) -> f64 {
     let style = &p.stroke_style;
+    let (caps, closed) = end_caps(p);
     p.strokes
         .iter()
         .filter(|s| s.width > 0.0)
         .map(|s| {
-            let w = effective_width(shape, s);
+            let w = if closed && s.align != StrokeAlign::Center {
+                2.0 * s.width
+            } else {
+                s.width
+            };
             let join = if style.join == StrokeJoin::Miter {
                 w / 2.0 * style.miter_limit.max(1.0)
             } else {
                 w / 2.0
             };
-            let caps = shape
-                .ends
-                .iter()
-                .map(|e| cap_extent(e.cap, w))
-                .fold(0.0, f64::max);
-            join.max(caps)
+            let cap = caps.iter().map(|c| cap_extent(*c, w)).fold(0.0, f64::max);
+            join.max(cap)
         })
         .fold(0.0, f64::max)
 }
@@ -598,4 +662,140 @@ pub fn nearest_segment(net: &VectorNetwork, pt: Point, within: f64) -> Option<(u
         }
     }
     best
+}
+
+/// С какого числа элементов контуры упрощаются под масштаб (`simplify`): меньшие
+/// рисуются точно на любом зуме.
+pub const SIMPLIFY_MIN_ELEMENTS: usize = 4096;
+
+/// Контуры с точностью `tol` (в координатах формы): кривые — ломаными, точки ближе
+/// `tol` к последней оставленной — пропускаются (концы подпутей остаются). Сеть в
+/// 100 000 точек при отдалении — тысячи отрезков меньше пикселя; рисовать и обводить
+/// их все — сотни миллисекунд на кадр. Небольшие контуры возвращаются как есть.
+pub fn simplify(shape: &PathShape, tol: f64) -> PathShape {
+    let size: usize = shape.stroke.elements().len()
+        + shape
+            .regions
+            .iter()
+            .map(|r| r.path.elements().len())
+            .sum::<usize>();
+    if size < SIMPLIFY_MIN_ELEMENTS || tol.is_nan() || tol <= 0.0 {
+        return shape.clone();
+    }
+    PathShape {
+        stroke: simplify_path(&shape.stroke, tol),
+        regions: shape
+            .regions
+            .iter()
+            .map(|r| RegionPath {
+                path: simplify_path(&r.path, tol),
+                ..r.clone()
+            })
+            .collect(),
+        ..shape.clone()
+    }
+}
+
+/// Ломаная подпути с отбросом точек, лежащих ближе `tol` к прямой от последней
+/// оставленной точки (Реуманн — Виткам, за один проход); точки, где путь
+/// поворачивает назад, остаются.
+#[derive(Default)]
+struct Thinner {
+    anchor: Point,
+    dir: Option<Vec2>,
+    /// Последняя пропущенная точка: оставляется, когда следующая уходит от прямой.
+    prev: Option<Point>,
+    along: f64,
+}
+
+impl Thinner {
+    fn start(&mut self, out: &mut BezPath, p: Point) {
+        out.move_to(p);
+        *self = Thinner {
+            anchor: p,
+            ..Default::default()
+        };
+    }
+
+    fn push(&mut self, out: &mut BezPath, p: Point, tol: f64) {
+        let v = p - self.anchor;
+        let Some(dir) = self.dir else {
+            if v.hypot() >= tol {
+                self.dir = Some(v / v.hypot());
+                self.along = v.hypot();
+            }
+            self.prev = Some(p);
+            return;
+        };
+        let along = v.dot(dir);
+        if v.cross(dir).abs() <= tol && along >= self.along - tol {
+            self.prev = Some(p);
+            self.along = self.along.max(along);
+            return;
+        }
+        let q = self.prev.unwrap_or(p);
+        out.line_to(q);
+        self.anchor = q;
+        let w = p - q;
+        let n = w.hypot();
+        self.dir = (n > 0.0).then(|| w / n);
+        self.along = n;
+        self.prev = Some(p);
+    }
+
+    fn finish(&mut self, out: &mut BezPath) {
+        if let Some(q) = self.prev.take() {
+            out.line_to(q);
+        }
+    }
+}
+
+/// Ломаная пути с точностью `tol` (см. `simplify`) — и для оверлея правки.
+pub fn simplify_path(path: &BezPath, tol: f64) -> BezPath {
+    let mut out = BezPath::new();
+    let mut t = Thinner::default();
+    let mut last = Point::ZERO;
+    for el in path.iter() {
+        match el {
+            PathEl::MoveTo(p) => {
+                t.finish(&mut out);
+                t.start(&mut out, p);
+                last = p;
+            }
+            PathEl::LineTo(p) => {
+                t.push(&mut out, p, tol);
+                last = p;
+            }
+            PathEl::CurveTo(a, b, p) => {
+                // Кривая, чьи ручки ближе `tol` к хорде, — отрезок: дробить её
+                // незачем (на сети в 100 000 точек таких — десятки тысяч).
+                let chord = Line::new(last, p);
+                let near = |q: Point| chord.nearest(q, 1e-9).distance_sq <= tol * tol;
+                if near(a) && near(b) {
+                    t.push(&mut out, p, tol);
+                } else {
+                    kurbo::flatten([PathEl::MoveTo(last), PathEl::CurveTo(a, b, p)], tol, |e| {
+                        if let PathEl::LineTo(q) = e {
+                            t.push(&mut out, q, tol);
+                        }
+                    });
+                }
+                last = p;
+            }
+            PathEl::QuadTo(a, p) => {
+                kurbo::flatten([PathEl::MoveTo(last), PathEl::QuadTo(a, p)], tol, |e| {
+                    if let PathEl::LineTo(q) = e {
+                        t.push(&mut out, q, tol);
+                    }
+                });
+                last = p;
+            }
+            PathEl::ClosePath => {
+                t.finish(&mut out);
+                out.close_path();
+            }
+        }
+    }
+    t.finish(&mut out);
+    out
 }

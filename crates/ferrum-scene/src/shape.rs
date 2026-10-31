@@ -230,9 +230,10 @@ impl Geometry {
 /// На сколько обводки узла выступают за его форму: кольца или обводка по контуру
 /// с соединениями и окончаниями.
 pub fn stroke_outset(p: &Props) -> f64 {
-    match vector::path_shape(p) {
-        Some(shape) => vector::path_stroke_outset(p, &shape),
-        None => geometry(p).stroke_outset(&p.strokes),
+    if vector::uses_path_stroke(p) {
+        vector::path_stroke_outset(p)
+    } else {
+        geometry(p).stroke_outset(&p.strokes)
     }
 }
 

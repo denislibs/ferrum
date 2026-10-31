@@ -115,3 +115,36 @@ pub fn fill_texts(page: &Tx, texts: usize) -> DocResult<Vec<NodeId>> {
     }
     Ok(ids)
 }
+
+/// Сеть для замеров (подсистема 3, этап 3): замкнутый волнистый контур из `n`
+/// точек по эллипсу 2000 × 1000 (как обведённая карта или скан), каждый
+/// четвёртый сегмент — кривая, одна область по всей петле.
+pub fn wavy_network(n: usize) -> crate::VectorNetwork {
+    use crate::{FillRule, VectorNetwork, VectorPoint, VectorRegion, VectorSegment};
+    let points = (0..n)
+        .map(|i| {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            let r = 1.0 + 0.01 * (i as f64 * 0.005).sin();
+            VectorPoint::new(1000.0 + 1000.0 * r * a.cos(), 500.0 + 500.0 * r * a.sin())
+        })
+        .collect();
+    let segments = (0..n as u32)
+        .map(|i| {
+            let mut s = VectorSegment::line(i, (i + 1) % n as u32);
+            if i % 4 == 0 {
+                s.tangent_start = [0.01, -0.01];
+                s.tangent_end = [-0.01, 0.01];
+            }
+            s
+        })
+        .collect();
+    VectorNetwork {
+        points,
+        segments,
+        regions: vec![VectorRegion {
+            rule: FillRule::NonZero,
+            loops: vec![(0..n as u32).collect()],
+            fills: None,
+        }],
+    }
+}
