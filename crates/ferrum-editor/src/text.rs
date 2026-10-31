@@ -129,6 +129,9 @@ pub(crate) fn fit_patch(
     Ok(patch)
 }
 
+/// Изменение стороны рамки меньше этого — не ресайз.
+const RESIZE_EPS: f64 = 1e-6;
+
 /// Режим размера текста после ресайза рамки — правила Figma: у «авто» только
 /// ширина (стороны слева и справа, поле W) — «авто по высоте» с новой шириной,
 /// иначе (высота, угол, масштаб группы) — фиксированный. `None` — размер не менялся.
@@ -167,23 +170,34 @@ pub(crate) fn resize_texts<'a>(
         if patch.text.is_some() {
             continue;
         }
-        let dw = patch.w.is_some_and(|w| w != before.w);
-        let dh = patch.h.is_some_and(|h| h != before.h);
-        let Some(sizing) = sizing_after_resize(t.sizing, dw, dh) else {
+        // Шум плавающей точки (повёрнутый узел без привязки к пикселям) не считается ресайзом.
+        let dw = patch.w.is_some_and(|w| (w - before.w).abs() > RESIZE_EPS);
+        let dh = patch.h.is_some_and(|h| (h - before.h).abs() > RESIZE_EPS);
+        let Some(mut sizing) = sizing_after_resize(t.sizing, dw, dh) else {
             continue;
         };
+        if sizing == TextSizing::AutoHeight {
+            let mut p = (*before).clone();
+            patch.apply_to(&mut p);
+            if let Some(pt) = p.text.as_mut() {
+                Arc::make_mut(pt).props.sizing = sizing;
+            }
+            // Высота по раскладке и якорь рамки — как у правки текста (учёт отражения).
+            match fit_patch(fonts, &p, &p) {
+                Ok(fit) => {
+                    patch.h = fit.h.or(patch.h);
+                    patch.x = fit.x.or(patch.x);
+                    patch.y = fit.y.or(patch.y);
+                }
+                // Шрифт ещё грузится: высоту не узнать, а «авто по высоте» с чужой
+                // высотой несогласовано — остаётся фиксированный размер.
+                Err(TextPending) => sizing = TextSizing::Fixed,
+            }
+        }
         patch.text = Some(TextProps {
             sizing,
             ..t.clone()
         });
-        if sizing == TextSizing::AutoHeight {
-            let mut p = (*before).clone();
-            patch.apply_to(&mut p);
-            // Шрифт ещё грузится — высота прежняя, поправит следующая правка.
-            if let Ok(Some((_, h))) = fit_size(fonts, &p) {
-                patch.h = Some(h);
-            }
-        }
     }
 }
 
