@@ -249,3 +249,75 @@ fn stroke_style_from_the_panel_is_one_step_and_skips_groups() {
     assert_eq!(h.props(r).stroke_style.join, StrokeJoin::Bevel);
     h.assert_one_step(steps, &before);
 }
+
+fn messages(h: &mut H) -> Vec<String> {
+    h.ed.take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            EditorEvent::Error(m) => Some(m),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn skipped_locked_or_hidden_layers_are_reported() {
+    const SKIPPED: &str = "Заблокированные и скрытые слои не сплющиваются";
+    // Только заблокированный прямоугольник — сообщение о блокировке, не «нечего».
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    h.set(
+        a,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    h.key("KeyE", ctrl());
+    assert_eq!(messages(&mut h), vec![SKIPPED.to_string()]);
+    // Группа с заблокированным слоем рядом с обычным прямоугольником: прямоугольник
+    // сплющен, о группе — сообщение.
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let b = h.rect(None, 20.0, 0.0, 10.0, 10.0);
+    let c = h.rect(None, 40.0, 0.0, 10.0, 10.0);
+    let d = h.rect(None, 60.0, 0.0, 10.0, 10.0);
+    h.ed.select(&[a, b]);
+    h.key("KeyG", ctrl());
+    let g = h.sel()[0];
+    h.set(
+        b,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[g, c, d]);
+    h.ed.take_events();
+    h.key("KeyE", ctrl());
+    assert_eq!(messages(&mut h), vec![SKIPPED.to_string()]);
+    assert!(h.props(b).locked, "заблокированный на месте");
+    // Скрытый выделенный — так же.
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    h.set(
+        a,
+        PropsPatch {
+            visible: Some(false),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    h.key("KeyE", ctrl());
+    assert_eq!(messages(&mut h), vec![SKIPPED.to_string()]);
+    // Обычная фигура без пропусков — без сообщений.
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    h.key("KeyE", ctrl());
+    assert!(messages(&mut h).is_empty());
+}

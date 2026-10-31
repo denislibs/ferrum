@@ -29,12 +29,15 @@ impl Editor {
         // Узлы-источники снизу вверх: выделенные фигуры и фигуры в выделенных группах.
         let mut leaves: Vec<NodeId> = Vec::new();
         let mut removed: Vec<NodeId> = Vec::new();
+        // Пропущено из-за блокировки или скрытия — пользователь узнает об этом.
+        let mut skipped = false;
         for id in &ids {
             let Some(slot) = self.scene.slot(*id) else {
                 continue;
             };
             // Заблокированный и скрытый (сам или предком) не трогаются.
             if locked(&self.scene, slot) || !self.scene.is_visible(slot) {
+                skipped = true;
                 continue;
             }
             let kind = self.scene.at(slot).props.kind;
@@ -44,18 +47,19 @@ impl Editor {
             } else if kind == NodeKind::Group {
                 let mut inner = Vec::new();
                 let mut stack = vec![slot];
-                let mut foreign = false;
+                let (mut foreign, mut held, mut hidden) = (false, false, false);
                 while let Some(s) = stack.pop() {
                     let n = self.scene.at(s);
                     // Заблокированный слой нельзя ни слить, ни удалить с группой —
                     // такую группу целиком не сплющить.
                     if n.props.locked {
-                        foreign = true;
+                        (foreign, held) = (true, true);
                         continue;
                     }
                     // Скрытые слои в результат не попадают (как в Figma) и
                     // уходят вместе с группой.
                     if !n.props.visible {
+                        hidden = true;
                         continue;
                     }
                     match n.props.kind {
@@ -67,6 +71,7 @@ impl Editor {
                 // Группу с текстом, изображением или фреймом сплющить целиком нельзя:
                 // их пришлось бы потерять вместе с группой.
                 if foreign || inner.is_empty() {
+                    skipped |= held || (inner.is_empty() && hidden);
                     continue;
                 }
                 inner.sort_by(|a, b| a.0.cmp(&b.0));
@@ -74,11 +79,18 @@ impl Editor {
                 removed.push(*id);
             }
         }
-        if leaves.is_empty() {
+        if skipped {
             self.out.events.push(EditorEvent::Error(
-                "Нечего сплющить: сплющиваются векторы, прямоугольники, эллипсы, линии и их группы"
-                    .into(),
+                "Заблокированные и скрытые слои не сплющиваются".into(),
             ));
+        }
+        if leaves.is_empty() {
+            if !skipped {
+                self.out.events.push(EditorEvent::Error(
+                    "Нечего сплющить: сплющиваются векторы, прямоугольники, эллипсы, линии и их группы"
+                        .into(),
+                ));
+            }
             return;
         }
         let top = *removed.last().expect("есть узлы");
