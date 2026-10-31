@@ -13,7 +13,8 @@ use tsify::Tsify;
 
 pub use crate::layers::{LayerRow, NodeType};
 pub use crate::summary::{
-    Align, FillDto, Flag, Num, PaintKind, Paints, ScaleModeDto, StrokeDto, Summary,
+    Align, FillDto, Flag, Num, PaintKind, Paints, ScaleModeDto, StrokeCapDto, StrokeDto,
+    StrokeJoinDto, StrokeStyleDto, Summary,
 };
 
 /// Наибольшая страница-пример: столько узлов генерирует `Demo`.
@@ -435,6 +436,17 @@ pub enum Edit {
     Size {
         w: f64,
         h: f64,
+    },
+    /// Окончания, соединение и предел острого угла; без поля — не трогать.
+    StrokeStyle {
+        #[serde(default)]
+        cap_start: Option<StrokeCapDto>,
+        #[serde(default)]
+        cap_end: Option<StrokeCapDto>,
+        #[serde(default)]
+        join: Option<StrokeJoinDto>,
+        #[serde(default)]
+        miter_limit: Option<f64>,
     },
 }
 

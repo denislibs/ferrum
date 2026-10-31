@@ -5,7 +5,9 @@
 //! эллипсов, обрезка не у фреймов), отсутствует (`None`). Считается при смене
 //! выделения или документа, а не в каждом кадре: O(выделенных).
 
-use ferrum_doc::{Fill, FillKind, NodeId, NodeKind, ScaleMode, Stroke, StrokeAlign};
+use ferrum_doc::{
+    Fill, FillKind, NodeId, NodeKind, ScaleMode, Stroke, StrokeAlign, StrokeCap, StrokeJoin,
+};
 use ferrum_editor::{field_applies, panel_pose, NumField};
 use ferrum_scene::Scene;
 use serde::{Deserialize, Serialize};
@@ -78,6 +80,82 @@ pub struct StrokeDto {
     pub align: Align,
 }
 
+/// Окончание открытого конца обводки (спека подсистемы 3, раздел 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum StrokeCapDto {
+    None,
+    Round,
+    Square,
+    ArrowLines,
+    ArrowTriangle,
+    Circle,
+    Diamond,
+}
+
+/// Соединение сегментов обводки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum StrokeJoinDto {
+    Miter,
+    Round,
+    Bevel,
+}
+
+pub fn cap_dto(c: StrokeCap) -> StrokeCapDto {
+    match c {
+        StrokeCap::None => StrokeCapDto::None,
+        StrokeCap::Round => StrokeCapDto::Round,
+        StrokeCap::Square => StrokeCapDto::Square,
+        StrokeCap::ArrowLines => StrokeCapDto::ArrowLines,
+        StrokeCap::ArrowTriangle => StrokeCapDto::ArrowTriangle,
+        StrokeCap::Circle => StrokeCapDto::Circle,
+        StrokeCap::Diamond => StrokeCapDto::Diamond,
+    }
+}
+
+pub fn cap_of(c: StrokeCapDto) -> StrokeCap {
+    match c {
+        StrokeCapDto::None => StrokeCap::None,
+        StrokeCapDto::Round => StrokeCap::Round,
+        StrokeCapDto::Square => StrokeCap::Square,
+        StrokeCapDto::ArrowLines => StrokeCap::ArrowLines,
+        StrokeCapDto::ArrowTriangle => StrokeCap::ArrowTriangle,
+        StrokeCapDto::Circle => StrokeCap::Circle,
+        StrokeCapDto::Diamond => StrokeCap::Diamond,
+    }
+}
+
+pub fn join_dto(j: StrokeJoin) -> StrokeJoinDto {
+    match j {
+        StrokeJoin::Miter => StrokeJoinDto::Miter,
+        StrokeJoin::Round => StrokeJoinDto::Round,
+        StrokeJoin::Bevel => StrokeJoinDto::Bevel,
+    }
+}
+
+pub fn join_of(j: StrokeJoinDto) -> StrokeJoin {
+    match j {
+        StrokeJoinDto::Miter => StrokeJoin::Miter,
+        StrokeJoinDto::Round => StrokeJoin::Round,
+        StrokeJoinDto::Bevel => StrokeJoin::Bevel,
+    }
+}
+
+/// Стиль обводки выделения: значение поля — общее у всех, `None` — «Смешанные».
+/// Окончания показываются, только если у кого-то есть открытые концы (линия,
+/// открытый путь вектора), соединение — если есть углы.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct StrokeStyleDto {
+    pub ends: bool,
+    pub corners: bool,
+    pub cap_start: Option<StrokeCapDto>,
+    pub cap_end: Option<StrokeCapDto>,
+    pub join: Option<StrokeJoinDto>,
+    pub miter_limit: Num,
+}
+
 /// Заливки или обводки выделения: список, если у всех одинаковый.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +183,8 @@ pub struct Summary {
     pub clip_content: Option<Flag>,
     pub fills: Option<Paints<FillDto>>,
     pub strokes: Option<Paints<StrokeDto>>,
+    /// Окончания и соединения обводки (у групп и текста их нет).
+    pub stroke_style: Option<StrokeStyleDto>,
 }
 
 impl Summary {
@@ -130,6 +210,7 @@ impl Summary {
             clip_content: None,
             fills: None,
             strokes: None,
+            stroke_style: None,
         }
     }
 }
@@ -262,6 +343,11 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
     let mut clip: Acc<bool> = Acc::default();
     let mut fills: Acc<&[Fill]> = Acc::default();
     let mut strokes: Acc<&[Stroke]> = Acc::default();
+    let mut cap_start: Acc<StrokeCap> = Acc::default();
+    let mut cap_end: Acc<StrokeCap> = Acc::default();
+    let mut join: Acc<StrokeJoin> = Acc::default();
+    let mut miter: Acc<f64> = Acc::default();
+    let (mut ends, mut corners) = (false, false);
     let mut name = None;
     for id in ids {
         let Some(slot) = scene.slot(*id) else {
@@ -294,6 +380,29 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
         }
         if p.kind != NodeKind::Group {
             strokes.add_by(&p.strokes, |a, b| strokes_eq(a, b));
+        }
+        if !matches!(p.kind, NodeKind::Group | NodeKind::Text) {
+            let s = &p.stroke_style;
+            join.add(s.join);
+            miter.add_num(s.miter_limit);
+            match p.kind {
+                NodeKind::Line => {
+                    ends = true;
+                    cap_start.add(s.cap_start);
+                    cap_end.add(s.cap_end);
+                }
+                NodeKind::Vector => {
+                    let shape = ferrum_scene::vector::network_shape(p);
+                    corners = true;
+                    if !shape.ends.is_empty() {
+                        ends = true;
+                        cap_start.add(s.cap_start);
+                        cap_end.add(s.cap_end);
+                    }
+                }
+                NodeKind::Ellipse => {}
+                _ => corners |= p.corner_radius <= 0.0,
+            }
         }
         if count == 1 {
             name = Some(p.name.chars().take(MAX_ROW_NAME_CHARS).collect::<String>());
@@ -347,6 +456,17 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
                     vec![]
                 },
             }
+        }),
+        stroke_style: join.first.map(|j| StrokeStyleDto {
+            ends,
+            corners,
+            cap_start: cap_start.first.filter(|_| !cap_start.mixed).map(cap_dto),
+            cap_end: cap_end.first.filter(|_| !cap_end.mixed).map(cap_dto),
+            join: (!join.mixed).then(|| join_dto(j)),
+            miter_limit: miter.num().unwrap_or(Num {
+                value: ferrum_doc::DEFAULT_MITER_LIMIT,
+                mixed: false,
+            }),
         }),
     }
 }
