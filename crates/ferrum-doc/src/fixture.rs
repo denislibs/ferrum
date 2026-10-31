@@ -154,3 +154,46 @@ pub fn wavy_network(n: usize) -> crate::VectorNetwork {
         },
     }
 }
+
+/// Сеть для замеров с настоящими кривыми: замкнутый контур из `n` точек по
+/// окружности радиуса `radius`, каждый сегмент — кубическая кривая, выгнутая
+/// наружу на полхорды (как обведённая карта с плавными линиями), одна область
+/// по всей петле. Меньше трёх точек — без петли и области, как `wavy_network`.
+pub fn curvy_network(n: usize, radius: f64) -> crate::VectorNetwork {
+    use crate::{FillRule, VectorNetwork, VectorPoint, VectorRegion, VectorSegment};
+    let points: Vec<VectorPoint> = (0..n)
+        .map(|i| {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            VectorPoint::new(radius + radius * a.cos(), radius + radius * a.sin())
+        })
+        .collect();
+    let count = if n >= 3 { n } else { n.saturating_sub(1) };
+    let segments = (0..count as u32)
+        .map(|i| {
+            let j = (i + 1) % n as u32;
+            let (a, b) = (points[i as usize], points[j as usize]);
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            // Нормаль наружу: ручки выгибают кривую на полхорды.
+            let (nx, ny) = (dy * 0.6, -dx * 0.6);
+            VectorSegment {
+                start: i,
+                end: j,
+                tangent_start: [dx * 0.3 + nx, dy * 0.3 + ny],
+                tangent_end: [-dx * 0.3 + nx, -dy * 0.3 + ny],
+            }
+        })
+        .collect();
+    VectorNetwork {
+        points,
+        segments,
+        regions: if n >= 3 {
+            vec![VectorRegion {
+                rule: FillRule::NonZero,
+                loops: vec![(0..n as u32).collect()],
+                fills: None,
+            }]
+        } else {
+            vec![]
+        },
+    }
+}

@@ -440,6 +440,61 @@ fn simplified_path_stays_within_the_tolerance_of_the_original() {
 }
 
 #[test]
+fn simplified_curves_are_never_bigger_than_the_exact_path() {
+    // Каждый сегмент — выгнутая кривая: на крупном масштабе упрощение оставляет
+    // кривые кривыми, а не дробит их в ломаные больше исходного пути.
+    for radius in [2000.0, 50_000.0] {
+        let shape = network_shape(&vector(ferrum_doc::fixture::curvy_network(100_000, radius)));
+        let exact = shape.stroke.elements().len();
+        let region = shape.regions[0].path.elements().len();
+        let mut scale = 1.0;
+        while scale <= 1024.0 {
+            let s = simplify(&shape, 0.25 / scale);
+            assert!(
+                s.stroke.elements().len() <= exact,
+                "r {radius}, масштаб {scale}: {} > {exact}",
+                s.stroke.elements().len()
+            );
+            assert!(s.regions[0].path.elements().len() <= region);
+            scale *= 2.0;
+        }
+    }
+    // Отдаление: почти прямые на экране кривые всё так же прореживаются.
+    let shape = network_shape(&vector(ferrum_doc::fixture::curvy_network(100_000, 2000.0)));
+    let far = simplify(&shape, 2.0);
+    assert!(far.stroke.elements().len() * 20 < shape.stroke.elements().len());
+}
+
+#[test]
+fn simplified_curvy_path_stays_within_the_tolerance() {
+    use kurbo::ParamCurve;
+    // Кривые, которые остаются и которые становятся хордами, — на одном контуре.
+    // Сеть меньше порога `simplify` — путь упрощается напрямую.
+    let shape = network_shape(&vector(ferrum_doc::fixture::curvy_network(5000, 100.0)));
+    for tol in [0.1, 0.5, 2.0] {
+        let s = simplify_path(&shape.stroke, tol);
+        let mut worst = 0.0f64;
+        for seg in shape.stroke.segments().step_by(3) {
+            for k in 0..5 {
+                let q = seg.eval(k as f64 / 5.0);
+                let d = distance_to(&s, q, 2.0 * tol + 1.0).unwrap_or(f64::MAX);
+                worst = worst.max(d);
+            }
+        }
+        assert!(worst <= tol, "допуск {tol}: отклонение {worst}");
+    }
+}
+
+#[test]
+fn curvy_network_survives_tiny_sizes() {
+    use ferrum_doc::fixture::curvy_network;
+    assert!(curvy_network(0, 10.0).points.is_empty());
+    assert_eq!(curvy_network(2, 10.0).segments.len(), 1);
+    let n = curvy_network(3, 10.0);
+    assert_eq!((n.segments.len(), n.regions.len()), (3, 1));
+}
+
+#[test]
 fn wavy_network_survives_tiny_sizes() {
     use ferrum_doc::fixture::wavy_network;
     assert!(wavy_network(0).points.is_empty() && wavy_network(0).segments.is_empty());

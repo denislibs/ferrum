@@ -88,6 +88,10 @@ pub struct DisplayList {
     /// Точность, с которой построены контуры (`paths_at`): у больших векторов —
     /// по масштабу кадра, у остальных — 0 (точно).
     pub detail: f64,
+    /// Контуры построены по точной форме, хотя просили точность `detail`:
+    /// упрощение ничего не дало. Точнее они не станут — приближение их не
+    /// перестраивает.
+    pub exact: bool,
     /// Контуры для обводки по контуру и областей вектора (`None` — кольца).
     /// Держится вместе со списком: по нему контуры строятся заново после
     /// вытеснения, без свойств узла.
@@ -220,6 +224,7 @@ impl DisplayList {
             split,
             last_used: 0,
             detail: 0.0,
+            exact: false,
             path: path_shape.map(|shape| {
                 Arc::new(PathSource {
                     shape,
@@ -245,7 +250,10 @@ impl DisplayList {
             }
             _ => 0.0,
         };
-        if self.detail != detail {
+        // Точные контуры годятся для любой точности тоньше той, при которой
+        // они построены: перестройка на приближении дала бы те же самые.
+        let exact_enough = self.exact && self.paths.is_some() && detail <= self.detail;
+        if self.detail != detail && !exact_enough {
             self.paths = None;
             self.detail = detail;
         }
@@ -254,11 +262,16 @@ impl DisplayList {
         let list = &self.items;
         let style = self.path.as_deref().map(|p| p.style).unwrap_or_default();
         let full = self.path.as_deref().map(|p| &p.shape);
+        let exact = &mut self.exact;
+        let detail = self.detail;
         self.paths.get_or_insert_with(|| {
             // Упрощение — только при построении: кадры с готовыми контурами его не платят.
+            // Не уменьшило контуры — рисуется точная форма (без копии).
             let simplified = full
                 .filter(|_| detail > 0.0)
-                .map(|shape| vector::simplify(shape, detail));
+                .map(|shape| vector::simplify(shape, detail))
+                .filter(|s| full.is_some_and(|f| !same_size(s, f)));
+            *exact = simplified.is_none();
             let ps = simplified.as_ref().or(full);
             let mut shape = BezPath::new();
             geom.fill_path_into(&mut shape);
@@ -310,6 +323,15 @@ impl DisplayList {
     }
 }
 
+/// Упрощение не убрало ни одного элемента (`simplify` монотонно: не больше точного).
+fn same_size(a: &PathShape, b: &PathShape) -> bool {
+    a.stroke.elements().len() == b.stroke.elements().len()
+        && a.regions
+            .iter()
+            .zip(&b.regions)
+            .all(|(x, y)| x.path.elements().len() == y.path.elements().len())
+}
+
 /// Внешность замкнутого пути: рамка с запасом `margin` и сам путь с обходом
 /// против неё — при ненулевом правиле обрезки путь вырезается (как у текста
 /// снаружи).
@@ -339,7 +361,10 @@ mod tests {
     use super::*;
 
     fn vector_node(n: usize) -> SceneNode {
-        let net = ferrum_doc::fixture::wavy_network(n);
+        node_of(ferrum_doc::fixture::wavy_network(n))
+    }
+
+    fn node_of(net: ferrum_doc::VectorNetwork) -> SceneNode {
         let b = vector::network_bounds(&net).unwrap();
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
@@ -411,5 +436,32 @@ mod tests {
         list.paths_at(1e12);
         list.paths_at(f64::NAN);
         list.paths_at(f64::INFINITY);
+    }
+
+    #[test]
+    fn curved_vectors_are_never_bigger_than_exact_and_not_rebuilt_once_exact() {
+        // Каждый сегмент — выгнутая кривая: на приближении упрощать нечего.
+        let mut list = DisplayList::build(
+            &node_of(ferrum_doc::fixture::curvy_network(20_000, 2000.0)),
+            false,
+        );
+        let exact = size(list.paths_at(0.0));
+        let far = size(list.paths_at(0.05));
+        assert!(far * 4 < exact, "отдаление прореживает: {exact} → {far}");
+        let mut built = None;
+        for scale in [8.0, 64.0, 512.0, 1e6, 1e12] {
+            let n = size(list.paths_at(scale));
+            assert!(n <= exact, "масштаб {scale}: {n} > {exact}");
+            if n == exact {
+                let at = first(list.paths_at(scale));
+                // Дальнейшее приближение не перестраивает точные контуры.
+                assert!(built.is_none_or(|b| b == at), "масштаб {scale}");
+                built = Some(at);
+            }
+        }
+        assert!(built.is_some() && list.exact);
+        // Отдаление — снова упрощённые.
+        assert_eq!(size(list.paths_at(0.05)), far);
+        assert!(!list.exact);
     }
 }

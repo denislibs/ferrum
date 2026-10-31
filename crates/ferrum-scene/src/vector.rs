@@ -668,10 +668,12 @@ pub fn nearest_segment(net: &VectorNetwork, pt: Point, within: f64) -> Option<(u
 /// рисуются точно на любом зуме.
 pub const SIMPLIFY_MIN_ELEMENTS: usize = 4096;
 
-/// Контуры с точностью `tol` (в координатах формы): кривые — ломаными, точки ближе
-/// `tol` к последней оставленной — пропускаются (концы подпутей остаются). Сеть в
-/// 100 000 точек при отдалении — тысячи отрезков меньше пикселя; рисовать и обводить
-/// их все — сотни миллисекунд на кадр. Небольшие контуры возвращаются как есть.
+/// Контуры с точностью `tol` (в координатах формы): кривые, почти прямые в этом
+/// допуске, становятся хордами, точки ближе `tol` к последней оставленной —
+/// пропускаются (концы подпутей остаются). Сеть в 100 000 точек при отдалении —
+/// тысячи отрезков меньше пикселя; рисовать и обводить их все — сотни миллисекунд
+/// на кадр. Выгнутые кривые остаются кривыми, поэтому упрощённый путь не больше
+/// точного на любом масштабе. Небольшие контуры возвращаются как есть.
 pub fn simplify(shape: &PathShape, tol: f64) -> PathShape {
     let size: usize = shape.stroke.elements().len()
         + shape
@@ -745,6 +747,14 @@ impl Thinner {
         self.prev = Some(p);
     }
 
+    /// Продолжение подпути с `p` без нового `MoveTo` (после оставленной кривой).
+    fn resume(&mut self, p: Point) {
+        *self = Thinner {
+            anchor: p,
+            ..Default::default()
+        };
+    }
+
     fn finish(&mut self, out: &mut BezPath) {
         if let Some(q) = self.prev.take() {
             out.line_to(q);
@@ -752,15 +762,22 @@ impl Thinner {
     }
 }
 
-/// Ломаная пути с точностью `tol` (см. `simplify`) — и для оверлея правки.
+/// Путь с точностью `tol` (см. `simplify`) — и для оверлея правки.
 ///
-/// Отклонение ломаной от исходного пути не больше `tol`: допуск делится пополам
-/// между сглаживанием кривых и отбрасыванием точек.
+/// Каждый элемент результата — свой элемент исходного пути (точка или кривая),
+/// поэтому результат не длиннее исходного; не стал короче — возвращается
+/// исходный. Отклонение не больше `tol`: кривая становится хордой, только
+/// если её ручки (а значит, и она сама) не дальше `tol / 4` от хорды, а точки
+/// ломаной отбрасываются в полосе `tol / 4` вокруг прямой (с возвратом назад не
+/// больше `tol / 4` — до отрезка выходит не больше `3/4 · tol`).
 pub fn simplify_path(path: &BezPath, tol: f64) -> BezPath {
-    let tol = tol / 2.0;
+    let tol = tol / 4.0;
     let mut out = BezPath::new();
     let mut t = Thinner::default();
     let mut last = Point::ZERO;
+    let near = |from: Point, to: Point, q: Point| {
+        Line::new(from, to).nearest(q, 1e-9).distance_sq <= tol * tol
+    };
     for el in path.iter() {
         match el {
             PathEl::MoveTo(p) => {
@@ -772,28 +789,22 @@ pub fn simplify_path(path: &BezPath, tol: f64) -> BezPath {
                 t.push(&mut out, p, tol);
                 last = p;
             }
-            PathEl::CurveTo(a, b, p) => {
-                // Кривая, чьи ручки ближе `tol` к хорде, — отрезок: дробить её
-                // незачем (на сети в 100 000 точек таких — десятки тысяч).
-                let chord = Line::new(last, p);
-                let near = |q: Point| chord.nearest(q, 1e-9).distance_sq <= tol * tol;
-                if near(a) && near(b) {
-                    t.push(&mut out, p, tol);
-                } else {
-                    kurbo::flatten([PathEl::MoveTo(last), PathEl::CurveTo(a, b, p)], tol, |e| {
-                        if let PathEl::LineTo(q) = e {
-                            t.push(&mut out, q, tol);
-                        }
-                    });
-                }
+            // Почти прямая кривая — хорда (на сети в 100 000 точек таких —
+            // десятки тысяч); выгнутая — остаётся кривой: дробить её в ломаную
+            // значило бы раздуть путь на крупном масштабе.
+            PathEl::CurveTo(a, b, p) if near(last, p, a) && near(last, p, b) => {
+                t.push(&mut out, p, tol);
                 last = p;
             }
-            PathEl::QuadTo(a, p) => {
-                kurbo::flatten([PathEl::MoveTo(last), PathEl::QuadTo(a, p)], tol, |e| {
-                    if let PathEl::LineTo(q) = e {
-                        t.push(&mut out, q, tol);
-                    }
-                });
+            PathEl::QuadTo(a, p) if near(last, p, a) => {
+                t.push(&mut out, p, tol);
+                last = p;
+            }
+            PathEl::CurveTo(..) | PathEl::QuadTo(..) => {
+                let p = el.end_point().expect("у кривой есть конец");
+                t.finish(&mut out);
+                out.push(el);
+                t.resume(p);
                 last = p;
             }
             PathEl::ClosePath => {
@@ -803,5 +814,8 @@ pub fn simplify_path(path: &BezPath, tol: f64) -> BezPath {
         }
     }
     t.finish(&mut out);
+    if out.elements().len() >= path.elements().len() {
+        return path.clone();
+    }
     out
 }
