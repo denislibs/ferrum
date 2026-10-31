@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use ferrum_doc::{
-    Color, Fill, FillKind, NodeKind, Props, ScaleMode, Stroke, StrokeAlign, StrokeStyle,
+    Color, Fill, FillKind, NodeKind, Props, ScaleMode, Stroke, StrokeAlign, StrokeJoin, StrokeStyle,
 };
 use ferrum_scene::shape::{self, Geometry};
 use ferrum_scene::vector::{self, PathShape, StrokeClip};
@@ -251,11 +251,19 @@ impl DisplayList {
             let inside = ps
                 .filter(|_| wants(StrokeClip::Inside))
                 .map(|ps| ps.stroke.clone());
-            // Запас рамки внешности — шире самой толстой обводки.
+            // Запас рамки внешности — вся протяжённость обводки: острие стыка
+            // доходит до `w · предел` (как в границах узла), кольцо — до `2w`.
+            let reach = if style.join == StrokeJoin::Miter {
+                style.miter_limit.max(1.0)
+            } else {
+                1.0
+            };
             let margin = list
                 .iter()
                 .filter_map(|i| match i {
-                    Item::PathStroke { stroke, .. } => Some(2.0 * stroke.width + 1.0),
+                    Item::PathStroke { stroke, .. } => {
+                        Some((reach * stroke.width).max(2.0 * stroke.width) + 1.0)
+                    }
                     _ => None,
                 })
                 .fold(1.0, f64::max);

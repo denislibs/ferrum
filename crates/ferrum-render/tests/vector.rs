@@ -320,3 +320,34 @@ fn stroke_joins_and_closed_alignment() {
     assert_px(&img, 284, 152, [255, 255, 255], 0);
     golden("stroke_joins", &img);
 }
+
+/// Острый угол замкнутого треугольника с обводкой снаружи и острым соединением
+/// (предел по умолчанию 4): кончик острия дальше `2w + 1` от пути, но внутри
+/// предела — обрезка внешности его не режет.
+#[test]
+fn outside_stroke_keeps_the_miter_tip_of_a_sharp_corner() {
+    let mut p = Page::new();
+    // Угол при (40, 20) около 30 градусов: стороны уходят вниз к y = 140.
+    add_vector(
+        &mut p,
+        &[(40.0, 20.0), (72.0, 140.0), (8.0, 140.0)],
+        &[(0, 1), (1, 2), (2, 0)],
+        vec![VectorRegion {
+            rule: FillRule::NonZero,
+            loops: vec![vec![0, 1, 2]],
+            fills: None,
+        }],
+        PropsPatch {
+            fills: solid(200, 200, 200),
+            strokes: black(6.0, StrokeAlign::Outside),
+            stroke_join: Some(StrokeJoin::Miter),
+            stroke_miter_limit: Some(DEFAULT_MITER_LIMIT),
+            ..Default::default()
+        },
+    );
+    let img = render(&p.scene(), &camera(80.0, 160.0));
+    // Обводка снаружи вдвое шире (12), острие вытянуто на 6 / sin 15 градусов
+    // ≈ 23 от вершины, до y ≈ -3 (отношение 3,9 < предела 4). Пиксель y = 4
+    // лежит выше рамки пути на 16 > `2w + 1 = 13`.
+    assert_px(&img, 40, 4, [0, 0, 0], 8);
+}
