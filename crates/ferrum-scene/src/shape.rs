@@ -1,9 +1,12 @@
 //! Геометрия узла в его локальных координатах: трансформация, контур заливки,
 //! кольца обводок и точная проверка попадания. Рендер и hit-testing берут форму
 //! отсюда, поэтому то, что нарисовано, и то, во что попадает клик, совпадает.
+//! Сеть вектора и обводка по контуру (окончания, соединения) — `crate::vector`.
 
-use ferrum_doc::{NodeKind, Props, Stroke, StrokeAlign};
+use ferrum_doc::{NodeKind, Props, Stroke, StrokeAlign, MITER_LIMIT_RANGE};
 use kurbo::{Affine, BezPath, Ellipse, Line, ParamCurveNearest, Point, Rect, RoundedRect, Shape};
+
+use crate::vector;
 
 /// Точность аппроксимации дуг кривыми Безье в локальных единицах. Контур строится
 /// один раз на изменение узла и потом масштабируется камерой до 256×, поэтому
@@ -65,6 +68,8 @@ pub fn sanitize(p: &mut Props) {
     for s in &mut p.strokes {
         s.width = finite(s.width, 0.0).clamp(0.0, COORD_LIMIT);
     }
+    let (lo, hi) = (*MITER_LIMIT_RANGE.start(), *MITER_LIMIT_RANGE.end());
+    p.stroke_style.miter_limit = finite(p.stroke_style.miter_limit, 4.0).clamp(lo, hi);
 }
 
 /// Собственная форма узла в локальных координатах.
@@ -78,6 +83,9 @@ pub enum Geometry {
     Ellipse(Rect),
     /// Линия от `(0, 0)` до `(w, 0)`.
     Line(f64),
+    /// Векторная сеть, растянутая в рамку `(0, 0, w, h)`; контуры —
+    /// `crate::vector::network_shape` по свойствам узла.
+    Vector(Rect),
 }
 
 pub fn geometry(p: &Props) -> Geometry {
@@ -97,8 +105,7 @@ pub fn geometry(p: &Props) -> Geometry {
         NodeKind::Line => Geometry::Line(p.w),
         // Рамка текста; попадание — по ней (спека подсистемы 3, раздел 5).
         NodeKind::Text => Geometry::Rect { rect, radius: 0.0 },
-        // Пока сеть не рисуется (её геометрия — следующая задача), вектор — рамка.
-        NodeKind::Vector => Geometry::Rect { rect, radius: 0.0 },
+        NodeKind::Vector => Geometry::Vector(rect),
     }
 }
 
@@ -107,7 +114,9 @@ impl Geometry {
     pub fn bounds(&self) -> Option<Rect> {
         match *self {
             Geometry::None => None,
-            Geometry::Rect { rect, .. } | Geometry::Ellipse(rect) => Some(rect),
+            Geometry::Rect { rect, .. } | Geometry::Ellipse(rect) | Geometry::Vector(rect) => {
+                Some(rect)
+            }
             Geometry::Line(len) => Some(Rect::new(0.0, 0.0, len, 0.0)),
         }
     }
@@ -118,7 +127,8 @@ impl Geometry {
         self.offset(0.0).is_some_and(|s| s.contains(p))
     }
 
-    /// Контур заливки; у линии и группы заливки нет.
+    /// Контур заливки; у линии и группы заливки нет, у вектора она — по областям
+    /// (`crate::vector`).
     pub fn fill_path(&self) -> Option<BezPath> {
         let mut path = BezPath::new();
         self.fill_path_into(&mut path).then_some(path)
@@ -136,7 +146,7 @@ impl Geometry {
                 out.extend(Ellipse::from_rect(rect).path_elements(PATH_TOLERANCE));
                 true
             }
-            Geometry::None | Geometry::Line(_) => false,
+            Geometry::None | Geometry::Line(_) | Geometry::Vector(_) => false,
         }
     }
 
@@ -162,7 +172,7 @@ impl Geometry {
                 (r.width() > 0.0 && r.height() > 0.0)
                     .then(|| Offset::Ellipse(Ellipse::from_rect(r)))
             }
-            Geometry::None | Geometry::Line(_) => None,
+            Geometry::None | Geometry::Line(_) | Geometry::Vector(_) => None,
         }
     }
 
@@ -204,7 +214,8 @@ impl Geometry {
         Some(out)
     }
 
-    /// На сколько обводки выступают за форму наружу.
+    /// На сколько обводки-кольца выступают за форму наружу (обводка по контуру —
+    /// `stroke_outset` по свойствам узла).
     pub fn stroke_outset(&self, strokes: &[Stroke]) -> f64 {
         strokes
             .iter()
@@ -213,6 +224,15 @@ impl Geometry {
                 _ => ring_offsets(s.align, s.width).0,
             })
             .fold(0.0, f64::max)
+    }
+}
+
+/// На сколько обводки узла выступают за его форму: кольца или обводка по контуру
+/// с соединениями и окончаниями.
+pub fn stroke_outset(p: &Props) -> f64 {
+    match vector::path_shape(p) {
+        Some(shape) => vector::path_stroke_outset(p, &shape),
+        None => geometry(p).stroke_outset(&p.strokes),
     }
 }
 
@@ -263,6 +283,16 @@ impl Offset {
 /// формы не имеет — в неё попадают через детей.
 pub fn hit(p: &Props, local: Point, tolerance: f64) -> bool {
     let geom = geometry(p);
+    if let Some(shape) = vector::path_shape(p) {
+        // Вектор заливается по областям (`hit_path`), фигура — по своей форме.
+        let filled = matches!(p.kind, NodeKind::Frame | NodeKind::Image)
+            || p.fills.iter().any(|f| f.visible);
+        if p.kind != NodeKind::Vector && p.kind != NodeKind::Line && filled && geom.contains(local)
+        {
+            return true;
+        }
+        return vector::hit_path(p, &shape, local, tolerance);
+    }
     if let Geometry::Line(len) = geom {
         let half = p.strokes.iter().map(|s| s.width / 2.0).fold(0.0, f64::max);
         let seg = Line::new((0.0, 0.0), (len, 0.0));

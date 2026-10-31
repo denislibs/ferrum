@@ -465,7 +465,7 @@ impl Scene {
                 .reduce(|a, b| a.union(b)),
             _ => geom.bounds(),
         };
-        let outset = geom.stroke_outset(&n.props.strokes);
+        let outset = shape::stroke_outset(&n.props);
         let world_bounds =
             local_bounds.map(|b| n.world.transform_rect_bbox(b.inflate(outset, outset)));
         // Фрейм с обрезкой: дети не выходят за него, перебирать их не нужно.
@@ -1044,7 +1044,13 @@ fn looks_different(a: &Props, b: &Props) -> bool {
         || a.corner_radius != b.corner_radius
         || a.fills != b.fills
         || a.strokes != b.strokes
+        || a.stroke_style != b.stroke_style
         || a.text != b.text
+        || match (&a.vector, &b.vector) {
+            // Та же сеть (правка других свойств) — без сравнения точек.
+            (Some(x), Some(y)) => !Arc::ptr_eq(x, y) && x != y,
+            (x, y) => x.is_some() != y.is_some(),
+        }
 }
 
 fn aabb(r: Rect) -> AABB<[f64; 2]> {

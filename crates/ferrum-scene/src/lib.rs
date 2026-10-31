@@ -4,5 +4,6 @@
 
 mod scene;
 pub mod shape;
+pub mod vector;
 
 pub use scene::{testing, Draft, Scene, SceneNode, Slot};
