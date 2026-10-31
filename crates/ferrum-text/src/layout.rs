@@ -266,7 +266,9 @@ impl CharMap {
 fn line_height(v: LineHeight) -> parley::LineHeight {
     match v {
         LineHeight::Auto => parley::LineHeight::MetricsRelative(1.0),
-        LineHeight::Px(px) => parley::LineHeight::Absolute(finite_or(px, 0.0).max(0.0) as f32),
+        // Нечисловой интерлиньяж из файла — «Авто», а не схлопнутые строки.
+        LineHeight::Px(px) if !px.is_finite() => parley::LineHeight::MetricsRelative(1.0),
+        LineHeight::Px(px) => parley::LineHeight::Absolute(px.max(0.0) as f32),
         LineHeight::Percent(p) => {
             parley::LineHeight::FontSizeRelative((finite_or(p, 100.0) / 100.0).max(0.0) as f32)
         }
@@ -296,7 +298,7 @@ impl Fonts {
         let mut para_start = 0usize;
         for (pi, para) in paragraphs.iter().enumerate() {
             if pi > 0 {
-                y += props.paragraph_spacing.max(0.0);
+                y += finite_or(props.paragraph_spacing, 0.0).max(0.0);
             }
             let styles: Vec<SpanStyle> = if para.runs.is_empty() {
                 vec![self.span_style(para.attrs, req, default_color, &mut out)]

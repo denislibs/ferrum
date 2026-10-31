@@ -187,3 +187,18 @@ fn nan_from_a_file_does_not_reach_the_layout() {
         .flat_map(|c| c.stops.iter())
         .all(|s| s.1.is_finite()));
 }
+
+#[test]
+fn non_finite_spacing_and_line_height_keep_lines_apart() {
+    let mut fonts = fonts();
+    let t = text("Fer\nrum", |p| {
+        p.paragraph_spacing = f64::INFINITY;
+        p.style.line_height = LineHeight::Px(f64::NAN);
+    });
+    let l = lay(&mut fonts, &t, 0.0);
+    assert!(l.height.is_finite() && l.height > 0.0);
+    assert_eq!(l.lines.len(), 2);
+    // Интерлиньяж «Авто», а не нулевой: строки не наезжают друг на друга.
+    assert!(l.lines[1].rect.y0 >= l.lines[0].rect.y1 - 0.01);
+    assert!(l.lines[0].rect.height() > 1.0);
+}
