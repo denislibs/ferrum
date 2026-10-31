@@ -517,6 +517,20 @@ fn simplified_curves_are_never_bigger_than_the_exact_path() {
 }
 
 #[test]
+fn near_straight_networks_stay_simplified_when_zoomed_in() {
+    // Волнистая сеть (каждый четвёртый сегмент — едва выгнутая кривая): при
+    // приближении ×8 упрощение по-прежнему убирает большую часть точек, а не
+    // отдаёт точный путь (иначе каждый кадр правки обводил бы весь путь; ближе
+    // рендер обводит только куски у экрана).
+    let shape = network_shape(&vector(ferrum_doc::fixture::wavy_network(100_000)));
+    let exact = shape.stroke.elements().len();
+    for scale in [4.0, 8.0] {
+        let n = simplify(&shape, 0.25 / scale).stroke.elements().len();
+        assert!(n * 5 < exact, "×{scale}: {n} из {exact}");
+    }
+}
+
+#[test]
 fn simplified_curvy_path_stays_within_the_tolerance() {
     use kurbo::ParamCurve;
     // Кривые, которые остаются и которые становятся хордами, — на одном контуре.

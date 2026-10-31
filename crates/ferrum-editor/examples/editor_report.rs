@@ -910,6 +910,66 @@ fn vector_edit(report: &mut Report, label: &str, net: ferrum_doc::VectorNetwork)
         format!("{}", ed.step_count() - steps),
         "1",
     );
+    // Перетаскивание точки при приближении: каждое движение — превью сцены и
+    // кадр (контур обводки строится заново у видимой части).
+    let fit_camera = ed.camera().clone();
+    for mul in [8.0, 64.0] {
+        let world = {
+            let n = ed.scene().node(id).unwrap();
+            let m = n.world * ferrum_scene::vector::fit(&n.props);
+            let p = ed.vector_work().unwrap().points[0];
+            m * Point::new(p.x, p.y)
+        };
+        let mut cam = fit_camera.clone();
+        cam.set_zoom(fit_camera.zoom() * mul);
+        cam.set_center(world);
+        ed.set_camera(cam);
+        let (w, h) = ed.camera().device_size();
+        let mut backend = ferrum_render::CpuBackend::new(w, h);
+        let mut renderer = ferrum_render::Renderer::new();
+        let mut frame = |ed: &Editor| {
+            renderer.render(
+                &mut backend,
+                ed.scene(),
+                ed.camera(),
+                &ed.overlay(),
+                &ferrum_render::NoImages,
+                None,
+            );
+        };
+        frame(&ed);
+        let at = ed.camera().world_to_screen(world);
+        timed(&mut ed, Input::PointerDown(clock.at(at)));
+        let steps_before = ed.step_count();
+        let moves: Vec<Duration> = (1..=20)
+            .map(|i| {
+                let t = Instant::now();
+                // Шаг — единица мира (привязка к пикселям), туда и обратно.
+                let dx = mul * (1 + i % 2) as f64;
+                ed.handle(Input::PointerMove(clock.at(Point::new(at.x + dx, at.y))));
+                frame(&ed);
+                let d = t.elapsed();
+                ed.take_events();
+                d
+            })
+            .collect();
+        timed(
+            &mut ed,
+            Input::PointerUp(clock.at(Point::new(at.x + mul, at.y))),
+        );
+        report.gate_median(
+            &format!("{label}: перетаскивание точки при ×{mul} — движение и кадр"),
+            &moves,
+            16.7,
+        );
+        report.check(
+            &format!("{label}: перетаскивание точки при ×{mul} записано одним шагом"),
+            ed.step_count() == steps_before + 1,
+            format!("{}", ed.step_count() - steps_before),
+            "1",
+        );
+    }
+    ed.set_camera(fit_camera);
     // Ctrl/Cmd+A в правке: выделены все точки — команда, оверлей и кадр.
     let (w, h) = ed.camera().device_size();
     let mut backend = ferrum_render::CpuBackend::new(w, h);

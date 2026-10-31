@@ -456,12 +456,15 @@ impl Painter {
         }
         let i = slot as usize;
         let split = part != Part::All;
+        // Видимая часть в локальных координатах узла: контур обводки большого
+        // вектора строится только у неё.
+        let view = ctx.cull.map(|c| n.world.inverse().transform_rect_bbox(c));
         backend.set_transform(ctx.transform * n.world);
         if part != Part::Strokes {
             self.stats.drawn += 1;
         }
         if let Some(mut list) = held {
-            list.paths_at(ctx.scale);
+            list.paths_at(ctx.scale, view);
             self.play(backend, &list, alpha, ctx, part);
             return None;
         }
@@ -473,7 +476,7 @@ impl Painter {
                 self.stats.lists_built += 1;
             }
             let mut list = DisplayList::build(n, split);
-            list.paths_at(ctx.scale);
+            list.paths_at(ctx.scale, view);
             self.play(backend, &list, alpha, ctx, part);
             if ctx.retain {
                 list.last_used = self.frame;
@@ -487,7 +490,7 @@ impl Painter {
         }
         let mut list = self.lists[i].take().expect("проверено выше");
         list.last_used = self.frame;
-        list.paths_at(ctx.scale);
+        list.paths_at(ctx.scale, view);
         self.play(backend, &list, alpha, ctx, part);
         self.lists[i] = Some(list);
         None

@@ -473,12 +473,23 @@ fn vector_edit(
     let r = VECTOR_POINT_RADIUS * dpr;
     let mut filled = BezPath::new();
     let mut hollow = BezPath::new();
+    // Невыделенная точка ближе радиуса к последней нарисованной невыделенной
+    // слилась бы с ней: густая сеть при приближении — сотни кружков вместо
+    // тысяч в одной каше (соседи по номеру обычно соседи и на экране).
+    let mut last_hollow: Option<Point> = None;
     for i in visible {
         let selected = v.points.binary_search(&i).is_ok();
         if crowd && !selected {
             continue;
         }
-        let c = kurbo::Circle::new(to_device * pt(i), r);
+        let at = to_device * pt(i);
+        if !selected {
+            if last_hollow.is_some_and(|q| (q - at).hypot() < r) {
+                continue;
+            }
+            last_hollow = Some(at);
+        }
+        let c = kurbo::Circle::new(at, r);
         if selected {
             filled.extend(c.path_elements(0.1));
         } else {
