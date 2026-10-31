@@ -595,7 +595,13 @@ pub fn path_stroke_outset(p: &Props) -> f64 {
 pub fn distance_to(path: &BezPath, pt: Point, within: f64) -> Option<f64> {
     let mut best: Option<f64> = None;
     for seg in path.segments() {
-        let b = seg.bounding_box().inflate(within, within);
+        // Рамка ручек (она шире точной) — без поиска экстремумов кривой.
+        let b = match seg {
+            PathSeg::Line(l) => Rect::from_points(l.p0, l.p1),
+            PathSeg::Quad(q) => Rect::from_points(q.p0, q.p2).union_pt(q.p1),
+            PathSeg::Cubic(c) => Rect::from_points(c.p0, c.p3).union_pt(c.p1).union_pt(c.p2),
+        }
+        .inflate(within, within);
         if !b.contains(pt) {
             continue;
         }

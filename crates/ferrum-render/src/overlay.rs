@@ -243,7 +243,9 @@ pub(crate) fn draw(
         !overlay.selection.contains(h) && scene.slot(*h).is_some_and(|s| scene.is_visible(s))
     });
     if let Some(id) = hover {
-        if let Some(outline) = node_outline(scene, id, view) {
+        let (w, h) = backend.size();
+        let screen = Rect::new(0.0, 0.0, w as f64, h as f64).inflate(8.0 * dpr, 8.0 * dpr);
+        if let Some(outline) = node_outline(scene, id, view, screen) {
             backend.set_transform(Affine::IDENTITY);
             backend.set_color(theme.select);
             backend.stroke_path(&outline, &Stroke::new(1.5 * dpr));
@@ -494,7 +496,7 @@ fn vector_edit(
 }
 
 /// Контур формы узла в пикселях устройства; у группы — рамка её границ.
-fn node_outline(scene: &Scene, id: NodeId, view: Affine) -> Option<BezPath> {
+fn node_outline(scene: &Scene, id: NodeId, view: Affine, screen: Rect) -> Option<BezPath> {
     let n = scene.node(id)?;
     let to_device = view * n.world;
     let mut path = BezPath::new();
@@ -504,17 +506,53 @@ fn node_outline(scene: &Scene, id: NodeId, view: Affine) -> Option<BezPath> {
             path.line_to(to_device * Point::new(len, 0.0));
         }
         Geometry::None => path = to_device * n.local_bounds?.to_path(0.1),
-        // Вектор подсвечивается своей сетью, а не рамкой.
-        Geometry::Vector(_) => {
-            path = ferrum_scene::vector::network_shape(&n.props).stroke;
-            path.apply_affine(to_device);
-        }
+        // Вектор подсвечивается своей сетью (контуры из кэша узла), а не рамкой.
+        Geometry::Vector(_) => path = device_path(&n.path_shape()?.stroke, to_device, screen),
         geom => {
             geom.fill_path_into(&mut path);
             path.apply_affine(to_device);
         }
     }
     Some(path)
+}
+
+/// Путь в пикселях устройства для подсветки: сегменты, чья рамка ручек не
+/// задевает экран, отброшены; большой путь — с точностью в четверть пикселя
+/// (как списки отображения). Сеть в 100 000 точек иначе обводилась бы целиком
+/// на каждом кадре, пока указатель над ней.
+fn device_path(path: &BezPath, to_device: Affine, screen: Rect) -> BezPath {
+    use kurbo::PathSeg;
+    let mut out = BezPath::new();
+    let mut last: Option<Point> = None;
+    for seg in path.segments() {
+        let seg = to_device * seg;
+        let (start, end, bb) = match seg {
+            PathSeg::Line(l) => (l.p0, l.p1, Rect::from_points(l.p0, l.p1)),
+            PathSeg::Quad(q) => (q.p0, q.p2, Rect::from_points(q.p0, q.p2).union_pt(q.p1)),
+            PathSeg::Cubic(c) => (
+                c.p0,
+                c.p3,
+                Rect::from_points(c.p0, c.p3).union_pt(c.p1).union_pt(c.p2),
+            ),
+        };
+        if !bb.overlaps(screen) {
+            last = None;
+            continue;
+        }
+        if last != Some(start) {
+            out.move_to(start);
+        }
+        last = Some(end);
+        match seg {
+            PathSeg::Line(l) => out.line_to(l.p1),
+            PathSeg::Quad(q) => out.quad_to(q.p1, q.p2),
+            PathSeg::Cubic(c) => out.curve_to(c.p1, c.p2, c.p3),
+        }
+    }
+    if out.elements().len() > ferrum_scene::vector::SIMPLIFY_MIN_ELEMENTS {
+        out = ferrum_scene::vector::simplify_path(&out, crate::display::LOD_TOLERANCE_PX);
+    }
+    out
 }
 
 /// Целые мировые координаты линий сетки на отрезке `lo..=hi`. Число линий задаётся

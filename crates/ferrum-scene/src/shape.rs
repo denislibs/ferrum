@@ -283,8 +283,19 @@ impl Offset {
 /// шириной не меньше допуска с каждой стороны от своей средней линии. Группа своей
 /// формы не имеет — в неё попадают через детей.
 pub fn hit(p: &Props, local: Point, tolerance: f64) -> bool {
+    hit_shape(p, vector::path_shape(p).as_ref(), local, tolerance)
+}
+
+/// `hit` с готовыми контурами `vector::path_shape(p)` (кэш узла сцены): сеть в
+/// 100 000 точек не строится заново на каждое движение указателя.
+pub fn hit_shape(
+    p: &Props,
+    path: Option<&vector::PathShape>,
+    local: Point,
+    tolerance: f64,
+) -> bool {
     let geom = geometry(p);
-    if let Some(shape) = vector::path_shape(p) {
+    if let Some(shape) = path {
         // Вектор заливается по областям (`hit_path`), фигура — по своей форме.
         let filled = matches!(p.kind, NodeKind::Frame | NodeKind::Image)
             || p.fills.iter().any(|f| f.visible);
@@ -292,7 +303,7 @@ pub fn hit(p: &Props, local: Point, tolerance: f64) -> bool {
         {
             return true;
         }
-        return vector::hit_path(p, &shape, local, tolerance);
+        return vector::hit_path(p, shape, local, tolerance);
     }
     if let Geometry::Line(len) = geom {
         let half = p.strokes.iter().map(|s| s.width / 2.0).fold(0.0, f64::max);

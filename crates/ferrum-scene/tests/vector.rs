@@ -282,6 +282,57 @@ fn scene_bounds_and_hit_test_follow_the_network() {
 }
 
 #[test]
+fn node_contours_are_built_once_and_rebuilt_only_when_the_shape_changes() {
+    // Попадание и подсветка берут контуры из кэша узла: сеть в 100 000 точек не
+    // строится заново на каждое движение указателя.
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let p = vector(net(&[(0.0, 0.0), (100.0, 50.0)], &[(0, 1)]));
+    let id = doc
+        .transact(page, vec![], |tx| {
+            Ok(vec![tx.create_with_props(None, None, &p)?])
+        })
+        .unwrap()[0];
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let first = scene.node(id).unwrap().path_shape().unwrap().clone();
+    assert_eq!(scene.hit_test(Point::new(50.0, 25.0), 1.0), Some(id));
+    assert_eq!(scene.hit_test(Point::new(10.0, 40.0), 1.0), None);
+    let same = scene.node(id).unwrap().path_shape().unwrap();
+    assert!(
+        Arc::ptr_eq(&first, same),
+        "попадание контуры не перестроило"
+    );
+    // Сдвиг узла вида не меняет — контуры те же.
+    scene.set_preview(&[(
+        id,
+        PropsPatch {
+            x: Some(30.0),
+            ..Default::default()
+        },
+    )]);
+    assert!(Arc::ptr_eq(
+        &first,
+        scene.node(id).unwrap().path_shape().unwrap()
+    ));
+    // Другая сеть (превью жеста) — новые контуры, попадание идёт по ним.
+    scene.set_preview(&[(
+        id,
+        PropsPatch {
+            vector: Some(Arc::new(net(&[(0.0, 50.0), (100.0, 0.0)], &[(0, 1)]))),
+            ..Default::default()
+        },
+    )]);
+    let moved = scene.node(id).unwrap().path_shape().unwrap().clone();
+    assert!(!Arc::ptr_eq(&first, &moved));
+    assert_eq!(scene.hit_test(Point::new(10.0, 45.0), 1.0), Some(id));
+    assert_eq!(scene.hit_test(Point::new(10.0, 5.0), 1.0), None);
+    scene.clear_preview();
+    let back = scene.node(id).unwrap().path_shape().unwrap();
+    assert_eq!(**back, *first);
+    assert_eq!(scene.hit_test(Point::new(10.0, 5.0), 1.0), Some(id));
+}
+
+#[test]
 fn fit_stays_finite_for_a_tiny_extent_in_a_huge_frame() {
     let n = net(&[(0.0, 0.0), (1e-300, 5.0)], &[(0, 1)]);
     let p = Props {

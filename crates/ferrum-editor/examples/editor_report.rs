@@ -802,6 +802,81 @@ fn vector_edit(report: &mut Report, label: &str, net: ferrum_doc::VectorNetwork)
     let mut cam = Camera::new(VIEWPORT, 1.0);
     cam.fit(kurbo::Rect::new(0.0, 0.0, b.width(), b.height()), 48.0);
     ed.set_camera(cam);
+    ed.select(&[]);
+    ed.take_events();
+    // Наведение: движения указателя по вектору (через контур и внутрь) — каждое
+    // проверяет попадание в сеть, кадр рисует подсветку её контура.
+    let mut clock = Clock(0.0);
+    let center = ed
+        .camera()
+        .world_to_screen(Point::new(b.width() / 2.0, b.height() / 2.0));
+    // Точка 0 сети — на правом краю, в середине по высоте.
+    let right = {
+        let n = ed.scene().node(id).unwrap();
+        let m = n.world * ferrum_scene::vector::fit(&n.props);
+        ed.camera()
+            .world_to_screen(m * Point::new(net.points[0].x, net.points[0].y))
+    };
+    let hovers: Vec<Duration> = (0..MOVES)
+        .map(|i| {
+            let t = i as f64 / (MOVES - 1) as f64 * 1.05;
+            let p = Point::new(
+                center.x + (right.x - center.x) * t,
+                center.y + 0.3 * i as f64,
+            );
+            timed(&mut ed, Input::PointerMove(clock.at(p)))
+        })
+        .collect();
+    report.gate_median(
+        &format!("{label}: наведение — движение указателя"),
+        &hovers,
+        2.0,
+    );
+    report.info(
+        &format!("{label}: наведение, худшее движение (первое строит контуры)"),
+        ms(worst(&hovers)),
+    );
+    // Указатель на контуре: вектор под ним.
+    ed.handle(Input::PointerMove(clock.at(right)));
+    report.check(
+        &format!("{label}: наведение находит вектор"),
+        ed.overlay().hover == Some(id),
+        format!("{:?}", ed.overlay().hover.is_some()),
+        "найден",
+    );
+    {
+        let (w, h) = ed.camera().device_size();
+        let mut backend = ferrum_render::CpuBackend::new(w, h);
+        let mut renderer = ferrum_render::Renderer::new();
+        let overlay = ed.overlay();
+        renderer.render(
+            &mut backend,
+            ed.scene(),
+            ed.camera(),
+            &overlay,
+            &ferrum_render::NoImages,
+            None,
+        );
+        let frames: Vec<Duration> = (0..7)
+            .map(|_| {
+                let t = Instant::now();
+                renderer.render(
+                    &mut backend,
+                    ed.scene(),
+                    ed.camera(),
+                    &overlay,
+                    &ferrum_render::NoImages,
+                    None,
+                );
+                t.elapsed()
+            })
+            .collect();
+        report.gate_median(
+            &format!("{label}: кадр с подсветкой наведения"),
+            &frames,
+            16.7,
+        );
+    }
     ed.start_vector_edit(id);
     ed.take_events();
     let steps = ed.step_count();
@@ -810,7 +885,6 @@ fn vector_edit(report: &mut Report, label: &str, net: ferrum_doc::VectorNetwork)
     let m = n.world * ferrum_scene::vector::fit(&n.props);
     let p0 = net.points[0];
     let from = ed.camera().world_to_screen(m * Point::new(p0.x, p0.y));
-    let mut clock = Clock(1000.0);
     timed(&mut ed, Input::PointerDown(clock.at(from)));
     let mut moves = Vec::new();
     for i in 1..=MOVES {

@@ -101,7 +101,9 @@ pub struct DisplayList {
 /// Контуры узла с обводкой по контуру и стиль обводки (соединение, предел угла).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathSource {
-    pub shape: PathShape,
+    /// Общие с узлом сцены (`SceneNode::path_shape`): попадание и подсветка
+    /// наведения строят их не заново.
+    pub shape: Arc<PathShape>,
     pub style: StrokeStyle,
 }
 
@@ -178,7 +180,7 @@ impl DisplayList {
     pub fn build(node: &SceneNode, split: bool) -> DisplayList {
         let p: &Props = &node.props;
         let geometry = shape::geometry(p);
-        let path_shape = vector::path_shape(p);
+        let path_shape = node.path_shape().cloned();
         let mut items = Vec::new();
         if let (NodeKind::Vector, Some(ps)) = (p.kind, &path_shape) {
             // Области снизу вверх, у каждой — её заливки (или заливки узла).
@@ -261,7 +263,7 @@ impl DisplayList {
         let items = &self.items;
         let list = &self.items;
         let style = self.path.as_deref().map(|p| p.style).unwrap_or_default();
-        let full = self.path.as_deref().map(|p| &p.shape);
+        let full = self.path.as_deref().map(|p| &*p.shape);
         let exact = &mut self.exact;
         let detail = self.detail;
         self.paths.get_or_insert_with(|| {

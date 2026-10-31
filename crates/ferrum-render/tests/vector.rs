@@ -507,3 +507,71 @@ fn edit_overlay_of_a_huge_selection_is_bounded() {
     );
     assert!(count.elements < 25_000, "элементов {}", count.elements);
 }
+
+#[test]
+fn hover_outline_of_a_huge_vector_is_culled_and_simplified() {
+    // Подсветка наведения: сеть в 20 000 кривых — из кэша узла, без сегментов
+    // вне экрана и с точностью в четверть пикселя, а не весь путь каждый кадр.
+    let mut page = Page::new();
+    let net = ferrum_doc::fixture::curvy_network(20_000, 500.0);
+    let id = page.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(Arc::new(net)),
+            strokes: Some(vec![Stroke {
+                color: Color::BLACK,
+                width: 1.0,
+                align: StrokeAlign::Center,
+            }]),
+            ..rect(0.0, 0.0, 1000.0, 1000.0)
+        },
+    );
+    let scene = page.scene();
+    let exact = scene
+        .node(id)
+        .unwrap()
+        .path_shape()
+        .unwrap()
+        .stroke
+        .elements()
+        .len();
+    let mut r = ferrum_render::Renderer::new();
+    let mut extra = |cam: &ferrum_render::Camera| {
+        let mut count = Count {
+            size: (0, 0),
+            calls: 0,
+            elements: 0,
+        };
+        let mut frame = |hover| {
+            let overlay = ferrum_render::Overlay {
+                frame_labels: false,
+                pixel_grid: false,
+                hover,
+                ..Default::default()
+            };
+            r.render(
+                &mut count,
+                &scene,
+                cam,
+                &overlay,
+                &ferrum_render::NoImages,
+                None,
+            );
+            count.elements
+        };
+        let without = frame(None);
+        frame(Some(id)) - without
+    };
+    let mut cam = camera(1200.0, 800.0);
+    cam.fit(kurbo::Rect::new(0.0, 0.0, 1000.0, 1000.0), 0.0);
+    let fit = extra(&cam);
+    assert!(fit > 0 && fit * 4 < exact, "вписано: {fit} из {exact}");
+    cam.set_zoom(40.0);
+    cam.set_center(kurbo::Point::new(1000.0, 500.0));
+    let near = extra(&cam);
+    assert!(
+        near > 0 && near * 20 < exact,
+        "приближено: {near} из {exact}"
+    );
+}
