@@ -95,6 +95,25 @@ pub struct Measure {
     pub kind: MeasureKind,
 }
 
+/// Правка текста на холсте (подсистема 3, этап 2): рамка текста, выделение,
+/// курсор и подчёркивание составляемого текста IME. Всё — в координатах узла.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextEditOverlay {
+    /// Координаты узла → мир.
+    pub transform: Affine,
+    /// Рамка узла: тонкий контур цвета выделения вместо ручек (как в Figma).
+    pub frame: Rect,
+    /// Выделенные участки строк: заливка `select` 25 %.
+    pub selection: Vec<Rect>,
+    /// Курсор: x, верх и низ строки; `None` — погашен миганием или есть выделение.
+    pub caret: Option<(f64, f64, f64)>,
+    /// Подчёркивание составляемого IME текста: `(x0, x1, y)` по строкам.
+    pub composition: Vec<(f64, f64, f64)>,
+}
+
+/// Прозрачность заливки выделения текста (спека подсистемы 3, раздел 7).
+pub const TEXT_SELECTION_ALPHA: f32 = 0.25;
+
 /// Что показать поверх содержимого. Заполняет редактор (этап 3).
 #[derive(Debug, Clone)]
 pub struct Overlay {
@@ -111,6 +130,8 @@ pub struct Overlay {
     pub pixel_grid: bool,
     /// Измерения расстояний с Alt (раздел 8.6 спеки).
     pub measurements: Vec<Measure>,
+    /// Правка текста: курсор и выделение внутри текстового узла.
+    pub text_edit: Option<TextEditOverlay>,
 }
 
 impl Default for Overlay {
@@ -124,6 +145,7 @@ impl Default for Overlay {
             frame_labels: true,
             pixel_grid: true,
             measurements: Vec::new(),
+            text_edit: None,
         }
     }
 }
@@ -204,8 +226,66 @@ pub(crate) fn draw(
         backend.set_color(theme.snap);
         backend.stroke_path(&path, &hairline);
     }
+    if let Some(t) = &overlay.text_edit {
+        text_edit(backend, view, dpr, theme, t);
+    }
     selection(backend, text, scene, camera, overlay);
     measurements(backend, text, camera, overlay);
+}
+
+/// Правка текста: контур рамки, выделение, подчёркивание IME и курсор в 1 CSS px.
+fn text_edit(
+    backend: &mut impl RenderBackend,
+    view: Affine,
+    dpr: f64,
+    theme: &OverlayTheme,
+    t: &TextEditOverlay,
+) {
+    let to_device = view * t.transform;
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.select);
+    let mut frame = BezPath::new();
+    let corners = [
+        Point::new(t.frame.x0, t.frame.y0),
+        Point::new(t.frame.x1, t.frame.y0),
+        Point::new(t.frame.x1, t.frame.y1),
+        Point::new(t.frame.x0, t.frame.y1),
+    ];
+    for (i, c) in corners.iter().enumerate() {
+        let p = crisp_point(to_device * *c, dpr);
+        if i == 0 {
+            frame.move_to(p);
+        } else {
+            frame.line_to(p);
+        }
+    }
+    frame.close_path();
+    backend.stroke_path(&frame, &Stroke::new(dpr));
+    if !t.selection.is_empty() {
+        backend.set_transform(to_device);
+        backend.set_color(theme.select.multiply_alpha(TEXT_SELECTION_ALPHA));
+        for r in &t.selection {
+            backend.fill_rect(r);
+        }
+    }
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.select);
+    for &(x0, x1, y) in &t.composition {
+        let a = crisp_point(to_device * Point::new(x0, y), dpr);
+        let b = crisp_point(to_device * Point::new(x1, y), dpr);
+        let mut path = BezPath::new();
+        path.move_to(a);
+        path.line_to(b);
+        backend.stroke_path(&path, &Stroke::new(dpr));
+    }
+    if let Some((x, top, bottom)) = t.caret {
+        let a = crisp_point(to_device * Point::new(x, top), dpr);
+        let b = crisp_point(to_device * Point::new(x, bottom), dpr);
+        let mut path = BezPath::new();
+        path.move_to(a);
+        path.line_to(b);
+        backend.stroke_path(&path, &Stroke::new(dpr));
+    }
 }
 
 /// Контур формы узла в пикселях устройства; у группы — рамка её границ.

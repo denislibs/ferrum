@@ -351,6 +351,7 @@ impl Editor {
             frame_labels: true,
             pixel_grid: self.settings.pixel_grid,
             measurements: self.measures.clone(),
+            text_edit: None,
         }
     }
 
