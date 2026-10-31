@@ -5,6 +5,7 @@
 //! одна и та же последовательность событий даёт один и тот же документ.
 
 mod actions;
+mod boolean;
 pub mod clipboard;
 pub mod commands;
 mod editor;

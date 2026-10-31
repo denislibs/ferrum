@@ -105,7 +105,7 @@ fn defaults_match_figma_on_both_platforms() {
         assert!(!map.bindings(c.id).is_empty(), "{:?}", c.id);
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 48);
+    assert_eq!(COMMANDS.len(), 52);
 }
 
 #[test]
@@ -389,7 +389,12 @@ fn alt_graph_never_matches_mod_alt_bindings() {
     let mut q = key("KeyQ", true, true, false, false);
     q.alt_graph = true;
     assert_eq!(map.lookup(&q), None);
-    // Без Ctrl+Alt в сочетании AltGr ничему не мешает.
+    // Alt+Shift+E (исключение) с AltGr — символ («ę» на польской раскладке).
+    let mut e2 = key("KeyE", false, true, true, false);
+    assert_eq!(win.lookup(&e2), Some(CommandId::BooleanExclude));
+    e2.alt_graph = true;
+    assert_eq!(win.lookup(&e2), None);
+    // Без Alt в сочетании AltGr ничему не мешает.
     let mut esc = KeyEvent::new("Escape", Modifiers::NONE);
     esc.alt_graph = true;
     assert_eq!(win.lookup(&esc), Some(CommandId::Escape));
@@ -538,4 +543,30 @@ fn import_without_or_with_unknown_platform() {
         win.import_json(odd).unwrap(),
         vec!["Неизвестная платформа раскладки — сочетания как в файле".to_string()]
     );
+}
+
+#[test]
+fn boolean_ops_are_alt_shift_letters_like_figma() {
+    for platform in [Platform::Mac, Platform::Windows, Platform::Linux] {
+        let map = Keymap::new(platform);
+        for (code, id) in [
+            ("KeyU", CommandId::BooleanUnion),
+            ("KeyS", CommandId::BooleanSubtract),
+            ("KeyI", CommandId::BooleanIntersect),
+            ("KeyE", CommandId::BooleanExclude),
+        ] {
+            assert_eq!(map.lookup(&key(code, false, true, true, false)), Some(id));
+            // Сочетание занято только булевой операцией.
+            let s = map.bindings(id)[0].clone();
+            assert_eq!(map.commands_for(&s), vec![id], "{platform:?} {code}");
+        }
+        // Ctrl/Cmd+Alt+буква — не булевы операции; Shift+E и Alt+E свободны.
+        let primary = platform == Platform::Mac;
+        assert_eq!(
+            map.lookup(&key("KeyU", !primary, true, false, primary)),
+            None
+        );
+        assert_eq!(map.lookup(&key("KeyE", false, false, true, false)), None);
+        assert_eq!(map.lookup(&key("KeyE", false, true, false, false)), None);
+    }
 }

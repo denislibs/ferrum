@@ -59,6 +59,10 @@ impl Editor {
             C::ToolPen => self.set_tool(ToolKind::Pen),
             C::ToolArrow => self.set_tool(ToolKind::Arrow),
             C::Flatten => self.flatten(),
+            C::BooleanUnion => self.boolean(ferrum_doc::BooleanOp::Union),
+            C::BooleanSubtract => self.boolean(ferrum_doc::BooleanOp::Subtract),
+            C::BooleanIntersect => self.boolean(ferrum_doc::BooleanOp::Intersect),
+            C::BooleanExclude => self.boolean(ferrum_doc::BooleanOp::Exclude),
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
@@ -287,14 +291,18 @@ impl Editor {
         });
     }
 
-    /// Ctrl+Shift+G: дети групп и фреймов выделения встают на их место у родителя.
+    /// Ctrl+Shift+G: дети групп, булевых групп и фреймов выделения встают на их
+    /// место у родителя (у булевой группы — снова со своими заливками).
     fn ungroup(&mut self) {
         let mut ids: Vec<(Vec<u32>, NodeId)> = top_level(&self.scene, &self.selection)
             .into_iter()
             .filter_map(|id| self.scene.slot(id).map(|s| (s, id)))
             .filter(|(s, _)| {
                 let n = self.scene.at(*s);
-                matches!(n.props.kind, NodeKind::Group | NodeKind::Frame) && !n.children.is_empty()
+                matches!(
+                    n.props.kind,
+                    NodeKind::Group | NodeKind::Frame | NodeKind::Boolean
+                ) && !n.children.is_empty()
             })
             .map(|(s, id)| (self.scene.order_key(s), id))
             .collect();

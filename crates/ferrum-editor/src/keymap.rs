@@ -365,9 +365,10 @@ impl Keymap {
 
     /// Команда для нажатой клавиши. При конфликте — первая по таблице команд.
     ///
-    /// С AltGr (`KeyEvent::alt_graph`) на Windows и Linux сочетания с Mod+Alt не
-    /// срабатывают: там AltGr приходит как Ctrl+Alt, и набор символа (например,
-    /// «@» на немецкой раскладке) иначе вызывал бы команду. На macOS AltGr нет, а
+    /// С AltGr (`KeyEvent::alt_graph`) на Windows и Linux сочетания с Alt не
+    /// срабатывают: там AltGr приходит как Ctrl+Alt (или как Alt), и набор символа
+    /// (например, «@» на немецкой раскладке, «ę» — AltGr+Shift+E на польской)
+    /// иначе вызывал бы команду (Mod+Alt+G, булевы Alt+Shift+U/S/I/E). На macOS AltGr нет, а
     /// Option некоторые браузеры отдают как AltGraph — правило убило бы ⌥⌘] и ⌥⌘[,
     /// поэтому там флаг не учитывается.
     pub fn lookup(&self, e: &KeyEvent) -> Option<CommandId> {
@@ -375,7 +376,7 @@ impl Keymap {
             code: e.code.clone(),
             mods: e.modifiers.into(),
         };
-        if e.alt_graph && self.platform != Platform::Mac && s.mods.alt && s.mods.ctrl {
+        if e.alt_graph && self.platform != Platform::Mac && s.mods.alt {
             return None;
         }
         self.index.get(&s).and_then(|ids| ids.first().copied())

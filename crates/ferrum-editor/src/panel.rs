@@ -101,7 +101,7 @@ pub fn display_rotation(deg: f64) -> f64 {
 pub fn panel_pose(scene: &Scene, slot: Slot) -> PanelPose {
     let n = scene.at(slot);
     let p = &n.props;
-    if p.kind == NodeKind::Group {
+    if p.kind.is_group_like() {
         let b = n.local_bounds.unwrap_or(Rect::ZERO);
         let corner = n.local * Point::new(b.x0, b.y0);
         return PanelPose {
@@ -247,7 +247,7 @@ fn size_patches(t: &Target, w: Option<f64>, h: Option<f64>) -> Vec<(NodeId, Prop
     if w.is_none() && h.is_none() {
         return vec![];
     }
-    if t.props.kind != NodeKind::Group {
+    if !t.props.kind.is_group_like() {
         return vec![(
             t.id,
             PropsPatch {
@@ -601,7 +601,8 @@ impl Editor {
         let parent = match target {
             DropTarget::Into(a) => {
                 let kind = self.scene.at(anchor_slot).props.kind;
-                if kind != NodeKind::Frame && kind != NodeKind::Group {
+                // Внутрь — фрейма, группы и булевой группы (как в Figma).
+                if kind != NodeKind::Frame && !kind.is_group_like() {
                     return false;
                 }
                 Some(a)
