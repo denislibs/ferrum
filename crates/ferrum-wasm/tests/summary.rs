@@ -605,11 +605,38 @@ fn stroke_style_rows_follow_the_node_kinds() {
             ..Default::default()
         },
     );
+    // Вектор из одного сегмента — только окончания: углов нет, соединение и
+    // предел ничего бы не меняли. Одна точка без сегментов — без строк.
+    let segment = p.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(net(2, &[(0, 1)])),
+            ..Default::default()
+        },
+    );
+    let dot = p.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(net(1, &[])),
+            ..Default::default()
+        },
+    );
     let sc = p.scene();
     assert_eq!(
-        summarize(&sc, &[t]).stroke_style.map(|s| s.ends),
-        Some(true)
+        summarize(&sc, &[t])
+            .stroke_style
+            .map(|s| (s.ends, s.corners)),
+        Some((true, true))
     );
+    assert_eq!(
+        summarize(&sc, &[segment])
+            .stroke_style
+            .map(|s| (s.ends, s.corners)),
+        Some((true, false))
+    );
+    assert_eq!(summarize(&sc, &[dot]).stroke_style.map(|s| s.ends), None);
 }
 
 #[test]

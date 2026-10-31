@@ -329,9 +329,10 @@ impl Acc<f64> {
     }
 }
 
-/// Есть ли у сети открытый конец (точка ровно с одним сегментом) — без сборки
-/// путей: один проход по сегментам.
-fn has_open_end(net: &ferrum_doc::VectorNetwork) -> bool {
+/// Строки стиля обводки вектора: окончания — есть открытый конец (точка ровно с
+/// одним сегментом), соединение и предел — есть угол (точка с двумя и больше
+/// сегментами). Без сборки путей: один проход по сегментам.
+fn vector_rows(net: &ferrum_doc::VectorNetwork) -> (bool, bool) {
     let mut degree = vec![0u8; net.points.len()];
     for s in &net.segments {
         for i in [s.start as usize, s.end as usize] {
@@ -340,7 +341,7 @@ fn has_open_end(net: &ferrum_doc::VectorNetwork) -> bool {
             }
         }
     }
-    degree.contains(&1)
+    (degree.contains(&1), degree.iter().any(|&d| d >= 2))
 }
 
 /// Сводка по выделенным узлам (неизвестные пропускаются).
@@ -402,7 +403,7 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
             // дают ложных «Смешанные».
             let (has_ends, has_corners) = match p.kind {
                 NodeKind::Line => (true, false),
-                NodeKind::Vector => (p.vector.as_deref().is_some_and(has_open_end), true),
+                NodeKind::Vector => p.vector.as_deref().map_or((false, false), vector_rows),
                 NodeKind::Ellipse => (false, false),
                 _ => (false, p.corner_radius <= 0.0),
             };
