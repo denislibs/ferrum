@@ -10,8 +10,10 @@ use std::sync::Arc;
 
 use common::*;
 use ferrum_doc::{Color, Fill, NodeKind, PropsPatch, ScaleMode, Stroke, StrokeAlign};
-use ferrum_render::{Camera, Measure, MeasureKind, Overlay, OverlayTheme, Pixmap, Renderer, Rgba};
-use kurbo::{Line, Point, Rect, Size};
+use ferrum_render::{
+    Camera, Measure, MeasureKind, Overlay, OverlayTheme, Pixmap, Renderer, Rgba, TextEditOverlay,
+};
+use kurbo::{Affine, Line, Point, Rect, Size};
 use vello_cpu::color::PremulRgba8;
 
 fn solid(r: u8, g: u8, b: u8, a: u8) -> Option<Vec<Fill>> {
@@ -826,4 +828,36 @@ fn mirroring() {
     let edge = px(&img, 100, 10);
     assert!(edge[2] > 180 && edge[0] < 80, "рамка выделения: {edge:?}");
     golden("mirroring", &img);
+}
+
+#[test]
+fn text_edit() {
+    let scene = Page::new().scene();
+    let overlay = Overlay {
+        frame_labels: false,
+        pixel_grid: false,
+        text_edit: Some(TextEditOverlay {
+            transform: Affine::translate((20.0, 30.0)),
+            frame: Rect::new(0.0, 0.0, 120.0, 40.0),
+            selection: vec![Rect::new(10.0, 4.0, 50.0, 24.0)],
+            caret: Some((70.0, 4.0, 24.0)),
+            composition: vec![(80.0, 110.0, 22.0)],
+        }),
+        ..Default::default()
+    };
+    let img = render_overlay(&scene, &camera(160.0, 80.0), &overlay, WHITE);
+    let select = [0x4a, 0xa3, 0xff];
+    // Выделение — `select` 25 % поверх белого.
+    assert_px(&img, 40, 45, [210, 232, 255], 2);
+    // Курсор в 1 px: столбец x = 90 от y = 34 до 54, соседние столбцы — фон.
+    assert_px(&img, 90, 44, select, 2);
+    assert_px(&img, 89, 44, [255, 255, 255], 0);
+    assert_px(&img, 91, 44, [255, 255, 255], 0);
+    // Подчёркивание IME — строка y = 52 от x = 100 до 130.
+    assert_px(&img, 115, 52, select, 2);
+    assert_px(&img, 115, 53, [255, 255, 255], 0);
+    // Рамка текста — тонкий контур, внутри — фон.
+    assert_px(&img, 20, 60, select, 2);
+    assert_px(&img, 25, 60, [255, 255, 255], 0);
+    golden("text_edit", &img);
 }

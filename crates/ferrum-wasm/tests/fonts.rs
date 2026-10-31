@@ -480,7 +480,7 @@ fn opening_a_document_drops_edits_waiting_for_fonts() {
 }
 
 #[test]
-fn page_change_drops_waiting_font_replacement() {
+fn page_change_waits_behind_font_replacement() {
     let mut c = core();
     // Inter готов; на двух страницах по тексту шрифтом «Comic Sans».
     create(&mut c, "Ferrum", None);
@@ -491,7 +491,7 @@ fn page_change_drops_waiting_font_replacement() {
     let first = c.editor().document().pages()[0].0.to_string();
     c.command(Command::AddPage);
     create(&mut c, "Два", comic);
-    c.command(Command::SetPage { id: first });
+    c.command(Command::SetPage { id: first.clone() });
     c.command(Command::ReplaceMissingFont {
         from: FontNameDto {
             family: "Comic Sans".into(),
@@ -503,14 +503,22 @@ fn page_change_drops_waiting_font_replacement() {
         },
     });
     let events = c.take_events();
-    // Ждёт Roboto; страница сменилась — замена относилась к первой.
+    // Замена ждёт Roboto; смена страницы встаёт за ней: замена — на первой
+    // странице, где её попросили, а не на второй.
     let second = c.editor().document().pages()[1].0.to_string();
-    c.command(Command::SetPage { id: second });
+    c.command(Command::SetPage { id: second.clone() });
     c.take_events();
+    assert_eq!(c.editor().page().to_string(), first, "смена страницы ждёт");
     serve(&mut c, &events);
+    assert_eq!(c.editor().page().to_string(), second);
     let missing = c.editor().missing_fonts();
     assert_eq!(missing.len(), 1, "{missing:?}");
     assert_eq!(missing[0].font.family, "Comic Sans");
+    c.command(Command::SetPage { id: first });
+    assert!(
+        c.editor().missing_fonts().is_empty(),
+        "первая страница — Roboto"
+    );
 }
 
 #[test]

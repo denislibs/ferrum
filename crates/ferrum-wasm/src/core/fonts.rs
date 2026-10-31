@@ -1,7 +1,11 @@
 //! Шрифты и текст в ядре worker'а (подсистема 3, этап 1): списки шрифтов
 //! источников, запросы и загрузка байтов, отсутствующие шрифты страницы и их
 //! замена, тестовое создание текста. Правки текста, которым нужны ещё не
-//! загруженные шрифты, ждут в очереди и выполняются, когда байты придут.
+//! загруженные шрифты, ждут в очереди и выполняются, когда байты придут. Пока
+//! очередь не пуста, за ней встаёт и всё следующее — команды и ввод из кольца:
+//! щелчок, «Вырезать» или отмена не обгоняют набор, ждущий шрифта. Очередь
+//! ограничена (`MAX_WAITING`), а ответа на запрос шрифта ждут не дольше
+//! `FONT_WAIT_MS` — затем шрифт считается не полученным (запасной Inter).
 //!
 //! Всё, что приходит из основного потока, не доверенное: имена и списки
 //! ограничены (спека 8), неверное — `Error`, сбой разбора шрифта — `Log`.
@@ -9,7 +13,7 @@
 use std::collections::VecDeque;
 
 use ferrum_doc::{FontName, LetterSpacing, LineHeight, PageId, TextContent, TextProps, TextSizing};
-use ferrum_editor::TextError;
+use ferrum_editor::{Input, TextError};
 use ferrum_scene::Scene;
 use ferrum_text::{FaceInfo, FamilyInfo, FontStatus, SharedFonts, SourceKind, MAX_FAMILY_NAME};
 use kurbo::Point;
@@ -21,12 +25,30 @@ use crate::protocol::{
     TextSizingDto, MAX_FONT_FACES, MAX_FONT_FAMILIES, MAX_TEXT_BYTES, MAX_TEXT_DATA_BYTES,
 };
 
+/// Сколько команд и событий ввода ждут шрифтов; сверх — очередь сбрасывается
+/// с ошибкой (неотвеченный запрос шрифта не растит память без предела).
+pub const MAX_WAITING: usize = 4096;
+/// Сколько ждать байтов запрошенных шрифтов (мс), пока очередь не пуста; затем
+/// они считаются не полученными, и очередь выполняется с запасным шрифтом.
+pub const FONT_WAIT_MS: f64 = 15_000.0;
+
+/// Ждёт шрифтов: команда основного потока или событие ввода из кольца.
+#[derive(Debug)]
+pub(crate) enum Waiting {
+    Command(Command),
+    Input(Input),
+}
+
 /// Что ядро уже сообщило об отсутствующих шрифтах и каталоге.
 #[derive(Default)]
 pub(crate) struct FontState {
-    /// Правки, ждущие шрифтов, по порядку прихода.
-    pub waiting: VecDeque<Command>,
+    /// Ждущее шрифтов, по порядку прихода.
+    pub waiting: VecDeque<Waiting>,
+    /// Время ядра (мс), с которого очередь не пуста.
+    pub waiting_since: Option<f64>,
     pub missing_sent: Option<Vec<MissingFontDto>>,
+    /// Семейства текстов страницы, что ушли последними (`PageFonts`).
+    pub page_sent: Option<Vec<String>>,
     pub catalog_sent: Option<Vec<FontChoice>>,
     /// При чём посчитаны отсутствующие: страница, экземпляр сцены, ревизия
     /// текстов сцены, поколение реестра (`None` — пересчитать). Правка без
@@ -203,7 +225,8 @@ impl Core {
     }
 
     /// Правка текста; ждущая шрифтов — в очередь (повтор — `after_fonts_changed`).
-    fn text_command(&mut self, cmd: Command) {
+    pub(crate) fn text_command(&mut self, cmd: Command) {
+        self.editor.take_text_pending();
         let result = match &cmd {
             Command::ReplaceMissingFont { from, to } => match (font_name(from), font_name(to)) {
                 (Ok(from), Ok(to)) => self.editor.replace_font(&from, &to).map(|_| ()),
@@ -212,6 +235,7 @@ impl Core {
                     return;
                 }
             },
+            c if super::text::is_text_command(c) => self.run_text(c),
             Command::TestCreateText {
                 x,
                 y,
@@ -264,9 +288,11 @@ impl Core {
             _ => return,
         };
         match result {
+            // Клавиша правки (удаление, формат) отложена редактором: повторить.
+            Ok(()) if self.editor.take_text_pending() => self.wait(Waiting::Command(cmd)),
             Ok(()) => {}
             // Шрифты ещё грузятся: повторить после изменения реестра.
-            Err(TextError::Pending) => self.font_state.waiting.push_back(cmd),
+            Err(TextError::Pending) => self.wait(Waiting::Command(cmd)),
             // Документ не принял правку (только чтение, пределы): сообщение
             // пользователю, в очередь не ставим.
             Err(TextError::Doc(e)) => self.error(e.to_string()),
@@ -274,15 +300,81 @@ impl Core {
         self.push_font_requests();
     }
 
-    /// Реестр изменился (пришёл список, загружен файл): кадр заново, правки,
-    /// ждавшие шрифтов, — ещё раз по порядку, списки для интерфейса — если сменились.
+    /// Ставит в очередь ждущих шрифтов. Переполнение — очередь сбрасывается
+    /// целиком с ошибкой: выполнить её часть значило бы нарушить порядок ввода.
+    pub(crate) fn wait(&mut self, item: Waiting) {
+        let q = &mut self.font_state.waiting;
+        if q.is_empty() {
+            self.font_state.waiting_since = Some(self.now_ms);
+        }
+        // Сдвиги указателя подряд: важен последний (наведение, протяжка).
+        if matches!(item, Waiting::Input(Input::PointerMove(_)))
+            && matches!(q.back(), Some(Waiting::Input(Input::PointerMove(_))))
+        {
+            q.pop_back();
+        }
+        if q.len() >= MAX_WAITING {
+            q.clear();
+            self.font_state.waiting_since = None;
+            self.error(
+                "Шрифты загружаются слишком долго: ввод, сделанный за это время, не применён",
+            );
+            return;
+        }
+        q.push_back(item);
+    }
+
+    /// Ждёт ли что-нибудь шрифтов (тогда и следующее встаёт в очередь).
+    pub(crate) fn fonts_awaited(&self) -> bool {
+        !self.font_state.waiting.is_empty()
+    }
+
+    /// Реестр изменился (пришёл список, загружен файл): кадр заново, ждавшее
+    /// шрифтов — ещё раз по порядку, списки для интерфейса — если сменились.
     fn after_fonts_changed(&mut self) {
         self.dirty = true;
-        let waiting: Vec<Command> = self.font_state.waiting.drain(..).collect();
-        for cmd in waiting {
-            self.text_command(cmd);
+        let waiting: Vec<Waiting> = self.font_state.waiting.drain(..).collect();
+        self.font_state.waiting_since = None;
+        for item in waiting {
+            // Правка снова ждёт — всё следующее за ней тоже ждёт: порядок команд
+            // и ввода (стиль, набор, щелчок) сохраняется.
+            if self.font_state.waiting.is_empty() {
+                self.run_waiting(item);
+            } else {
+                self.font_state.waiting.push_back(item);
+            }
         }
         self.push_font_requests();
+    }
+
+    /// Перед журналом и снимком (интерфейс может закрываться — `pagehide`):
+    /// ждущее шрифтов не должно пропасть. Ожидание прекращается (шрифты — как
+    /// не полученные, запасной), очередь выполняется. Повтор может запросить новые
+    /// шрифты — тогда ещё раз, не больше нескольких кругов.
+    pub(crate) fn settle_waiting_fonts(&mut self) {
+        for _ in 0..4 {
+            if !self.fonts_awaited() {
+                return;
+            }
+            self.give_up_waiting_fonts();
+        }
+    }
+
+    /// Шрифтов ждут дольше `FONT_WAIT_MS`: запрошенные считаются не полученными
+    /// (как `LoadFont` без байтов), очередь выполняется с запасным шрифтом.
+    pub(crate) fn give_up_waiting_fonts(&mut self) {
+        let families = self.fonts.borrow_mut().give_up_loading();
+        let secs = FONT_WAIT_MS / 1000.0;
+        let message = if families.is_empty() {
+            format!("Шрифты не загрузились за {secs} с: текст — запасным шрифтом")
+        } else {
+            format!(
+                "Шрифты не загрузились за {secs} с ({}): текст — запасным шрифтом",
+                families.join(", ")
+            )
+        };
+        self.events.push(CoreEvent::Log { message });
+        self.after_fonts_changed();
     }
 
     /// Шрифты текущей страницы: на ней — не вытеснять, незагруженные — запросить
@@ -343,6 +435,18 @@ impl Core {
 
     fn push_missing_list(&mut self) {
         self.font_state.recomputed.0 += 1;
+        // Семейства страницы — для группы «В документе» выбора шрифта.
+        let mut families: Vec<String> = self
+            .editor
+            .page_fonts()
+            .into_iter()
+            .map(|f| f.family)
+            .collect();
+        families.dedup();
+        if self.font_state.page_sent.as_ref() != Some(&families) {
+            self.font_state.page_sent = Some(families.clone());
+            self.events.push(CoreEvent::PageFonts { families });
+        }
         let list: Vec<MissingFontDto> = self
             .editor
             .missing_fonts()
@@ -377,13 +481,6 @@ impl Core {
             self.events
                 .push(CoreEvent::FontCatalog { families: catalog });
         }
-    }
-
-    /// Смена страницы: замена шрифта относилась к прошлой странице — отбросить.
-    pub(crate) fn drop_page_scoped_font_edits(&mut self) {
-        self.font_state
-            .waiting
-            .retain(|c| !matches!(c, Command::ReplaceMissingFont { .. }));
     }
 
     /// Сколько раз пересчитаны (отсутствующие шрифты, каталог) — для тестов.

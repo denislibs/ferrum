@@ -7,6 +7,11 @@
 import { expect, test, type Page } from '@playwright/test';
 import { appScreen, live, liveWhen, openApp } from './helpers';
 
+// Чтений layout вне фазы measure планировщика не было (тестовый режим их копит).
+test.afterEach(async ({ page }) => {
+  expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
+});
+
 /** Текст в точке мира; ждёт узел в сцене (шрифты грузятся асинхронно). */
 async function createText(page: Page, x: number, y: number, text: string, font?: { family: string; style: string }): Promise<void> {
   const before = (await live(page)).nodes;
@@ -103,7 +108,12 @@ test('системные шрифты Chrome: «Показать системн�
   await createText(page, 100, 300, 'Ferrum', { family: family!, style: 'Regular' });
   await page.evaluate(() => window.__ferrum!.core!.send({ type: 'select', ids: [], mode: 'replace' }));
   await expect(page.getByRole('region', { name: 'Отсутствующие шрифты (1)' })).toBeVisible();
+  // «Показать системные шрифты» — в выборе шрифта секции «Текст» (этап 2).
+  const id = await page.evaluate(() => window.__ferrum!.ui!.layers.rows[0].id);
+  await page.evaluate((id) => window.__ferrum!.core!.send({ type: 'select', ids: [id], mode: 'replace' }), id);
+  await page.getByRole('button', { name: 'Шрифт', exact: true }).click();
   await page.getByRole('button', { name: 'Показать системные шрифты' }).click();
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'select', ids: [], mode: 'replace' }));
   // Шрифт нашёлся: список пуст, текст нарисован системным шрифтом (байты пришли).
   await expect(page.getByRole('region', { name: /Отсутствующие шрифты/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Показать системные шрифты' })).toHaveCount(0);

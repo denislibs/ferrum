@@ -44,11 +44,36 @@ impl Editor {
             C::ToolEllipse => self.set_tool(ToolKind::Ellipse),
             C::ToolLine => self.set_tool(ToolKind::Line),
             C::ToolHand => self.set_tool(ToolKind::Hand),
+            C::ToolText => self.set_tool(ToolKind::Text),
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
             C::Undo => self.undo_redo(false),
             C::Redo => self.undo_redo(true),
+            // В правке текста — фрагмент текста и обычный текст.
+            C::Copy if self.text_edit.is_some() => {
+                if let Some((bytes, plain)) = self.copy_text() {
+                    self.out
+                        .events
+                        .push(EditorEvent::ClipboardText { bytes, plain });
+                }
+            }
+            // Вырезание: в буфер — только если удаление состоится.
+            C::Cut if self.text_edit.is_some() && self.doc.is_read_only() => {}
+            C::Cut if self.text_edit.is_some() => {
+                if let Some((bytes, plain)) = self.copy_text() {
+                    match self.text_input(crate::TextInputKind::DeleteBackward, "") {
+                        Ok(()) => self
+                            .out
+                            .events
+                            .push(EditorEvent::ClipboardText { bytes, plain }),
+                        // Шрифты грузятся: ничего не сделано, ядро повторит команду.
+                        Err(crate::TextError::Pending) => self.out.text_pending = true,
+                        // Отказ документа `apply_text_edit` уже отдала событием.
+                        Err(crate::TextError::Doc(_)) => {}
+                    }
+                }
+            }
             C::Copy => {
                 if let Some(bytes) = self.copy() {
                     self.out.events.push(EditorEvent::Clipboard(bytes));
@@ -500,7 +525,7 @@ impl Editor {
 
     /// Куда вставлять: в единственный выделенный фрейм, иначе к родителю
     /// выделения, иначе в корень. Родитель, его мировая матрица и рамка фрейма.
-    fn paste_target(&self) -> (Option<NodeId>, Affine, Option<Rect>) {
+    pub(crate) fn paste_target(&self) -> (Option<NodeId>, Affine, Option<Rect>) {
         let candidate = match self.selection[..] {
             [one]
                 if self
@@ -564,6 +589,13 @@ impl Editor {
                 return Err(e);
             }
         };
+        // В правке текста тексты вставляются в него; иное — узлами после правки.
+        if self.text_edit.is_some() {
+            if self.paste_into_text(&payload) {
+                return Ok(());
+            }
+            self.end_text_edit();
+        }
         let (target, target_world, target_box) = self.paste_target();
         let offset = self.paste_offset(payload.bounds, target_box);
         let shift = Affine::translate(offset);

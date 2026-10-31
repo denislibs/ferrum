@@ -6,11 +6,12 @@
 //! Раскладке нужны байты шрифтов. Если какой-то шрифт ещё грузится, правка не
 //! делается: `TextPending` — ядро повторит её, когда шрифты придут.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ferrum_doc::{
-    DocError, DocResult, FontName, NodeId, NodeKind, Props, PropsPatch, TextContent, TextData,
-    TextProps, TextSizing, Tx,
+    DocError, FontName, NodeId, NodeKind, Props, PropsPatch, TextContent, TextData, TextProps,
+    TextSizing,
 };
 use ferrum_text::{FontStatus, Fonts, LayoutRequest, SharedFonts};
 use kurbo::Point;
@@ -89,30 +90,115 @@ pub fn fit_size(fonts: &mut Fonts, p: &Props) -> Result<Option<(f64, f64)>, Text
     }))
 }
 
-/// Ресайз текста рамкой (ручки, поля W/H, масштаб группы) переводит его в
-/// `Fixed`: размер больше не по тексту. Этап 2 добавит правила Figma для
-/// горизонтального ресайза (`AutoHeight`) вместе с режимом размера в панели.
-pub(crate) fn sizing_after_resize(before: &Props, patch: &PropsPatch) -> PropsPatch {
-    let Some(t) = &before.text else {
-        return patch.clone();
+/// Размер и положение рамки после правки текста `before` → `after` (у
+/// `AutoWidth` и `AutoHeight` — по раскладке `after`; `Fixed` — без изменений).
+/// Текст «авто по ширине» растёт от своего выравнивания: по центру — в обе
+/// стороны, справа — влево (как в Figma). Пустой патч — менять нечего.
+pub(crate) fn fit_patch(
+    fonts: &mut Fonts,
+    before: &Props,
+    after: &Props,
+) -> Result<PropsPatch, TextPending> {
+    let Some((w, h)) = fit_size(fonts, after)? else {
+        return Ok(PropsPatch::default());
     };
-    let resized = patch.w.is_some_and(|w| w != before.w) || patch.h.is_some_and(|h| h != before.h);
-    if !resized || t.props.sizing == TextSizing::Fixed || patch.text.is_some() {
-        return patch.clone();
+    let mut patch = PropsPatch::default();
+    if w != before.w {
+        patch.w = Some(w);
     }
-    PropsPatch {
-        text: Some(TextProps {
-            sizing: TextSizing::Fixed,
-            ..t.props.clone()
-        }),
-        ..patch.clone()
+    if h != before.h {
+        patch.h = Some(h);
+    }
+    let k = match after.text_props().map(|t| (t.sizing, t.align_h)) {
+        Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Center)) => 0.5,
+        Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Right)) => 1.0,
+        _ => 0.0,
+    };
+    // Отражённый узел переворачивает содержимое в своей рамке: край текста,
+    // что при отражении смотрит влево (вверх), лежит у дальнего края рамки, и
+    // рамка растёт к нему — якорь переходит на противоположную сторону.
+    let kx = if before.flip_x { 1.0 - k } else { k };
+    let dy = if before.flip_y { h - before.h } else { 0.0 };
+    let dx = (w - before.w) * kx;
+    if dx != 0.0 || dy != 0.0 {
+        // Сдвиг вдоль осей узла (с его поворотом) в координатах родителя.
+        let v = kurbo::Affine::rotate(-before.rotation.to_radians()) * kurbo::Point::new(-dx, -dy);
+        patch.x = Some(before.x + v.x);
+        patch.y = Some(before.y + v.y);
+    }
+    Ok(patch)
+}
+
+/// Изменение стороны рамки меньше этого — не ресайз.
+const RESIZE_EPS: f64 = 1e-6;
+
+/// Режим размера текста после ресайза рамки — правила Figma: у «авто» только
+/// ширина (стороны слева и справа, поле W) — «авто по высоте» с новой шириной,
+/// иначе (высота, угол, масштаб группы) — фиксированный. `None` — размер не менялся.
+pub(crate) fn sizing_after_resize(
+    sizing: TextSizing,
+    width_changed: bool,
+    height_changed: bool,
+) -> Option<TextSizing> {
+    match (sizing, width_changed, height_changed) {
+        (_, false, false) | (TextSizing::Fixed, _, _) => None,
+        (_, true, false) => Some(TextSizing::AutoHeight),
+        _ => Some(TextSizing::Fixed),
     }
 }
 
-/// `set_props` с правилом ресайза текста (`sizing_after_resize`).
-pub(crate) fn set_props_resizing(tx: &Tx, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
-    let before = tx.props(id)?;
-    tx.set_props(id, &sizing_after_resize(&before, patch))
+/// Правила ресайза к правкам текстов жеста или панели (и к превью, и к записи):
+/// режим размера по `sizing_after_resize`, у «авто по высоте» — высота по
+/// раскладке при новой ширине (превью переносит строки сразу). `bases` —
+/// свойства узлов на начало жеста.
+pub(crate) fn resize_texts<'a>(
+    fonts: &mut Fonts,
+    bases: impl Iterator<Item = (NodeId, &'a Props)>,
+    patches: &mut [(NodeId, PropsPatch)],
+) {
+    let texts: HashMap<NodeId, &Props> = bases.filter(|(_, p)| p.text.is_some()).collect();
+    if texts.is_empty() {
+        return;
+    }
+    for (id, patch) in patches.iter_mut() {
+        let Some(before) = texts.get(id) else {
+            continue;
+        };
+        let Some(t) = before.text_props() else {
+            continue;
+        };
+        if patch.text.is_some() {
+            continue;
+        }
+        // Шум плавающей точки (повёрнутый узел без привязки к пикселям) не считается ресайзом.
+        let dw = patch.w.is_some_and(|w| (w - before.w).abs() > RESIZE_EPS);
+        let dh = patch.h.is_some_and(|h| (h - before.h).abs() > RESIZE_EPS);
+        let Some(mut sizing) = sizing_after_resize(t.sizing, dw, dh) else {
+            continue;
+        };
+        if sizing == TextSizing::AutoHeight {
+            let mut p = (*before).clone();
+            patch.apply_to(&mut p);
+            if let Some(pt) = p.text.as_mut() {
+                Arc::make_mut(pt).props.sizing = sizing;
+            }
+            // Высота по раскладке и якорь рамки — как у правки текста (учёт отражения).
+            match fit_patch(fonts, &p, &p) {
+                Ok(fit) => {
+                    patch.h = fit.h.or(patch.h);
+                    patch.x = fit.x.or(patch.x);
+                    patch.y = fit.y.or(patch.y);
+                }
+                // Шрифт ещё грузится: высоту не узнать, а «авто по высоте» с чужой
+                // высотой несогласовано — остаётся фиксированный размер.
+                Err(TextPending) => sizing = TextSizing::Fixed,
+            }
+        }
+        patch.text = Some(TextProps {
+            sizing,
+            ..t.clone()
+        });
+    }
 }
 
 /// Новый шрифт участков после замены `from` → `to`: участок, набранный `from`

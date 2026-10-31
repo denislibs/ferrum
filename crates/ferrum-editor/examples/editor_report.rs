@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use ferrum_doc::fixture::fill;
-use ferrum_doc::{Document, NodeId, PropsPatch};
+use ferrum_doc::{Document, NodeId, PropsPatch, TextContent, TextProps, TextSizing};
 use ferrum_editor::snap::SNAP_THRESHOLD_PX as SNAP_PX;
 use ferrum_editor::{CommandId, Editor, Input, KeyEvent, Modifiers, Platform, PointerEvent};
 use ferrum_render::Camera;
@@ -744,6 +744,8 @@ fn main() {
         "false",
     );
 
+    typing(&mut report);
+
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
     let mut failed = false;
@@ -763,4 +765,87 @@ fn main() {
     if failed {
         std::process::exit(1);
     }
+}
+
+/// Шрифт вшитого Inter для замера ввода (файл сборки интерфейса).
+fn inter() -> ferrum_text::SharedFonts {
+    let rel = "inter/Inter-Variable.ttf";
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/web/public/fonts")
+        .join(rel);
+    let bytes = std::fs::read(&path).expect("вшитый Inter");
+    let fonts = ferrum_text::Fonts::shared();
+    {
+        let mut f = fonts.borrow_mut();
+        f.add_catalog(
+            ferrum_text::SourceKind::Bundled,
+            ferrum_text::group(ferrum_text::read_faces(&bytes, rel)),
+        );
+        f.load("Inter", rel, bytes).unwrap();
+        f.take_requests();
+    }
+    fonts
+}
+
+/// Ввод в текст из 10 000 символов (подсистема 3, этап 2): символ в середину
+/// абзацного текста «авто по высоте» — правка, раскладка для размера рамки и
+/// курсора одной транзакцией; ход курсора стрелкой.
+fn typing(report: &mut Report) {
+    let mut ed =
+        Editor::new(Document::new(), None, VIEWPORT, 1.0, Platform::Mac).expect("страница");
+    ed.set_fonts(inter());
+    let words = "Съешь же ещё этих мягких французских булок, да выпей чаю. ";
+    let text: String = words.chars().cycle().take(10_000).collect();
+    let mut props = TextProps {
+        sizing: TextSizing::AutoHeight,
+        ..Default::default()
+    };
+    props.style.size = 14.0;
+    let id = ed
+        .create_text(
+            Point::new(0.0, 0.0),
+            &TextContent::plain(&text),
+            &props,
+            600.0,
+            0.0,
+        )
+        .expect("текст");
+    ed.start_text_edit(id, ferrum_editor::EnterAt::All);
+    ed.text_key("ArrowLeft", Modifiers::NONE);
+    for _ in 0..5000 {
+        ed.text_key("ArrowRight", Modifiers::NONE);
+    }
+    let mut chars = Vec::new();
+    let mut now = 10_000.0;
+    for c in "Ферум".chars().cycle().take(40) {
+        now += 50.0;
+        ed.set_time(now);
+        let t = Instant::now();
+        ed.text_input(ferrum_editor::TextInputKind::Insert, &c.to_string())
+            .expect("ввод");
+        chars.push(t.elapsed());
+    }
+    let mut moves = Vec::new();
+    for _ in 0..40 {
+        let t = Instant::now();
+        ed.text_key("ArrowLeft", Modifiers::NONE);
+        moves.push(t.elapsed());
+    }
+    ed.take_events();
+    report.gate_median(
+        "Символ в текст из 10 000 символов: правка и размер рамки",
+        &chars,
+        16.0,
+    );
+    report.gate_median(
+        "Ход курсора стрелкой в тексте из 10 000 символов",
+        &moves,
+        1.0,
+    );
+    report.check(
+        "Ввод подряд — один шаг отмены",
+        ed.step_count() == 2,
+        format!("{}", ed.step_count()),
+        "2",
+    );
 }

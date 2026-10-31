@@ -2,6 +2,8 @@
 //! при которой экранные координаты совпадают с мировыми.
 #![allow(dead_code)]
 
+pub mod text;
+
 use ferrum_doc::{NodeId, NodeKind, Props, PropsPatch};
 use ferrum_editor::*;
 use ferrum_render::Camera;

@@ -54,6 +54,7 @@ pub enum Tool {
     Line,
     Hand,
     Image,
+    Text,
 }
 
 /// Тема оверлеев.
@@ -75,6 +76,8 @@ pub enum CursorKind {
     Duplicate,
     Resize,
     Rotate,
+    /// Текст в правке и инструмент «Текст».
+    Text,
 }
 
 /// Бэкенд рендера (`layout::BACKENDS`).
@@ -222,6 +225,181 @@ pub enum TextSizingDto {
     AutoWidth,
     AutoHeight,
     Fixed,
+}
+
+/// Наибольшая клавиша `TextKey` (`KeyboardEvent.code`) в байтах.
+pub const MAX_KEY_CODE_BYTES: usize = 64;
+/// Пределы чисел стиля текста из панели (недоверенный ввод).
+pub const MAX_FONT_SIZE: f64 = 10_000.0;
+
+/// Вид ввода в текст (`InputEvent.inputType` и составление IME).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum TextInputKindDto {
+    Insert,
+    Paragraph,
+    Paste,
+    Compose,
+    Commit,
+    DeleteBackward,
+    DeleteForward,
+    DeleteWordBackward,
+    DeleteWordForward,
+    DeleteLineBackward,
+    DeleteLineForward,
+}
+
+/// Модификаторы клавиши `TextKey`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeyMods {
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub meta: bool,
+}
+
+/// Единица интерлиньяжа и трекинга.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum SpacingUnit {
+    /// Только интерлиньяж: по метрикам шрифта (значение не читается).
+    Auto,
+    Px,
+    Percent,
+}
+
+/// Интерлиньяж или трекинг: единица и значение.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpacingDto {
+    pub unit: SpacingUnit,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum DecorationDto {
+    None,
+    Underline,
+    Strike,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum TextCaseDto {
+    None,
+    Upper,
+    Lower,
+    Title,
+    SmallCaps,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum ListKindDto {
+    None,
+    Bullet,
+    Ordered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum AlignHDto {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum AlignVDto {
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// Правка стиля символов из секции «Текст»: только известные ключи. Семейство
+/// без начертания — Regular (интерфейс сам подбирает то же начертание, если оно
+/// есть в семействе, и шлёт его явно).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextStylePatchDto {
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub size: Option<f64>,
+    #[serde(default)]
+    pub line_height: Option<SpacingDto>,
+    #[serde(default)]
+    pub letter_spacing: Option<SpacingDto>,
+    #[serde(default)]
+    pub decoration: Option<DecorationDto>,
+    #[serde(default)]
+    pub case: Option<TextCaseDto>,
+    #[serde(default)]
+    pub list: Option<ListKindDto>,
+}
+
+/// Правка свойств текстовых узлов из секции «Текст».
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextPropsPatchDto {
+    #[serde(default)]
+    pub sizing: Option<TextSizingDto>,
+    #[serde(default)]
+    pub align_h: Option<AlignHDto>,
+    #[serde(default)]
+    pub align_v: Option<AlignVDto>,
+    #[serde(default)]
+    pub paragraph_spacing: Option<f64>,
+    #[serde(default)]
+    pub paragraph_indent: Option<f64>,
+}
+
+/// Значение для панели и признак «Смешанное».
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct MixedString {
+    pub value: String,
+    pub mixed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct MixedSpacing {
+    pub value: SpacingDto,
+    pub mixed: bool,
+}
+
+/// Сводка стиля для секции «Текст».
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct TextStyleDto {
+    pub family: MixedString,
+    pub style: MixedString,
+    pub size: Num,
+    pub line_height: MixedSpacing,
+    pub letter_spacing: MixedSpacing,
+    /// Перечисления — строкой: `decoration` (`none`…), `case`, `list`,
+    /// `sizing`, `alignH`, `alignV`.
+    pub decoration: MixedString,
+    pub case: MixedString,
+    pub list: MixedString,
+    pub sizing: MixedString,
+    pub align_h: MixedString,
+    pub align_v: MixedString,
+    pub paragraph_spacing: Num,
+    pub paragraph_indent: Num,
+    /// Правится выделенный диапазон (идёт правка текста).
+    pub range: bool,
 }
 
 /// Правка выделения из панели свойств.
@@ -487,6 +665,42 @@ pub enum Command {
         #[serde(default)]
         height: Option<f64>,
     },
+    // ——— Подсистема 3, этап 2: правка текста ———
+    /// Войти в правку текста (весь текст выделен).
+    TextEditStart {
+        id: String,
+    },
+    /// Выйти из правки (как Esc).
+    TextEditEnd,
+    /// Ввод из поля: набор, абзац, удаление, вставка обычного текста (вне правки
+    /// — новый текст), составление IME. `data` — не больше 64 КБ.
+    TextInput {
+        kind: TextInputKindDto,
+        #[serde(default)]
+        data: Option<String>,
+    },
+    /// Клавиша в правке: ход курсора, удаление, отмена, форматирование
+    /// (`key` — `KeyboardEvent.code`).
+    TextKey {
+        key: String,
+        #[serde(default)]
+        mods: KeyMods,
+    },
+    /// Стиль символов: в правке — выделенного диапазона (у курсора — следующего
+    /// ввода), иначе — всего текста узлов `ids` (без них — выделения).
+    SetTextStyle {
+        patch: TextStylePatchDto,
+        phase: EditPhase,
+        #[serde(default)]
+        ids: Option<Vec<String>>,
+    },
+    /// Свойства текстовых узлов (режим размера, выравнивание, интервалы абзацев).
+    SetTextProps {
+        patch: TextPropsPatchDto,
+        phase: EditPhase,
+        #[serde(default)]
+        ids: Option<Vec<String>>,
+    },
 }
 
 /// Страница в списке.
@@ -574,10 +788,14 @@ pub enum CoreEvent {
     Page {
         id: String,
     },
-    /// Байты для системного буфера обмена (`web application/x-ferrum`).
+    /// Байты для системного буфера обмена (`web application/x-ferrum`); у
+    /// фрагмента текста в правке — и обычный текст для `text/plain`.
     Clipboard {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
+        #[serde(default)]
+        #[tsify(type = "string | undefined")]
+        plain: Option<String>,
     },
     /// PNG выделения для буфера обмена («Скопировать как PNG»).
     ClipboardPng {
@@ -737,5 +955,24 @@ pub enum CoreEvent {
     /// файл шрифта, пропущенное семейство.
     Log {
         message: String,
+    },
+    // ——— Подсистема 3, этап 2: правка текста ———
+    /// Правка текста: идёт ли, прямоугольник курсора в CSS-пикселях холста
+    /// `[x, y, w, h]` (поле ввода и окно IME встают под него) и выделение
+    /// `[якорь, курсор]` в символах. Приходит, когда что-то из этого сменилось.
+    TextCaret {
+        editing: bool,
+        rect: Option<[f64; 4]>,
+        selection: Option<[u32; 2]>,
+        /// Новый текст (инструмент T) ещё не в документе.
+        draft: bool,
+    },
+    /// Стиль для секции «Текст»; `None` — текстов не выделено.
+    TextStyleSummary {
+        summary: Option<TextStyleDto>,
+    },
+    /// Семейства текстов текущей страницы (группа «В документе» выбора шрифта).
+    PageFonts {
+        families: Vec<String>,
     },
 }

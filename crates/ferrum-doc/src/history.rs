@@ -76,6 +76,11 @@ impl History {
         self.last_merge = Some((page, merge));
     }
 
+    /// Следующая сливаемая правка начинает новый шаг (новый сеанс правки текста).
+    pub fn break_merge(&mut self) {
+        self.last_merge = None;
+    }
+
     pub fn push_redo(&mut self, entry: HistoryEntry) {
         self.redo.push(entry);
         self.last_merge = None;

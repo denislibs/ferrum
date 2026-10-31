@@ -186,7 +186,10 @@ fn events() -> Vec<CoreEvent> {
             steps: 3.0,
         },
         CoreEvent::Page { id: "p1".into() },
-        CoreEvent::Clipboard { bytes: bytes(b"x") },
+        CoreEvent::Clipboard {
+            bytes: bytes(b"x"),
+            plain: Some("Привет".into()),
+        },
         CoreEvent::ClipboardPng { bytes: bytes(b"p") },
         CoreEvent::PasteRequested,
         CoreEvent::RequestImage,

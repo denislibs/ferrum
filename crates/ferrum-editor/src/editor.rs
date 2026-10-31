@@ -9,12 +9,14 @@
 //! единственный владелец всего состояния ядра, рендер получает `scene()`,
 //! `camera()` и `overlay()` по ссылке.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use ferrum_doc::{Changes, DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
-use ferrum_render::{Camera, Measure, Overlay, OverlayTheme};
+use ferrum_render::{Camera, Measure, Overlay, OverlayTheme, TextEditOverlay};
 use ferrum_scene::Scene;
-use ferrum_text::{Fonts, SharedFonts};
+use ferrum_text::{Fonts, SharedFonts, TextLayout};
 use kurbo::{Point, Size, Vec2};
 
 use crate::commands::CommandId;
@@ -23,10 +25,14 @@ use crate::input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerE
 use crate::keymap::Keymap;
 use crate::measure::{measure, AltState, MeasureCache};
 use crate::panel::PanelGesture;
+use crate::text_edit::{EnterAt, TextEdit};
 use crate::tools::{
-    sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, Tool,
-    ToolKind, ToolOverlay,
+    sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, TextTool,
+    Tool, ToolKind, ToolOverlay,
 };
+
+/// Раскладка правимого текста и её ключ: узел, версия узла, поколение шрифтов.
+pub(crate) type EditLayout = ((NodeId, u64, u64), Arc<TextLayout>);
 
 /// Множитель зума колесом с Ctrl/Cmd и щипком: `exp(-deltaY · k)`.
 pub const WHEEL_ZOOM_SPEED: f64 = 0.01;
@@ -67,6 +73,11 @@ pub enum EditorEvent {
     PageChanged(PageId),
     /// Готовы байты для системного буфера обмена (формат `web application/x-ferrum`).
     Clipboard(Vec<u8>),
+    /// Копия фрагмента текста в правке: наш формат и обычный текст (`text/plain`).
+    ClipboardText {
+        bytes: Vec<u8>,
+        plain: String,
+    },
     /// Интерфейсу пора прочитать системный буфер и вызвать `paste`.
     PasteRequested,
     /// Скопировать как PNG: интерфейс экспортирует узлы и кладёт картинку в буфер.
@@ -121,6 +132,8 @@ struct FrameKey {
     pixel_grid: bool,
     /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
     measures: Vec<Measure>,
+    /// Правка текста: курсор (с миганием), выделение, превью IME.
+    text: Option<TextEditOverlay>,
 }
 
 pub struct Editor {
@@ -153,6 +166,14 @@ pub struct Editor {
     measure_cache: Option<MeasureCache>,
     /// Реестр шрифтов для размера текста по раскладке (общий с рендером ядра).
     pub(crate) fonts: SharedFonts,
+    /// Правка текста на холсте (спека подсистемы 3, раздел 7).
+    pub(crate) text_edit: Option<TextEdit>,
+    /// Раскладка правимого текста по ключу (узел, версия узла, поколение шрифтов).
+    pub(crate) edit_layout_cache: RefCell<Option<EditLayout>>,
+    /// Время ядра, мс (`set_time`): мигание курсора и склейка ввода.
+    pub(crate) now_ms: f64,
+    /// Указатель над правимым текстом: курсор — текстовый.
+    pub(crate) text_hover: bool,
 }
 
 impl Editor {
@@ -190,6 +211,7 @@ impl Editor {
                 theme: theme.clone(),
                 pixel_grid: true,
                 measures: Vec::new(),
+                text: None,
             },
         };
         Ok(Editor {
@@ -214,11 +236,22 @@ impl Editor {
             measures: Vec::new(),
             measure_cache: None,
             fonts: Fonts::shared(),
+            text_edit: None,
+            edit_layout_cache: RefCell::new(None),
+            now_ms: 0.0,
+            text_hover: false,
         })
     }
 
     pub fn document(&self) -> &Document {
         &self.doc
+    }
+
+    /// Только для тестов: документ для правки мимо редактора (например, перевод
+    /// в «только чтение» посреди правки текста).
+    #[doc(hidden)]
+    pub fn document_mut_for_tests(&mut self) -> &mut Document {
+        &mut self.doc
     }
 
     /// Правки документа с прошлого вызова одной пачкой журнала автосохранения
@@ -315,6 +348,13 @@ impl Editor {
         std::mem::take(&mut self.out.events)
     }
 
+    /// Было ли с прошлого вызова действие правки текста, не применённое из-за
+    /// загрузки шрифтов (документ не тронут). Ядро ставит это действие в очередь
+    /// правок, ждущих шрифтов, и повторит его по приходу байтов.
+    pub fn take_text_pending(&mut self) -> bool {
+        std::mem::take(&mut self.out.text_pending)
+    }
+
     /// Камера целиком (восстановление вида страницы, тесты).
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
@@ -334,6 +374,13 @@ impl Editor {
     pub fn cursor(&self) -> Cursor {
         if self.pan.is_some() {
             Cursor::Grabbing
+        } else if self.text_edit.is_some() {
+            // Рамка с ручками во время правки скрыта: ни Resize, ни Rotate.
+            if self.text_hover {
+                Cursor::Text
+            } else {
+                Cursor::Default
+            }
         } else {
             self.tool.cursor()
         }
@@ -342,15 +389,27 @@ impl Editor {
     /// Описание оверлея для рендера.
     pub fn overlay(&self) -> Overlay {
         let t = self.tool.overlay();
+        // Правка текста: вместо рамки с ручками — рамка текста и курсор.
+        let text = self.text_overlay().map(|o| o.overlay);
+        let editing = text.is_some();
         Overlay {
             theme: self.theme.clone(),
-            selection: t.selection.unwrap_or_else(|| self.selection.to_vec()),
-            hover: if self.is_busy() { None } else { self.hover },
+            selection: if editing {
+                Vec::new()
+            } else {
+                t.selection.unwrap_or_else(|| self.selection.to_vec())
+            },
+            hover: if self.is_busy() || editing {
+                None
+            } else {
+                self.hover
+            },
             marquee: t.marquee,
             snap_lines: t.snap_lines,
             frame_labels: true,
             pixel_grid: self.settings.pixel_grid,
             measurements: self.measures.clone(),
+            text_edit: text,
         }
     }
 
@@ -367,6 +426,7 @@ impl Editor {
             settings,
             out,
             tool,
+            fonts,
             ..
         } = self;
         (
@@ -381,6 +441,7 @@ impl Editor {
                 hover,
                 settings,
                 out,
+                fonts,
             },
         )
     }
@@ -452,6 +513,11 @@ impl Editor {
                 if self.pan.is_some() {
                     return;
                 }
+                // Правка текста: нажатие в тексте ставит курсор; мимо — правка
+                // кончается, и нажатие достаётся инструменту.
+                if self.text_edit.is_some() && self.text_pointer_down(&e) {
+                    return;
+                }
                 // Нажатие без отпускания предыдущего (событие потеряно) — прежний
                 // жест отменяется, а не записывается.
                 if self.tool.is_busy() {
@@ -459,6 +525,20 @@ impl Editor {
                 }
                 let (tool, mut cx) = self.split();
                 tool.pointer_down(&mut cx, &e);
+                // Двойной щелчок по тексту (или нажатие инструментом «Текст»):
+                // инструмент просит войти в правку.
+                if let Some((id, world)) = self.out.edit_text.take() {
+                    if self.tool.is_busy() {
+                        let (tool, mut cx) = self.split();
+                        tool.cancel(&mut cx);
+                    }
+                    // Инструмент «Текст» своё сделал — после правки снова «Перемещение».
+                    if self.tool.kind() == ToolKind::Text {
+                        self.set_tool(ToolKind::Move);
+                        self.selection.set(vec![id]);
+                    }
+                    self.start_text_edit(id, EnterAt::Point(world));
+                }
             }
         }
     }
@@ -468,6 +548,15 @@ impl Editor {
         if let Some(mut hand) = self.pan.take() {
             hand.pointer_move(&mut self.ctx(), &e);
             self.pan = Some(hand);
+            return;
+        }
+        if let Some(t) = &self.text_edit {
+            if t.drag.is_some() {
+                self.text_pointer_move(&e);
+                return;
+            }
+            self.text_hover = self.over_edited_text(e.point);
+            // Инструмент не опрашивается: его ручки скрыты, hover не меняется.
             return;
         }
         let (tool, mut cx) = self.split();
@@ -482,12 +571,20 @@ impl Editor {
             }
             return;
         }
+        if self.text_edit.as_ref().is_some_and(|t| t.drag.is_some()) {
+            self.text_pointer_up(&e);
+            return;
+        }
         if e.button != PointerButton::Primary || !self.tool.is_busy() {
             return;
         }
         let (tool, mut cx) = self.split();
         if tool.pointer_up(&mut cx, &e) == Flow::Finished {
             self.set_tool(ToolKind::Move);
+        }
+        // Инструмент «Текст» поставил новый текст: правка с курсором в нём.
+        if let Some((parent, props)) = self.out.new_text.take() {
+            self.start_draft_text(parent, props);
         }
     }
 
@@ -542,6 +639,11 @@ impl Editor {
     }
 
     fn key_down(&mut self, e: KeyEvent) {
+        // Правка текста: раскладка клавиш не действует (спека подсистемы 3, 7).
+        if self.text_edit.is_some() {
+            self.text_key(&e.code, e.modifiers);
+            return;
+        }
         if self.is_busy() {
             // Во время жеста клавиши только меняют модификаторы; Esc отменяет жест.
             // Esc здесь — физическая клавиша (раздел 7.1), а не команда раскладки:
@@ -553,6 +655,18 @@ impl Editor {
                 tool.key(&mut cx, e.modifiers);
             }
             return;
+        }
+        // Enter по единственному выделенному тексту — правка всего текста (как в
+        // Figma). Физическая клавиша, как Esc у жеста: не команда раскладки.
+        if (e.code == "Enter" || e.code == "NumpadEnter")
+            && e.modifiers == Modifiers::NONE
+            && !e.repeat
+        {
+            if let [id] = self.selection[..] {
+                if self.start_text_edit(id, EnterAt::All) {
+                    return;
+                }
+            }
         }
         let Some(cmd) = self.keymap.lookup(&e) else {
             return;
@@ -606,6 +720,7 @@ impl Editor {
     /// Выбирает инструмент (тулбар, горячая клавиша). Жест текущего отменяется.
     pub fn set_tool(&mut self, kind: ToolKind) {
         self.cancel_gesture();
+        self.end_text_edit();
         self.held = None;
         self.hover = None;
         self.tool = match kind {
@@ -615,6 +730,7 @@ impl Editor {
             ToolKind::Ellipse => Box::new(DrawTool::new(Shape::Ellipse)),
             ToolKind::Line => Box::new(DrawTool::new(Shape::Line)),
             ToolKind::Hand => Box::new(HandTool::new()),
+            ToolKind::Text => Box::new(TextTool::new()),
             // Изображению нужны хэш и размер: интерфейс сначала выбирает файл.
             ToolKind::Image => {
                 self.out.events.push(EditorEvent::RequestImage);
@@ -683,6 +799,10 @@ impl Editor {
     pub fn select(&mut self, ids: &[NodeId]) {
         self.cancel_gesture();
         let sel = self.alive(ids);
+        // Другое выделение из панели слоёв заканчивает правку текста.
+        if self.text_edit.as_ref().is_some_and(|t| sel != [t.id]) {
+            self.end_text_edit();
+        }
         self.selection.set(sel);
         self.emit();
     }
@@ -724,6 +844,7 @@ impl Editor {
     /// Переключает страницу: сцена строится заново, выделение снимается.
     pub fn set_page(&mut self, page: PageId) -> DocResult<()> {
         self.cancel_gesture();
+        self.finish_text_edit();
         // Изменения всех страниц уже в сценах или не нужны: новая сцена строится
         // по документу целиком.
         for (p, _) in self.doc.pages() {
@@ -820,6 +941,9 @@ impl Editor {
         if self.hover.is_some_and(|h| self.scene.slot(h).is_none()) {
             self.hover = None;
         }
+        // Правимый текст удалён (отмена, чужая правка): правка кончается; курсор
+        // за концом текста (его укоротили) — к концу.
+        self.clamp_text_edit();
         self.update_measures();
         let now = Seen {
             selection: self.selection.version(),
@@ -835,6 +959,7 @@ impl Editor {
                 theme: self.theme.clone(),
                 pixel_grid: self.settings.pixel_grid,
                 measures: self.measures.clone(),
+                text: self.text_overlay().map(|o| o.overlay),
             },
         };
         if now.selection != self.seen.selection {

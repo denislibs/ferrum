@@ -80,6 +80,9 @@ pub struct GlyphRun {
     /// Нормализованные координаты вариативного шрифта (биты `F2Dot14`).
     pub coords: Vec<i16>,
     pub color: Color,
+    /// Заливка участка (разметка `fill`): цвет или изображение; `None` — заливки
+    /// узла (спека 6: заливки диапазонов — этап 2).
+    pub paint: Option<Fill>,
     /// Синтетический наклон (курсив без своего файла), градусы.
     pub skew: Option<f32>,
     pub glyphs: Vec<PlacedGlyph>,
@@ -95,10 +98,32 @@ pub struct LineBox {
 }
 
 /// Подчёркивание или зачёркивание — прямоугольник цвета текста.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecorationBox {
     pub rect: Rect,
     pub color: Color,
+    /// Заливка участка (как у глифов): украшение рисуется ею, а скрытая или
+    /// прозрачная — не рисуется вовсе; `None` — заливки узла.
+    pub paint: Option<Fill>,
+}
+
+/// Строка для правки текста: какие символы на ней, где она по вертикали и где
+/// между кластерами может стоять курсор (спека 7). Позиции — символы Unicode
+/// содержимого узла.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaretLine {
+    /// Позиция первого символа строки.
+    pub start: usize,
+    /// Позиция за последним символом строки; у последней строки абзаца — позиция
+    /// его перевода строки.
+    pub end: usize,
+    pub top: f64,
+    pub bottom: f64,
+    pub baseline: f64,
+    /// Позиции курсора по возрастанию символа: `(символ, x)`, от `start` до `end`.
+    pub stops: Vec<(usize, f64)>,
+    /// Строка кончается абзацем, а не переносом.
+    pub hard: bool,
 }
 
 /// Результат раскладки.
@@ -118,6 +143,8 @@ pub struct TextLayout {
     pub loading: bool,
     /// Текст обрезан (обрезка с многоточием или по рамке).
     pub truncated: bool,
+    /// Строки для правки (курсор, выделение, попадание) — все, и у обрезанного.
+    pub carets: Vec<CaretLine>,
 }
 
 /// Стиль участка после разрешения шрифта.
@@ -130,11 +157,14 @@ struct SpanStyle {
     decoration: Decoration,
     case: TextCase,
     color: Color,
+    /// Заливка участка из разметки (любого вида).
+    paint: Option<Fill>,
 }
 
 /// Где в раскладке лежит абзац (для выравнивания текста «авто» по ширине).
 struct ParaSpan {
     lines: Range<usize>,
+    carets: Range<usize>,
     runs: Range<usize>,
     decos: Range<usize>,
     width: f64,
@@ -192,38 +222,71 @@ fn split_paragraphs(data: &TextData) -> Vec<Paragraph<'_>> {
     out
 }
 
-fn apply_case(s: &str, case: TextCase, word_start: &mut bool) -> String {
+/// Символ с учётом регистра — по одному: так каждый символ содержимого знает
+/// свои байты в тексте раскладки (курсор и попадание, спека 7).
+fn push_case(out: &mut String, c: char, case: TextCase, word_start: &mut bool) {
     match case {
-        TextCase::Upper => s.to_uppercase(),
-        TextCase::Lower => s.to_lowercase(),
-        TextCase::Title => s
-            .chars()
-            .flat_map(|c| {
-                let out: Vec<char> = if *word_start && c.is_alphabetic() {
-                    c.to_uppercase().collect()
-                } else {
-                    vec![c]
-                };
-                *word_start = !c.is_alphanumeric();
-                out
-            })
-            .collect(),
-        TextCase::None | TextCase::SmallCaps => s.to_string(),
+        TextCase::Upper => out.extend(c.to_uppercase()),
+        TextCase::Lower => out.extend(c.to_lowercase()),
+        TextCase::Title => {
+            if *word_start && c.is_alphabetic() {
+                out.extend(c.to_uppercase());
+            } else {
+                out.push(c);
+            }
+            *word_start = !c.is_alphanumeric();
+        }
+        TextCase::None | TextCase::SmallCaps => out.push(c),
+    }
+}
+
+/// Число из документа без NaN и бесконечности: иначе — `default` (файл чужой
+/// сборки или испорченный кэш не должен довести NaN до `parley`).
+fn finite_or(v: f64, default: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        default
+    }
+}
+
+/// Байты текста абзаца → символы содержимого узла.
+struct CharMap {
+    /// Начало байтов каждого символа абзаца и его позиция в содержимом.
+    starts: Vec<(usize, usize)>,
+    /// Позиция перевода строки абзаца (за последним символом).
+    end: usize,
+    text_len: usize,
+}
+
+impl CharMap {
+    fn char_at(&self, byte: usize) -> usize {
+        if byte >= self.text_len {
+            return self.end;
+        }
+        match self.starts.partition_point(|(b, _)| *b <= byte) {
+            0 => self.starts.first().map_or(self.end, |s| s.1),
+            i => self.starts[i - 1].1,
+        }
     }
 }
 
 fn line_height(v: LineHeight) -> parley::LineHeight {
     match v {
         LineHeight::Auto => parley::LineHeight::MetricsRelative(1.0),
+        // Нечисловой интерлиньяж из файла — «Авто», а не схлопнутые строки.
+        LineHeight::Px(px) if !px.is_finite() => parley::LineHeight::MetricsRelative(1.0),
         LineHeight::Px(px) => parley::LineHeight::Absolute(px.max(0.0) as f32),
-        LineHeight::Percent(p) => parley::LineHeight::FontSizeRelative((p / 100.0).max(0.0) as f32),
+        LineHeight::Percent(p) => {
+            parley::LineHeight::FontSizeRelative((finite_or(p, 100.0) / 100.0).max(0.0) as f32)
+        }
     }
 }
 
 fn letter_spacing(v: LetterSpacing, size: f64) -> f32 {
     match v {
-        LetterSpacing::Px(px) => px as f32,
-        LetterSpacing::Percent(p) => (size * p / 100.0) as f32,
+        LetterSpacing::Px(px) => finite_or(px, 0.0) as f32,
+        LetterSpacing::Percent(p) => finite_or(size * p / 100.0, 0.0) as f32,
     }
 }
 
@@ -239,9 +302,11 @@ impl Fonts {
         let mut spans: Vec<ParaSpan> = Vec::new();
         let mut counters = [0u32; MAX_LIST_INDENT as usize + 1];
         let paragraphs = split_paragraphs(req.text);
+        // Позиция первого символа абзаца в содержимом узла.
+        let mut para_start = 0usize;
         for (pi, para) in paragraphs.iter().enumerate() {
             if pi > 0 {
-                y += props.paragraph_spacing.max(0.0);
+                y += finite_or(props.paragraph_spacing, 0.0).max(0.0);
             }
             let styles: Vec<SpanStyle> = if para.runs.is_empty() {
                 vec![self.span_style(para.attrs, req, default_color, &mut out)]
@@ -274,15 +339,28 @@ impl Fonts {
             } else {
                 0.0
             };
-            // Текст абзаца с учётом регистра и диапазоны участков в байтах.
+            // Текст абзаца с учётом регистра, диапазоны участков в байтах и
+            // символы содержимого для курсора.
             let mut text = String::new();
             let mut ranges: Vec<Range<usize>> = Vec::new();
+            let mut starts: Vec<(usize, usize)> = Vec::new();
             let mut word_start = true;
+            let mut ci = para_start;
             for ((s, _), style) in para.runs.iter().zip(&styles) {
                 let start = text.len();
-                text.push_str(&apply_case(s, style.case, &mut word_start));
+                for c in s.chars() {
+                    starts.push((text.len(), ci));
+                    push_case(&mut text, c, style.case, &mut word_start);
+                    ci += 1;
+                }
                 ranges.push(start..text.len());
             }
+            let map = CharMap {
+                starts,
+                end: ci,
+                text_len: text.len(),
+            };
+            para_start = ci + 1;
             // Пустой абзац — строка высотой своего стиля: невидимый пробел нулевой ширины.
             if text.is_empty() {
                 text.push('\u{200B}');
@@ -295,8 +373,9 @@ impl Fonts {
                 push_style(&mut builder, style, i as u32, range.clone());
             }
             let mut layout: Layout<u32> = builder.build(&text);
-            if props.paragraph_indent != 0.0 {
-                layout.set_text_indent(props.paragraph_indent as f32, IndentOptions::default());
+            let indent = finite_or(props.paragraph_indent, 0.0);
+            if indent != 0.0 {
+                layout.set_text_indent(indent as f32, IndentOptions::default());
             }
             let avail = req.width.map(|w| (w - indent_x).max(0.0) as f32);
             layout.break_all_lines(avail);
@@ -310,8 +389,10 @@ impl Fonts {
                 AlignmentOptions::default(),
             );
             let first_line = out.lines.len();
+            let first_caret = out.carets.len();
             let (first_run, first_deco) = (out.runs.len(), out.decorations.len());
             collect_lines(&layout, &styles, indent_x, y, &mut out);
+            collect_carets(&layout, &map, indent_x, y, &mut out.carets);
             if let (Some(m), Some(line)) = (marker, out.lines.get(first_line).copied()) {
                 let x = level as f64 * LIST_INDENT_EM * first.size;
                 self.place_marker(&m, first, x, line.baseline, &mut out);
@@ -323,6 +404,7 @@ impl Fonts {
                     .fold(0.0, f64::max);
                 spans.push(ParaSpan {
                     lines: first_line..out.lines.len(),
+                    carets: first_caret..out.carets.len(),
                     runs: first_run..out.runs.len(),
                     decos: first_deco..out.decorations.len(),
                     width: w,
@@ -341,6 +423,7 @@ impl Fonts {
             let widest = spans.iter().map(|s| s.width).fold(0.0, f64::max);
             for ParaSpan {
                 lines,
+                carets,
                 runs,
                 decos,
                 width,
@@ -349,6 +432,11 @@ impl Fonts {
                 let dx = (widest - width) * k;
                 for l in &mut out.lines[lines] {
                     l.rect = l.rect + kurbo::Vec2::new(dx, 0.0);
+                }
+                for c in &mut out.carets[carets] {
+                    for s in &mut c.stops {
+                        s.1 += dx;
+                    }
                 }
                 for r in &mut out.runs[runs] {
                     for g in &mut r.glyphs {
@@ -398,7 +486,7 @@ impl Fonts {
         }
         SpanStyle {
             resolved,
-            size: a.size.unwrap_or(d.size).clamp(0.1, 10_000.0),
+            size: finite_or(a.size.unwrap_or(d.size), 12.0).clamp(0.1, 10_000.0),
             line_height: a.line_height.unwrap_or(d.line_height),
             letter_spacing: a.letter_spacing.unwrap_or(d.letter_spacing),
             decoration: a.decoration.unwrap_or(d.decoration),
@@ -407,6 +495,7 @@ impl Fonts {
                 Some(f) if f.kind == FillKind::Solid => text_color(std::slice::from_ref(f)),
                 _ => default_color,
             },
+            paint: a.fill.clone(),
         }
     }
 
@@ -561,6 +650,7 @@ impl Fonts {
             decoration: Decoration::None,
             case: TextCase::None,
             color: like.color,
+            paint: like.paint.clone(),
         };
         let text = "…";
         let mut builder = self.lcx.ranged_builder(&mut self.fcx, text, 1.0, false);
@@ -673,6 +763,7 @@ fn collect_lines(
                 out.decorations.push(DecorationBox {
                     rect: Rect::new(x0, top, x1, top + size),
                     color,
+                    paint: span.paint.clone(),
                 });
             }
             if style.strikethrough.is_some() {
@@ -681,6 +772,7 @@ fn collect_lines(
                 out.decorations.push(DecorationBox {
                     rect: Rect::new(x0, top, x1, top + size),
                     color,
+                    paint: span.paint.clone(),
                 });
             }
             if glyphs.is_empty() {
@@ -702,6 +794,7 @@ fn collect_lines(
                     .map(|c| c.to_bits())
                     .collect(),
                 color,
+                paint: span.paint.clone(),
                 skew: synthesis.skew(),
                 glyphs,
             });
@@ -720,7 +813,57 @@ fn collect_lines(
     }
 }
 
+/// Строки абзаца для правки: символы, вертикаль и позиции курсора по кластерам
+/// (`parley`), со сдвигом `(dx, dy)`.
+fn collect_carets(layout: &Layout<u32>, map: &CharMap, dx: f64, dy: f64, out: &mut Vec<CaretLine>) {
+    let count = layout.lines().count();
+    for (i, line) in layout.lines().enumerate() {
+        let m = line.metrics();
+        let range = line.text_range();
+        let (start, end) = (map.char_at(range.start), map.char_at(range.end));
+        let mut stops: Vec<(usize, f64)> = Vec::new();
+        let mut tail = None;
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(gr) = item else {
+                continue;
+            };
+            let mut x = gr.offset() as f64 + dx;
+            for cl in gr.run().visual_clusters() {
+                let r = cl.text_range();
+                stops.push((map.char_at(r.start), x));
+                x += cl.advance() as f64;
+                tail = Some((map.char_at(r.end), x));
+            }
+        }
+        let line_x = m.offset as f64 + dx;
+        if stops.is_empty() {
+            stops.push((start, line_x));
+        }
+        stops.push(match tail {
+            Some((c, x)) => (c.max(end), x),
+            None => (end, line_x),
+        });
+        // Кластер из нескольких символов (и пустой абзац) — одна позиция.
+        stops.sort_by_key(|s| s.0);
+        stops.dedup_by_key(|s| s.0);
+        out.push(CaretLine {
+            start,
+            end,
+            top: m.block_min_coord as f64 + dy,
+            bottom: m.block_max_coord as f64 + dy,
+            baseline: m.baseline as f64 + dy,
+            stops,
+            hard: i + 1 == count,
+        });
+    }
+}
+
 fn shift(out: &mut TextLayout, dy: f64) {
+    for c in &mut out.carets {
+        c.top += dy;
+        c.bottom += dy;
+        c.baseline += dy;
+    }
     for l in &mut out.lines {
         l.rect = l.rect + kurbo::Vec2::new(0.0, dy);
         l.baseline += dy;

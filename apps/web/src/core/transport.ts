@@ -16,6 +16,9 @@ export interface Transport {
   readonly sink: Sink;
   /** Кадр основного потока (`requestAnimationFrame`): разбудить worker. */
   tick(): void;
+  /** Ввод, ждущий отправки, — worker'у сейчас, до следующего сообщения (команды
+   * правки текста идут после щелчков, положенных раньше них). */
+  flush(): void;
   /** Последнее живое состояние или `null`, если его ещё не было. */
   live(): Float64Array | null;
   /** Сколько событий ввода пришлось выбросить (очередь переполнилась). */
@@ -134,6 +137,10 @@ export class SabTransport implements Transport {
     }
   }
 
+  flush(): void {
+    if (this.pendingCount > 0) this.flushPending();
+  }
+
   tick(): void {
     if (this.pendingCount > 0) this.flushPending();
     Atomics.add(this.ctrl, Ctrl.FRAME, 1);
@@ -229,6 +236,15 @@ export class MessageTransport implements Transport {
     new Uint8Array(this.buf).set(this.scratchBytes, this.count * RECORD_SIZE);
     this.count++;
   };
+
+  flush(): void {
+    if (this.count === 0) return;
+    // Кадр вне очереди: ответ `live` снимет и признак ожидания прошлого кадра.
+    const input = this.buf.slice(0, this.count * RECORD_SIZE);
+    this.count = 0;
+    this.inFlight = true;
+    this.worker.postMessage({ t: 'tick', input } satisfies ToWorker, [input]);
+  }
 
   tick(): void {
     if (this.inFlight) return;

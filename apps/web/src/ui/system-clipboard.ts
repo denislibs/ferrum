@@ -17,6 +17,8 @@ import {
 } from './clipboard';
 import { fileBytes, IMAGE_FILE, pickFile } from './files';
 import { editableTarget, modalOpen } from './keys';
+import { isTextField } from './text-input';
+import { MAX_TEXT_INPUT_BYTES, utf8Length } from '../core/text-keys';
 
 /** Событие из поля ввода, из диалога (и немодального — палитры), из меню или при
  * открытом модальном диалоге — это обычный текст браузера, не документ на холсте. */
@@ -63,8 +65,32 @@ export function installClipboard(ed: Editor): () => void {
     });
   };
 
-  const write = (e: { bytes: Uint8Array } & ClipboardExtra) => {
+  /** Фрагмент текста в правке: обычный текст и (где можно) наш формат со стилями.
+   * Без своего формата — только обычный текст (запасной путь `execCommand`). */
+  /** Обычный текст последней записанной копии фрагмента (состояние интерфейса). */
+  let lastFragment: string | null = null;
+  const writeFragment = (bytes: Uint8Array, plain: string, cut: boolean) => {
+    lastFragment = plain;
+    if (!supportsCustomFormat() || typeof ClipboardItem === 'undefined') {
+      writeText(plain, cut);
+      return;
+    }
+    navigator.clipboard
+      .write([
+        new ClipboardItem({
+          'text/plain': new Blob([plain], { type: 'text/plain' }),
+          [FERRUM_MIME]: new Blob([bytes as BlobPart], { type: FERRUM_MIME }),
+        }),
+      ])
+      .catch(() => writeText(plain, cut));
+  };
+
+  const write = (e: { bytes: Uint8Array; plain?: string } & ClipboardExtra) => {
     const cut = e.cut === true;
+    if (typeof e.plain === 'string') {
+      writeFragment(e.bytes, e.plain, cut);
+      return;
+    }
     if (!supportsCustomFormat()) {
       if (typeof e.text === 'string') writeText(e.text, cut);
       else writeViaWorker(e.bytes, cut);
@@ -132,22 +158,53 @@ export function installClipboard(ed: Editor): () => void {
       e.preventDefault();
       return;
     }
+    // Поле правки текста: копия фрагмента — от ядра (в поле текста документа нет).
+    if (isTextField(e.target) && !modalOpen()) {
+      e.preventDefault();
+      ed.run(command);
+      return;
+    }
     if (textTarget(e.target)) return;
     e.preventDefault();
     ed.run(command);
   };
   const copy = onCopy('edit.copy');
   const cut = onCopy('edit.cut');
+  /** Обычный текст другого приложения: в правке — в позицию курсора, вне её —
+   * новым текстом (ядро). Больше предела команды — отказ сразу. */
+  const pastePlain = (text: string) => {
+    if (utf8Length(text) > MAX_TEXT_INPUT_BYTES) {
+      toast('Слишком длинный текст: за раз — не больше 64 КБ');
+      return;
+    }
+    ed.send({ type: 'textInput', kind: 'paste', data: text });
+  };
+  /** Вставка с Shift: обычным текстом, в стиле у курсора. */
+  let plainNext = false;
+  const onKeyDown = (e: KeyboardEvent) => {
+    plainNext = (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyV';
+  };
   const paste = (e: ClipboardEvent) => {
-    if (textTarget(e.target)) return;
+    if (textTarget(e.target) && !(isTextField(e.target) && !modalOpen())) return;
     e.preventDefault();
     const sync = fromDataTransfer(e.clipboardData);
     if (sync) void deliver(sync);
     // Свой формат асинхронного API в событии не виден: событие пустое — читаем его.
     else if (eventIsEmpty(e.clipboardData)) void readAsync(true).then(deliver);
+    else {
+      const text = e.clipboardData?.getData('text/plain') ?? '';
+      if (text === '') return;
+      // Свой формат (стили) читается только асинхронно, и чтение может спросить доступ:
+      // просим его, лишь когда обычный текст совпал с последней записанной нами копией.
+      // Чужой текст вставляется сразу, без разрешения. Ctrl/Cmd+Shift+V — всегда обычным.
+      if (!plainNext && supportsCustomFormat() && text === lastFragment) {
+        void readAsync(true).then((d) => (d?.kind === 'ferrum' ? deliver(d) : pastePlain(text)));
+      } else pastePlain(text);
+    }
   };
   document.addEventListener('copy', copy);
   document.addEventListener('cut', cut);
+  document.addEventListener('keydown', onKeyDown, true);
   document.addEventListener('paste', paste);
   const off = ed.core.on((e) => {
     if (e.type === 'clipboard') write(e);
@@ -171,6 +228,7 @@ export function installClipboard(ed: Editor): () => void {
   return () => {
     document.removeEventListener('copy', copy);
     document.removeEventListener('cut', cut);
+    document.removeEventListener('keydown', onKeyDown, true);
     document.removeEventListener('paste', paste);
     off();
   };

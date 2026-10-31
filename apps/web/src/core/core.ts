@@ -6,7 +6,7 @@
 import type { Backend, Command, CoreEvent, CursorKind } from '../wasm/ferrum_wasm';
 import * as enc from './input';
 import { BACKENDS, Kind, LIVE_NAMES } from './layout.gen';
-import { prepareCommand, type FromWorker } from './messages';
+import { isTextCommand, prepareCommand, type FromWorker } from './messages';
 import { createTransport, type Transport, type TransportMode } from './transport';
 
 export type LiveState = Record<(typeof LIVE_NAMES)[number], number>;
@@ -81,6 +81,8 @@ export function cssCursor(kind: CursorKind, angle: number): string {
       return 'copy';
     case 'rotate':
       return 'alias';
+    case 'text':
+      return 'text';
     case 'resize': {
       const a = ((angle % 180) + 180) % 180;
       if (a < 22.5 || a >= 157.5) return 'ew-resize';
@@ -113,6 +115,9 @@ export class Core {
   private stopped = false;
   /** Ожидающие ответа `encodeClipboard` — по порядку запросов. */
   private readonly encodes: ((text: string | null) => void)[] = [];
+  /** Кто получает клавиши после нажатия на холсте: поле правки текста, пока идёт
+   * правка (иначе — сам холст). */
+  keyTarget: HTMLElement | null = null;
 
   private constructor(
     private readonly worker: Worker,
@@ -216,6 +221,8 @@ export class Core {
       this.emit({ type: 'error', message: prepared.error });
       return;
     }
+    // Щелчок в тексте и набор следом: ввод из кольца — раньше команды.
+    if (isTextCommand(cmd)) this.transport.flush();
     const error = this.transport.post({ t: 'cmd', cmd: prepared.cmd }, prepared.transfer);
     if (error) this.emit({ type: 'error', message: error });
   }
@@ -227,6 +234,8 @@ export class Core {
       this.emit({ type: 'error', message: 'Ядро остановлено, команда не выполнена' });
       return;
     }
+    // Как у остальных вставок: набранное до вставки — раньше неё.
+    this.transport.flush();
     const error = this.transport.post({ t: 'pasteText', text });
     if (error) this.emit({ type: 'error', message: error });
   }
@@ -328,11 +337,17 @@ export class Core {
     const xy = (e: { clientX: number; clientY: number }) => [e.clientX - this.rect.left, e.clientY - this.rect.top] as const;
     this.add(c, 'pointerdown', (e) => {
       c.setPointerCapture(e.pointerId);
-      c.focus();
+      // В правке текста клавиши остаются у поля ввода (щелчок по тексту — курсор).
+      (this.keyTarget ?? c).focus({ preventScroll: true });
       // Кнопки «назад» и «вперёд» (3, 4) холсту не нужны.
       if (e.button > 2) return;
       const [x, y] = xy(e);
       enc.pointer(sink, Kind.POINTER_DOWN, e, x, y);
+    });
+    // В правке текста нажатие на холсте не уводит фокус у поля ввода (действие
+    // `mousedown` по умолчанию отдало бы его холсту).
+    this.add(c, 'mousedown', (e) => {
+      if (this.keyTarget) e.preventDefault();
     });
     this.add(c, 'pointermove', (e) => {
       // Все промежуточные точки движения, а не одна на кадр.

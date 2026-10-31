@@ -541,5 +541,6 @@ pub fn full_patch(p: &Props) -> PropsPatch {
         fills: Some(p.fills.clone()),
         strokes: Some(p.strokes.clone()),
         text: p.text.as_ref().map(|t| t.props.clone()),
+        content: None,
     }
 }

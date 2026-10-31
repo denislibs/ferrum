@@ -161,6 +161,13 @@ impl Document {
         self.read_only
     }
 
+    /// Только для тестов: документ становится «только чтение», как при
+    /// загрузке страницы с неизвестными узлами.
+    #[doc(hidden)]
+    pub fn force_read_only_for_tests(&mut self) {
+        self.read_only = true;
+    }
+
     fn writable(&self) -> DocResult<()> {
         if self.read_only {
             Err(DocError::ReadOnly)
@@ -283,7 +290,7 @@ impl Document {
             // иначе страница пропала бы из документа и не попала бы в сохранение.
             let page = PageDoc::load(&u.snapshot, u.scene.as_deref())?;
             // Узлы неизвестного типа скрыты от модели; правка могла бы их потерять.
-            if page.has_unknown_nodes() {
+            if page.has_unknown_nodes() || page.has_oversized_text() {
                 self.read_only = true;
             }
             self.unloaded.remove(&id);
@@ -396,6 +403,12 @@ impl Document {
             // Откат: применяем обратные операции, в историю ничего не попадает.
             Err(e) => Err(rollback(p, &ops, e)),
         }
+    }
+
+    /// Следующая `transact_merging` не сольётся с прошлой правкой, даже если та её
+    /// продолжает: редактор начал новый сеанс правки текста.
+    pub fn break_text_merge(&mut self) {
+        self.history.break_merge();
     }
 
     /// Узлы страницы, изменённые правками, отменой и повтором с прошлого вызова.
@@ -525,7 +538,7 @@ impl Document {
                 Ok(complete) => lost |= !complete,
                 Err(_) => lost = true,
             }
-            if page.has_unknown_nodes() {
+            if page.has_unknown_nodes() || page.has_oversized_text() {
                 self.read_only = true;
             }
         }

@@ -5,6 +5,7 @@
 import type { Command, CoreEvent } from '../wasm/ferrum_wasm';
 import { MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from './clipboard-text';
 import { MAX_DATA_BYTES, MAX_FONT_BYTES, MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, mb, tooLarge } from './limits';
+import { MAX_TEXT_INPUT_BYTES, utf8Length } from './text-keys';
 
 export type ToWorker =
   | {
@@ -62,6 +63,14 @@ const SHARED_BYTES = 'Неверная команда: данные не мог�
  * `null`: форму целиком проверяет разбор команды в ядре («Неверная команда»). */
 export function commandSizeError(cmd: Command): string | null {
   if (typeof cmd !== 'object' || cmd === null) return null;
+  if (cmd.type === 'textInput') {
+    const data = (cmd as { data?: unknown }).data;
+    // Каждая буква — 1–4 байта: длина в символах × 4 укладывается — считать незачем.
+    if (typeof data === 'string' && data.length * 4 > MAX_TEXT_INPUT_BYTES && utf8Length(data) > MAX_TEXT_INPUT_BYTES) {
+      return 'Слишком длинный текст: за раз — не больше 64 КБ';
+    }
+    return null;
+  }
   if (cmd.type === 'openWithJournal') return journalCommandError(cmd);
   if (cmd.type === 'loadFont' && (cmd as { bytes?: unknown }).bytes === undefined) return null;
   if (
@@ -152,6 +161,15 @@ export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transfer
     return { cmd: { ...cmd, bytes, journal }, transfer };
   }
   return { cmd: { ...cmd, bytes } as Command, transfer: [bytes.buffer as ArrayBuffer] };
+}
+
+/** Команды правки текста (и вставка, копирование, вырезание — `execute`): идут после ввода, положенного в кольцо до них
+ * (щелчок в тексте, затем набор), — основной поток досылает ввод, worker вычитывает
+ * кольцо перед такой командой. */
+const TEXT_COMMANDS: ReadonlySet<string> = new Set(['textEditStart', 'textEditEnd', 'textInput', 'textKey', 'setTextStyle', 'setTextProps', 'paste', 'execute']);
+
+export function isTextCommand(cmd: Command): boolean {
+  return typeof cmd === 'object' && cmd !== null && TEXT_COMMANDS.has(cmd.type);
 }
 
 /** Виды сообщений worker'у: остальное — неверный конверт. */

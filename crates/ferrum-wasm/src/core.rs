@@ -11,6 +11,7 @@
 
 mod fonts;
 mod panels;
+mod text;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -96,6 +97,10 @@ pub struct Core {
     /// замену документа — загруженные шрифты не качаются заново.
     fonts: SharedFonts,
     font_state: fonts::FontState,
+    /// Что ушло полю ввода и секции «Текст» (подсистема 3, этап 2).
+    text_state: text::TextState,
+    /// Время ядра (мс) из `set_time`: начало ожидания шрифтов.
+    now_ms: f64,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -115,6 +120,7 @@ fn tool_kind(t: Tool) -> ToolKind {
         Tool::Line => ToolKind::Line,
         Tool::Hand => ToolKind::Hand,
         Tool::Image => ToolKind::Image,
+        Tool::Text => ToolKind::Text,
     }
 }
 
@@ -127,6 +133,7 @@ fn tool(k: ToolKind) -> Tool {
         ToolKind::Line => Tool::Line,
         ToolKind::Hand => Tool::Hand,
         ToolKind::Image => Tool::Image,
+        ToolKind::Text => Tool::Text,
     }
 }
 
@@ -139,6 +146,7 @@ fn cursor(c: Cursor) -> (CursorKind, f64) {
         Cursor::Duplicate => (CursorKind::Duplicate, 0.0),
         Cursor::Resize { angle } => (CursorKind::Resize, angle),
         Cursor::Rotate { angle } => (CursorKind::Rotate, angle),
+        Cursor::Text => (CursorKind::Text, 0.0),
     }
 }
 
@@ -150,6 +158,34 @@ fn selection_event(count: usize, ids: impl Iterator<Item = String>, version: u64
         ids: ids.take(SELECTION_IDS_MAX).collect(),
         version: version as f64,
     }
+}
+
+/// Встаёт ли команда в очередь за ждущим шрифтов. Не встают: загрузка шрифтов
+/// (она очередь и разбирает), замена документа (она очередь сбрасывает), запись
+/// и журнал (интерфейс ждёт ответа; ждущие правки, применившись, снова пометят
+/// документ изменённым), чтения для тестов, тема и вид панели слоёв — они не
+/// меняют документ, выделение и правку.
+fn waits_behind_fonts(cmd: &Command) -> bool {
+    !matches!(
+        cmd,
+        Command::FontsAvailable { .. }
+            | Command::LoadFont { .. }
+            | Command::Open { .. }
+            | Command::OpenWithJournal { .. }
+            | Command::Demo { .. }
+            | Command::DemoText { .. }
+            | Command::FlushJournal
+            | Command::Snapshot { .. }
+            | Command::MarkSaved { .. }
+            | Command::ReadPixels { .. }
+            | Command::ReadMeasurements
+            | Command::SetTheme { .. }
+            | Command::LayersWindow { .. }
+            | Command::ExpandLayer { .. }
+            | Command::FilterLayers { .. }
+            | Command::PrepareSearch
+            | Command::HoverLayer { .. }
+    )
 }
 
 /// Команда в тексте ошибки: чужая строка может быть любой длины.
@@ -212,6 +248,8 @@ impl Core {
             journal_batch: 0,
             fonts,
             font_state: fonts::FontState::default(),
+            text_state: text::TextState::default(),
+            now_ms: 0.0,
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -274,8 +312,11 @@ impl Core {
         // Списки шрифтов — для нового документа; его шрифты — запросить сразу.
         self.font_state.missing_sent = None;
         self.font_state.missing_key = None;
-        // Ждавшие шрифтов правки относились к прошлому документу.
+        // Ждавшие шрифтов правки и ввод относились к прошлому документу.
         self.font_state.waiting.clear();
+        self.font_state.waiting_since = None;
+        // Поле ввода и секция «Текст» узнают о новом документе заново.
+        self.text_state = text::TextState::default();
         self.preload_page_fonts();
         Ok(())
     }
@@ -527,7 +568,8 @@ impl Core {
         let n = decoded.records.len();
         for rec in decoded.records {
             match rec {
-                Record::Input(input) => self.editor.handle(input),
+                Record::Input(input) => self.input_or_wait(input),
+                // Размер холста — сразу: от него зависит поверхность, а не правки.
                 Record::Resize { width, height, dpr } => {
                     self.editor.set_viewport(Size::new(width, height), dpr);
                     self.dirty = true;
@@ -541,13 +583,53 @@ impl Core {
 
     /// Одно событие ввода (тесты и бенчмарк без кодирования).
     pub fn handle(&mut self, input: Input) {
-        self.editor.handle(input);
+        self.input_or_wait(input);
         self.inputs += 1;
         self.drain_editor();
     }
 
-    /// Команда основного потока.
+    /// Событие ввода: пока что-то ждёт шрифтов — в ту же очередь, за ним.
+    fn input_or_wait(&mut self, input: Input) {
+        if self.fonts_awaited() {
+            self.wait(fonts::Waiting::Input(input));
+        } else {
+            self.run_input(input);
+        }
+    }
+
+    /// Событие ввода редактору; правку текста, отложенную до шрифтов
+    /// (клавиша удаления), — в очередь, повтор по приходу байтов.
+    fn run_input(&mut self, input: Input) {
+        self.editor.take_text_pending();
+        let retry = input.clone();
+        self.editor.handle(input);
+        if self.editor.take_text_pending() {
+            self.wait(fonts::Waiting::Input(retry));
+        }
+    }
+
+    /// Ждавшее шрифтов — по порядку, когда они пришли.
+    fn run_waiting(&mut self, item: fonts::Waiting) {
+        match item {
+            fonts::Waiting::Command(cmd) => self.run_command(cmd),
+            fonts::Waiting::Input(input) => self.run_input(input),
+        }
+        self.drain_editor();
+    }
+
+    /// Команда основного потока. Пока что-то ждёт шрифтов, команды, меняющие
+    /// документ, выделение, камеру или правку, встают в очередь за ним
+    /// (`waits_behind_fonts`): порядок действий пользователя сохраняется.
     pub fn command(&mut self, cmd: Command) {
+        if self.fonts_awaited() && waits_behind_fonts(&cmd) {
+            self.wait(fonts::Waiting::Command(cmd));
+        } else {
+            self.run_command(cmd);
+        }
+        self.drain_editor();
+    }
+
+    fn run_command(&mut self, cmd: Command) {
         match cmd {
             Command::Open { bytes } => self.open(&bytes),
             Command::Demo { nodes } => self.demo(nodes),
@@ -557,9 +639,21 @@ impl Core {
             | Command::ReplaceMissingFont { .. }
             | Command::TestCreateText { .. }) => self.font_command(cmd),
             Command::OpenWithJournal { bytes, journal } => self.open_with_journal(&bytes, &journal),
-            Command::FlushJournal => self.flush_journal(true),
+            Command::FlushJournal => {
+                self.settle_waiting_fonts();
+                self.flush_journal(true);
+            }
+            // Правка текста; ждущая шрифтов — в очередь.
+            cmd if text::is_text_command(&cmd) => self.text_command(cmd),
             Command::Execute { command } => match CommandId::from_key(&command) {
-                Some(id) => self.editor.execute(id),
+                Some(id) => {
+                    self.editor.take_text_pending();
+                    self.editor.execute(id);
+                    // «Вырезать» в правке текста ждёт шрифтов: повторить по приходу.
+                    if self.editor.take_text_pending() {
+                        self.wait(fonts::Waiting::Command(Command::Execute { command }));
+                    }
+                }
                 None => self.error(format!("Неизвестная команда «{}»", clip(&command))),
             },
             Command::SetTool { tool } => self.editor.set_tool(tool_kind(tool)),
@@ -568,8 +662,13 @@ impl Core {
                 self.editor.set_theme(overlay_theme(theme));
             }
             Command::Paste { bytes } => {
+                self.editor.take_text_pending();
                 // Ошибку вставки редактор сам отдаёт событием `Error`.
                 let _ = self.editor.paste(&bytes);
+                // Фрагмент в правку текста ждёт шрифтов: повторить по приходу.
+                if self.editor.take_text_pending() {
+                    self.wait(fonts::Waiting::Command(Command::Paste { bytes }));
+                }
             }
             Command::PlaceImage { bytes } => self.place_image(bytes.into_vec()),
             Command::Save => match container::encode(self.editor.document()) {
@@ -578,7 +677,10 @@ impl Core {
                 }),
                 Err(e) => self.error(format!("Не удалось сохранить: {e}")),
             },
-            Command::Snapshot { thumbnail } => self.snapshot(thumbnail),
+            Command::Snapshot { thumbnail } => {
+                self.settle_waiting_fonts();
+                self.snapshot(thumbnail);
+            }
             Command::MarkSaved { revision } => {
                 // Ревизия не доверенная: только точное совпадение с текущей.
                 if revision == self.revision as f64 {
@@ -602,7 +704,6 @@ impl Core {
             }
             other => self.panel_command(other),
         }
-        self.drain_editor();
     }
 
     fn place_image(&mut self, bytes: Vec<u8>) {
@@ -652,7 +753,6 @@ impl Core {
                 }
                 EditorEvent::PageChanged(p) => {
                     self.events.push(CoreEvent::Page { id: p.to_string() });
-                    self.drop_page_scoped_font_edits();
                     self.preload_page_fonts();
                     self.background_preview = None;
                     self.layers.reset();
@@ -662,7 +762,14 @@ impl Core {
                 }
                 EditorEvent::Clipboard(bytes) => self.events.push(CoreEvent::Clipboard {
                     bytes: ByteBuf::from(bytes),
+                    plain: None,
                 }),
+                EditorEvent::ClipboardText { bytes, plain } => {
+                    self.events.push(CoreEvent::Clipboard {
+                        bytes: ByteBuf::from(bytes),
+                        plain: Some(plain),
+                    })
+                }
                 EditorEvent::PasteRequested => self.events.push(CoreEvent::PasteRequested),
                 EditorEvent::ExportPng(ids) => self.copy_png(&ids),
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),
@@ -692,7 +799,9 @@ impl Core {
                 .retain(|e| !matches!(e, CoreEvent::Document { .. }));
             self.push_document();
         }
+        let properties = self.ui.properties;
         self.flush_ui();
+        self.push_text_state(properties);
         self.push_modified();
         self.push_font_requests();
     }

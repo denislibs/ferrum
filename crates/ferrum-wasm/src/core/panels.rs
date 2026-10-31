@@ -483,7 +483,13 @@ impl Core {
             | Command::FontsAvailable { .. }
             | Command::LoadFont { .. }
             | Command::ReplaceMissingFont { .. }
-            | Command::TestCreateText { .. } => {
+            | Command::TestCreateText { .. }
+            | Command::TextEditStart { .. }
+            | Command::TextEditEnd
+            | Command::TextInput { .. }
+            | Command::TextKey { .. }
+            | Command::SetTextStyle { .. }
+            | Command::SetTextProps { .. } => {
                 debug_assert!(false, "команда ядра — в `Core::command`");
             }
         }

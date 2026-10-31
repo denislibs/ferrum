@@ -310,3 +310,58 @@
   width: 100%;
   font: inherit;
 }
+
+/* Секция «Текст» (подсистема 3, этап 2): шрифт, переключатели с иконками,
+   выбор шрифта с поиском и виртуальным списком. */
+.fe-text__family {
+  width: 100%;
+  margin-bottom: var(--space-2);
+}
+.fe-text__row {
+  margin-top: var(--space-2);
+  flex-wrap: wrap;
+}
+.fe-segmented--icons .fe-segmented__item {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+}
+.fe-fonts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.fe-fonts__list {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.fe-fonts__heading,
+.fe-fonts__row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 28px;
+  padding: 0 var(--space-2);
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fe-fonts__heading {
+  font-size: 11px;
+}
+.fe-fonts__row {
+  cursor: default;
+  font-size: 13px;
+}
+.fe-fonts__row:hover,
+.fe-fonts__row--active,
+.fe-fonts__row[aria-selected='true'] {
+  background: var(--surface-hover);
+}
+.fe-fonts__empty {
+  margin: 0;
+}

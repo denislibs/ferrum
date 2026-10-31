@@ -8,15 +8,18 @@
 
 mod draw;
 mod hand;
-mod select;
+pub(crate) mod select;
+mod text;
 
 pub use draw::{DrawTool, Shape};
 pub use hand::HandTool;
 pub use select::SelectTool;
+pub use text::TextTool;
 
-use ferrum_doc::{Changes, DocResult, Document, NodeId, PageId, Tx};
+use ferrum_doc::{Changes, DocResult, Document, NodeId, PageId, Props, Tx};
 use ferrum_render::Camera;
 use ferrum_scene::Scene;
+use ferrum_text::SharedFonts;
 use kurbo::{Line, Point, Rect};
 
 use crate::editor::{EditorEvent, Settings};
@@ -35,6 +38,8 @@ pub enum ToolKind {
     Line,
     Hand,
     Image,
+    /// «Текст» (T): новый текст щелчком или рамкой.
+    Text,
 }
 
 /// Курсор над холстом. Углы — в градусах на экране: 0 — горизонтальная стрелка
@@ -53,6 +58,8 @@ pub enum Cursor {
     Rotate {
         angle: f64,
     },
+    /// Над текстом в правке и у инструмента «Текст» (I-образный).
+    Text,
 }
 
 /// Чем инструмент дополняет оверлей.
@@ -139,6 +146,8 @@ pub struct Ctx<'a> {
     pub(crate) hover: &'a mut Option<NodeId>,
     pub(crate) settings: &'a Settings,
     pub(crate) out: &'a mut Outbox,
+    /// Реестр шрифтов: ресайз текста считает высоту по раскладке.
+    pub(crate) fonts: &'a SharedFonts,
 }
 
 /// Исходящее: события для интерфейса, счётчики.
@@ -153,6 +162,14 @@ pub(crate) struct Outbox {
     /// по ним без полного обхода). Не больше `MAX_APPLIED`: при переполнении
     /// старые отбрасываются, и потребитель видит пропуск по метке сцены.
     pub applied: Vec<Changes>,
+    /// Двойной щелчок по тексту: войти в его правку с курсором в точке мира.
+    pub edit_text: Option<(NodeId, Point)>,
+    /// Инструмент «Текст» закончил: новый текст (родитель и свойства) в правку.
+    pub new_text: Option<(Option<NodeId>, Props)>,
+    /// Действие правки текста (клавиша удаления, «Вырезать», вставка фрагмента)
+    /// не применено: шрифты ещё грузятся. Ядро повторит то же действие, когда
+    /// они придут (`Editor::take_text_pending`).
+    pub text_pending: bool,
 }
 
 /// Сколько применённых пачек изменений копится до `Editor::take_applied`.

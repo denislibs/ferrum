@@ -506,6 +506,8 @@ fn scene_cache_roundtrips_every_field() {
                             case: TextCase::SmallCaps,
                         },
                     }),
+                    // Содержимое — ниже, своими правками.
+                    content: None,
                 },
             )?;
             if kind == NodeKind::Text {

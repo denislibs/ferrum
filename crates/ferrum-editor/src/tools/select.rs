@@ -24,6 +24,7 @@ use crate::selection::{
     top_hit, Pick,
 };
 use crate::snap::{Snapper, SNAP_THRESHOLD_PX};
+use crate::text::resize_texts;
 
 /// Двойной клик: не дольше 500 мс и не дальше 4 px от первого.
 pub const DOUBLE_CLICK_MS: f64 = 500.0;
@@ -540,11 +541,16 @@ impl SelectTool {
                 let new = resize_rect(r.sbox.rect, r.handle, local, mods.shift, mods.alt);
                 r.transform =
                     r.sbox.to_world * rect_map(r.sbox.rect, new) * r.sbox.to_world.inverse();
-                let patches = scale_patches_in(
+                let mut patches = scale_patches_in(
                     &r.bases,
                     r.transform,
                     r.sbox.to_world,
                     cx.settings.pixel_snap.into(),
+                );
+                resize_texts(
+                    &mut cx.fonts.borrow_mut(),
+                    r.bases.iter().map(|b| (b.id, &b.props)),
+                    &mut patches,
                 );
                 cx.scene.set_preview(&patches);
             }
@@ -625,11 +631,16 @@ impl SelectTool {
             State::Dragging(d) => commit_drag(cx, d, cx.to_world(e.point)),
             State::Marquee(_) => {}
             State::Resizing(r) => {
-                let patches = scale_patches_in(
+                let mut patches = scale_patches_in(
                     &r.bases,
                     r.transform,
                     r.sbox.to_world,
                     cx.settings.pixel_snap.into(),
+                );
+                resize_texts(
+                    &mut cx.fonts.borrow_mut(),
+                    r.bases.iter().map(|b| (b.id, &b.props)),
+                    &mut patches,
                 );
                 commit_patches(cx, patches);
             }
@@ -785,7 +796,7 @@ fn commit_patches(cx: &mut Ctx, patches: Vec<(NodeId, PropsPatch)>) {
     let sel = cx.selection.to_vec();
     cx.commit(|tx, _| {
         for (id, patch) in &patches {
-            crate::text::set_props_resizing(tx, *id, patch)?;
+            tx.set_props(*id, patch)?;
         }
         Ok(sel)
     });
@@ -872,6 +883,21 @@ impl Tool for SelectTool {
         let shift = e.modifiers.shift;
         let cache = self.sel_cache(cx);
         let sbox = cache.sbox;
+        // Двойной щелчок по тексту — его правка (спека подсистемы 3, раздел 7),
+        // даже над ручками рамки мелкого текста.
+        if double && !shift {
+            if let Some(id) = Self::pick_at(cx, &cache.parents, e.point, e.modifiers, true) {
+                let text = cx.scene.slot(id).is_some_and(|s| {
+                    cx.scene.at(s).props.kind == NodeKind::Text && !locked(cx.scene, s)
+                });
+                if text {
+                    cx.selection.set(vec![id]);
+                    cx.out.edit_text = Some((id, world));
+                    self.state = State::Idle;
+                    return;
+                }
+            }
+        }
         let target = if let Some((hit, _)) = Self::box_hit(cx, sbox, e.point) {
             match hit {
                 BoxHit::Handle(h) => Target::Handle(h),

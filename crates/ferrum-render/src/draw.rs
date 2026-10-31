@@ -568,13 +568,16 @@ impl Painter {
             text_node::paint_greek(backend, &layout.lines, to_device, alpha);
             self.stats.text_greeked += 1;
         } else {
-            text_node::paint_glyphs(
+            let ready = text_node::paint_glyphs(
                 backend,
                 &mut ctx.fonts.borrow_mut(),
                 &layout,
+                &n.props,
                 to_device,
                 alpha,
+                ctx.images,
             );
+            self.missing_image |= !ready;
             self.stats.text_glyphs += 1;
         }
     }
