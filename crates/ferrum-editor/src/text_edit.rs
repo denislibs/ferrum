@@ -214,6 +214,9 @@ impl Editor {
     pub fn start_text_edit(&mut self, id: NodeId, at: EnterAt) -> bool {
         self.cancel_gesture();
         self.finish_text_edit();
+        if self.doc.is_read_only() {
+            return false;
+        }
         let Some(slot) = self.scene.slot(id) else {
             return false;
         };
@@ -236,6 +239,7 @@ impl Editor {
         let last = last_index(&content);
         self.selection.set(vec![id]);
         self.hover = None;
+        self.text_hover = false;
         self.text_edit = Some(TextEdit::new(id, 0, last, self.now_ms));
         match at {
             EnterAt::All => {}
@@ -290,7 +294,11 @@ impl Editor {
     pub(crate) fn text_pointer_down(&mut self, e: &PointerEvent) -> bool {
         let world = self.camera.screen_to_world(e.point);
         if !self.inside_edited(world) {
-            self.end_text_edit();
+            // Нажатие достаётся инструменту как обычное: без выделения нет ручек
+            // правимого текста, и оно не начнёт поворот или размер.
+            self.finish_text_edit();
+            self.selection.set(Vec::new());
+            self.emit();
             return false;
         }
         let Some(caret) = self.hit_text(world) else {
@@ -435,6 +443,7 @@ impl Editor {
 
     /// Заканчивает правку без выделения узла: превью IME убирается.
     pub(crate) fn finish_text_edit(&mut self) {
+        self.text_hover = false;
         if self.text_edit.take().is_some() {
             self.scene.clear_preview();
         }

@@ -24,7 +24,7 @@ fn double_click_enters_editing_with_caret_at_the_point() {
     assert!(o.selection.is_empty());
     let t = o.text_edit.unwrap();
     let (cx, top, bottom) = t.caret.unwrap();
-    assert!((t.transform * Point::new(cx, 0.0)).x - x < 1e-6);
+    assert!(((t.transform * Point::new(cx, 0.0)).x - x).abs() < 1e-6);
     assert!(bottom - top > 20.0);
     assert!(t.selection.is_empty());
     assert_eq!(h.ed.step_count(), 1, "вход в правку — не шаг истории");
@@ -37,6 +37,7 @@ fn enter_selects_all_and_escape_exits_with_the_node_selected() {
     h.key("Enter", none());
     assert_eq!(sel_range(&h), (0, 10));
     assert!(!h.ed.overlay().text_edit.unwrap().selection.is_empty());
+    assert!(h.ed.overlay().text_edit.unwrap().caret.is_none());
     h.key("Escape", none());
     assert!(!h.ed.is_editing_text());
     assert_eq!(h.sel(), vec![id]);
@@ -200,4 +201,61 @@ fn double_click_on_small_text_beats_its_handles() {
     h.dbl(105.0, 305.0);
     assert!(h.ed.is_editing_text());
     assert_eq!(h.sel(), vec![id]);
+}
+
+#[test]
+fn press_just_off_a_corner_ends_editing_without_a_handle_gesture() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    h.key("Enter", none());
+    let n = h.ed.scene().node(id).unwrap();
+    let (w, hh) = (n.props.w, n.props.h);
+    let before = h.ed.page_doc().props(id).unwrap();
+    let steps = h.ed.step_count();
+    // 10 px по диагонали от правого нижнего угла: зона поворота ручек.
+    let (x, y) = (100.0 + w + 7.0, 100.0 + hh + 7.0);
+    h.mv(x, y, none());
+    assert_ne!(h.ed.cursor(), Cursor::Text);
+    assert!(!matches!(
+        h.ed.cursor(),
+        Cursor::Rotate { .. } | Cursor::Resize { .. }
+    ));
+    h.down(x, y, none());
+    assert!(!h.ed.is_editing_text());
+    h.mv(x + 40.0, y + 40.0, none());
+    h.up(x + 40.0, y + 40.0, none());
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(h.ed.page_doc().props(id).unwrap(), before);
+    assert!(h.sel().is_empty());
+}
+
+#[test]
+fn read_only_document_refuses_editing() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    let bytes = ferrum_doc::container::encode(h.ed.document()).unwrap();
+    let future =
+        ferrum_doc::container::testing::with_schema_version(&bytes, ferrum_doc::SCHEMA_VERSION + 1);
+    let doc = ferrum_doc::container::decode(&future).unwrap().document;
+    let mut ed = Editor::new(
+        doc,
+        None,
+        kurbo::Size::new(800.0, 600.0),
+        1.0,
+        Platform::Windows,
+    )
+    .unwrap();
+    ed.set_fonts(loaded_fonts());
+    assert!(!ed.start_text_edit(id, EnterAt::All));
+    assert!(!ed.is_editing_text());
+}
+
+#[test]
+fn held_enter_does_not_enter_editing() {
+    let mut h = text_h();
+    add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    let mut e = KeyEvent::new("Enter", none());
+    e.repeat = true;
+    h.ev(Input::KeyDown(e));
+    assert!(!h.ed.is_editing_text());
 }

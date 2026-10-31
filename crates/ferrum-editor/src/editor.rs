@@ -355,8 +355,13 @@ impl Editor {
     pub fn cursor(&self) -> Cursor {
         if self.pan.is_some() {
             Cursor::Grabbing
-        } else if self.text_edit.is_some() && self.text_hover {
-            Cursor::Text
+        } else if self.text_edit.is_some() {
+            // Рамка с ручками во время правки скрыта: ни Resize, ни Rotate.
+            if self.text_hover {
+                Cursor::Text
+            } else {
+                Cursor::Default
+            }
         } else {
             self.tool.cursor()
         }
@@ -524,6 +529,8 @@ impl Editor {
                 return;
             }
             self.text_hover = self.over_edited_text(e.point);
+            // Инструмент не опрашивается: его ручки скрыты, hover не меняется.
+            return;
         }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
@@ -620,7 +627,10 @@ impl Editor {
         }
         // Enter по единственному выделенному тексту — правка всего текста (как в
         // Figma). Физическая клавиша, как Esc у жеста: не команда раскладки.
-        if (e.code == "Enter" || e.code == "NumpadEnter") && e.modifiers == Modifiers::NONE {
+        if (e.code == "Enter" || e.code == "NumpadEnter")
+            && e.modifiers == Modifiers::NONE
+            && !e.repeat
+        {
             if let [id] = self.selection[..] {
                 if self.start_text_edit(id, EnterAt::All) {
                     return;
