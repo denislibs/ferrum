@@ -5,23 +5,51 @@
 //! верхнего и берёт его свойства (имя, заливки, обводки), а области других
 //! узлов сохраняют свои заливки цветом. Группа с заблокированным слоем не
 //! сплющивается; скрытые слои группы в вектор не попадают (как в Figma).
+//! Этап 4: булева группа сплющивается в свой результат (дети уходят вместе с
+//! ней), текст — в контуры глифов (с подчёркиванием и зачёркиванием); оба — новым
+//! вектором на своём месте.
 
 use crate::editor::{Editor, EditorEvent};
 use crate::geometry::parent_world;
 use crate::selection::locked;
 use crate::vector_edit::{as_vector, convert_to_vector};
-use crate::vector_ops::{merge_networks, reframe, shape_network};
-use ferrum_doc::{FillKind, NodeId, NodeKind, Props};
+use crate::vector_ops::{merge_networks, path_network, reframe, shape_network};
+use ferrum_doc::{FillKind, FillRule, NodeId, NodeKind, Props, VectorNetwork};
+use ferrum_scene::Slot;
 
 /// Сплющивается ли узел этого типа.
 fn flattenable(k: NodeKind) -> bool {
     matches!(
         k,
-        NodeKind::Vector | NodeKind::Rect | NodeKind::Ellipse | NodeKind::Line
+        NodeKind::Vector
+            | NodeKind::Rect
+            | NodeKind::Ellipse
+            | NodeKind::Line
+            | NodeKind::Boolean
+            | NodeKind::Text
     )
 }
 
 impl Editor {
+    /// Сеть узла в координатах его формы: фигура и вектор — `shape_network`,
+    /// булева группа — её результат, текст — контуры глифов (`None`, пока
+    /// шрифты грузятся).
+    pub(crate) fn node_network(&self, slot: Slot) -> Option<VectorNetwork> {
+        let n = self.scene.at(slot);
+        match n.props.kind {
+            NodeKind::Boolean => {
+                let b = n.boolean.as_ref()?;
+                Some(path_network(&b.contours.to_path(), FillRule::NonZero))
+            }
+            NodeKind::Text => {
+                let mut fonts = self.fonts.try_borrow_mut().ok()?;
+                let path = ferrum_render::text_outline(&mut fonts, &n.props)?;
+                Some(path_network(&path, FillRule::NonZero))
+            }
+            _ => shape_network(&n.props),
+        }
+    }
+
     /// Сплющивает выделение в один вектор.
     pub(crate) fn flatten(&mut self) {
         self.finish_vector_edit();
@@ -64,11 +92,12 @@ impl Editor {
                     }
                     match n.props.kind {
                         NodeKind::Group => stack.extend(n.children.iter().rev()),
+                        // Булева группа внутри группы — её результатом.
                         k if flattenable(k) => inner.push((self.scene.order_key(s), n.id)),
                         _ => foreign = true,
                     }
                 }
-                // Группу с текстом, изображением или фреймом сплющить целиком нельзя:
+                // Группу с изображением или фреймом сплющить целиком нельзя:
                 // их пришлось бы потерять вместе с группой.
                 if foreign || inner.is_empty() {
                     skipped |= held || (inner.is_empty() && hidden);
@@ -87,7 +116,7 @@ impl Editor {
         if leaves.is_empty() {
             if !skipped {
                 self.out.events.push(EditorEvent::Error(
-                    "Нечего сплющить: сплющиваются векторы, прямоугольники, эллипсы, линии и их группы"
+                    "Нечего сплющить: сплющиваются векторы, фигуры, текст, булевы группы и их группы"
                         .into(),
                 ));
             }
@@ -100,14 +129,32 @@ impl Editor {
             if one == only {
                 let n = self.scene.at(top_slot);
                 let props = n.props.clone();
-                let Some(net) = shape_network(&props) else {
-                    return;
-                };
                 if props.kind == NodeKind::Vector {
                     return;
                 }
-                let patch = reframe(&props, net);
+                let Some(net) = self.node_network(top_slot) else {
+                    self.out.events.push(EditorEvent::Error(
+                        "Шрифты ещё загружаются — текст не сплющен".into(),
+                    ));
+                    return;
+                };
                 let id = *one;
+                // Булева группа и текст — новым вектором на своём месте (у них
+                // есть дети или содержимое, которые вектору не нужны).
+                if matches!(props.kind, NodeKind::Boolean | NodeKind::Text) {
+                    let mut base = props.clone();
+                    as_vector(&mut base);
+                    let patch = reframe(&base, net);
+                    patch.apply_to(&mut base);
+                    let parent = n.parent.map(|p| self.scene.at(p).id);
+                    let index = self.scene.index(top_slot) as usize;
+                    self.ctx().commit(|tx, _| {
+                        tx.delete_nodes(&[id])?;
+                        Ok(vec![tx.create_with_props(parent, Some(index), &base)?])
+                    });
+                    return;
+                }
+                let patch = reframe(&props, net);
                 self.ctx()
                     .commit(|tx, _| Ok(vec![convert_to_vector(tx, id, &patch)?]));
                 return;
@@ -124,9 +171,14 @@ impl Editor {
             .clone();
         let mut parts = Vec::new();
         for id in &leaves {
-            let n = self.scene.node(*id).expect("в сцене");
-            let Some(mut net) = shape_network(&n.props) else {
-                continue;
+            let slot = self.scene.slot(*id).expect("в сцене");
+            let n = self.scene.at(slot);
+            // Текст без шрифтов не терять: ничего не сплющивается.
+            let Some(mut net) = self.node_network(slot) else {
+                self.out.events.push(EditorEvent::Error(
+                    "Шрифты ещё загружаются — текст не сплющен".into(),
+                ));
+                return;
             };
             // Заливки узла, отличные от заливок результата, остаются у его областей.
             let own = n.props.fills != top_leaf.fills

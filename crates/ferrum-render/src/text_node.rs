@@ -97,6 +97,23 @@ fn glyphs_path<'a>(fonts: &mut Fonts, runs: impl Iterator<Item = &'a GlyphRun>) 
     out
 }
 
+/// Контуры текста узла в его локальных координатах — глифы всех прогонов и
+/// прямоугольники подчёркивания и зачёркивания (спека подсистемы 3, раздел 10:
+/// булевы операции, «Сплющить» и «Контур обводки» текста). `None` — шрифты ещё
+/// грузятся (раскладка не окончательная) или узел не текст.
+pub fn text_outline(fonts: &mut Fonts, p: &Props) -> Option<BezPath> {
+    let t = p.text.as_deref()?;
+    let layout = fonts.layout(&ferrum_text::LayoutRequest::for_node(t, &p.fills, p.w, p.h));
+    if layout.loading {
+        return None;
+    }
+    let mut out = glyphs_path(fonts, layout.runs.iter());
+    for d in &layout.decorations {
+        out.extend(d.rect.path_elements(0.1));
+    }
+    Some(out)
+}
+
 /// Заливка глифов прогона краской `paint`. Изображение — по рамке узла `area`;
 /// `false` — картинки ещё нет (нарисована заглушка).
 #[allow(clippy::too_many_arguments)]

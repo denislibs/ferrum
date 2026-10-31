@@ -15,6 +15,7 @@ pub mod input;
 pub mod keymap;
 pub mod measure;
 mod ops;
+mod outline;
 pub mod pages;
 pub mod panel;
 pub mod presets;

@@ -105,7 +105,7 @@ fn defaults_match_figma_on_both_platforms() {
         assert!(!map.bindings(c.id).is_empty(), "{:?}", c.id);
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 52);
+    assert_eq!(COMMANDS.len(), 53);
 }
 
 #[test]

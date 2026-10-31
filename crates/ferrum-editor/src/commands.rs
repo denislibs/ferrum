@@ -26,6 +26,8 @@ pub enum CommandId {
     BooleanSubtract,
     BooleanIntersect,
     BooleanExclude,
+    /// «Контур обводки»: обводки выделения — в векторы с заливкой их цветом.
+    OutlineStroke,
     /// Рука, пока клавиша удерживается (по умолчанию Space).
     HandHold,
     ToolImage,
@@ -211,6 +213,12 @@ pub const COMMANDS: &[Command] = &[
         "object.boolean_exclude",
         "Исключение",
         &["Alt+Shift+KeyE"],
+    ),
+    cmd(
+        C::OutlineStroke,
+        "object.outline_stroke",
+        "Контур обводки",
+        &["Mod+Alt+KeyO"],
     ),
     cmd(
         C::FrameSelection,

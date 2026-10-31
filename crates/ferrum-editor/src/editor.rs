@@ -9,8 +9,9 @@
 //! единственный владелец всего состояния ядра, рендер получает `scene()`,
 //! `camera()` и `overlay()` по ссылке.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrum_doc::{Changes, DocError, DocResult, Document, NodeId, PageDoc, PageId, Tx};
@@ -179,6 +180,32 @@ pub struct Editor {
     pub(crate) text_hover: bool,
     /// Правка вектора и перо (спека подсистемы 3, раздел 9).
     pub(crate) vector_edit: Option<VectorEdit>,
+    /// Поколение реестра шрифтов, с которым посчитаны контуры глифов текста в
+    /// булевых группах сцены (`sync_text_outlines`).
+    pub(crate) outlines_generation: u64,
+    /// Источник контуров глифов застал реестр шрифтов занятым: текст булевой
+    /// группы остался без формы — `sync_text_outlines` пересчитает её на
+    /// следующем `emit`.
+    pub(crate) outlines_missed: Rc<Cell<bool>>,
+}
+
+/// Ставит сцене источник контуров глифов для текста в булевых группах — реестр
+/// шрифтов редактора. Реестр занят (сцена пересчитывается посреди раскладки) —
+/// текст пока без формы, а `missed` помечается: пересчёт — на ближайшем `emit`.
+pub(crate) fn install_text_outlines(
+    scene: &mut Scene,
+    fonts: &SharedFonts,
+    missed: &Rc<Cell<bool>>,
+) {
+    let fonts = fonts.clone();
+    let missed = missed.clone();
+    scene.set_text_outlines(Some(Rc::new(move |p: &ferrum_doc::Props| {
+        let Ok(mut f) = fonts.try_borrow_mut() else {
+            missed.set(true);
+            return None;
+        };
+        ferrum_render::text_outline(&mut f, p)
+    })));
 }
 
 impl Editor {
@@ -194,7 +221,10 @@ impl Editor {
             Some(p) => p,
             None => return Err(DocError::PageNotFound("—".into())),
         };
-        let scene = Scene::from_page(doc.page(page)?);
+        let mut scene = Scene::from_page(doc.page(page)?);
+        let fonts = Fonts::shared();
+        let outlines_missed = Rc::new(Cell::new(false));
+        install_text_outlines(&mut scene, &fonts, &outlines_missed);
         // Изменения, накопленные до редактора, уже в сцене.
         for (p, _) in doc.pages() {
             doc.take_changes(p);
@@ -241,13 +271,31 @@ impl Editor {
             alt: AltState::default(),
             measures: Vec::new(),
             measure_cache: None,
-            fonts: Fonts::shared(),
+            fonts,
             text_edit: None,
             edit_layout_cache: RefCell::new(None),
             now_ms: 0.0,
             text_hover: false,
             vector_edit: None,
+            outlines_generation: 0,
+            outlines_missed,
         })
+    }
+
+    /// Шрифты сменились (пришли байты, отказ в загрузке) — булевы группы с
+    /// текстом пересчитываются с новыми контурами глифов. Вызывается с каждым
+    /// `emit`; ядро зовёт его и после загрузки шрифта.
+    /// Так же пересчитываются группы, чей текст застал реестр занятым.
+    pub fn sync_text_outlines(&mut self) {
+        // Реестр занят — дождаться следующего вызова.
+        let Ok(generation) = self.fonts.try_borrow().map(|f| f.generation()) else {
+            return;
+        };
+        if generation != self.outlines_generation || self.outlines_missed.get() {
+            self.outlines_generation = generation;
+            self.outlines_missed.set(false);
+            self.scene.refresh_text_outlines();
+        }
     }
 
     pub fn document(&self) -> &Document {
@@ -954,6 +1002,7 @@ impl Editor {
         }
         let pd = self.doc.page(page)?;
         self.scene = Scene::from_page(pd);
+        install_text_outlines(&mut self.scene, &self.fonts, &self.outlines_missed);
         self.scene_epoch += 1;
         self.page = page;
         self.selection.clear();
@@ -984,6 +1033,7 @@ impl Editor {
                 if restore.page != self.page {
                     if let Ok(pd) = self.doc.page(restore.page) {
                         self.scene = Scene::from_page(pd);
+                        install_text_outlines(&mut self.scene, &self.fonts, &self.outlines_missed);
                         self.scene_epoch += 1;
                         self.page = restore.page;
                         self.out.events.push(EditorEvent::PageChanged(restore.page));
@@ -1055,6 +1105,7 @@ impl Editor {
         self.clamp_text_edit();
         // Правимый вектор изменился (запись, отмена, панель) — сеть заново.
         self.resync_vector_edit();
+        self.sync_text_outlines();
         self.update_measures();
         let now = Seen {
             selection: self.selection.version(),

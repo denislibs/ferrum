@@ -63,6 +63,7 @@ impl Editor {
             C::BooleanSubtract => self.boolean(ferrum_doc::BooleanOp::Subtract),
             C::BooleanIntersect => self.boolean(ferrum_doc::BooleanOp::Intersect),
             C::BooleanExclude => self.boolean(ferrum_doc::BooleanOp::Exclude),
+            C::OutlineStroke => self.outline_stroke(),
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),

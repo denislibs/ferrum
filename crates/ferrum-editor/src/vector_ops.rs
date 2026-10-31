@@ -14,7 +14,8 @@ use ferrum_doc::{
 };
 use ferrum_scene::vector::{fit, network_bounds, segment_curve};
 use kurbo::{
-    Affine, BezPath, CubicBez, ParamCurve, ParamCurveNearest, PathSeg, Point, Rect, Shape, Vec2,
+    Affine, BezPath, CubicBez, ParamCurve, ParamCurveNearest, PathEl, PathSeg, Point, Rect, Shape,
+    Vec2,
 };
 
 /// Доля радиуса для ручек дуги в четверть окружности.
@@ -1189,4 +1190,99 @@ pub fn merge_networks(parts: &[(VectorNetwork, Affine)]) -> VectorNetwork {
         }));
     }
     out
+}
+
+/// Путь → сеть (результат булевой группы, контуры глифов, контур обводки):
+/// каждый подпуть — цепочка точек и сегментов (квадратичные кривые — кубическими),
+/// замкнутые подпути — петли одной области с правилом `rule` и заливками узла.
+/// Отрезки нулевой длины пропускаются; подпуть меньше двух точек — тоже.
+pub fn path_network(path: &BezPath, rule: FillRule) -> VectorNetwork {
+    let mut net = VectorNetwork::default();
+    let mut loops = Vec::new();
+    // Точки и сегменты текущего подпути: (конечная точка, ручки).
+    let mut start: Option<Point> = None;
+    let mut sub: Vec<(Point, [f64; 2], [f64; 2])> = Vec::new();
+    let mut flush = |start: Point,
+                     sub: &mut Vec<(Point, [f64; 2], [f64; 2])>,
+                     closed: bool,
+                     net: &mut VectorNetwork| {
+        let mut items = std::mem::take(sub);
+        // Замыкающий отрезок — тот же, что `close_path` дорисует сам.
+        if closed {
+            match items.last() {
+                Some((p, _, _)) if (*p - start).hypot() < 1e-9 => {}
+                _ => items.push((start, [0.0; 2], [0.0; 2])),
+            }
+        }
+        if items.is_empty() || (closed && items.len() < 2) {
+            return;
+        }
+        let first = net.points.len() as u32;
+        net.points.push(VectorPoint::new(start.x, start.y));
+        let n = items.len();
+        let mut seg_ids = Vec::with_capacity(n);
+        for (k, (p, ts, te)) in items.into_iter().enumerate() {
+            let from = net.points.len() as u32 - 1;
+            let to = if closed && k == n - 1 {
+                first
+            } else {
+                net.points.push(VectorPoint::new(p.x, p.y));
+                net.points.len() as u32 - 1
+            };
+            seg_ids.push(net.segments.len() as u32);
+            net.segments.push(VectorSegment {
+                start: from,
+                end: to,
+                tangent_start: ts,
+                tangent_end: te,
+            });
+        }
+        if closed {
+            loops.push(seg_ids);
+        }
+    };
+    let mut last = Point::ZERO;
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                if let Some(s) = start.take() {
+                    flush(s, &mut sub, false, &mut net);
+                }
+                start = Some(p);
+                last = p;
+            }
+            PathEl::LineTo(p) => {
+                if (p - last).hypot() > 1e-9 {
+                    sub.push((p, [0.0; 2], [0.0; 2]));
+                    last = p;
+                }
+            }
+            PathEl::QuadTo(c, p) => {
+                let c = kurbo::QuadBez::new(last, c, p).raise();
+                sub.push((p, arr(c.p1 - c.p0), arr(c.p2 - c.p3)));
+                last = p;
+            }
+            PathEl::CurveTo(a, b, p) => {
+                sub.push((p, arr(a - last), arr(b - p)));
+                last = p;
+            }
+            PathEl::ClosePath => {
+                if let Some(s) = start.take() {
+                    flush(s, &mut sub, true, &mut net);
+                    last = s;
+                }
+            }
+        }
+    }
+    if let Some(s) = start.take() {
+        flush(s, &mut sub, false, &mut net);
+    }
+    if !loops.is_empty() {
+        net.regions.push(VectorRegion {
+            rule,
+            loops,
+            fills: None,
+        });
+    }
+    net
 }
