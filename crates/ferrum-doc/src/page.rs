@@ -31,9 +31,20 @@ use crate::text::{
 };
 use crate::text_codec;
 use crate::types::*;
+use crate::vector::{VectorError, VectorNetwork};
 
 const TREE: &str = "nodes";
 const KEY_ID: &str = "id";
+
+/// Сеть, которую пишет правка: сверх 100 000 точек — отказ с сообщением, иначе
+/// неверная сеть (ошибка редактора) не попадает в документ.
+fn check_vector(v: &VectorNetwork) -> DocResult<()> {
+    match v.validate() {
+        Ok(()) => Ok(()),
+        Err(VectorError::TooManyPoints) => Err(DocError::VectorTooLarge),
+        Err(e) => Err(DocError::InvalidVector("—".into(), e)),
+    }
+}
 
 /// Узел, сохранённый перед удалением, чтобы восстановить его отменой.
 #[derive(Debug, Clone, PartialEq)]
@@ -247,7 +258,9 @@ impl PageDoc {
             let id = self.stable_id(tid);
             let props = match codec::read_props(&self.tree.get_meta(tid)?, &id) {
                 Ok(props) => props,
-                Err(DocError::UnknownKind(..)) => {
+                // Неверная сеть вектора (чужая сборка, повреждение) — как
+                // неизвестный тип: узел скрыт, документ только для чтения.
+                Err(DocError::UnknownKind(..) | DocError::InvalidVector(..)) => {
                     unknown = true;
                     self.collect_hidden_refs(tid, &mut hidden_refs)?;
                     continue;
@@ -313,6 +326,17 @@ impl PageDoc {
         let t = text_codec::text_container(&self.tree.get_meta(tid).expect("карта узла"))
             .expect("текст узла");
         t.insert(0, text).expect("вставка в Loro");
+        self.doc.commit();
+    }
+
+    /// Только для тестов: значение `vector` узла в Loro как есть (как в файле
+    /// чужой сборки) — без проверки и без зеркала.
+    #[doc(hidden)]
+    pub fn force_vector_bytes_for_tests(&self, id: NodeId, bytes: &[u8]) {
+        let tid = self.tid(id).expect("узел есть");
+        let meta = self.tree.get_meta(tid).expect("карта узла");
+        meta.insert(codec::key::VECTOR, LoroValue::Binary(bytes.to_vec().into()))
+            .expect("запись в Loro");
         self.doc.commit();
     }
 
@@ -474,9 +498,13 @@ impl PageDoc {
         index: Option<usize>,
         props: &Props,
     ) -> DocResult<NodeId> {
-        // Пределы текста — до создания узла: отказ не оставляет ни узла, ни шага.
+        // Пределы текста и сети — до создания узла: отказ не оставляет ни узла,
+        // ни шага.
         if let Some(t) = &props.text {
             t.content.check_limits()?;
+        }
+        if let Some(v) = &props.vector {
+            check_vector(v)?;
         }
         let tid = self.create_tree_node(parent, index)?;
         let id = NodeId(tid);
@@ -563,17 +591,33 @@ impl PageDoc {
         }
         let tid = self.tid(id)?;
         let before = self.props(id)?;
-        // Свойства текста есть только у текста: у остальных узлов их не пишем.
+        // Свойства текста есть только у текста, сеть — только у вектора: у
+        // остальных узлов их не пишем.
         let stripped;
-        let patch = if before.text.is_none() && patch.text.is_some() {
+        let foreign_text = before.text.is_none() && patch.text.is_some();
+        let foreign_vector = before.vector.is_none() && patch.vector.is_some();
+        let patch = if foreign_text || foreign_vector {
             stripped = PropsPatch {
-                text: None,
+                text: if foreign_text {
+                    None
+                } else {
+                    patch.text.clone()
+                },
+                vector: if foreign_vector {
+                    None
+                } else {
+                    patch.vector.clone()
+                },
                 ..patch.clone()
             };
             &stripped
         } else {
             patch
         };
+        if let Some(v) = &patch.vector {
+            check_vector(v)?;
+        }
+
         let mut after = before.clone();
         patch.apply_to(&mut after);
         if after == before {

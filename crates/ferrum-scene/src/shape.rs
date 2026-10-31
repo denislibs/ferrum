@@ -97,6 +97,8 @@ pub fn geometry(p: &Props) -> Geometry {
         NodeKind::Line => Geometry::Line(p.w),
         // Рамка текста; попадание — по ней (спека подсистемы 3, раздел 5).
         NodeKind::Text => Geometry::Rect { rect, radius: 0.0 },
+        // Пока сеть не рисуется (её геометрия — следующая задача), вектор — рамка.
+        NodeKind::Vector => Geometry::Rect { rect, radius: 0.0 },
     }
 }
 

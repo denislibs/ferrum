@@ -70,6 +70,11 @@ impl<'a> Reader<'a> {
         Some(self.take(1)?[0])
     }
 
+    /// Сколько байт ещё не прочитано.
+    pub fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
     pub fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
     }

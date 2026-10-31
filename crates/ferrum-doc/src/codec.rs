@@ -10,6 +10,7 @@ use crate::error::{DocError, DocResult};
 use crate::text::TextData;
 use crate::text_codec;
 use crate::types::*;
+use crate::vector::{StrokeCap, StrokeJoin, StrokeStyle, VectorNetwork};
 
 pub(crate) mod key {
     pub const TYPE: &str = "type";
@@ -28,6 +29,12 @@ pub(crate) mod key {
     pub const FLIP_Y: &str = "flipY";
     pub const FILLS: &str = "fills";
     pub const STROKES: &str = "strokes";
+    pub const STROKE_CAP_START: &str = "strokeCapStart";
+    pub const STROKE_CAP_END: &str = "strokeCapEnd";
+    pub const STROKE_JOIN: &str = "strokeJoin";
+    pub const STROKE_MITER_LIMIT: &str = "strokeMiterLimit";
+    /// Сеть узла `vector` — двоичное значение (`VectorNetwork::encode`).
+    pub const VECTOR: &str = "vector";
 }
 
 pub(crate) fn value(map: &LoroMap, k: &str) -> Option<LoroValue> {
@@ -67,6 +74,48 @@ fn f64_or(map: &LoroMap, k: &str, default: f64) -> f64 {
 
 fn bool_or(map: &LoroMap, k: &str, default: bool) -> bool {
     value(map, k).as_ref().and_then(as_bool).unwrap_or(default)
+}
+
+/// Стиль обводки: неизвестное окончание или соединение (из будущей сборки) —
+/// умолчание, предел острого угла — в допустимых пределах.
+fn read_stroke_style(map: &LoroMap) -> StrokeStyle {
+    let d = StrokeStyle::default();
+    let s = |k| value(map, k).as_ref().and_then(as_str);
+    let limit = f64_or(map, key::STROKE_MITER_LIMIT, d.miter_limit);
+    StrokeStyle {
+        cap_start: s(key::STROKE_CAP_START)
+            .and_then(|v| StrokeCap::parse(&v))
+            .unwrap_or(d.cap_start),
+        cap_end: s(key::STROKE_CAP_END)
+            .and_then(|v| StrokeCap::parse(&v))
+            .unwrap_or(d.cap_end),
+        join: s(key::STROKE_JOIN)
+            .and_then(|v| StrokeJoin::parse(&v))
+            .unwrap_or(d.join),
+        miter_limit: if limit.is_finite() {
+            limit.clamp(
+                *crate::MITER_LIMIT_RANGE.start(),
+                *crate::MITER_LIMIT_RANGE.end(),
+            )
+        } else {
+            d.miter_limit
+        },
+    }
+}
+
+/// Сеть узла `vector`; нет ключа — пустая сеть. Неверная — ошибка: узел
+/// скрывается, документ — только для чтения (`PageDoc::rebuild_from_loro`).
+fn read_vector(map: &LoroMap, id: &NodeId) -> DocResult<VectorNetwork> {
+    match value(map, key::VECTOR) {
+        None => Ok(VectorNetwork::default()),
+        Some(LoroValue::Binary(b)) => {
+            VectorNetwork::decode(&b).map_err(|e| DocError::InvalidVector(id.to_string(), e))
+        }
+        Some(_) => Err(DocError::InvalidVector(
+            id.to_string(),
+            crate::vector::VectorError::Invalid("не двоичное значение"),
+        )),
+    }
 }
 
 /// Тип узла читается отдельно: по нему выбираются значения по умолчанию.
@@ -109,6 +158,7 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
             Some(v) => read_list(&v, read_stroke),
             None => d.strokes,
         },
+        stroke_style: read_stroke_style(map),
         text: (kind == NodeKind::Text).then(|| {
             Arc::new(TextData {
                 props: text_codec::read_text_props(map),
@@ -117,6 +167,10 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
                     .unwrap_or_default(),
             })
         }),
+        vector: match kind {
+            NodeKind::Vector => Some(Arc::new(read_vector(map, id)?)),
+            _ => None,
+        },
     })
 }
 
@@ -210,6 +264,11 @@ pub(crate) fn write_props(map: &LoroMap, p: &Props) -> DocResult<()> {
         text: p.text.as_ref().map(|t| t.props.clone()),
         // Содержимое пишется ниже, в новый контейнер.
         content: None,
+        stroke_cap_start: Some(p.stroke_style.cap_start).filter(|v| *v != StrokeCap::None),
+        stroke_cap_end: Some(p.stroke_style.cap_end).filter(|v| *v != StrokeCap::None),
+        stroke_join: Some(p.stroke_style.join).filter(|v| *v != StrokeJoin::Miter),
+        stroke_miter_limit: neutral(p.stroke_style.miter_limit, crate::DEFAULT_MITER_LIMIT),
+        vector: p.vector.clone(),
     };
     write_patch(map, &patch)?;
     // Содержимое — в новый `LoroText` узла: узел только что создан (или
@@ -263,9 +322,28 @@ pub(crate) fn write_patch(map: &LoroMap, p: &PropsPatch) -> DocResult<()> {
             LoroValue::from(strokes.iter().map(stroke_value).collect::<Vec<_>>()),
         )?;
     }
-    // Вызывающий убирает `text` из патча узла не текста (`PageDoc::set_props`).
+    for (k, v) in [
+        (
+            key::STROKE_CAP_START,
+            p.stroke_cap_start.map(StrokeCap::as_str),
+        ),
+        (key::STROKE_CAP_END, p.stroke_cap_end.map(StrokeCap::as_str)),
+        (key::STROKE_JOIN, p.stroke_join.map(StrokeJoin::as_str)),
+    ] {
+        if let Some(v) = v {
+            map.insert(k, v)?;
+        }
+    }
+    if let Some(v) = p.stroke_miter_limit {
+        map.insert(key::STROKE_MITER_LIMIT, v)?;
+    }
+    // Вызывающий убирает `text` и `vector` из патча узла другого типа
+    // (`PageDoc::set_props`).
     if let Some(text) = &p.text {
         text_codec::write_text_props(map, text)?;
+    }
+    if let Some(v) = &p.vector {
+        map.insert(key::VECTOR, LoroValue::Binary(v.encode().into()))?;
     }
     Ok(())
 }
