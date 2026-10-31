@@ -27,6 +27,7 @@ import type { Route } from './router';
 import { createSaver, SETTLE_MS, withTimeout, type Saver, type SaverOptions } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
 import { installClipboard } from './system-clipboard';
+import { installTextInput } from './text-input';
 import { createUiStore } from './store';
 import { Toasts } from './toasts';
 import { Toolbar } from './toolbar';
@@ -278,7 +279,13 @@ export function App(props: AppProps) {
         }
         setEditor(ed);
         canvas.focus();
-        uninstall = installClipboard(ed);
+        const offClipboard = installClipboard(ed);
+        // Поле правки текста — в сцене холста (под курсором текста).
+        const offText = installTextInput(ed, canvas.parentElement ?? document.body, canvas);
+        uninstall = () => {
+          offText();
+          offClipboard();
+        };
         saver = createSaver(ed, props.files, id, version, stored, { ...testIntervals(), journalSession });
         // Ctrl/Cmd+S, пока фокус в поле панели (клавиша не ушла ядру): тоже
         // «Сохранить», и браузер не открывает диалог сохранения страницы.

@@ -21,7 +21,6 @@ const SHAPES: { tool: Shape; name: string; command: string; icon: IconName }[] =
 
 const LATER: { name: string; key: string; when: string; icon: IconName }[] = [
   { name: 'Перо', key: 'P', when: 'подсистема 3', icon: 'pen' },
-  { name: 'Текст', key: 'T', when: 'подсистема 3', icon: 'text' },
   { name: 'Комментарии', key: 'C', when: 'подсистема 4', icon: 'comment' },
 ];
 
@@ -130,6 +129,17 @@ export function Toolbar() {
           <Caret />
         </button>
       </div>
+      <button
+        class="fe-tool"
+        aria-pressed={tool() === 'text'}
+        aria-label="Текст"
+        data-tip="Текст"
+        data-command="tool.text"
+        data-tip-side="top"
+        onClick={() => setTool('text')}
+      >
+        <Icon name="text" />
+      </button>
       <span class="fe-toolbar__sep" role="separator" />
       <For each={LATER}>
         {(t) => (

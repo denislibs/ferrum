@@ -8,6 +8,7 @@ import type {
   CoreEvent,
   FontChoice,
   KeymapEntry,
+  TextStyleDto,
   MissingFontDto,
   LayerRow,
   PageInfo,
@@ -58,6 +59,12 @@ export interface UiState {
   fontCatalog: FontChoice[];
   /** Системные шрифты: есть ли на платформе и показаны ли уже. */
   systemFonts: { supported: boolean; shown: boolean };
+  /** Правка текста на холсте (подсистема 3, этап 2): идёт ли и новый ли текст. */
+  text: { editing: boolean; draft: boolean };
+  /** Стиль для секции «Текст»; `null` — текстов не выделено. */
+  textStyle: TextStyleDto | null;
+  /** Семейства текстов текущей страницы (группа «В документе» выбора шрифта). */
+  pageFonts: string[];
 }
 
 const initial: UiState = {
@@ -84,6 +91,9 @@ const initial: UiState = {
   missingFonts: [],
   fontCatalog: [],
   systemFonts: { supported: false, shown: false },
+  text: { editing: false, draft: false },
+  textStyle: null,
+  pageFonts: [],
 };
 
 /** Сколько уведомлений видно одновременно и сколько секунд живёт каждое. */
@@ -176,6 +186,15 @@ export function createUiStore() {
         break;
       case 'fontCatalog':
         setState('fontCatalog', e.families);
+        break;
+      case 'textCaret':
+        setState('text', { editing: e.editing, draft: e.draft });
+        break;
+      case 'textStyleSummary':
+        setState('textStyle', e.summary ? reconcile(e.summary) : null);
+        break;
+      case 'pageFonts':
+        setState('pageFonts', e.families);
         break;
       case 'error':
         // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.

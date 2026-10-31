@@ -11,6 +11,7 @@ import {
   clipboardBytesError,
   commandSizeError,
   copyTooLarge,
+  isTextCommand,
   isToWorker,
   pasteTextError,
   type ClipboardExtra,
@@ -157,6 +158,11 @@ function run(cmd: ToWorker & { t: 'cmd' }): void {
   if (error) {
     postError(error);
     return;
+  }
+  // Правка текста — после ввода, положенного в кольцо до неё (щелчок, затем набор).
+  if (sab && isTextCommand(cmd.cmd)) {
+    const input = drain();
+    if (input.byteLength > 0) core!.input(input);
   }
   core!.command(cmd.cmd);
   sendEvents();

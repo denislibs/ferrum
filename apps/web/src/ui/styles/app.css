@@ -40,3 +40,25 @@
   background: color-mix(in srgb, var(--canvas) 85%, transparent);
   text-align: center;
 }
+
+/* Поле правки текста: невидимое, под курсором текста на холсте (окно IME
+   появляется рядом с текстом). Текста документа в нём нет. */
+.fe-text-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  pointer-events: none;
+  caret-color: transparent;
+  color: transparent;
+  background: transparent;
+  outline: none;
+}

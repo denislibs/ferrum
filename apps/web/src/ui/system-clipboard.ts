@@ -17,6 +17,8 @@ import {
 } from './clipboard';
 import { fileBytes, IMAGE_FILE, pickFile } from './files';
 import { editableTarget, modalOpen } from './keys';
+import { isTextField } from './text-input';
+import { MAX_TEXT_INPUT_BYTES, utf8Length } from '../core/text-keys';
 
 /** Событие из поля ввода, из диалога (и немодального — палитры), из меню или при
  * открытом модальном диалоге — это обычный текст браузера, не документ на холсте. */
@@ -63,8 +65,29 @@ export function installClipboard(ed: Editor): () => void {
     });
   };
 
-  const write = (e: { bytes: Uint8Array } & ClipboardExtra) => {
+  /** Фрагмент текста в правке: обычный текст и (где можно) наш формат со стилями.
+   * Без своего формата — только обычный текст (запасной путь `execCommand`). */
+  const writeFragment = (bytes: Uint8Array, plain: string, cut: boolean) => {
+    if (!supportsCustomFormat() || typeof ClipboardItem === 'undefined') {
+      writeText(plain, cut);
+      return;
+    }
+    navigator.clipboard
+      .write([
+        new ClipboardItem({
+          'text/plain': new Blob([plain], { type: 'text/plain' }),
+          [FERRUM_MIME]: new Blob([bytes as BlobPart], { type: FERRUM_MIME }),
+        }),
+      ])
+      .catch(() => writeText(plain, cut));
+  };
+
+  const write = (e: { bytes: Uint8Array; plain?: string } & ClipboardExtra) => {
     const cut = e.cut === true;
+    if (typeof e.plain === 'string') {
+      writeFragment(e.bytes, e.plain, cut);
+      return;
+    }
     if (!supportsCustomFormat()) {
       if (typeof e.text === 'string') writeText(e.text, cut);
       else writeViaWorker(e.bytes, cut);
@@ -132,19 +155,43 @@ export function installClipboard(ed: Editor): () => void {
       e.preventDefault();
       return;
     }
+    // Поле правки текста: копия фрагмента — от ядра (в поле текста документа нет).
+    if (isTextField(e.target) && !modalOpen()) {
+      e.preventDefault();
+      ed.run(command);
+      return;
+    }
     if (textTarget(e.target)) return;
     e.preventDefault();
     ed.run(command);
   };
   const copy = onCopy('edit.copy');
   const cut = onCopy('edit.cut');
+  /** Обычный текст другого приложения: в правке — в позицию курсора, вне её —
+   * новым текстом (ядро). Больше предела команды — отказ сразу. */
+  const pastePlain = (text: string) => {
+    if (utf8Length(text) > MAX_TEXT_INPUT_BYTES) {
+      toast('Слишком длинный текст: за раз — не больше 64 КБ');
+      return;
+    }
+    ed.send({ type: 'textInput', kind: 'paste', data: text });
+  };
   const paste = (e: ClipboardEvent) => {
-    if (textTarget(e.target)) return;
+    if (textTarget(e.target) && !(isTextField(e.target) && !modalOpen())) return;
     e.preventDefault();
     const sync = fromDataTransfer(e.clipboardData);
     if (sync) void deliver(sync);
     // Свой формат асинхронного API в событии не виден: событие пустое — читаем его.
     else if (eventIsEmpty(e.clipboardData)) void readAsync(true).then(deliver);
+    else {
+      const text = e.clipboardData?.getData('text/plain') ?? '';
+      if (text !== '') {
+        // Свой формат (стили) — в асинхронном API рядом с обычным текстом.
+        if (supportsCustomFormat()) {
+          void readAsync(true).then((d) => (d?.kind === 'ferrum' ? deliver(d) : pastePlain(text)));
+        } else pastePlain(text);
+      }
+    }
   };
   document.addEventListener('copy', copy);
   document.addEventListener('cut', cut);

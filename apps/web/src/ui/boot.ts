@@ -63,11 +63,13 @@ function perfHook(): boolean {
   return (window as { __ferrumPerf?: boolean }).__ferrumPerf === true;
 }
 
-/** Запись журнала: тип и размер, но не сами данные (картинки и буфер обмена — до 64 МБ). */
-function note(e: CoreEvent): { type: string; size?: number; message?: string } {
-  const n: { type: string; size?: number; message?: string } = { type: e.type };
+/** Запись журнала: тип и размер, но не сами данные (картинки и буфер обмена — до 64 МБ).
+ * У копии фрагмента текста — её обычный текст (не больше 64 КБ). */
+function note(e: CoreEvent): { type: string; size?: number; message?: string; text?: string } {
+  const n: { type: string; size?: number; message?: string; text?: string } = { type: e.type };
   if ('bytes' in e && e.bytes instanceof Uint8Array) n.size = e.bytes.length;
   if (e.type === 'error') n.message = e.message;
+  if (e.type === 'clipboard' && typeof e.plain === 'string') n.text = e.plain;
   return n;
 }
 
@@ -112,7 +114,7 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
       store.toast(message, 'error');
     },
   });
-  const uiEvents: { type: string; size?: number; message?: string }[] = [];
+  const uiEvents: { type: string; size?: number; message?: string; text?: string }[] = [];
   const isClipboardKey = opts.isClipboardKey ?? (() => false);
   let unguard = () => {};
   const core = await Core.start(canvas, {
