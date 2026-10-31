@@ -5,14 +5,17 @@
 //! только затронутые узлы, их потомки (мировая трансформация) и предки (границы).
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ferrum_doc::{Changes, NodeId, NodeKind, PageDoc, Props, PropsPatch, SceneRow};
-use kurbo::{Affine, Point, Rect};
+use kurbo::{Affine, BezPath, Point, Rect};
 use rstar::primitives::{GeomWithData, Rectangle};
 use rstar::{RStarInsertionStrategy, RTree, RTreeParams, SelectionFunction, AABB};
 
+use crate::boolean::{self as boolean, Contours};
 use crate::shape::{self, Geometry};
 use crate::vector::{self, PathShape};
 
@@ -97,6 +100,24 @@ pub struct SceneNode {
     /// 100 000 точек строится ~7 мс, и каждое движение указателя над ней их бы
     /// строило. Сбрасываются вместе с `version`.
     path: OnceLock<Option<Arc<PathShape>>>,
+    /// Форма заливки узла-листа для булевой группы-предка (`boolean::leaf_fill`),
+    /// построенная при первом запросе; сбрасывается вместе с `version`. Правка
+    /// одного ребёнка большой булевой группы не дробит кривые остальных заново.
+    fill: OnceLock<Arc<Contours>>,
+    /// Результат булевой группы (у остальных узлов — `None`).
+    pub boolean: Option<Arc<BooleanOutline>>,
+    /// Ключ содержимого: версия листа или (у группы и булевой группы) тип,
+    /// операция и ключи, положения и видимость детей. Результат булевой группы пересчитывается, только когда
+    /// ключ сменился: сдвиг самой группы его не меняет.
+    content: u64,
+}
+
+/// Результат булевой группы в её локальных координатах.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BooleanOutline {
+    pub contours: Contours,
+    /// Форма для рендера и попадания: одна область и замкнутый путь обводки.
+    pub shape: Arc<PathShape>,
 }
 
 impl SceneNode {
@@ -105,13 +126,20 @@ impl SceneNode {
     }
 
     /// Контуры обводки по контуру — из кэша узла (`None` — узел обводится
-    /// кольцами).
+    /// кольцами). У булевой группы — её результат.
     pub fn path_shape(&self) -> Option<&Arc<PathShape>> {
+        if self.props.kind == NodeKind::Boolean {
+            return self.boolean.as_ref().map(|b| &b.shape);
+        }
         self.path
             .get_or_init(|| vector::path_shape(&self.props).map(Arc::new))
             .as_ref()
     }
 }
+
+/// Контуры глифов текстового узла в его локальных координатах для булевых групп
+/// (сцена шрифтов не знает — их даёт редактор); `None` — шрифты ещё грузятся.
+pub type TextOutlines = Rc<dyn Fn(&Props) -> Option<BezPath>>;
 
 /// Временный узел жеста, которого нет в документе: фигура, которую рисуют, или копия
 /// при перетаскивании с Alt. Живёт только в сцене до конца жеста.
@@ -200,6 +228,11 @@ pub struct Scene {
     /// Те же слоты, что в `draft_slots`, — для `is_draft` за O(1): его вызывают на
     /// каждое событие указателя и на каждого кандидата привязки.
     draft_set: HashSet<Slot>,
+    /// Контуры глифов для текста в булевых группах (`set_text_outlines`).
+    text_outlines: Option<TextOutlines>,
+    /// Растёт, когда меняются шрифты (`refresh_text_outlines`): входит в ключ
+    /// содержимого текста, и булевы группы с текстом пересчитываются.
+    text_epoch: u64,
 }
 
 impl Scene {
@@ -372,6 +405,9 @@ impl Scene {
             version,
             subtree_version: version,
             path: OnceLock::new(),
+            fill: OnceLock::new(),
+            boolean: None,
+            content: 0,
         };
         let slot = match self.free.pop() {
             Some(s) => {
@@ -468,9 +504,18 @@ impl Scene {
     /// `update_tree` — обновить запись в R-tree (при полном построении дерево
     /// строится пакетно).
     fn update_bounds(&mut self, slot: Slot, update_tree: bool) {
+        self.update_content(slot);
         let n = self.at(slot);
         let geom = n.geometry();
+        let result = n
+            .boolean
+            .as_ref()
+            .and_then(|b| b.contours.bounds())
+            .filter(|_| n.props.kind == NodeKind::Boolean);
         let local_bounds = match geom {
+            // Булева группа — по результату; пустой результат — по детям, чтобы
+            // рамка выделения показывала, где группа.
+            Geometry::None if result.is_some() => result,
             Geometry::None => n
                 .children
                 .iter()
@@ -507,6 +552,146 @@ impl Scene {
                 self.tree_inserts.push((slot, b));
             }
         }
+    }
+
+    /// Ключ содержимого узла и, у булевой группы со сменившимся ключом, её
+    /// результат. Дети уже посчитаны (обход снизу вверх).
+    fn update_content(&mut self, slot: Slot) {
+        let n = self.at(slot);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        // У контейнера — тип и операция: его версию меняют и свои заливки, а
+        // результат булевой группы сам меняет её версию (иначе ключ не сошёлся
+        // бы ни разу).
+        if n.props.kind.is_group_like() {
+            n.props.kind.hash(&mut h);
+            n.props.boolean_op.hash(&mut h);
+        } else {
+            n.version.hash(&mut h);
+        }
+        if n.props.kind == NodeKind::Text {
+            self.text_epoch.hash(&mut h);
+        }
+        // Дети — только у группы и булевой группы: форма фрейма для булевой
+        // группы — его рамка, а перебор 100 000 детей фрейма на каждую правку
+        // ребёнка стоил бы миллисекунды.
+        let children: &[Slot] = if n.props.kind.is_group_like() {
+            &n.children
+        } else {
+            &[]
+        };
+        for &c in children {
+            let c = self.at(c);
+            c.content.hash(&mut h);
+            c.props.visible.hash(&mut h);
+            for v in c.local.as_coeffs() {
+                v.to_bits().hash(&mut h);
+            }
+        }
+        let key = h.finish();
+        if key == n.content && (n.boolean.is_some() || n.props.kind != NodeKind::Boolean) {
+            return;
+        }
+        let outline = (n.props.kind == NodeKind::Boolean).then(|| {
+            let op = n.props.boolean_op.unwrap_or_default();
+            let inputs: Vec<Contours> = n
+                .children
+                .iter()
+                .filter(|&&c| self.at(c).props.visible)
+                .map(|&c| self.fill_of(c).transformed(self.at(c).local))
+                .filter(|c| !c.is_empty())
+                .collect();
+            let contours = boolean::combine(op, &inputs);
+            let shape = Arc::new(boolean::outline_shape(&contours));
+            Arc::new(BooleanOutline { contours, shape })
+        });
+        let n = self.at_mut(slot);
+        n.content = key;
+        if let Some(o) = outline {
+            if n.boolean.as_ref() != Some(&o) {
+                // Другой результат — другой вид: рендер строит список заново.
+                n.version = fresh_version();
+            }
+            n.boolean = Some(o);
+        }
+    }
+
+    /// Форма заливки узла с видимыми детьми в его локальных координатах: у
+    /// булевой группы — её результат, у группы — объединение детей, у листа —
+    /// `boolean::leaf_fill` (у текста — по контурам глифов редактора).
+    fn fill_of(&self, slot: Slot) -> Contours {
+        let n = self.at(slot);
+        match n.props.kind {
+            NodeKind::Boolean => n
+                .boolean
+                .as_ref()
+                .map(|b| b.contours.clone())
+                .unwrap_or_default(),
+            NodeKind::Group => {
+                let parts: Vec<Contours> = n
+                    .children
+                    .iter()
+                    .filter(|&&c| self.at(c).props.visible)
+                    .map(|&c| self.fill_of(c).transformed(self.at(c).local))
+                    .filter(|c| !c.is_empty())
+                    .collect();
+                boolean::combine(ferrum_doc::BooleanOp::Union, &parts)
+            }
+            NodeKind::Text => {
+                let glyphs = self.text_outlines.as_ref().and_then(|f| f(&n.props));
+                boolean::leaf_fill(&n.props, None, glyphs.as_ref())
+            }
+            _ => (**n.fill.get_or_init(|| {
+                Arc::new(boolean::leaf_fill(
+                    &n.props,
+                    n.path_shape().map(|s| &**s),
+                    None,
+                ))
+            }))
+            .clone(),
+        }
+    }
+
+    /// Источник контуров глифов для текста в булевых группах (редактор ставит
+    /// его на каждую новую сцену). Булевы группы с текстом пересчитываются.
+    pub fn set_text_outlines(&mut self, f: Option<TextOutlines>) {
+        self.text_outlines = f;
+        self.refresh_text_outlines();
+    }
+
+    /// Шрифты сменились (пришли байты, отказ в загрузке): булевы группы с
+    /// текстом пересчитываются с новыми контурами глифов. Без таких групп —
+    /// ничего не делает.
+    pub fn refresh_text_outlines(&mut self) {
+        let dirty: Vec<Slot> = self
+            .iter()
+            .filter(|(_, n)| n.props.kind == NodeKind::Text)
+            .filter(|(s, _)| self.has_boolean_ancestor(*s))
+            .map(|(s, _)| s)
+            .collect();
+        if dirty.is_empty() {
+            return;
+        }
+        self.text_epoch += 1;
+        self.changes += 1;
+        self.recompute(dirty, Vec::new());
+        self.flush_tree();
+    }
+
+    fn has_boolean_ancestor(&self, slot: Slot) -> bool {
+        self.boolean_root(slot).is_some()
+    }
+
+    /// Самая внешняя булева группа среди предков узла.
+    fn boolean_root(&self, slot: Slot) -> Option<Slot> {
+        let mut cur = self.at(slot).parent;
+        let mut found = None;
+        while let Some(p) = cur {
+            if self.at(p).props.kind == NodeKind::Boolean {
+                found = Some(p);
+            }
+            cur = self.at(p).parent;
+        }
+        found
     }
 
     /// Применяет накопленные изменения R-tree. Удаление по одной записи стоит
@@ -638,9 +823,13 @@ impl Scene {
                 .iter()
                 .map(|(&s, (_, patch))| (self.at(s).id, patch.clone()))
                 .collect();
+            let outlines = self.text_outlines.take();
             *self = Scene::from_page(page);
             // Ревизия текстов, как и счётчик, не откатывается: пересборка — смена.
             self.text_revision += text_revision + 1;
+            if outlines.is_some() {
+                self.set_text_outlines(outlines);
+            }
             self.set_preview(&preview);
         }
         if !drafts.is_empty() {
@@ -772,6 +961,7 @@ impl Scene {
         if looks_different(&n.props, &props) {
             n.version = version;
             n.path = OnceLock::new();
+            n.fill = OnceLock::new();
         }
         // Тот же `Arc` (правка нетекстовых свойств) — сравнение бесплатно.
         let text_changed = match (&n.props.text, &props.text) {
@@ -994,8 +1184,21 @@ impl Scene {
     }
 
     fn hits(&self, slot: Slot, point: Point, tolerance: f64) -> bool {
+        if !self.is_visible(slot) || !self.hits_own(slot, point, tolerance) {
+            return false;
+        }
+        // Дети булевой группы не рисуются: в них попадают только там, где
+        // рисуется сама внешняя группа (дыра «Вычитания» — мимо).
+        match self.boolean_root(slot) {
+            Some(b) => self.hits_own(b, point, tolerance),
+            None => true,
+        }
+    }
+
+    /// Попадание в собственную форму узла (без проверки видимости).
+    fn hits_own(&self, slot: Slot, point: Point, tolerance: f64) -> bool {
         let n = self.at(slot);
-        if n.props.kind == NodeKind::Group || !self.is_visible(slot) {
+        if n.props.kind == NodeKind::Group {
             return false;
         }
         // Предки-фреймы с обрезкой скрывают всё, что за их формой.

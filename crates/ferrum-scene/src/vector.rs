@@ -117,7 +117,8 @@ pub struct PathShape {
 pub fn uses_path_stroke(p: &Props) -> bool {
     let s = &p.stroke_style;
     match p.kind {
-        NodeKind::Vector => true,
+        // Результат булевой группы — замкнутый путь, обводится как вектор.
+        NodeKind::Vector | NodeKind::Boolean => true,
         NodeKind::Line => s.cap_start != StrokeCap::None || s.cap_end != StrokeCap::None,
         // Углы есть только у прямоугольника без скругления.
         NodeKind::Rect | NodeKind::Frame | NodeKind::Image => {
@@ -349,7 +350,9 @@ fn fit_seg(a: Affine, s: PathSeg) -> PathSeg {
 /// Контуры узла для обводки по контуру: сеть вектора, отрезок линии, рамка
 /// прямоугольника. `None` — узел обводится кольцами.
 pub fn path_shape(p: &Props) -> Option<PathShape> {
-    if !uses_path_stroke(p) {
+    // Форму булевой группы по одним свойствам не построить: её считает сцена
+    // (`SceneNode::path_shape`).
+    if !uses_path_stroke(p) || p.kind == NodeKind::Boolean {
         return None;
     }
     let (w, h) = (p.w.max(0.0), p.h.max(0.0));
@@ -624,7 +627,7 @@ pub fn region_contains(r: &RegionPath, pt: Point) -> bool {
 /// залитая область, полоса обводки не уже допуска, фигуры окончаний.
 pub fn hit_path(p: &Props, shape: &PathShape, local: Point, tolerance: f64) -> bool {
     let node_filled = p.fills.iter().any(|f| f.visible && f.opacity > 0.0);
-    if p.kind == NodeKind::Vector {
+    if matches!(p.kind, NodeKind::Vector | NodeKind::Boolean) {
         for r in &shape.regions {
             let filled = match &r.fills {
                 Some(f) => f.iter().any(|f| f.visible && f.opacity > 0.0),
