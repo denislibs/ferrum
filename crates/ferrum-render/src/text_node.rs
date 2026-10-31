@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ferrum_doc::{Fill as Paint, FillKind, Props, StrokeAlign, TextSizing};
 use ferrum_text::{text_color, Fonts, GlyphRun, LineBox, TextLayout};
-use kurbo::{Affine, BezPath, Rect, Stroke};
+use kurbo::{Affine, BezPath, Join, Rect, Shape, Stroke};
 use vello_cpu::peniko::Fill;
 
 use crate::backend::{ImageKey, ImagePaint, RenderBackend, Rgba};
@@ -110,6 +110,11 @@ fn fill_run(
     alpha: f32,
     images: &dyn ImageProvider,
 ) -> bool {
+    // Скрытая или прозрачная заливка не рисует ничего — и для участка тоже
+    // (не откатывается ни к заливкам узла, ни к чёрному).
+    if !paint.visible || paint.opacity <= 0.0 {
+        return true;
+    }
     let a = alpha * paint.opacity.clamp(0.0, 1.0) as f32;
     let image = match (paint.kind, &paint.image_hash) {
         (FillKind::Image, Some(h)) => Some(h),
@@ -175,17 +180,6 @@ pub(crate) fn paint_glyphs(
         .filter(|s| s.width > 0.0 && s.color.a > 0)
         .collect();
     let outline = (!strokes.is_empty()).then(|| glyphs_path(fonts, layout.runs.iter()));
-    let stroke = |backend: &mut _, outside: bool| {
-        let Some(path) = &outline else { return };
-        for s in &strokes {
-            if (s.align == StrokeAlign::Outside) != outside {
-                continue;
-            }
-            backend_stroke(backend, path, s, to_device, alpha);
-        }
-    };
-    // Снаружи — под заливкой: заливка закрывает внутреннюю половину.
-    stroke(backend, true);
     let mut ready = true;
     for run in &layout.runs {
         match &run.paint {
@@ -202,30 +196,64 @@ pub(crate) fn paint_glyphs(
         backend.set_color(color(d.color).multiply_alpha(alpha));
         backend.fill_rect(&d.rect);
     }
-    stroke(backend, false);
+    // Обводки — поверх заливок, в порядке списка.
+    if let Some(path) = &outline {
+        for s in &strokes {
+            glyph_stroke(backend, path, s, to_device, alpha);
+        }
+    }
     ready
 }
 
-/// Обводка контура глифов: по центру — как есть; внутри — двойной толщины с
-/// обрезкой по глифам; снаружи — двойной толщины (рисуется под заливкой).
-fn backend_stroke(
+/// Обводка контура глифов (стык — острый, как у обводок фигур). По центру — как
+/// есть; внутри — двойной толщины с обрезкой по глифам; снаружи — двойной
+/// толщины с обрезкой по внешности глифов (кольцо только снаружи, заливка не
+/// нужна). Перекрывающиеся контуры одного глифа (вариативные шрифты) обводятся
+/// и по внутренним швам, как при любой обводке контура.
+fn glyph_stroke(
     backend: &mut impl RenderBackend,
     path: &BezPath,
     s: &ferrum_doc::Stroke,
     to_device: Affine,
     alpha: f32,
 ) {
+    let stroke = |width: f64| Stroke::new(width).with_join(Join::Miter);
     backend.set_transform(to_device);
     backend.set_color(color(s.color).multiply_alpha(alpha));
     match s.align {
-        StrokeAlign::Center => backend.stroke_path(path, &Stroke::new(s.width)),
-        StrokeAlign::Outside => backend.stroke_path(path, &Stroke::new(2.0 * s.width)),
+        StrokeAlign::Center => backend.stroke_path(path, &stroke(s.width)),
         StrokeAlign::Inside => {
             backend.push_clip(path);
-            backend.stroke_path(path, &Stroke::new(2.0 * s.width));
+            backend.stroke_path(path, &stroke(2.0 * s.width));
+            backend.pop_clip();
+        }
+        StrokeAlign::Outside => {
+            backend.push_clip(&exterior(path, 2.0 * s.width + 1.0));
+            backend.stroke_path(path, &stroke(2.0 * s.width));
             backend.pop_clip();
         }
     }
+}
+
+/// Внешность контура: прямоугольник вокруг (шире на `margin`) и сам контур с
+/// обратным обходом — при заливке по ненулевому правилу контур вырезается.
+fn exterior(path: &BezPath, margin: f64) -> BezPath {
+    let r = path.bounding_box().inflate(margin, margin);
+    // Контуры глифов (внешние) идут в одну сторону; рамка — в противоположную.
+    let mut out = BezPath::new();
+    out.move_to((r.x0, r.y0));
+    out.line_to((r.x1, r.y0));
+    out.line_to((r.x1, r.y1));
+    out.line_to((r.x0, r.y1));
+    out.close_path();
+    // Площадь рамки при обходе выше положительна; глиф с той же ориентацией
+    // нужно развернуть.
+    if path.area() > 0.0 {
+        out.extend(path.reverse_subpaths());
+    } else {
+        out.extend(path.elements().iter().copied());
+    }
+    out
 }
 
 /// Цвет мелкого текстового узла (LOD-прямоугольник): цвет текста с той же

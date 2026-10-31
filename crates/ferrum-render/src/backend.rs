@@ -70,8 +70,8 @@ pub trait RenderBackend {
     fn set_image(&mut self, image: &ImagePaint);
     fn fill_path(&mut self, path: &BezPath, rule: Fill);
     fn fill_rect(&mut self, rect: &Rect);
-    /// Обводка в координатах текущей трансформации — только для оверлеев: обводки
-    /// узлов рисуются заливкой колец (см. `ferrum_scene::shape`).
+    /// Обводка в координатах текущей трансформации: оверлеи и обводки контура
+    /// глифов текста; обводки фигур рисуются заливкой колец (`ferrum_scene::shape`).
     fn stroke_path(&mut self, path: &BezPath, stroke: &Stroke);
     /// Обрезка без отдельного слоя композиции — дешевле слоя.
     fn push_clip(&mut self, path: &BezPath);

@@ -446,3 +446,307 @@ fn image_fill_and_strokes_paint_glyphs() {
     );
     golden("text_paints", &img);
 }
+
+// ---- Заливки и обводки текста: попиксельные проверки --------------------
+
+const RED: Color = Color::rgba(255, 0, 0, 255);
+const GREEN: Color = Color::rgba(0, 200, 0, 255);
+const BLUE: Color = Color::rgba(0, 0, 255, 255);
+
+fn is_red(c: [u8; 4]) -> bool {
+    c[0] > 200 && c[1] < 60 && c[2] < 60
+}
+fn is_blue(c: [u8; 4]) -> bool {
+    c[2] > 200 && c[0] < 60 && c[1] < 60
+}
+fn is_green(c: [u8; 4]) -> bool {
+    c[1] > 150 && c[0] < 60 && c[2] < 60
+}
+fn is_white(c: [u8; 4]) -> bool {
+    c[0] > 250 && c[1] > 250 && c[2] > 250
+}
+
+/// Один кадр узла с текстом Inter Black 48 в рамке (10, 10, 100×60).
+/// Возвращает картинку и статистику кадра.
+fn paint_frame(
+    content: TextContent,
+    fills: Option<Vec<Fill>>,
+    strokes: Vec<Stroke>,
+    images: &HashMap<String, Arc<ferrum_render::Pixmap>>,
+) -> (ferrum_render::Pixmap, ferrum_render::FrameStats) {
+    let fonts = fonts(true);
+    let mut p = Page::new();
+    let mut tp = props(48.0, TextSizing::Fixed);
+    tp.style.font = FontName::new("Inter", "Black");
+    let id = add_text(&mut p, 10.0, 10.0, 100.0, 60.0, content, tp);
+    p.edit(
+        id,
+        PropsPatch {
+            fills,
+            strokes: Some(strokes),
+            ..Default::default()
+        },
+    );
+    let mut r = renderer(&fonts);
+    r.set_clock(None);
+    let cam = camera(120.0, 80.0);
+    let (w, h) = cam.device_size();
+    let mut backend = ferrum_render::CpuBackend::new(w, h);
+    use ferrum_render::RenderBackend;
+    backend.set_transform(kurbo::Affine::IDENTITY);
+    backend.set_color(WHITE);
+    backend.fill_rect(&kurbo::Rect::new(0.0, 0.0, w as f64, h as f64));
+    let stats = r.draw_scene(&mut backend, &p.scene(), &cam, images);
+    (backend.render(), stats)
+}
+
+fn no_images() -> HashMap<String, Arc<ferrum_render::Pixmap>> {
+    HashMap::new()
+}
+
+fn stroke(color: Color, width: f64, align: StrokeAlign) -> Stroke {
+    Stroke {
+        color,
+        width,
+        align,
+    }
+}
+
+/// Пиксели сплошной внутренности глифов (эталон: чёрная заливка).
+fn interior() -> Vec<(u16, u16)> {
+    let (img, _) = paint_frame(TextContent::plain("I"), None, vec![], &no_images());
+    let mut v = vec![];
+    for y in 0..80 {
+        for x in 0..120 {
+            if px(&img, x, y)[0] < 10 {
+                v.push((x, y));
+            }
+        }
+    }
+    assert!(v.len() > 100, "эталон пуст");
+    v
+}
+
+fn count(img: &ferrum_render::Pixmap, f: impl Fn([u8; 4]) -> bool) -> usize {
+    (0..80u16)
+        .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+        .filter(|&(x, y)| f(px(img, x, y)))
+        .count()
+}
+
+#[test]
+fn outside_stroke_is_a_ring_outside_only() {
+    let inside = interior();
+    // Без заливки: внутренность глифа остаётся фоном, кольцо — снаружи.
+    let (img, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![]),
+        vec![stroke(RED, 4.0, StrokeAlign::Outside)],
+        &no_images(),
+    );
+    assert!(inside.iter().all(|&(x, y)| is_white(px(&img, x, y))));
+    assert!(count(&img, is_red) > 100);
+    // Полупрозрачная заливка: обводка не просвечивает сквозь неё.
+    let mut half = Fill::solid(Color::rgba(0, 0, 0, 255));
+    half.opacity = 0.5;
+    let (img, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![half]),
+        vec![stroke(RED, 4.0, StrokeAlign::Outside)],
+        &no_images(),
+    );
+    assert!(inside.iter().all(|&(x, y)| {
+        let c = px(&img, x, y);
+        c[0].abs_diff(128) < 4 && c[1].abs_diff(128) < 4
+    }));
+}
+
+#[test]
+fn inside_stroke_stays_within_glyphs() {
+    let inside = interior();
+    let (img, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![]),
+        vec![stroke(RED, 2.0, StrokeAlign::Inside)],
+        &no_images(),
+    );
+    let red_in = inside
+        .iter()
+        .filter(|&&(x, y)| is_red(px(&img, x, y)))
+        .count();
+    let white_in = inside
+        .iter()
+        .filter(|&&(x, y)| is_white(px(&img, x, y)))
+        .count();
+    assert!(red_in > 50 && white_in > 0, "{red_in} {white_in}");
+    // Вне глифов (где эталон полностью белый) красного нет.
+    let (reference, _) = paint_frame(TextContent::plain("I"), None, vec![], &no_images());
+    let leak = (0..80u16)
+        .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+        .filter(|&(x, y)| is_white(px(&reference, x, y)) && is_red(px(&img, x, y)))
+        .count();
+    assert_eq!(leak, 0);
+}
+
+#[test]
+fn strokes_are_drawn_in_list_order_with_miter_joins() {
+    let inside = interior();
+    let (x0, y0) = (
+        inside.iter().map(|p| p.0).min().unwrap(),
+        inside.iter().map(|p| p.1).min().unwrap(),
+    );
+    let y_mid = inside[inside.len() / 2].1;
+    let xl = inside
+        .iter()
+        .filter(|p| p.1 == y_mid)
+        .map(|p| p.0)
+        .min()
+        .unwrap();
+    // Пиксель левее края (xl — первый полностью тёмный; xl-1 — краевой): попадает и в кольцо снаружи, и в обводку по центру.
+    let at_edge = |img: &ferrum_render::Pixmap| px(img, xl - 2, y_mid);
+    let more_blue = |c: [u8; 4]| c[2] as i16 > c[0] as i16 + 80;
+    let more_red = |c: [u8; 4]| c[0] as i16 > c[2] as i16 + 80;
+    let outside_red = stroke(RED, 4.0, StrokeAlign::Outside);
+    let center_blue = stroke(BLUE, 4.0, StrokeAlign::Center);
+    let (a, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![]),
+        vec![outside_red.clone(), center_blue.clone()],
+        &no_images(),
+    );
+    assert!(more_blue(at_edge(&a)), "{:?}", at_edge(&a));
+    let (b, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![]),
+        vec![center_blue, outside_red],
+        &no_images(),
+    );
+    assert!(more_red(at_edge(&b)), "{:?}", at_edge(&b));
+    // Острый стык: угол обводки по центру в 16 px не скруглён.
+    let (c, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![]),
+        vec![stroke(BLUE, 16.0, StrokeAlign::Center)],
+        &no_images(),
+    );
+    assert!(
+        is_blue(px(&c, x0 - 7, y0 - 7)),
+        "{:?}",
+        px(&c, x0 - 7, y0 - 7)
+    );
+}
+
+#[test]
+fn node_fills_paint_in_order_and_hidden_fills_do_not() {
+    // Верхняя (последняя) заливка побеждает.
+    let (img, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![Fill::solid(RED), Fill::solid(BLUE)]),
+        vec![],
+        &no_images(),
+    );
+    assert!(count(&img, is_blue) > 100 && count(&img, is_red) == 0);
+    // Скрытая верхняя заливка не рисуется.
+    let mut hidden = Fill::solid(BLUE);
+    hidden.visible = false;
+    let (img, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![Fill::solid(RED), hidden.clone()]),
+        vec![],
+        &no_images(),
+    );
+    assert!(count(&img, is_red) > 100 && count(&img, is_blue) == 0);
+    // Единственная скрытая заливка — текст не виден совсем.
+    let (img, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![hidden]),
+        vec![],
+        &no_images(),
+    );
+    assert_eq!(count(&img, |c| !is_white(c)), 0);
+}
+
+fn two_runs(first: Fill) -> TextContent {
+    TextContent {
+        runs: vec![
+            TextRun {
+                text: "I".into(),
+                attrs: TextAttrs {
+                    fill: Some(first),
+                    ..Default::default()
+                },
+            },
+            TextRun {
+                text: "I\n".into(),
+                attrs: TextAttrs::default(),
+            },
+        ],
+    }
+}
+
+#[test]
+fn range_fill_overrides_node_fills_and_hidden_range_paints_nothing() {
+    let green = Fill::solid(GREEN);
+    let (img, _) = paint_frame(
+        two_runs(green),
+        Some(vec![Fill::solid(RED)]),
+        vec![],
+        &no_images(),
+    );
+    // Участок — зелёный, остальное — красная заливка узла.
+    assert!(count(&img, is_green) > 100 && count(&img, is_red) > 100);
+    // Скрытая заливка участка: первая буква не рисуется ни цветом узла, ни чёрным.
+    let mut hidden = Fill::solid(GREEN);
+    hidden.visible = false;
+    let (img, _) = paint_frame(
+        two_runs(hidden),
+        Some(vec![Fill::solid(RED)]),
+        vec![],
+        &no_images(),
+    );
+    let red_n = count(&img, is_red);
+    let (single, _) = paint_frame(
+        TextContent::plain("I"),
+        Some(vec![Fill::solid(RED)]),
+        vec![],
+        &no_images(),
+    );
+    // Красная одна буква (не две), ни зелёного, ни чёрного.
+    assert_eq!(count(&img, is_green), 0);
+    assert!(
+        red_n > 100 && red_n < count(&single, is_red) * 3 / 2,
+        "{red_n} {}",
+        count(&single, is_red)
+    );
+    assert_eq!(count(&img, |c| c[0] < 60 && c[1] < 60 && c[2] < 60), 0);
+    // Нулевая непрозрачность — то же самое.
+    let mut clear = Fill::solid(GREEN);
+    clear.opacity = 0.0;
+    let (img, _) = paint_frame(
+        two_runs(clear),
+        Some(vec![Fill::solid(RED)]),
+        vec![],
+        &no_images(),
+    );
+    assert_eq!(count(&img, is_green), 0);
+    assert_eq!(count(&img, |c| c[0] < 60 && c[1] < 60 && c[2] < 60), 0);
+}
+
+#[test]
+fn missing_image_fill_draws_placeholder_and_requests_another_frame() {
+    let fill = vec![Fill::image("later")];
+    let (img, stats) = paint_frame(
+        TextContent::plain("I"),
+        Some(fill.clone()),
+        vec![],
+        &no_images(),
+    );
+    let gray = |c: [u8; 4]| c[0].abs_diff(217) < 4 && c[1].abs_diff(217) < 4;
+    assert!(count(&img, gray) > 100);
+    assert!(stats.needs_another_frame, "{stats:?}");
+    // Картинка появилась — кадр полный, заглушки нет.
+    let images: HashMap<_, _> = [("later".to_string(), two_tone())].into();
+    let (img, stats) = paint_frame(TextContent::plain("I"), Some(fill), vec![], &images);
+    assert!(!stats.needs_another_frame, "{stats:?}");
+    assert_eq!(count(&img, gray), 0);
+}
