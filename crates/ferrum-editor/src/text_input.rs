@@ -186,19 +186,41 @@ impl Editor {
         };
         let t = self.text_edit.as_ref().expect("правка идёт");
         let range = t.range();
-        let mut attrs = typing_attrs(&content, range.clone(), t.caret_attrs.as_ref());
-        if paragraph {
+        let attrs = typing_attrs(&content, range.clone(), t.caret_attrs.as_ref());
+        // Новые абзацы (любой `\n` во вставке) наследуют список и уровень абзаца,
+        // который разрезают.
+        let runs = if text.contains('\n') {
             let end = (range.end..content.char_len())
                 .find(|i| char_at(&content, *i) == Some('\n'))
                 .unwrap_or(content.char_len().saturating_sub(1));
             let p = content.attrs_at(end);
-            attrs.list = p.list;
-            attrs.indent = p.indent;
-        }
-        let runs = vec![TextRun {
-            text: text.to_string(),
-            attrs: attrs.clone(),
-        }];
+            let newline = TextAttrs {
+                list: p.list,
+                indent: p.indent,
+                ..attrs.clone()
+            };
+            let mut runs = Vec::new();
+            for (i, piece) in text.split('\n').enumerate() {
+                if i > 0 {
+                    runs.push(TextRun {
+                        text: "\n".into(),
+                        attrs: newline.clone(),
+                    });
+                }
+                if !piece.is_empty() {
+                    runs.push(TextRun {
+                        text: piece.to_string(),
+                        attrs: attrs.clone(),
+                    });
+                }
+            }
+            runs
+        } else {
+            vec![TextRun {
+                text: text.to_string(),
+                attrs: attrs.clone(),
+            }]
+        };
         let next = splice(&content, range.clone(), &runs);
         next.check_limits()?;
         let added = text.chars().count();
@@ -599,8 +621,10 @@ impl Editor {
                 } else {
                     TextInputKind::DeleteForward
                 };
-                if let Err(TextError::Doc(_)) = self.text_input(kind, "") {
-                    // Сообщение уже отправлено событием.
+                // Ошибку документа `apply_text_edit` уже отправила событием; шрифт ещё
+                // грузится — удаление не применено, и пользователь видит причину.
+                if let Err(e @ TextError::Pending) = self.text_input(kind, "") {
+                    self.out.events.push(EditorEvent::Error(e.to_string()));
                 }
                 true
             }

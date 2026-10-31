@@ -39,7 +39,7 @@ fn typing_inserts_at_the_caret_and_merges_into_one_step() {
 }
 
 #[test]
-fn pause_caret_move_and_style_break_the_step() {
+fn pause_caret_move_and_kind_break_the_step() {
     let mut h = text_h();
     let id = add_text(&mut h, 100.0, 100.0, "", 24.0);
     let steps = h.ed.step_count();
@@ -299,4 +299,155 @@ fn text_tool_does_not_start_in_a_read_only_document() {
     assert!(!ed.is_editing_text());
     assert!(!ed.scene().has_preview());
     assert!(ed.scene().node(id).is_some());
+}
+
+/// Рамка 400×300 в (100, 100) с заданным поворотом и отражением.
+fn posed_frame(h: &mut H, rotation: f64, flip_x: bool) -> NodeId {
+    let f = h.frame(None, 100.0, 100.0, 400.0, 300.0);
+    h.set(
+        f,
+        PropsPatch {
+            rotation: Some(rotation),
+            flip_x: Some(flip_x),
+            ..Default::default()
+        },
+    );
+    f
+}
+
+/// Линейная часть мировой матрицы узла — единичная (текст не повёрнут и не зеркален).
+fn assert_upright(h: &H, id: NodeId) {
+    let c = h.ed.scene().node(id).unwrap().world.as_coeffs();
+    let want = [1.0, 0.0, 0.0, 1.0];
+    for (g, w) in c[..4].iter().zip(want) {
+        assert!((g - w).abs() < 1e-9, "{c:?}");
+    }
+}
+
+#[test]
+fn text_tool_in_a_rotated_or_flipped_frame_matches_the_screen_gesture() {
+    for (rotation, flip) in [(30.0, false), (0.0, true), (30.0, true)] {
+        // Щелчок: текст «авто» встаёт в точку щелчка и не повёрнут.
+        let mut h = text_h();
+        let frame = posed_frame(&mut h, rotation, flip);
+        h.key("KeyT", none());
+        h.click(300.0, 250.0, none());
+        type_text(&mut h, "x");
+        let id = info(&h).id;
+        assert_eq!(h.parent(id), Some(frame));
+        assert_upright(&h, id);
+        let o = h.ed.scene().node(id).unwrap().world * kurbo::Point::ZERO;
+        assert!(
+            close(o.x, 300.0) && close(o.y, 250.0),
+            "{rotation} {flip}: {o:?}"
+        );
+        // Протяжка: рамка текста совпадает с нарисованной на экране.
+        let mut h = text_h();
+        let frame = posed_frame(&mut h, rotation, flip);
+        h.key("KeyT", none());
+        h.drag((250.0, 220.0), (360.0, 270.0), none());
+        type_text(&mut h, "x");
+        let id = info(&h).id;
+        assert_eq!(h.parent(id), Some(frame));
+        assert_upright(&h, id);
+        let n = h.ed.scene().node(id).unwrap();
+        assert_eq!((n.props.w, n.props.h), (110.0, 50.0));
+        let r = n
+            .world
+            .transform_rect_bbox(kurbo::Rect::new(0.0, 0.0, 110.0, 50.0));
+        assert!(
+            close(r.x0, 250.0) && close(r.y0, 220.0) && close(r.x1, 360.0) && close(r.y1, 270.0),
+            "{rotation} {flip}: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn multiline_insert_into_a_list_item_makes_list_paragraphs() {
+    for kind in [ListKind::Bullet, ListKind::Ordered] {
+        let mut h = text_h();
+        let id = add_text(&mut h, 100.0, 100.0, "xyz", 24.0);
+        let list = TextAttrs {
+            list: Some(kind),
+            ..Default::default()
+        };
+        h.ed.transact(|tx| {
+            tx.format_text(id, 3..4, &list, &[])?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        h.key("Enter", none());
+        h.key("Home", none());
+        h.key("ArrowRight", none());
+        h.key("ArrowRight", none());
+        h.ed.text_input(TextInputKind::Insert, "a\nb").unwrap();
+        let c = h.props(id).text.unwrap().content.clone();
+        assert_eq!(c.text(), "xya\nbz\n");
+        assert_eq!(c.attrs_at(3).list, Some(kind), "разрезанный абзац");
+        assert_eq!(c.attrs_at(6).list, Some(kind));
+        // Вставка из буфера — так же.
+        h.ed.text_input(TextInputKind::Paste, "1\r\n2").unwrap();
+        let c = h.props(id).text.unwrap().content.clone();
+        assert_eq!(c.text(), "xya\nb1\n2z\n");
+        assert_eq!(c.attrs_at(6).list, Some(kind));
+        assert_eq!(c.attrs_at(9).list, Some(kind));
+    }
+}
+
+#[test]
+fn delete_while_the_font_loads_reports_instead_of_dropping_silently() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "abc", 24.0);
+    h.key("Enter", none());
+    h.key("KeyA", ctrl());
+    h.ed.take_events();
+    // Шрифты исчезли из реестра (грузятся заново): правка откладывается.
+    let fonts = ferrum_text::Fonts::shared();
+    {
+        let faces = [
+            "inter/Inter-Variable.ttf",
+            "inter/Inter-Italic-Variable.ttf",
+            "roboto/Roboto-Variable.ttf",
+            "roboto/Roboto-Italic-Variable.ttf",
+        ]
+        .iter()
+        .flat_map(|r| ferrum_text::read_faces(&font_file(r), r))
+        .collect::<Vec<_>>();
+        let mut f = fonts.borrow_mut();
+        f.add_catalog(ferrum_text::SourceKind::Bundled, ferrum_text::group(faces));
+        f.take_requests();
+    }
+    h.ed.set_fonts(fonts);
+    h.key("Backspace", none());
+    let events = h.ed.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EditorEvent::Error(m) if m.contains("Шрифт"))),
+        "{events:?}"
+    );
+    assert_eq!(text_of(&mut h, id), "abc\n", "документ не менялся");
+    assert!(h.ed.is_editing_text());
+}
+
+#[test]
+fn draft_without_its_parent_ends_the_edit_instead_of_retrying() {
+    let mut h = text_h();
+    let frame = h.frame(None, 100.0, 100.0, 400.0, 300.0);
+    h.key("KeyT", none());
+    h.click(300.0, 250.0, none());
+    assert!(info(&h).draft);
+    h.ed.transact(|tx| {
+        tx.delete_nodes(&[frame])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    assert!(
+        !h.ed.is_editing_text(),
+        "черновик без родителя — правка кончена"
+    );
+    h.ed.take_events();
+    h.ed.text_input(TextInputKind::Insert, "x").unwrap();
+    assert!(h.ed.take_events().is_empty());
+    assert!(h.ed.page_doc().walk().is_empty());
 }

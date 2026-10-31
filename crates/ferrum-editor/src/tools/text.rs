@@ -9,6 +9,7 @@ use ferrum_doc::{NodeId, NodeKind, Props, TextSizing};
 use kurbo::{Affine, Point, Rect};
 
 use super::{Ctx, Cursor, Flow, Tool, ToolKind, ToolOverlay, DRAG_THRESHOLD_PX};
+use crate::geometry::decompose_with;
 use crate::input::{Modifiers, PointerEvent};
 use crate::selection::drop_frame_at;
 
@@ -58,8 +59,18 @@ impl TextTool {
     fn props(start: &Start, rect: Option<Rect>) -> Props {
         let mut p = Props::defaults(NodeKind::Text);
         let origin = rect.map_or(start.world, |r| r.origin());
-        let local = start.parent_world.inverse() * origin;
-        (p.x, p.y) = (local.x, local.y);
+        // Как у `DrawTool`: поворот и отражение родителя снимаются, и текст на
+        // экране ровно в нарисованной рамке (а не повёрнут и не зеркален вместе с ней).
+        let (w, h) = rect.map_or((0.0, 0.0), |r| (r.width(), r.height()));
+        let pose = decompose_with(
+            start.parent_world.inverse() * Affine::translate(origin.to_vec2()),
+            w,
+            h,
+            0.0,
+        );
+        (p.x, p.y) = (pose.x, pose.y);
+        p.rotation = pose.rotation;
+        (p.flip_x, p.flip_y) = (pose.flip_x, pose.flip_y);
         if let (Some(r), Some(t)) = (rect, p.text.as_mut()) {
             let t = std::sync::Arc::make_mut(t);
             t.props.sizing = TextSizing::Fixed;

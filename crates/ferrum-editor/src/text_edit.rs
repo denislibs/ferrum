@@ -412,10 +412,17 @@ impl Editor {
         let Some(t) = &self.text_edit else {
             return;
         };
-        if self.scene.slot(t.id).is_none() {
+        let id = t.id;
+        if self.scene.slot(id).is_none() {
             if t.draft.is_some() {
-                // Черновик убран вместе с превью чужого жеста — вернуть.
+                // Черновик убран вместе с превью чужого жеста — вернуть; не
+                // встал (родитель пропал) — правка кончается.
                 self.restore_draft();
+                if self.scene.slot(id).is_none() {
+                    self.text_edit = None;
+                    self.text_hover = false;
+                    self.scene.clear_preview();
+                }
             } else {
                 // Узла нет: правка кончается, превью IME уходит вместе с ней.
                 self.text_edit = None;

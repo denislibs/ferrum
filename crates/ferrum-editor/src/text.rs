@@ -104,21 +104,26 @@ pub(crate) fn fit_patch(
     let mut patch = PropsPatch::default();
     if w != before.w {
         patch.w = Some(w);
-        let k = match after.text_props().map(|t| (t.sizing, t.align_h)) {
-            Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Center)) => 0.5,
-            Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Right)) => 1.0,
-            _ => 0.0,
-        };
-        if k > 0.0 {
-            // Сдвиг вдоль оси x узла (с его поворотом) в координатах родителя.
-            let v = kurbo::Affine::rotate(-before.rotation.to_radians())
-                * kurbo::Point::new(-(w - before.w) * k, 0.0);
-            patch.x = Some(before.x + v.x);
-            patch.y = Some(before.y + v.y);
-        }
     }
     if h != before.h {
         patch.h = Some(h);
+    }
+    let k = match after.text_props().map(|t| (t.sizing, t.align_h)) {
+        Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Center)) => 0.5,
+        Some((TextSizing::AutoWidth, ferrum_doc::AlignH::Right)) => 1.0,
+        _ => 0.0,
+    };
+    // Отражённый узел переворачивает содержимое в своей рамке: край текста,
+    // что при отражении смотрит влево (вверх), лежит у дальнего края рамки, и
+    // рамка растёт к нему — якорь переходит на противоположную сторону.
+    let kx = if before.flip_x { 1.0 - k } else { k };
+    let dy = if before.flip_y { h - before.h } else { 0.0 };
+    let dx = (w - before.w) * kx;
+    if dx != 0.0 || dy != 0.0 {
+        // Сдвиг вдоль осей узла (с его поворотом) в координатах родителя.
+        let v = kurbo::Affine::rotate(-before.rotation.to_radians()) * kurbo::Point::new(-dx, -dy);
+        patch.x = Some(before.x + v.x);
+        patch.y = Some(before.y + v.y);
     }
     Ok(patch)
 }
