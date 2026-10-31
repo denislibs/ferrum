@@ -17,7 +17,10 @@ use ferrum_doc::{
     NodeId, NodeKind, Props, PropsPatch, TextAttrs, TextCase, TextContent, TextData, TextProps,
     TextSizing, TextStyle, Tx, MAX_LIST_INDENT,
 };
-use ferrum_text::{style_name::guess_attrs, FontStatus};
+use ferrum_text::{
+    style_name::{guess_attrs, style_key},
+    FontStatus,
+};
 
 use crate::editor::{Editor, EditorEvent};
 use crate::input::Modifiers;
@@ -267,8 +270,46 @@ fn restyle_ops(
     Ok(())
 }
 
-/// Имя начертания по весу и курсиву (как у Figma: «Semi Bold Italic»).
-fn style_name(weight: f32, italic: bool) -> String {
+/// Слова веса в имени начертания (ключи без пробелов, как у `style_key`).
+const WEIGHT_WORDS: [&str; 16] = [
+    "hairline",
+    "thin",
+    "extralight",
+    "ultralight",
+    "semilight",
+    "light",
+    "regular",
+    "normal",
+    "medium",
+    "semibold",
+    "demibold",
+    "extrabold",
+    "ultrabold",
+    "bold",
+    "black",
+    "heavy",
+];
+
+/// Имя начертания с новым весом и курсивом; остальные части («Condensed»)
+/// остаются: «Condensed Bold» ↔ «Condensed».
+fn style_name(old: &str, weight: f32, italic: bool) -> String {
+    let words: Vec<&str> = old.split_whitespace().collect();
+    let mut rest: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let one = style_key(words[i]);
+        let two = words
+            .get(i + 1)
+            .map(|n| style_key(&format!("{}{}", words[i], n)));
+        if two.as_deref().is_some_and(|k| WEIGHT_WORDS.contains(&k)) {
+            i += 2;
+        } else if WEIGHT_WORDS.contains(&one.as_str()) || one == "italic" || one == "oblique" {
+            i += 1;
+        } else {
+            rest.push(words[i]);
+            i += 1;
+        }
+    }
     let w = match weight.round() as i32 {
         ..=150 => "Thin",
         151..=250 => "Extra Light",
@@ -280,10 +321,40 @@ fn style_name(weight: f32, italic: bool) -> String {
         751..=850 => "Extra Bold",
         _ => "Black",
     };
-    match (w, italic) {
-        ("Regular", true) => "Italic".into(),
-        (w, true) => format!("{w} Italic"),
-        (w, false) => w.into(),
+    let mut out: Vec<&str> = rest;
+    if w != "Regular" || (out.is_empty() && !italic) {
+        out.push(w);
+    }
+    if italic {
+        out.push("Italic");
+    }
+    out.join(" ")
+}
+
+/// Что переключают сочетания Ctrl/Cmd+B и +I.
+#[derive(Clone, Copy, PartialEq)]
+enum FontToggle {
+    Bold,
+    Italic,
+}
+
+impl FontToggle {
+    fn is_on(self, font: &FontName) -> bool {
+        let (w, italic) = guess_attrs(&font.style);
+        match self {
+            FontToggle::Bold => w >= 700.0,
+            FontToggle::Italic => italic,
+        }
+    }
+
+    /// Шрифт участка после переключения: семейство и вторая ось те же.
+    fn apply(self, font: &FontName, on: bool) -> FontName {
+        let (w, italic) = guess_attrs(&font.style);
+        let (w, italic) = match self {
+            FontToggle::Bold => (if on { 700.0 } else { 400.0 }, italic),
+            FontToggle::Italic => (w, on),
+        };
+        FontName::new(font.family.clone(), style_name(&font.style, w, italic))
     }
 }
 
@@ -626,6 +697,9 @@ impl Editor {
             Phase::Cancel => unreachable!("отмена — выше"),
             Phase::Preview => {
                 if pending {
+                    // Шрифты грузятся: старое превью не оставляем на экране.
+                    self.cancel_text_preview();
+                    self.emit();
                     return Ok(());
                 }
                 let list: Vec<(NodeId, PropsPatch)> = patches
@@ -672,8 +746,10 @@ impl Editor {
                                     },
                                 )?;
                             }
-                            None if p.content.is_some() && p.text.is_some() => {
-                                let d = &p.text.as_ref().expect("проверено").style;
+                            // Узел целиком: содержимое меняется только разметкой
+                            // (список, значение, равное умолчанию), без полной замены.
+                            None if p.content.is_some() => {
+                                let d = p.text.as_ref().map_or(&t.props.style, |x| &x.style);
                                 let all = 0..t.content.char_len();
                                 tx.set_props(
                                     *id,
@@ -707,34 +783,107 @@ impl Editor {
         self.restore_draft();
     }
 
+    /// Жирный и курсив: каждый участок диапазона сохраняет своё семейство
+    /// (и вес, если переключается курсив). Все участки уже включены — выключает,
+    /// иначе включает у всех (как подчёркивание). Начертания нет в семействе —
+    /// участок не меняется.
+    fn toggle_font(&mut self, which: FontToggle) -> Result<(), TextError> {
+        let Some(t) = self.text_edit.as_ref() else {
+            return Ok(());
+        };
+        let (id, range, draft) = (t.id, t.range(), t.draft.is_some());
+        let usable = |ed: &Editor, f: &FontName| ed.fonts.borrow().status(f) != FontStatus::Missing;
+        if range.is_empty() || draft {
+            // Курсор и черновик: стиль один (следующего ввода или узла).
+            let Some(s) = self.text_style_summary() else {
+                return Ok(());
+            };
+            let old = FontName::new(s.family.value, s.style.value);
+            let font = which.apply(&old, !which.is_on(&old));
+            if !usable(self, &font) {
+                return Ok(());
+            }
+            return self.edit_text_style(
+                &TextStylePatch {
+                    font: Some(font),
+                    ..Default::default()
+                },
+                Phase::Commit,
+                None,
+            );
+        }
+        let Some(before) = self.doc_props(id) else {
+            return Ok(());
+        };
+        let Some(td) = before.text.as_ref() else {
+            return Ok(());
+        };
+        let d = &td.props.style;
+        // Участки диапазона с их позициями и шрифтом.
+        let mut runs: Vec<(Range<usize>, FontName, bool)> = Vec::new();
+        let mut at = range.start;
+        for r in td.content.slice(range) {
+            let len = r.text.chars().count();
+            runs.push((
+                at..at + len,
+                r.attrs.font_name(d),
+                r.text.chars().any(|c| c != '\n'),
+            ));
+            at += len;
+        }
+        let on = runs.iter().filter(|r| r.2).all(|(_, f, _)| which.is_on(f));
+        let mut content = td.content.clone();
+        let mut changes: Vec<(Range<usize>, TextStylePatch)> = Vec::new();
+        for (r, f, _) in runs {
+            let font = which.apply(&f, !on);
+            if font == f || !usable(self, &font) {
+                continue;
+            }
+            let patch = TextStylePatch {
+                font: Some(font),
+                ..Default::default()
+            };
+            content = restyle(&content, r.clone(), &patch, d);
+            changes.push((r, patch));
+        }
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut after = before.clone();
+        after.text = Some(Arc::new(TextData {
+            props: td.props.clone(),
+            content,
+        }));
+        let fit = fit_patch(&mut self.fonts.borrow_mut(), &before, &after)
+            .map_err(|_| TextError::Pending)?;
+        self.cancel_text_preview();
+        let selection = self.selection.to_vec();
+        let (content, style) = (td.content.clone(), d.clone());
+        self.ctx().commit(|tx, _| {
+            for (r, patch) in &changes {
+                restyle_ops(tx, id, &content, r.clone(), patch, &style)?;
+            }
+            tx.set_props(id, &fit)?;
+            Ok(selection)
+        });
+        if let Some(t) = self.text_edit.as_mut() {
+            t.merge = None;
+        }
+        self.emit();
+        Ok(())
+    }
+
     /// Сочетания форматирования в правке. Возвращает, обработано ли.
     pub(crate) fn text_format_key(&mut self, code: &str, mods: Modifiers) -> bool {
         let platform = self.settings.platform;
         let primary = mods.primary(platform);
         let result = match code {
             "KeyB" | "KeyI" if primary && !mods.alt && !mods.shift => {
-                let Some(s) = self.text_style_summary() else {
-                    return true;
-                };
-                let (w, italic) = guess_attrs(&s.style.value);
-                let (w, italic) = if code == "KeyB" {
-                    (if w >= 600.0 { 400.0 } else { 700.0 }, italic)
+                self.toggle_font(if code == "KeyB" {
+                    FontToggle::Bold
                 } else {
-                    (w, !italic)
-                };
-                let font = FontName::new(s.family.value.clone(), style_name(w, italic));
-                // Начертания нет в семействе — ничего (как в Figma).
-                if self.fonts.borrow().status(&font) == FontStatus::Missing {
-                    return true;
-                }
-                self.edit_text_style(
-                    &TextStylePatch {
-                        font: Some(font),
-                        ..Default::default()
-                    },
-                    Phase::Commit,
-                    None,
-                )
+                    FontToggle::Italic
+                })
             }
             "KeyU" | "KeyX" if primary && !mods.alt && (code == "KeyU") != mods.shift => {
                 let want = if code == "KeyU" {
@@ -796,10 +945,21 @@ mod tests {
 
     #[test]
     fn style_names_follow_figma() {
-        assert_eq!(style_name(400.0, false), "Regular");
-        assert_eq!(style_name(400.0, true), "Italic");
-        assert_eq!(style_name(700.0, true), "Bold Italic");
-        assert_eq!(style_name(600.0, false), "Semi Bold");
+        assert_eq!(style_name("Regular", 400.0, false), "Regular");
+        assert_eq!(style_name("Regular", 400.0, true), "Italic");
+        assert_eq!(style_name("Regular", 700.0, true), "Bold Italic");
+        assert_eq!(style_name("Regular", 600.0, false), "Semi Bold");
+    }
+
+    #[test]
+    fn style_names_keep_width_parts() {
+        assert_eq!(style_name("Condensed Bold", 400.0, false), "Condensed");
+        assert_eq!(style_name("Condensed", 700.0, false), "Condensed Bold");
+        assert_eq!(
+            style_name("Condensed Semi Bold Italic", 700.0, true),
+            "Condensed Bold Italic"
+        );
+        assert_eq!(style_name("Bold Italic", 700.0, false), "Bold");
     }
 
     #[test]

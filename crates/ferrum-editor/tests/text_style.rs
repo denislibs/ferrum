@@ -259,3 +259,178 @@ fn style_change_at_the_caret_breaks_the_typing_merge() {
     assert_eq!(c.attrs_at(2).style.as_deref(), Some("Bold"));
     assert_eq!(c.attrs_at(3).style.as_deref(), Some("Bold"));
 }
+
+fn font_of(h: &mut H, id: NodeId, at: usize) -> (String, String) {
+    let p = h.props(id);
+    let t = p.text.unwrap();
+    let f = t.content.attrs_at(at).font_name(&t.props.style);
+    (f.family, f.style)
+}
+
+/// «Привет мир»: первые три символа — Roboto, остальное — Inter Regular.
+fn mixed_family_text(h: &mut H) -> NodeId {
+    let id = add_text(h, 100.0, 100.0, "Привет мир", 24.0);
+    h.ed.transact(|tx| {
+        tx.format_text(
+            id,
+            0..3,
+            &TextAttrs {
+                font: Some("Roboto".into()),
+                style: Some("Regular".into()),
+                ..Default::default()
+            },
+            &[],
+        )?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    id
+}
+
+#[test]
+fn bold_keeps_each_runs_family_and_toggles_all_on_off() {
+    let mut h = text_h();
+    let id = mixed_family_text(&mut h);
+    h.key("Enter", none());
+    h.key("KeyA", ctrl());
+    h.key("KeyB", ctrl());
+    assert_eq!(font_of(&mut h, id, 0), ("Roboto".into(), "Bold".into()));
+    assert_eq!(font_of(&mut h, id, 5), ("Inter".into(), "Bold".into()));
+    h.key("KeyB", ctrl());
+    assert_eq!(font_of(&mut h, id, 0), ("Roboto".into(), "Regular".into()));
+    assert_eq!(font_of(&mut h, id, 5), ("Inter".into(), "Regular".into()));
+}
+
+#[test]
+fn bold_on_mixed_weights_makes_all_bold_and_italic_keeps_weights() {
+    let mut h = text_h();
+    let id = mixed_text(&mut h); // «При» — Bold, остальное Regular
+    h.key("Enter", none());
+    h.key("KeyA", ctrl());
+    h.key("KeyI", ctrl());
+    assert_eq!(font_of(&mut h, id, 0).1, "Bold Italic");
+    assert_eq!(font_of(&mut h, id, 5).1, "Italic");
+    h.key("KeyI", ctrl());
+    assert_eq!(font_of(&mut h, id, 0).1, "Bold");
+    assert_eq!(font_of(&mut h, id, 5).1, "Regular");
+    h.key("KeyB", ctrl());
+    assert_eq!(font_of(&mut h, id, 0).1, "Bold");
+    assert_eq!(font_of(&mut h, id, 5).1, "Bold");
+    h.key("KeyB", ctrl());
+    assert_eq!(font_of(&mut h, id, 0).1, "Regular");
+    assert_eq!(font_of(&mut h, id, 5).1, "Regular");
+}
+
+#[test]
+fn semi_bold_is_not_bold_for_the_shortcut() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    h.ed.edit_text_style(
+        &TextStylePatch {
+            font: Some(FontName::new("Inter", "Semi Bold")),
+            ..Default::default()
+        },
+        Phase::Commit,
+        None,
+    )
+    .unwrap();
+    h.key("Enter", none());
+    h.key("KeyA", ctrl());
+    h.key("KeyB", ctrl());
+    assert_eq!(font_of(&mut h, id, 0).1, "Bold");
+}
+
+/// Размер пачки журнала после действия: полная замена текста кладёт в неё
+/// весь текст, разметка — несколько байт.
+fn journal_len(h: &mut H, act: impl FnOnce(&mut H)) -> usize {
+    h.ed.take_journal().unwrap();
+    act(h);
+    h.ed.take_journal().unwrap().map_or(0, |b| b.len())
+}
+
+fn long_text() -> String {
+    let mut x: u32 = 12345;
+    let mut para = |n: usize| -> String {
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                (b'a' + ((x >> 16) % 26) as u8) as char
+            })
+            .collect()
+    };
+    format!("{}\n{}\n{}", para(300), para(300), para(300))
+}
+
+#[test]
+fn whole_node_list_and_default_equal_edits_use_marks_not_a_text_replace() {
+    let mut h = text_h();
+    let text = long_text();
+    let id = add_text(&mut h, 100.0, 100.0, &text, 24.0);
+    let bytes = journal_len(&mut h, |h| {
+        h.ed.edit_text_style(
+            &TextStylePatch {
+                list: Some(ListKind::Bullet),
+                ..Default::default()
+            },
+            Phase::Commit,
+            None,
+        )
+        .unwrap();
+    });
+    assert!(
+        bytes > 0 && bytes < 400,
+        "список — разметка, не замена: {bytes}"
+    );
+    let c = content(&mut h, id);
+    assert_eq!(c.attrs_at(300).list, Some(ListKind::Bullet));
+    assert_eq!(c.text().chars().count(), text.chars().count() + 1);
+    h.ed.execute(CommandId::Undo);
+    assert_eq!(content(&mut h, id).attrs_at(300).list, None);
+
+    // Размер, равный умолчанию узла, при части символов с другим размером.
+    h.ed.transact(|tx| {
+        tx.format_text(
+            id,
+            0..5,
+            &TextAttrs {
+                size: Some(40.0),
+                ..Default::default()
+            },
+            &[],
+        )?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    let bytes = journal_len(&mut h, |h| {
+        h.ed.edit_text_style(&size(24.0), Phase::Commit, None)
+            .unwrap();
+    });
+    assert!(
+        bytes > 0 && bytes < 400,
+        "снятие разметки, не замена: {bytes}"
+    );
+    assert_eq!(content(&mut h, id).runs.len(), 1);
+    h.ed.execute(CommandId::Undo);
+    assert_eq!(content(&mut h, id).attrs_at(0).size, Some(40.0));
+}
+
+#[test]
+fn preview_while_fonts_load_clears_the_stale_preview() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    h.ed.edit_text_style(&size(40.0), Phase::Preview, None)
+        .unwrap();
+    assert!(h.ed.scene().has_preview());
+    let pending = ferrum_text::Fonts::shared();
+    let rel = "inter/Inter-Variable.ttf";
+    let faces = ferrum_text::read_faces(&font_file(rel), rel);
+    pending
+        .borrow_mut()
+        .add_catalog(ferrum_text::SourceKind::Bundled, ferrum_text::group(faces));
+    h.ed.set_fonts(pending);
+    h.ed.edit_text_style(&size(50.0), Phase::Preview, None)
+        .unwrap();
+    assert!(!h.ed.scene().has_preview(), "устаревшего превью нет");
+    let t = h.ed.scene().node(id).unwrap().props.text.clone().unwrap();
+    assert_eq!(t.props.style.size, 24.0);
+}
