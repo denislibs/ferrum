@@ -73,6 +73,11 @@ pub enum EditorEvent {
     PageChanged(PageId),
     /// Готовы байты для системного буфера обмена (формат `web application/x-ferrum`).
     Clipboard(Vec<u8>),
+    /// Копия фрагмента текста в правке: наш формат и обычный текст (`text/plain`).
+    ClipboardText {
+        bytes: Vec<u8>,
+        plain: String,
+    },
     /// Интерфейсу пора прочитать системный буфер и вызвать `paste`.
     PasteRequested,
     /// Скопировать как PNG: интерфейс экспортирует узлы и кладёт картинку в буфер.

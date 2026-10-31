@@ -575,10 +575,14 @@ pub enum CoreEvent {
     Page {
         id: String,
     },
-    /// Байты для системного буфера обмена (`web application/x-ferrum`).
+    /// Байты для системного буфера обмена (`web application/x-ferrum`); у
+    /// фрагмента текста в правке — и обычный текст для `text/plain`.
     Clipboard {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
+        #[serde(default)]
+        #[tsify(type = "string | undefined")]
+        plain: Option<String>,
     },
     /// PNG выделения для буфера обмена («Скопировать как PNG»).
     ClipboardPng {

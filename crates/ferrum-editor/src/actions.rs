@@ -50,6 +50,22 @@ impl Editor {
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
             C::Undo => self.undo_redo(false),
             C::Redo => self.undo_redo(true),
+            // В правке текста — фрагмент текста и обычный текст.
+            C::Copy if self.text_edit.is_some() => {
+                if let Some((bytes, plain)) = self.copy_text() {
+                    self.out
+                        .events
+                        .push(EditorEvent::ClipboardText { bytes, plain });
+                }
+            }
+            C::Cut if self.text_edit.is_some() => {
+                if let Some((bytes, plain)) = self.copy_text() {
+                    self.out
+                        .events
+                        .push(EditorEvent::ClipboardText { bytes, plain });
+                    let _ = self.text_input(crate::TextInputKind::DeleteBackward, "");
+                }
+            }
             C::Copy => {
                 if let Some(bytes) = self.copy() {
                     self.out.events.push(EditorEvent::Clipboard(bytes));
@@ -501,7 +517,7 @@ impl Editor {
 
     /// Куда вставлять: в единственный выделенный фрейм, иначе к родителю
     /// выделения, иначе в корень. Родитель, его мировая матрица и рамка фрейма.
-    fn paste_target(&self) -> (Option<NodeId>, Affine, Option<Rect>) {
+    pub(crate) fn paste_target(&self) -> (Option<NodeId>, Affine, Option<Rect>) {
         let candidate = match self.selection[..] {
             [one]
                 if self
@@ -565,6 +581,13 @@ impl Editor {
                 return Err(e);
             }
         };
+        // В правке текста тексты вставляются в него; иное — узлами после правки.
+        if self.text_edit.is_some() {
+            if self.paste_into_text(&payload) {
+                return Ok(());
+            }
+            self.end_text_edit();
+        }
         let (target, target_world, target_box) = self.paste_target();
         let offset = self.paste_offset(payload.bounds, target_box);
         let shift = Affine::translate(offset);

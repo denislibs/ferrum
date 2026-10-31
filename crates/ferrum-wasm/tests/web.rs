@@ -63,6 +63,7 @@ fn events_become_js_objects_with_byte_arrays() {
     let js = events_to_js(&[
         CoreEvent::Clipboard {
             bytes: ByteBuf::from(vec![7, 8]),
+            plain: None,
         },
         CoreEvent::Document {
             can_undo: true,

@@ -666,7 +666,14 @@ impl Core {
                 }
                 EditorEvent::Clipboard(bytes) => self.events.push(CoreEvent::Clipboard {
                     bytes: ByteBuf::from(bytes),
+                    plain: None,
                 }),
+                EditorEvent::ClipboardText { bytes, plain } => {
+                    self.events.push(CoreEvent::Clipboard {
+                        bytes: ByteBuf::from(bytes),
+                        plain: Some(plain),
+                    })
+                }
                 EditorEvent::PasteRequested => self.events.push(CoreEvent::PasteRequested),
                 EditorEvent::ExportPng(ids) => self.copy_png(&ids),
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),

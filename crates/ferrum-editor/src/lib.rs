@@ -19,6 +19,7 @@ pub mod presets;
 pub mod selection;
 pub mod snap;
 pub mod text;
+mod text_clipboard;
 pub mod text_edit;
 mod text_input;
 pub mod tools;
