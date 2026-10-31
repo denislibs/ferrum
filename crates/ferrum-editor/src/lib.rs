@@ -19,6 +19,7 @@ pub mod presets;
 pub mod selection;
 pub mod snap;
 pub mod text;
+pub mod text_edit;
 pub mod tools;
 
 pub use actions::{FIT_PADDING_PX, PRESET_GAP};
@@ -32,4 +33,5 @@ pub use panel::{
 };
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
 pub use text::{fit_size, MissingFont, TextError, TextPending};
+pub use text_edit::{EnterAt, TextEditInfo, CARET_BLINK_MS};
 pub use tools::{Cursor, Tool, ToolKind, ToolOverlay};

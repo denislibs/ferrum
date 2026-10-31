@@ -872,6 +872,21 @@ impl Tool for SelectTool {
         let shift = e.modifiers.shift;
         let cache = self.sel_cache(cx);
         let sbox = cache.sbox;
+        // Двойной щелчок по тексту — его правка (спека подсистемы 3, раздел 7),
+        // даже над ручками рамки мелкого текста.
+        if double && !shift {
+            if let Some(id) = Self::pick_at(cx, &cache.parents, e.point, e.modifiers, true) {
+                let text = cx.scene.slot(id).is_some_and(|s| {
+                    cx.scene.at(s).props.kind == NodeKind::Text && !locked(cx.scene, s)
+                });
+                if text {
+                    cx.selection.set(vec![id]);
+                    cx.out.edit_text = Some((id, world));
+                    self.state = State::Idle;
+                    return;
+                }
+            }
+        }
         let target = if let Some((hit, _)) = Self::box_hit(cx, sbox, e.point) {
             match hit {
                 BoxHit::Handle(h) => Target::Handle(h),

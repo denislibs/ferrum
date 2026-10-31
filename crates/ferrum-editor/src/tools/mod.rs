@@ -8,7 +8,7 @@
 
 mod draw;
 mod hand;
-mod select;
+pub(crate) mod select;
 
 pub use draw::{DrawTool, Shape};
 pub use hand::HandTool;
@@ -53,6 +53,8 @@ pub enum Cursor {
     Rotate {
         angle: f64,
     },
+    /// Над текстом в правке и у инструмента «Текст» (I-образный).
+    Text,
 }
 
 /// Чем инструмент дополняет оверлей.
@@ -153,6 +155,8 @@ pub(crate) struct Outbox {
     /// по ним без полного обхода). Не больше `MAX_APPLIED`: при переполнении
     /// старые отбрасываются, и потребитель видит пропуск по метке сцены.
     pub applied: Vec<Changes>,
+    /// Двойной щелчок по тексту: войти в его правку с курсором в точке мира.
+    pub edit_text: Option<(NodeId, Point)>,
 }
 
 /// Сколько применённых пачек изменений копится до `Editor::take_applied`.

@@ -139,6 +139,8 @@ fn cursor(c: Cursor) -> (CursorKind, f64) {
         Cursor::Duplicate => (CursorKind::Duplicate, 0.0),
         Cursor::Resize { angle } => (CursorKind::Resize, angle),
         Cursor::Rotate { angle } => (CursorKind::Rotate, angle),
+        // Текстовый курсор появится в протоколе вместе с командами текста.
+        Cursor::Text => (CursorKind::Default, 0.0),
     }
 }
 
