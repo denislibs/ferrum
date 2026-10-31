@@ -141,6 +141,7 @@ pub fn lod_color(p: &Props) -> Option<Rgba> {
             .find(|s| s.width > 0.0 && s.color.a > 0)
             .map(|s| color(s.color));
     }
+    // У булевой группы — её заливки и обводки (результат один, без своих областей).
     if !matches!(p.kind, NodeKind::Line | NodeKind::Group) {
         if let Some(f) = p.fills.iter().find(|f| f.visible && f.opacity > 0.0) {
             return Some(paint_lod(f));
@@ -186,8 +187,9 @@ impl DisplayList {
         let geometry = shape::geometry(p);
         let path_shape = node.path_shape().cloned();
         let mut items = Vec::new();
-        if let (NodeKind::Vector, Some(ps)) = (p.kind, &path_shape) {
-            // Области снизу вверх, у каждой — её заливки (или заливки узла).
+        if let (NodeKind::Vector | NodeKind::Boolean, Some(ps)) = (p.kind, &path_shape) {
+            // Области снизу вверх, у каждой — её заливки (или заливки узла); у
+            // булевой группы область одна — результат операции.
             for (region, r) in ps.regions.iter().enumerate() {
                 for f in r.fills.as_deref().unwrap_or(&p.fills) {
                     if let Some(paint) = paint_of(f) {

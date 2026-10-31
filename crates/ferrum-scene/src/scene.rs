@@ -533,6 +533,9 @@ impl Scene {
             None
         } else if n.props.kind == NodeKind::Frame && n.props.clip_content {
             world_bounds
+        } else if n.props.kind == NodeKind::Boolean {
+            // Дети булевой группы не рисуются: видно только результат.
+            world_bounds
         } else {
             n.children
                 .iter()
