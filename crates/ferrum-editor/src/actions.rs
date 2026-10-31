@@ -37,6 +37,8 @@ enum Arrange {
 impl Editor {
     pub(crate) fn run(&mut self, cmd: CommandId) {
         use CommandId as C;
+        // Команда с зажатой кнопкой: жест отменяется, а не записывается.
+        self.cancel_stale_vector_drag();
         // Правка вектора перехватывает свои команды (удаление, сдвиг, Esc…).
         if self.vector_edit.is_some() && self.vector_command(cmd) {
             return;

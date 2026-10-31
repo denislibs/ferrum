@@ -323,7 +323,7 @@ fn selection_never_points_past_the_network_after_the_pen_drops_a_point() {
     let r = h.rect(None, 100.0, 100.0, 100.0, 100.0);
     assert!(h.ed.start_vector_edit(r));
     h.key("KeyP", Modifiers::NONE);
-    // Одинокая точка получает номер 4 и выделяется; путь заканчивает «Заливка».
+    // Одинокая точка получает номер 4 и выделяется; путь заканчивает Esc.
     h.click(400.0, 400.0, Modifiers::NONE);
     let during = h.ed.vector_selection().unwrap().points.clone();
     assert!(during.iter().all(|&i| i < 5), "{during:?}");
@@ -370,4 +370,116 @@ fn double_click_sets_the_edit_vector_outbox_and_enters_edit_mode() {
     h.dbl(150.0, 100.0);
     assert_eq!(h.ed.vector_edit_node(), Some(id));
     assert_eq!(h.sel(), vec![id]);
+}
+
+#[test]
+fn lost_pointer_up_does_not_leak_into_the_next_edit() {
+    let mut h = H::new();
+    let id = square(&mut h, false);
+    h.ed.start_vector_edit(id);
+    // Протяжка точки без отпускания, затем щелчок по другой точке и сдвиг.
+    h.drag_hold((200.0, 200.0), (250.0, 250.0), Modifiers::NONE);
+    h.click(100.0, 100.0, Modifiers::NONE);
+    assert!(!h.ed.scene().has_preview());
+    assert_eq!(
+        h.ed.vector_work().unwrap().points[2],
+        VectorPoint::new(100.0, 100.0)
+    );
+    h.key("ArrowDown", Modifiers::NONE);
+    let w = world_points(&mut h, id);
+    assert!(near(w[2], Point::new(200.0, 200.0)), "{w:?}");
+    assert!(near(w[0], Point::new(100.0, 101.0)), "{w:?}");
+}
+
+#[test]
+fn delete_and_nudge_finish_an_open_pen_path_as_its_own_step() {
+    // Путь — один шаг, сдвиг — свой.
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 100.0, 100.0);
+    assert!(h.ed.start_vector_edit(r));
+    h.key("KeyP", Modifiers::NONE);
+    let steps = h.ed.step_count();
+    h.click(400.0, 400.0, Modifiers::NONE);
+    h.click(500.0, 400.0, Modifiers::NONE);
+    h.key("ArrowDown", Modifiers::NONE);
+    assert_eq!(h.ed.step_count(), steps + 2, "путь и сдвиг");
+    h.click(600.0, 400.0, Modifiers::NONE);
+    h.click(700.0, 400.0, Modifiers::NONE);
+    h.key("Escape", Modifiers::NONE);
+    assert_eq!(h.ed.step_count(), steps + 3);
+    // Пустой холст, перо с панели: узел появляется от записи пути, не от сдвига.
+    let mut h = H::new();
+    h.key("KeyP", Modifiers::NONE);
+    let steps = h.ed.step_count();
+    h.click(100.0, 100.0, Modifiers::NONE);
+    h.click(200.0, 100.0, Modifiers::NONE);
+    h.key("ArrowDown", Modifiers::NONE);
+    assert_eq!(
+        h.ed.step_count(),
+        steps + 2,
+        "путь создал узел, сдвиг — свой шаг"
+    );
+    assert_eq!(h.children(None).len(), 1);
+}
+
+#[test]
+fn delete_in_pen_mode_does_not_connect_to_a_renumbered_point() {
+    let mut h = H::new();
+    let id = h.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(Arc::new(VectorNetwork {
+                points: (0..4)
+                    .map(|i| VectorPoint::new(i as f64 * 50.0, 0.0))
+                    .collect(),
+                segments: (0..3).map(|i| VectorSegment::line(i, i + 1)).collect(),
+                regions: vec![],
+            })),
+            ..patch(100.0, 100.0, 150.0, 1.0)
+        },
+    );
+    h.ed.start_vector_edit(id);
+    h.key("KeyP", Modifiers::NONE);
+    // Продолжить от точки 0, удалить её, поставить две новые точки.
+    h.click(100.0, 100.0, Modifiers::NONE);
+    h.key("Delete", Modifiers::NONE);
+    h.click(400.0, 400.0, Modifiers::NONE);
+    h.click(500.0, 400.0, Modifiers::NONE);
+    h.key("Escape", Modifiers::NONE);
+    let net = net_of(&mut h, id);
+    let n = net.points.len() as u32;
+    // Путь начат заново: сегмент только между двумя новыми точками.
+    assert_eq!(net.segments.len(), 3, "{:?}", net.segments);
+    let last = net.segments.last().unwrap();
+    assert_eq!((last.start, last.end), (n - 2, n - 1), "{:?}", net.segments);
+}
+
+#[test]
+fn repeated_escape_does_nothing_in_edit_mode() {
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 100.0, 100.0);
+    assert!(h.ed.start_vector_edit(r));
+    h.key("KeyP", Modifiers::NONE);
+    let mut rep = KeyEvent::new("Escape", Modifiers::NONE);
+    rep.repeat = true;
+    h.ev(Input::KeyDown(rep.clone()));
+    h.ev(Input::KeyDown(rep.clone()));
+    assert_eq!(h.ed.vector_tool(), Some(VectorTool::Pen), "повторы пусты");
+    h.key("Escape", Modifiers::NONE);
+    assert_eq!(h.ed.vector_tool(), Some(VectorTool::Select));
+    h.ev(Input::KeyDown(rep));
+    assert!(h.ed.is_editing_vector(), "повтор не выходит из режима");
+}
+
+#[test]
+fn bucket_mode_leaves_edit_on_a_press_at_another_node() {
+    let mut h = H::new();
+    let id = square(&mut h, false);
+    let other = h.rect(None, 400.0, 400.0, 50.0, 50.0);
+    h.ed.start_vector_edit(id);
+    h.key("KeyB", Modifiers::NONE);
+    h.click(420.0, 420.0, Modifiers::NONE);
+    assert!(!h.ed.is_editing_vector());
+    assert_eq!(h.sel(), vec![other]);
 }

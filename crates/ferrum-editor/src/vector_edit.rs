@@ -28,7 +28,7 @@ use kurbo::{Affine, Line, Point, Rect, Vec2};
 
 use crate::editor::{Editor, EditorEvent};
 use crate::geometry::{decompose_with, snap_angle};
-use crate::input::{KeyEvent, Modifiers, PointerEvent};
+use crate::input::{KeyEvent, Modifiers, PointerButton, PointerEvent};
 use crate::selection::{drop_frame_at, locked};
 use crate::tools::{sync, Cursor, ToolKind, DRAG_THRESHOLD_PX};
 use crate::vector_ops::{reframe, shape_network, HandleEnd};
@@ -859,7 +859,6 @@ impl Editor {
             v.work.segments.truncate(s as usize);
         }
         v.work.points.pop();
-        v.sel.clamp(&v.work);
         v.pen.last = prev;
         v.pen.pending_out = None;
         v.sel = VectorSelection {
@@ -882,12 +881,19 @@ impl Editor {
     /// Нажатие в правке. `false` — нажатие мимо: правка кончилась, его
     /// обработает инструмент.
     pub(crate) fn vector_pointer_down(&mut self, e: &PointerEvent) -> bool {
+        // Нажатие без отпускания предыдущего: прежний жест отменяется, а не
+        // записывается следующей правкой (превью не остаётся в рабочей сети).
+        self.cancel_stale_vector_drag();
         match self.vector_edit.as_ref().map(|v| v.tool) {
             Some(VectorTool::Pen) => {
                 self.pen_pointer_down(e);
                 true
             }
             Some(VectorTool::Bucket) => {
+                // Щелчок по другому узлу — выход из правки, как в выделении.
+                if self.vector_press_leaves(e) {
+                    return false;
+                }
                 self.bucket_click(e);
                 true
             }
@@ -907,6 +913,10 @@ impl Editor {
 
     /// Отпускание кнопки в правке.
     pub(crate) fn vector_pointer_up(&mut self, e: &PointerEvent) {
+        // Жест кончает только основная кнопка.
+        if e.button != PointerButton::Primary {
+            return;
+        }
         match self.vector_tool() {
             Some(VectorTool::Pen) => self.pen_pointer_up(),
             Some(VectorTool::Select) => self.vector_select_up(e),
@@ -925,7 +935,9 @@ impl Editor {
             return true;
         }
         match e.code.as_str() {
-            "Escape" | "Enter" | "NumpadEnter" if plain && !e.repeat => {
+            // Автоповтор Esc и Enter не должен выходить из режима целиком.
+            "Escape" | "Enter" | "NumpadEnter" if e.repeat => true,
+            "Escape" | "Enter" | "NumpadEnter" if plain => {
                 self.vector_escape();
                 true
             }
@@ -973,6 +985,18 @@ impl Editor {
             return;
         }
         self.end_vector_edit();
+    }
+
+    /// Жест выделения, оставшийся без отпускания, отменяется (протяжка пера
+    /// живёт по своим правилам).
+    pub(crate) fn cancel_stale_vector_drag(&mut self) {
+        if self.vector_edit.as_ref().is_some_and(|v| {
+            v.drag
+                .as_ref()
+                .is_some_and(|d| !matches!(d, Drag::PenHandle { .. }))
+        }) {
+            self.cancel_vector_drag();
+        }
     }
 
     /// Отменяет жест правки (Esc при нажатой кнопке, потеря фокуса): рабочая

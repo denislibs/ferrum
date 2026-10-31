@@ -55,6 +55,34 @@ impl Editor {
         })
     }
 
+    /// Нажатие по другому узлу (не по узлу правки и не по черновику): правка
+    /// кончается, выделение сбрасывается, нажатие достаётся инструменту.
+    pub(crate) fn vector_press_leaves(&mut self, e: &PointerEvent) -> bool {
+        let world = self.camera.screen_to_world(e.point);
+        let tol = crate::tools::HIT_TOLERANCE_PX / self.camera.zoom();
+        let edited = self.vector_edit_node();
+        match self.scene.hit_test(world, tol) {
+            Some(hit) if Some(hit) != edited && !self.scene.is_draft(hit) => {
+                self.end_vector_edit();
+                self.selection.set(Vec::new());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Путь пера записывается раньше правки, которая перенумеровала бы точки
+    /// или создала бы узел посреди пути: путь — один шаг, команда — свой.
+    fn finish_open_pen_path(&mut self) {
+        if self
+            .vector_edit
+            .as_ref()
+            .is_some_and(|v| v.tool == crate::vector_edit::VectorTool::Pen)
+        {
+            self.finish_pen_path();
+        }
+    }
+
     /// Нажатие инструментом выделения в правке. `false` — нажатие по другому
     /// узлу: правка кончилась, нажатие — обычное.
     pub(crate) fn vector_select_down(&mut self, e: &PointerEvent) -> bool {
@@ -132,14 +160,8 @@ impl Editor {
             return true;
         }
         // Другой узел под точкой — выход из правки, щелчок как обычный.
-        let tol = crate::tools::HIT_TOLERANCE_PX / self.camera.zoom();
-        let edited = self.vector_edit_node();
-        if let Some(hit) = self.scene.hit_test(world, tol) {
-            if Some(hit) != edited && !self.scene.is_draft(hit) {
-                self.end_vector_edit();
-                self.selection.set(Vec::new());
-                return false;
-            }
+        if self.vector_press_leaves(e) {
+            return false;
         }
         let v = self.vector_edit.as_mut().expect("правка идёт");
         let base = if shift {
@@ -328,6 +350,7 @@ impl Editor {
     /// Удаление выделенного в правке: точки с сохранением формы (или с
     /// разрывом), иначе сегменты. Пустая сеть — узел удаляется (как в Figma).
     pub(crate) fn vector_delete(&mut self, break_path: bool) {
+        self.finish_open_pen_path();
         self.clamp_vector_selection();
         let Some(v) = self.vector_edit.as_mut() else {
             return;
@@ -381,10 +404,15 @@ impl Editor {
 
     /// Сдвиг выделенных точек стрелками на `d` в мире.
     fn vector_nudge(&mut self, d: Vec2) {
+        self.finish_open_pen_path();
         self.clamp_vector_selection();
         let Some(v) = self.vector_edit.as_mut() else {
             return;
         };
+        // Узла ещё нет (путь не записан): двигать нечего.
+        if v.id.is_none() {
+            return;
+        }
         let moving = v.sel.moving_points(&v.work);
         if moving.is_empty() {
             return;
@@ -402,6 +430,7 @@ impl Editor {
         match cmd {
             C::Delete => self.vector_delete(false),
             C::SelectAll => {
+                self.finish_open_pen_path();
                 if let Some(v) = &mut self.vector_edit {
                     v.sel = VectorSelection {
                         points: (0..v.work.points.len() as u32).collect(),
