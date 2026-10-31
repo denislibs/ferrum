@@ -402,3 +402,108 @@ fn vector_edit_overlay() {
     assert_px(&img, 70, 50, [255, 255, 255], 0);
     golden("vector_edit", &img);
 }
+
+/// Бэкенд-счётчик: вызовы рисования и элементы путей, без растеризации.
+struct Count {
+    size: (u16, u16),
+    calls: usize,
+    elements: usize,
+}
+
+impl ferrum_render::RenderBackend for Count {
+    fn begin_frame(&mut self, width: u16, height: u16) {
+        self.size = (width, height);
+        self.calls = 0;
+        self.elements = 0;
+    }
+    fn size(&self) -> (u16, u16) {
+        self.size
+    }
+    fn set_transform(&mut self, _: kurbo::Affine) {}
+    fn set_color(&mut self, _: ferrum_render::Rgba) {}
+    fn set_image(&mut self, _: &ferrum_render::ImagePaint) {}
+    fn fill_path(&mut self, path: &kurbo::BezPath, _: vello_cpu::peniko::Fill) {
+        self.calls += 1;
+        self.elements += path.elements().len();
+    }
+    fn fill_rect(&mut self, _: &kurbo::Rect) {
+        self.calls += 1;
+    }
+    fn stroke_path(&mut self, path: &kurbo::BezPath, _: &kurbo::Stroke) {
+        self.calls += 1;
+        self.elements += path.elements().len();
+    }
+    fn push_clip(&mut self, _: &kurbo::BezPath) {}
+    fn pop_clip(&mut self) {}
+    fn push_opacity_layer(&mut self, _: f32) {}
+    fn pop_layer(&mut self) {}
+}
+
+/// Оверлей правки кривой сети из `n` точек, вписанной в 1200 × 800: выделены
+/// все точки, видны все ручки.
+fn huge_selection(n: usize, transform: kurbo::Affine) -> (Count, ferrum_render::Overlay) {
+    use ferrum_render::{Overlay, VectorEditOverlay};
+    let net = ferrum_doc::fixture::curvy_network(n, 500.0);
+    let handles = (0..net.segments.len() as u32)
+        .flat_map(|i| [(i, true), (i, false)])
+        .collect();
+    let overlay = Overlay {
+        frame_labels: false,
+        pixel_grid: false,
+        vector_edit: Some(VectorEditOverlay {
+            transform,
+            points: (0..n as u32).collect(),
+            net: Arc::new(net),
+            segments: vec![],
+            handles,
+            selected_handles: vec![(0, true)],
+            rubber: None,
+        }),
+        ..Default::default()
+    };
+    let count = Count {
+        size: (0, 0),
+        calls: 0,
+        elements: 0,
+    };
+    (count, overlay)
+}
+
+#[test]
+fn edit_overlay_of_a_huge_selection_is_bounded() {
+    // Ctrl/Cmd+A на сети в 20 000 точек: точки и ручки не рисуются по одной, а
+    // число вызовов и элементов не растёт с размером выделения.
+    let scene = Page::new().scene();
+    let fit = kurbo::Affine::translate((100.0, 20.0)) * kurbo::Affine::scale(0.75);
+    let (mut count, overlay) = huge_selection(20_000, fit);
+    let mut r = ferrum_render::Renderer::new();
+    r.render(
+        &mut count,
+        &scene,
+        &camera(1200.0, 800.0),
+        &overlay,
+        &ferrum_render::NoImages,
+        None,
+    );
+    assert!(count.calls < 40, "вызовов {}", count.calls);
+    assert!(count.elements < 25_000, "элементов {}", count.elements);
+    // Приближение: на экране — сотня точек; они и их ручки видны (не больше
+    // предела), невидимые отброшены.
+    let near = kurbo::Affine::scale(40.0) * kurbo::Affine::translate((-990.0, -500.0));
+    let (mut count, overlay) = huge_selection(20_000, near);
+    r.render(
+        &mut count,
+        &scene,
+        &camera(1200.0, 800.0),
+        &overlay,
+        &ferrum_render::NoImages,
+        None,
+    );
+    assert!(count.calls < 40, "вызовов {}", count.calls);
+    assert!(
+        count.elements > 100,
+        "точки и ручки видны: {}",
+        count.elements
+    );
+    assert!(count.elements < 25_000, "элементов {}", count.elements);
+}

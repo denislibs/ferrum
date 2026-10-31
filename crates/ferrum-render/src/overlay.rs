@@ -118,7 +118,9 @@ pub const TEXT_SELECTION_ALPHA: f32 = 0.25;
 pub const VECTOR_POINT_RADIUS: f64 = 3.5;
 pub const VECTOR_HANDLE_RADIUS: f64 = 2.5;
 /// Больше стольких точек на экране не рисуются невыделенные: сеть в 100 000
-/// точек при отдалении была бы сплошной кашей кружков (и дорогим кадром).
+/// точек при отдалении была бы сплошной кашей кружков (и дорогим кадром). Больше
+/// стольких выделенных или ручек на экране — не рисуются и они (выделение видно
+/// по сети, обведённой толще).
 pub const VECTOR_MAX_POINTS_DRAWN: usize = 5000;
 
 /// Правка вектора (подсистема 3, этап 3): сеть, точки, ручки и резинка пера.
@@ -402,8 +404,29 @@ fn vector_edit(
         r.line_to(to_device * b);
         backend.stroke_path(&r, &Stroke::new(dpr));
     }
-    // Ручки: линия от точки и кружок на конце.
+    // Точки на экране; при толпе — только выделенные.
+    let visible: Vec<u32> = (0..net.points.len() as u32)
+        .filter(|&i| screen.contains(to_device * pt(i)))
+        .collect();
+    let selected_visible = visible
+        .iter()
+        .filter(|i| v.points.binary_search(i).is_ok())
+        .count();
+    // Выделенных на экране больше предела (Ctrl/Cmd+A на большой сети): кружки и
+    // ручки по одному не рисуются — выделение видно по сети, обведённой толще.
+    if selected_visible > VECTOR_MAX_POINTS_DRAWN {
+        backend.set_color(theme.select);
+        backend.stroke_path(&all, &Stroke::new(2.0 * dpr));
+        return;
+    }
+    // Ручки на экране: линия от точки и кружок на конце — тремя путями на все.
     let handle_r = VECTOR_HANDLE_RADIUS * dpr;
+    let mut chosen = v.selected_handles.clone();
+    chosen.sort_unstable();
+    let mut lines = BezPath::new();
+    let mut plain = BezPath::new();
+    let mut picked = BezPath::new();
+    let mut drawn = 0;
     for &(i, at_start) in &v.handles {
         let Some(s) = net.segments.get(i as usize) else {
             continue;
@@ -415,27 +438,35 @@ fn vector_edit(
         };
         let a = to_device * p;
         let b = to_device * (p + kurbo::Vec2::new(t[0], t[1]));
-        let mut line = BezPath::new();
-        line.move_to(a);
-        line.line_to(b);
-        backend.set_transform(Affine::IDENTITY);
-        backend.set_color(theme.select);
-        backend.stroke_path(&line, &Stroke::new(dpr));
-        let circle = kurbo::Circle::new(b, handle_r).to_path(0.1);
-        let selected = v.selected_handles.contains(&(i, at_start));
-        backend.set_color(if selected {
-            theme.select
+        if !Rect::from_points(a, b).overlaps(screen) {
+            continue;
+        }
+        drawn += 1;
+        if drawn > VECTOR_MAX_POINTS_DRAWN {
+            // Ручек на экране больше предела — не рисуется ни одна.
+            lines = BezPath::new();
+            plain = BezPath::new();
+            picked = BezPath::new();
+            break;
+        }
+        lines.move_to(a);
+        lines.line_to(b);
+        let circle = kurbo::Circle::new(b, handle_r).path_elements(0.1);
+        if chosen.binary_search(&(i, at_start)).is_ok() {
+            picked.extend(circle);
         } else {
-            theme.handle_fill
-        });
-        backend.fill_path(&circle, Fill::NonZero);
-        backend.set_color(theme.select);
-        backend.stroke_path(&circle, &Stroke::new(dpr));
+            plain.extend(circle);
+        }
     }
-    // Точки: видимые; при толпе на экране — только выделенные.
-    let visible: Vec<u32> = (0..net.points.len() as u32)
-        .filter(|&i| screen.contains(to_device * pt(i)))
-        .collect();
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.select);
+    backend.stroke_path(&lines, &Stroke::new(dpr));
+    backend.set_color(theme.handle_fill);
+    backend.fill_path(&plain, Fill::NonZero);
+    backend.set_color(theme.select);
+    backend.fill_path(&picked, Fill::NonZero);
+    backend.stroke_path(&plain, &Stroke::new(dpr));
+    backend.stroke_path(&picked, &Stroke::new(dpr));
     let crowd = visible.len() > VECTOR_MAX_POINTS_DRAWN;
     let r = VECTOR_POINT_RADIUS * dpr;
     let mut filled = BezPath::new();

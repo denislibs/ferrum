@@ -65,16 +65,21 @@ impl VectorSelection {
 
     /// Точки, которые двигает перетаскивание: выделенные и концы выделенных сегментов.
     pub fn moving_points(&self, net: &VectorNetwork) -> Vec<u32> {
-        let mut out: BTreeSet<u32> = (self.points.iter().copied())
+        // Точки множества уже по порядку: без сегментов — без пересортировки
+        // (все 100 000 точек после Ctrl/Cmd+A — каждый кадр).
+        let mut out: Vec<u32> = (self.points.iter().copied())
             .filter(|&i| (i as usize) < net.points.len())
             .collect();
-        for &s in &self.segments {
-            if let Some(seg) = net.segments.get(s as usize) {
-                out.insert(seg.start);
-                out.insert(seg.end);
+        if !self.segments.is_empty() {
+            for &s in &self.segments {
+                if let Some(seg) = net.segments.get(s as usize) {
+                    out.extend([seg.start, seg.end]);
+                }
             }
+            out.sort_unstable();
+            out.dedup();
         }
-        out.into_iter().collect()
+        out
     }
 
     /// Убирает номера за пределами сети (после отмены или чужой правки).
@@ -1037,14 +1042,18 @@ impl Editor {
         }
         // Ручки — у выделенных точек, концов выделенных сегментов и соседей
         // выделенных точек (как в Figma).
-        let mut handles = BTreeSet::new();
-        let around: BTreeSet<u32> = v.sel.moving_points(&v.work).into_iter().collect();
+        // Маской, а не множеством: Ctrl/Cmd+A на сети в 100 000 точек — кадр.
+        let mut around = vec![false; v.work.points.len()];
+        for i in v.sel.moving_points(&v.work) {
+            around[i as usize] = true;
+        }
+        let mut handles = Vec::new();
         for (i, s) in v.work.segments.iter().enumerate() {
-            if around.contains(&s.start) && s.tangent_start != [0.0; 2] {
-                handles.insert((i as u32, HandleEnd::Start));
+            if around[s.start as usize] && s.tangent_start != [0.0; 2] {
+                handles.push((i as u32, true));
             }
-            if around.contains(&s.end) && s.tangent_end != [0.0; 2] {
-                handles.insert((i as u32, HandleEnd::End));
+            if around[s.end as usize] && s.tangent_end != [0.0; 2] {
+                handles.push((i as u32, false));
             }
         }
         let rubber = match (v.tool, v.pen.last, v.pointer, &v.drag) {
@@ -1063,10 +1072,7 @@ impl Editor {
             net: v.work.clone(),
             points: v.sel.points.iter().copied().collect(),
             segments: v.sel.segments.iter().copied().collect(),
-            handles: handles
-                .into_iter()
-                .map(|(s, e)| (s, e == HandleEnd::Start))
-                .collect(),
+            handles,
             selected_handles: v
                 .sel
                 .handles

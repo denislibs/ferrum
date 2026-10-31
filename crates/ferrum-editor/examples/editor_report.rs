@@ -745,7 +745,16 @@ fn main() {
     );
 
     typing(&mut report);
-    vector_edit(&mut report);
+    vector_edit(
+        &mut report,
+        "Вектор 100 000 точек",
+        ferrum_doc::fixture::wavy_network(100_000),
+    );
+    vector_edit(
+        &mut report,
+        "Кривой вектор 100 000 точек",
+        ferrum_doc::fixture::curvy_network(100_000, 2000.0),
+    );
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -770,11 +779,10 @@ fn main() {
 
 /// Правка вектора из 100 000 точек (подсистема 3, этап 3): перетаскивание точки в
 /// режиме правки — кадр жеста (превью сцены с новой рамкой) и запись одним шагом.
-fn vector_edit(report: &mut Report) {
+fn vector_edit(report: &mut Report, label: &str, net: ferrum_doc::VectorNetwork) {
     use std::sync::Arc;
     let mut ed =
         Editor::new(Document::new(), None, VIEWPORT, 1.0, Platform::Mac).expect("страница");
-    let net = ferrum_doc::fixture::wavy_network(100_000);
     let b = ferrum_scene::vector::network_bounds(&net).unwrap();
     let id = ed
         .transact(|tx| {
@@ -812,20 +820,63 @@ fn vector_edit(report: &mut Report) {
     let end = Point::new(from.x + MOVES as f64, from.y + 0.5 * MOVES as f64);
     let commit = timed(&mut ed, Input::PointerUp(clock.at(end)));
     report.gate_median(
-        "Вектор 100 000 точек: перетаскивание точки, кадр жеста",
+        &format!("{label}: перетаскивание точки, кадр жеста"),
         &moves,
         16.0,
     );
     report.gate(
-        "Вектор 100 000 точек: отпускание — запись одним шагом",
+        &format!("{label}: отпускание — запись одним шагом"),
         commit,
         50.0,
     );
     report.check(
-        "Перетаскивание точки — один шаг отмены",
+        &format!("{label}: перетаскивание точки — один шаг отмены"),
         ed.step_count() == steps + 1,
         format!("{}", ed.step_count() - steps),
         "1",
+    );
+    // Ctrl/Cmd+A в правке: выделены все точки — команда, оверлей и кадр.
+    let (w, h) = ed.camera().device_size();
+    let mut backend = ferrum_render::CpuBackend::new(w, h);
+    let mut renderer = ferrum_render::Renderer::new();
+    let mut draw = |ed: &Editor, backend: &mut ferrum_render::CpuBackend| {
+        renderer.render(
+            backend,
+            ed.scene(),
+            ed.camera(),
+            &ed.overlay(),
+            &ferrum_render::NoImages,
+            None,
+        );
+    };
+    draw(&ed, &mut backend);
+    let t = Instant::now();
+    ed.execute(CommandId::SelectAll);
+    draw(&ed, &mut backend);
+    let select_all = t.elapsed();
+    ed.take_events();
+    report.gate(
+        &format!("{label}: Ctrl/Cmd+A в правке — команда и кадр"),
+        select_all,
+        16.7,
+    );
+    report.check(
+        &format!("{label}: Ctrl/Cmd+A выделяет все точки"),
+        ed.vector_selection().map(|s| s.points.len()) == Some(net.points.len()),
+        format!("{:?}", ed.vector_selection().map(|s| s.points.len())),
+        "все",
+    );
+    let frames: Vec<Duration> = (0..7)
+        .map(|_| {
+            let t = Instant::now();
+            draw(&ed, &mut backend);
+            t.elapsed()
+        })
+        .collect();
+    report.gate_median(
+        &format!("{label}: кадр правки, все точки выделены"),
+        &frames,
+        16.7,
     );
 }
 
