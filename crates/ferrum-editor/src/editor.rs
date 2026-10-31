@@ -858,6 +858,9 @@ impl Editor {
     where
         F: FnOnce(&Tx) -> DocResult<Vec<NodeId>>,
     {
+        // Открытый путь пера записывается до правки панели (как в Figma): иначе
+        // он затёр бы её своей записью по старым свойствам узла.
+        self.finish_pen_path();
         self.cancel_gesture();
         let before = self.selection.to_vec();
         let result = self.doc.transact(self.page, before, f);

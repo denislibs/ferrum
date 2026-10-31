@@ -65,6 +65,9 @@ pub(crate) enum Inverse {
     /// Отмена изменения свойств: прежние значения изменённых полей. За `Box`:
     /// с текстом патч стал большим, а варианты журнала живут тысячами.
     Props(NodeId, Box<PropsPatch>),
+    /// Отмена смены вида узла (фигура ↔ вектор): тип, скругление, обрезка и
+    /// сеть прежними. Применение пишет обратную к себе — повтор работает так же.
+    Shape(NodeId, Box<Props>),
     /// Отмена перемещения.
     Move {
         id: NodeId,
@@ -453,6 +456,7 @@ impl PageDoc {
                     .map(|_| ())
             }),
             Inverse::Props(id, patch) => self.set_props(*id, patch),
+            Inverse::Shape(id, props) => self.set_shape(*id, props),
             Inverse::Move { id, parent, index } => self.move_node(*id, *parent, *index),
             Inverse::Text(id, delta) => self.apply_text_delta(*id, delta),
         })
@@ -628,6 +632,58 @@ impl PageDoc {
             patch.apply_to(props);
         }
         self.record(Inverse::Props(id, Box::new(patch.previous(&before))));
+        Ok(())
+    }
+
+    /// Превращает фигуру (прямоугольник, эллипс, линию) в вектор с сетью `net`
+    /// на месте: тот же узел и ID, позиция среди соседей, имя, заливки,
+    /// обводки и поза сохраняются; скругление и обрезка фигуры не нужны вектору.
+    /// У вектора только заменяет сеть. Текст и контейнеры не превращаются.
+    pub(crate) fn convert_to_vector(
+        &self,
+        id: NodeId,
+        net: std::sync::Arc<VectorNetwork>,
+    ) -> DocResult<()> {
+        let before = self.props(id)?;
+        if before.text.is_some() || matches!(before.kind, NodeKind::Frame | NodeKind::Group) {
+            return Err(DocError::NotText(id.to_string()));
+        }
+        check_vector(&net)?;
+        let mut after = before;
+        after.kind = NodeKind::Vector;
+        after.corner_radius = 0.0;
+        after.clip_content = false;
+        after.vector = Some(net);
+        self.set_shape(id, &after)
+    }
+
+    /// Записывает вид узла (тип, скругление, обрезку, сеть) по `to` и запоминает
+    /// прежний для отмены. Без изменений ничего не пишет.
+    fn set_shape(&self, id: NodeId, to: &Props) -> DocResult<()> {
+        let tid = self.tid(id)?;
+        let before = self.props(id)?;
+        if before.kind == to.kind
+            && before.corner_radius == to.corner_radius
+            && before.clip_content == to.clip_content
+            && before.vector == to.vector
+        {
+            return Ok(());
+        }
+        let meta = self.tree.get_meta(tid)?;
+        meta.insert(codec::key::TYPE, to.kind.as_str())?;
+        meta.insert(codec::key::CORNER_RADIUS, to.corner_radius)?;
+        meta.insert(codec::key::CLIP_CONTENT, to.clip_content)?;
+        match &to.vector {
+            Some(v) => meta.insert(codec::key::VECTOR, LoroValue::Binary(v.encode().into()))?,
+            None => meta.delete(codec::key::VECTOR)?,
+        }
+        if let Some(props) = self.state.borrow_mut().props.get_mut(&id) {
+            props.kind = to.kind;
+            props.corner_radius = to.corner_radius;
+            props.clip_content = to.clip_content;
+            props.vector = to.vector.clone();
+        }
+        self.record(Inverse::Shape(id, Box::new(before)));
         Ok(())
     }
 
@@ -1186,6 +1242,16 @@ impl<'a> Tx<'a> {
 
     pub fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
         self.page.set_props(id, patch)
+    }
+
+    /// Фигура становится вектором с сетью `net` на месте: тот же узел, ID и
+    /// позиция среди соседей (см. `PageDoc::convert_to_vector`).
+    pub fn convert_to_vector(
+        &self,
+        id: NodeId,
+        net: std::sync::Arc<crate::vector::VectorNetwork>,
+    ) -> DocResult<()> {
+        self.page.convert_to_vector(id, net)
     }
 
     /// Узел сразу со всеми свойствами (копия, вставка; у текста — с содержимым).

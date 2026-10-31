@@ -253,7 +253,7 @@ fn pen_on_a_rectangle_turns_it_into_a_vector_in_one_step() {
     h.click(150.0, 100.0, Modifiers::NONE);
     h.key("Escape", Modifiers::NONE);
     let id = only_vector(&mut h);
-    assert_ne!(id, r);
+    assert_eq!(id, r, "тот же узел стал вектором");
     let p = h.props(id);
     assert_eq!(p.name, "Кнопка");
     assert_eq!((p.x, p.y, p.w, p.h), (100.0, 100.0, 200.0, 100.0));
@@ -264,4 +264,149 @@ fn pen_on_a_rectangle_turns_it_into_a_vector_in_one_step() {
     h.ed.end_vector_edit();
     h.assert_scene_clean();
     h.assert_one_step(steps, &before);
+}
+
+#[test]
+fn lone_point_in_edit_mode_leaves_a_shape_untouched() {
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    assert!(h.ed.start_vector_edit(r));
+    h.key("KeyP", Modifiers::NONE);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    // Одна точка вне фигуры и Esc: ни шага, ни превращения.
+    h.click(500.0, 400.0, Modifiers::NONE);
+    h.key("Escape", Modifiers::NONE);
+    assert_eq!(h.props(r).kind, NodeKind::Rect);
+    assert_eq!(h.state(), before);
+    assert_eq!(h.ed.step_count(), steps);
+    h.assert_scene_clean();
+    // Точка и Ctrl+Z, затем Enter: путь пуст, записывать нечего.
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    assert!(h.ed.start_vector_edit(r));
+    h.key("KeyP", Modifiers::NONE);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.click(500.0, 400.0, Modifiers::NONE);
+    h.key("KeyZ", ctrl());
+    h.key("Enter", Modifiers::NONE);
+    assert_eq!(h.props(r).kind, NodeKind::Rect);
+    assert_eq!(h.state(), before);
+    assert_eq!(h.ed.step_count(), steps);
+}
+
+#[test]
+fn closing_drag_mirrors_both_handles_of_the_first_point() {
+    let mut h = H::new();
+    h.key("KeyP", Modifiers::NONE);
+    h.click(100.0, 100.0, Modifiers::NONE);
+    h.click(200.0, 100.0, Modifiers::NONE);
+    h.click(150.0, 180.0, Modifiers::NONE);
+    // Замыкающая протяжка с первой точки.
+    h.drag((100.0, 100.0), (120.0, 70.0), Modifiers::NONE);
+    let id = only_vector(&mut h);
+    let net = h.props(id).vector.as_deref().unwrap().clone();
+    assert_eq!(net.points[0].handle_mode, HandleMode::MirrorAll);
+    let incoming = net.segments[2].tangent_end;
+    let outgoing = net.segments[0].tangent_start;
+    assert!((incoming[0] + outgoing[0]).abs() < 1e-9 && (incoming[1] + outgoing[1]).abs() < 1e-9);
+    assert!((outgoing[0] - 20.0).abs() < 1e-9 && (outgoing[1] + 30.0).abs() < 1e-9);
+    // Правка ручки позже не двигает вторую: она уже зеркальна.
+    let moved = ferrum_editor::vector_ops::set_handle(
+        &net,
+        0,
+        ferrum_editor::vector_ops::HandleEnd::Start,
+        kurbo::Vec2::new(outgoing[0], outgoing[1]),
+        false,
+    );
+    let jump = moved.segments[2].tangent_end;
+    assert!((jump[0] - incoming[0]).abs() < 1e-9 && (jump[1] - incoming[1]).abs() < 1e-9);
+}
+
+#[test]
+fn panel_edit_during_an_open_path_survives_the_commit() {
+    // Вектор: панель двигает и растягивает узел посреди пути.
+    let mut h = H::new();
+    let net = VectorNetwork {
+        points: vec![VectorPoint::new(0.0, 0.0), VectorPoint::new(100.0, 0.0)],
+        segments: vec![VectorSegment::line(0, 1)],
+        regions: vec![],
+    };
+    let id = h.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(Arc::new(net)),
+            ..patch(100.0, 100.0, 100.0, 100.0)
+        },
+    );
+    assert!(h.ed.start_vector_edit(id));
+    h.key("KeyP", Modifiers::NONE);
+    h.click(100.0, 100.0, Modifiers::NONE);
+    h.click(100.0, 200.0, Modifiers::NONE);
+    h.set(
+        id,
+        PropsPatch {
+            opacity: Some(0.5),
+            ..Default::default()
+        },
+    );
+    h.key("Escape", Modifiers::NONE);
+    let p = h.props(id);
+    assert_eq!(p.opacity, 0.5, "правка панели не затёрта");
+    assert_eq!(
+        p.vector.as_deref().unwrap().segments.len(),
+        2,
+        "путь записан"
+    );
+    // Фигура: заливка из панели переходит в новый вектор.
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    assert!(h.ed.start_vector_edit(r));
+    h.key("KeyP", Modifiers::NONE);
+    h.click(150.0, 100.0, Modifiers::NONE);
+    h.set(
+        r,
+        PropsPatch {
+            name: Some("Из панели".into()),
+            opacity: Some(0.25),
+            ..Default::default()
+        },
+    );
+    h.key("Escape", Modifiers::NONE);
+    let id = only_vector(&mut h);
+    let p = h.props(id);
+    assert_eq!((p.name.as_str(), p.opacity), ("Из панели", 0.25));
+    assert_eq!(p.vector.as_deref().unwrap().points.len(), 5);
+}
+
+#[test]
+fn shape_becomes_a_vector_in_place_keeping_id_and_order() {
+    let mut h = H::new();
+    let below = h.rect(None, 0.0, 0.0, 10.0, 10.0);
+    let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    let above = h.rect(None, 0.0, 300.0, 10.0, 10.0);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    assert!(h.ed.start_vector_edit(r));
+    h.key("KeyP", Modifiers::NONE);
+    h.click(150.0, 100.0, Modifiers::NONE);
+    h.key("Escape", Modifiers::NONE);
+    assert_eq!(
+        h.props(r).kind,
+        NodeKind::Vector,
+        "тот же узел стал вектором"
+    );
+    assert_eq!(h.children(None), vec![below, r, above]);
+    assert_eq!(h.sel(), vec![r]);
+    h.ed.end_vector_edit();
+    h.assert_scene_clean();
+    h.assert_one_step(steps, &before);
+    h.ed.execute(CommandId::Undo);
+    assert_eq!(
+        h.props(r).kind,
+        NodeKind::Rect,
+        "после отмены снова прямоугольник"
+    );
 }

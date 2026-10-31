@@ -114,6 +114,11 @@ pub(crate) enum Drag {
         point: u32,
         /// Сегмент, который пришёл в точку (его конечная ручка — зеркальная).
         incoming: Option<usize>,
+        /// Сегмент, уходящий из точки: его ручка у точки — исходящая, зеркальная
+        /// входящей (замыкание и соединение).
+        outgoing: Option<usize>,
+        /// Точка может быть зеркальной: у неё не больше двух сегментов.
+        mirror: bool,
         origin: VectorNetwork,
         start_screen: Point,
         /// Alt был нажат: зеркальность разорвана, входящая ручка не меняется.
@@ -412,11 +417,7 @@ impl Editor {
             self.selection.to_vec(),
             |tx| -> DocResult<Vec<NodeId>> {
                 match (id, &new) {
-                    (Some(id), _) if base.kind == NodeKind::Vector => {
-                        tx.set_props(id, &patch)?;
-                        Ok(vec![id])
-                    }
-                    (Some(id), _) => Ok(vec![replace_with_vector(tx, id, &base, &patch)?]),
+                    (Some(id), _) => Ok(vec![convert_to_vector(tx, id, &patch)?]),
                     (None, Some(n)) => {
                         let mut props = base.clone();
                         patch.apply_to(&mut props);
@@ -540,6 +541,20 @@ impl Editor {
                     net.segments.push(s);
                     v.pen.chain.push(seg);
                     let closes = v.pen.first == Some(p);
+                    // Второй сегмент точки: у замыкания — первый сегмент пути.
+                    let others: Vec<usize> = net
+                        .segments
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, s)| *i != seg as usize && (s.start == p || s.end == p))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let outgoing = if others.len() == 1 {
+                        others.first().copied()
+                    } else {
+                        None
+                    };
+                    let mirror = others.len() <= 1;
                     if closes && v.pen.chain.len() >= 2 {
                         net.regions.push(VectorRegion {
                             rule: FillRule::NonZero,
@@ -557,6 +572,8 @@ impl Editor {
                     v.drag = Some(Drag::PenHandle {
                         point: p,
                         incoming: Some(seg as usize),
+                        outgoing,
+                        mirror,
                         origin: v.work.clone(),
                         start_screen: e.point,
                         broken: e.modifiers.alt,
@@ -627,6 +644,8 @@ impl Editor {
         v.drag = Some(Drag::PenHandle {
             point: p,
             incoming,
+            outgoing: None,
+            mirror: true,
             origin: v.work.clone(),
             start_screen: e.point,
             broken: e.modifiers.alt,
@@ -646,6 +665,8 @@ impl Editor {
         let Some(Drag::PenHandle {
             point,
             incoming,
+            outgoing,
+            mirror,
             origin,
             start_screen,
             broken,
@@ -660,7 +681,7 @@ impl Editor {
         let anchor = point_of(&origin, point);
         let d = v.to_shape(world) - anchor;
         let mut net = origin.clone();
-        net.points[point as usize].handle_mode = if broken {
+        net.points[point as usize].handle_mode = if broken || !mirror {
             HandleMode::Free
         } else {
             HandleMode::MirrorAll
@@ -678,6 +699,19 @@ impl Editor {
                 }
             }
         }
+        // Замыкание и соединение: исходящая ручка — отражение входящей.
+        if let Some(o) = outgoing {
+            if broken {
+                net.segments[o] = v.work.segments[o];
+            } else {
+                let s = &mut net.segments[o];
+                if s.start == point {
+                    s.tangent_start = [d.x, d.y];
+                } else {
+                    s.tangent_end = [d.x, d.y];
+                }
+            }
+        }
         // Замыкающий щелчок не продолжает путь: исходящей ручки нет.
         if v.pen.last == Some(point) {
             v.pen.pending_out = Some(d);
@@ -686,6 +720,8 @@ impl Editor {
         v.drag = Some(Drag::PenHandle {
             point,
             incoming,
+            outgoing,
+            mirror,
             origin,
             start_screen,
             broken,
@@ -716,6 +752,7 @@ impl Editor {
         let Some(v) = &mut self.vector_edit else {
             return;
         };
+        let (last, no_chain) = (v.pen.last, v.pen.chain.is_empty());
         v.pen.last = None;
         v.pen.first = None;
         v.pen.chain.clear();
@@ -723,10 +760,25 @@ impl Editor {
         if !v.pen.dirty {
             return;
         }
+        // Одинокая свежая точка без сегментов пропадает, а не пишется.
+        if let Some(l) = last.filter(|_| no_chain) {
+            let lone = l as usize + 1 == v.work.points.len()
+                && !v.work.segments.iter().any(|s| s.start == l || s.end == l);
+            if lone {
+                v.work.points.pop();
+            }
+        }
         if v.id.is_none() && v.work.segments.is_empty() {
             v.pen.dirty = false;
             v.work = VectorNetwork::default();
             v.new = None;
+            self.scene.clear_preview();
+            return;
+        }
+        // Сеть не изменилась (одна точка или всё отменено): ни шага, ни превращения.
+        let unchanged = shape_network(&v.base).is_some_and(|n| n == v.work);
+        if unchanged {
+            v.pen.dirty = false;
             self.scene.clear_preview();
             return;
         }
@@ -929,19 +981,12 @@ pub(crate) fn as_vector(p: &mut Props) {
     p.vector = Some(Arc::new(VectorNetwork::default()));
 }
 
-/// Заменяет фигуру `id` вектором на её месте (та же позиция в родителе, имя,
-/// заливки, обводки, поза) с правкой `patch`. Возвращает новый узел.
-pub(crate) fn replace_with_vector(
-    tx: &Tx,
-    id: NodeId,
-    base: &Props,
-    patch: &PropsPatch,
-) -> DocResult<NodeId> {
-    let (parent, index) = tx.placement(id).unwrap_or((None, None));
-    let mut props = base.clone();
-    as_vector(&mut props);
-    patch.apply_to(&mut props);
-    let new = tx.create_with_props(parent, index, &props)?;
-    tx.delete_nodes(&[id])?;
-    Ok(new)
+/// Превращает фигуру `id` в вектор на месте (тот же узел, ID, позиция среди
+/// соседей, имя, заливки, обводки, поза) и применяет правку `patch` с сетью.
+/// Для вектора только применяет правку. Годится для «Сплющить».
+pub(crate) fn convert_to_vector(tx: &Tx, id: NodeId, patch: &PropsPatch) -> DocResult<NodeId> {
+    let net = patch.vector.clone().unwrap_or_default();
+    tx.convert_to_vector(id, net)?;
+    tx.set_props(id, patch)?;
+    Ok(id)
 }
