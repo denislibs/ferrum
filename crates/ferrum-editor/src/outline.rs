@@ -89,6 +89,13 @@ impl Editor {
     pub(crate) fn outline_stroke(&mut self) {
         self.finish_vector_edit();
         let ids = self.ordered_selection();
+        // Результат булевой группы после жеста (по частям) зависит от истории
+        // правок — обводится полный, как у «Сплющить».
+        for id in &ids {
+            if let Some(slot) = self.scene.slot(*id) {
+                self.scene.force_full_booleans(slot);
+            }
+        }
         let mut jobs: Vec<(NodeId, Props, bool)> = Vec::new();
         let mut loading = false;
         // Пропущено из-за блокировки или скрытия.

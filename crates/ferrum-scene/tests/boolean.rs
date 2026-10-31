@@ -621,76 +621,80 @@ fn one_visible_child_keeps_its_shape_in_gesture_and_after_commit() {
     }
 }
 
-/// Внешнее пересечение прямоугольника и внутреннего вычитания 12 одинаковых
-/// кругов: ребёнок внутри сдвигается, остальные по-прежнему закрывают основу —
-/// внутренний результат пуст (без осколков), внешний — прямоугольник.
+/// Вложенные группы: внешняя `outer` над прямоугольником и внутренней `inner`
+/// из 12 кругов (сетка 4 × 3, шаг 15, диаметр 20). Три жеста подряд — над
+/// детьми 0, 5 и снова 0: первый оставляет круг 0 в (40, 2), второй ставит
+/// круг 5 точно туда же — два круга совпадают, и вычитание в два приёма
+/// оставляло осколок там, где полный пересчёт даёт пустоту (а внешнее
+/// пересечение — 0 вместо 3600). Исключение при этом расходилось числом контуров.
 #[test]
-fn nested_intersect_over_covered_subtract_has_no_slivers() {
-    let mut doc = Document::new();
-    let page = doc.pages()[0].0;
-    let ids = doc
-        .transact(page, vec![], |tx| {
-            let top = tx.create_with_props(
-                None,
-                None,
-                &Props {
-                    boolean_op: Some(BooleanOp::Intersect),
-                    ..Props::defaults(NodeKind::Boolean)
-                },
-            )?;
-            let r = tx.create_node(Some(top), None, NodeKind::Rect)?;
-            tx.set_props(r, &patch(0.0, 0.0, 60.0, 60.0))?;
-            let inner = tx.create_with_props(
-                Some(top),
-                None,
-                &Props {
-                    boolean_op: Some(BooleanOp::Subtract),
-                    ..Props::defaults(NodeKind::Boolean)
-                },
-            )?;
-            let mut ids = vec![top, inner];
-            for i in 0..12 {
-                let e = tx.create_node(Some(inner), None, NodeKind::Ellipse)?;
-                tx.set_props(
-                    e,
-                    &patch(
-                        10.0 - i as f64 * 0.5,
-                        10.0 - i as f64 * 0.5,
-                        40.0 + i as f64,
-                        40.0 + i as f64,
-                    ),
-                )?;
-                ids.push(e);
+fn nested_groups_match_the_full_result_when_two_circles_coincide() {
+    for outer_op in BooleanOp::ALL {
+        for inner_op in BooleanOp::ALL {
+            let mut doc = Document::new();
+            let page = doc.pages()[0].0;
+            let ids = doc
+                .transact(page, vec![], |tx| {
+                    let mk = |op| Props {
+                        boolean_op: Some(op),
+                        ..Props::defaults(NodeKind::Boolean)
+                    };
+                    let outer = tx.create_with_props(None, None, &mk(outer_op))?;
+                    let r = tx.create_node(Some(outer), None, NodeKind::Rect)?;
+                    tx.set_props(r, &patch(-10.0, -10.0, 60.0, 60.0))?;
+                    let inner = tx.create_with_props(Some(outer), None, &mk(inner_op))?;
+                    let mut ids = vec![outer, inner];
+                    for k in 0..12 {
+                        let e = tx.create_node(Some(inner), None, NodeKind::Ellipse)?;
+                        tx.set_props(
+                            e,
+                            &patch((k % 4) as f64 * 15.0, (k / 4) as f64 * 15.0, 20.0, 20.0),
+                        )?;
+                        ids.push(e);
+                    }
+                    Ok(ids)
+                })
+                .unwrap();
+            let mut scene = Scene::from_page(doc.page(page).unwrap());
+            let check = |scene: &Scene, doc: &mut Document, what: &str| {
+                let full = Scene::from_page(doc.page(page).unwrap());
+                for id in [ids[1], ids[0]] {
+                    let got = scene.node(id).unwrap().boolean.clone().unwrap();
+                    let want = full.node(id).unwrap().boolean.clone().unwrap();
+                    let tag = format!("{outer_op:?}/{inner_op:?} {what}");
+                    assert_eq!(
+                        got.contours.0.len(),
+                        want.contours.0.len(),
+                        "{tag}: контуры"
+                    );
+                    assert!(
+                        (area(&got.contours) - area(&want.contours)).abs()
+                            < 1e-3 * area(&want.contours).max(1.0),
+                        "{tag}: площадь {} ≠ {}",
+                        area(&got.contours),
+                        area(&want.contours)
+                    );
+                }
+            };
+            for kid in [ids[2], ids[7], ids[2]] {
+                for dx in [3.0, 9.0, 40.0] {
+                    let moved = PropsPatch {
+                        x: Some(dx),
+                        y: Some(2.0),
+                        ..Default::default()
+                    };
+                    scene.set_preview(&[(kid, moved.clone())]);
+                    doc.transact(page, vec![], |tx| tx.set_props(kid, &moved).map(|_| vec![]))
+                        .unwrap();
+                    check(&scene, &mut doc, &format!("жест dx={dx}"));
+                }
+                scene.clear_preview();
+                let changes = doc.take_changes(page);
+                scene.apply(&changes, doc.page(page).unwrap());
+                check(&scene, &mut doc, "запись");
             }
-            Ok(ids)
-        })
-        .unwrap();
-    let full = Scene::from_page(doc.page(page).unwrap());
-    assert!(full
-        .node(ids[1])
-        .unwrap()
-        .boolean
-        .as_ref()
-        .unwrap()
-        .contours
-        .is_empty());
-    for k in [3usize, 7, 11] {
-        gesture_matches_full(&mut doc, page, ids[2 + k], ids[1], ids[0], 40.0);
+        }
     }
-    let scene = Scene::from_page(doc.page(page).unwrap());
-    assert!(
-        (area(
-            &scene
-                .node(ids[0])
-                .unwrap()
-                .boolean
-                .as_ref()
-                .unwrap()
-                .contours
-        ) - 3600.0)
-            .abs()
-            < 1.0
-    );
 }
 
 #[test]
