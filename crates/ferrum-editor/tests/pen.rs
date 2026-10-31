@@ -503,3 +503,63 @@ fn shape_becomes_a_vector_in_place_keeping_id_and_order() {
         "после отмены снова прямоугольник"
     );
 }
+
+#[test]
+fn panel_commit_during_a_pen_handle_drag_keeps_the_shown_handle() {
+    // Правка панели для заданных узлов приходит посреди протяжки ручки пера
+    // (кнопка ещё нажата): путь записывается с той ручкой, что видна, а
+    // протяжка кончается — дальнейшие движения и отпускание ничего не теряют
+    // и не добавляют.
+    let mut h = H::new();
+    let r = h.rect(None, 600.0, 400.0, 50.0, 50.0);
+    h.key("KeyP", Modifiers::NONE);
+    h.click(100.0, 100.0, Modifiers::NONE);
+    h.down(200.0, 100.0, Modifiers::NONE);
+    h.mv(215.0, 120.0, Modifiers::NONE);
+    h.mv(230.0, 140.0, Modifiers::NONE);
+    let shown = h.ed.vector_work().unwrap().clone();
+    assert_eq!(shown.segments[0].tangent_end, [-30.0, -40.0]);
+    h.ed.edit_nodes(&number(NumField::Opacity, 0.5), Phase::Commit, &[r]);
+    assert_eq!(h.props(r).opacity, 0.5);
+    let id = only_vector(&mut h);
+    let net = h.props(id).vector.as_deref().unwrap().clone();
+    assert_eq!(net.points.len(), 2);
+    assert_eq!(
+        net.segments[0].tangent_end,
+        [-30.0, -40.0],
+        "видимая ручка записана"
+    );
+    let after = h.state();
+    let steps = h.ed.step_count();
+    h.mv(260.0, 160.0, Modifiers::NONE);
+    // Протяжка кончилась вместе с путём: на экране — то, что записано.
+    if let Some(work) = h.ed.vector_work() {
+        let t = work.segments[0].tangent_end;
+        assert!(
+            (t[0] + 30.0).abs() < 1e-9 && (t[1] + 40.0).abs() < 1e-9,
+            "показанное = записанное: {t:?}"
+        );
+    }
+    h.up(260.0, 160.0, Modifiers::NONE);
+    h.key("Escape", Modifiers::NONE);
+    assert_eq!(h.state(), after);
+    assert_eq!(h.ed.step_count(), steps);
+
+    // Протяжка из первой точки нового пути: одинокая точка пропадает вместе с
+    // путём и не возвращается следующими движениями.
+    let mut h = H::new();
+    let r = h.rect(None, 600.0, 400.0, 50.0, 50.0);
+    h.key("KeyP", Modifiers::NONE);
+    h.down(100.0, 100.0, Modifiers::NONE);
+    h.mv(120.0, 110.0, Modifiers::NONE);
+    h.ed.edit_nodes(&number(NumField::Opacity, 0.5), Phase::Commit, &[r]);
+    h.mv(140.0, 120.0, Modifiers::NONE);
+    assert!(
+        h.ed.vector_work().is_none_or(|w| w.points.is_empty()),
+        "{:?}",
+        h.ed.vector_work()
+    );
+    h.up(140.0, 120.0, Modifiers::NONE);
+    h.key("Escape", Modifiers::NONE);
+    assert_eq!(h.children(None), vec![r], "вектора нет");
+}
