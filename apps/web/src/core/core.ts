@@ -234,6 +234,8 @@ export class Core {
       this.emit({ type: 'error', message: 'Ядро остановлено, команда не выполнена' });
       return;
     }
+    // Как у остальных вставок: набранное до вставки — раньше неё.
+    this.transport.flush();
     const error = this.transport.post({ t: 'pasteText', text });
     if (error) this.emit({ type: 'error', message: error });
   }
