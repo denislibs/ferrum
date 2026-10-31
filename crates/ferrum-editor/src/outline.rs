@@ -45,7 +45,8 @@ impl Editor {
         let n = self.scene.at(slot);
         let p = &n.props;
         if p.kind == NodeKind::Text {
-            // Глифы (без подчёркивания и зачёркивания — рендер их не обводит): по центру — как есть, внутри и снаружи — двойной толщиной с
+            // Глифы (без подчёркивания и зачёркивания — рендер их не обводит):
+            // по центру — как есть, внутри и снаружи — двойной толщиной с
             // обрезкой по глифам (как рисует рендер).
             let glyphs = {
                 let mut fonts = self.fonts.try_borrow_mut().ok()?;
@@ -106,6 +107,15 @@ impl Editor {
             if matches!(p.kind, NodeKind::Group | NodeKind::Frame) {
                 continue;
             }
+            // Результат булевой группы мог посчитаться без текста — ждём шрифты,
+            // иначе группа (без заливок) уйдёт вместе с текстом без его контура.
+            if p.kind == NodeKind::Boolean
+                && p.strokes.iter().any(visible)
+                && (self.outlines_missed.get() || self.has_unshaped_text(slot))
+            {
+                loading = true;
+                continue;
+            }
             let mut parts = Vec::new();
             for s in p.strokes.iter().filter(|s| visible(s)) {
                 let Some((path, rule)) = self.stroke_outline(slot, s) else {
@@ -146,18 +156,16 @@ impl Editor {
             self.out.events.push(EditorEvent::Error(msg.into()));
             return;
         }
-        // Часть выделения обработана, часть — нет: сказать и об этом.
+        // Часть выделения обработана, часть — нет: сказать и об этом, но после
+        // удачной записи.
+        let mut notes = Vec::new();
         if loading {
-            self.out.events.push(EditorEvent::Error(
-                "Шрифты ещё загружаются — контур обводки текста не построен".into(),
-            ));
+            notes.push("Шрифты ещё загружаются — контур обводки текста не построен".to_string());
         }
         if skipped {
-            self.out.events.push(EditorEvent::Error(
-                "Заблокированные и скрытые слои не обрабатываются".into(),
-            ));
+            notes.push("Заблокированные и скрытые слои не обрабатываются".to_string());
         }
-        self.ctx().commit(|tx, _| {
+        let ok = self.ctx().commit(|tx, _| {
             let mut created = Vec::new();
             for (id, props, keep) in &jobs {
                 let parent = tx.parent(*id);
@@ -181,5 +189,8 @@ impl Editor {
             }
             Ok(created)
         });
+        if ok {
+            self.push_errors(notes);
+        }
     }
 }

@@ -1214,8 +1214,22 @@ pub fn path_network(path: &BezPath, rule: FillRule) -> VectorNetwork {
                 _ => items.push((start, [0.0; 2], [0.0; 2])),
             }
         }
-        // Замкнутый подпуть из одного сегмента (в том числе петля одной кривой)
-        // сеть не принимает: сегмент с совпадающими концами недопустим.
+        // Петля одной кривой: сегмент с совпадающими концами сеть не принимает —
+        // делим кривую пополам.
+        if closed && items.len() == 1 && (items[0].1 != [0.0; 2] || items[0].2 != [0.0; 2]) {
+            let (p, ts, te) = items[0];
+            let c = kurbo::CubicBez::new(
+                start,
+                start + kurbo::Vec2::new(ts[0], ts[1]),
+                p + kurbo::Vec2::new(te[0], te[1]),
+                p,
+            );
+            let (a, b) = c.subdivide();
+            items = vec![
+                (a.p3, arr(a.p1 - a.p0), arr(a.p2 - a.p3)),
+                (b.p3, arr(b.p1 - b.p0), arr(b.p2 - b.p3)),
+            ];
+        }
         if items.is_empty() || (closed && items.len() < 2) {
             return;
         }

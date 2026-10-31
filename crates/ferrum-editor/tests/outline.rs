@@ -406,8 +406,15 @@ fn flatten_refuses_a_boolean_whose_text_has_no_glyphs_yet() {
     // Шрифты доступны — группа сплющивается вместе с текстом.
     h.ed.select(&[g]);
     h.key("KeyE", ctrl());
-    assert_eq!(h.props(h.sel()[0]).kind, NodeKind::Vector);
+    let v = h.sel()[0];
+    assert_eq!(h.props(v).kind, NodeKind::Vector);
     assert!(h.ed.scene().node(g).is_none());
+    // Текст действительно в векторе: шире одного прямоугольника.
+    assert!(
+        world_box(&mut h, v).x0 < 150.0,
+        "{:?}",
+        world_box(&mut h, v)
+    );
 }
 
 #[test]
@@ -629,4 +636,115 @@ fn path_network_drops_zero_length_curves() {
     assert_eq!(net.validate(), Ok(()));
     assert_eq!(net.regions[0].loops.len(), 1);
     assert_eq!(net.segments.len(), 3);
+}
+
+#[test]
+fn outline_stroke_refuses_a_stroked_boolean_whose_text_has_no_glyphs_yet() {
+    let mut h = text_h();
+    let t = add_text(&mut h, 100.0, 100.0, "Ok", 40.0);
+    let r = h.rect(None, 400.0, 100.0, 20.0, 20.0);
+    h.ed.select(&[t, r]);
+    let fonts = h.ed.fonts().clone();
+    let busy = fonts.borrow_mut();
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    h.set(
+        g,
+        PropsPatch {
+            fills: Some(vec![]),
+            strokes: Some(vec![stroke(Color::BLACK, 2.0, StrokeAlign::Center)]),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[g]);
+    h.ed.take_events();
+    let steps = h.ed.step_count();
+    h.key("KeyO", ctrl_alt());
+    assert_eq!(h.ed.step_count(), steps, "ни шага отмены");
+    assert_eq!(
+        errors(&mut h),
+        vec!["Шрифты ещё загружаются — контур обводки текста не построен"]
+    );
+    assert_eq!(h.props(g).kind, NodeKind::Boolean);
+    assert_eq!(h.children(Some(g)).len(), 2, "текст на месте");
+    drop(busy);
+    // Шрифты доступны — контур строится и охватывает текст.
+    h.ed.select(&[g]);
+    h.key("KeyO", ctrl_alt());
+    let v = h.sel()[0];
+    assert_ne!(v, g);
+    assert!(world_box(&mut h, v).x0 < 150.0);
+}
+
+#[test]
+fn text_without_content_does_not_block_flatten_or_outline_of_a_boolean() {
+    let mut h = text_h();
+    let t = add_text(&mut h, 100.0, 100.0, "Ok", 40.0);
+    h.ed.transact(|tx| {
+        tx.set_text_content(t, &ferrum_doc::TextContent::plain(""))?;
+        Ok(vec![])
+    })
+    .unwrap();
+    // Узел без текстового содержимого вовсе.
+    let bare = h.add(None, NodeKind::Text, patch(300.0, 100.0, 50.0, 20.0));
+    let r = h.rect(None, 100.0, 300.0, 50.0, 50.0);
+    h.ed.select(&[t, bare, r]);
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    assert_eq!(h.props(g).kind, NodeKind::Boolean);
+    h.set(
+        g,
+        PropsPatch {
+            fills: Some(vec![]),
+            strokes: Some(vec![stroke(Color::BLACK, 2.0, StrokeAlign::Center)]),
+            ..Default::default()
+        },
+    );
+    h.ed.take_events();
+    h.key("KeyO", ctrl_alt());
+    assert!(errors(&mut h).is_empty());
+    let ring = h.sel()[0];
+    assert_ne!(ring, g);
+    h.ed.execute(CommandId::Undo);
+    h.ed.select(&[g]);
+    h.key("KeyE", ctrl());
+    assert!(errors(&mut h).is_empty());
+    assert_eq!(h.props(h.sel()[0]).kind, NodeKind::Vector);
+}
+
+#[test]
+fn outline_stroke_of_a_boolean_child_stays_an_operand_of_the_group() {
+    let mut h = H::new();
+    let a = h.rect(None, 100.0, 100.0, 100.0, 100.0);
+    let b = h.rect(None, 150.0, 150.0, 100.0, 100.0);
+    h.set(
+        b,
+        PropsPatch {
+            fills: Some(vec![]),
+            strokes: Some(vec![stroke(Color::BLACK, 2.0, StrokeAlign::Outside)]),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[a, b]);
+    h.key("KeyU", alt_shift());
+    let g = h.sel()[0];
+    h.ed.select(&[b]);
+    h.key("KeyO", ctrl_alt());
+    let v = h.sel()[0];
+    assert_ne!(v, b);
+    assert_eq!(h.parent(v), Some(g), "кольцо — операнд той же группы");
+    assert_eq!(h.children(Some(g)), vec![a, v], "ребёнок заменён на месте");
+    assert_eq!(h.props(g).kind, NodeKind::Boolean);
+}
+
+#[test]
+fn path_network_splits_a_loop_made_of_one_curve() {
+    let mut p = BezPath::new();
+    p.move_to((0.0, 0.0));
+    p.curve_to((10.0, 0.0), (10.0, 10.0), (0.0, 0.0));
+    p.close_path();
+    let net = path_network(&p, FillRule::NonZero);
+    assert_eq!(net.validate(), Ok(()));
+    assert_eq!(net.segments.len(), 2);
+    assert_eq!(net.regions[0].loops.len(), 1);
 }
