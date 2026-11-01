@@ -454,6 +454,41 @@ fn shown(bytes: &[u8]) -> Vec<(String, f64)> {
     out
 }
 
+/// Две видимые сплошные заливки текста: настоящим текстом прогон записан один
+/// раз (верхней заливкой), нижняя — контурами. Поиск и копирование находят
+/// «Дубль» один раз, а цвет обеих заливок в файле есть.
+#[test]
+fn text_with_two_fills_is_written_as_text_once() {
+    let mut p = Page::new();
+    let id = add_text(
+        &mut p,
+        "Дубль",
+        "Regular",
+        vec![
+            Fill::solid(Color::rgba(255, 0, 0, 255)),
+            Fill::solid(Color::rgba(0, 0, 255, 128)),
+        ],
+        0.0,
+    );
+    let mut r = Renderer::new();
+    r.set_fonts(inter());
+    let bytes = pdf(&mut r, &mut p, &[id]);
+    let got: Vec<String> = shown(&bytes).into_iter().map(|(t, _)| t).collect();
+    assert_eq!(got.concat(), "Дубль", "{got:?}");
+    let content: Vec<String> = streams(&bytes).iter().map(|s| text(s)).collect();
+    assert!(
+        content.iter().any(|c| c.contains("1 0 0 rg")),
+        "красная (контуры)"
+    );
+    assert!(
+        content.iter().any(|c| c.contains("0 0 1 rg")),
+        "синяя (текст)"
+    );
+    // Нижняя заливка — контурами глифов (кривые `c`), верхняя — текстом.
+    let curves: usize = content.iter().map(|c| c.matches(" c ").count()).sum();
+    assert!(curves > 10, "контуры нижней заливки: {curves}");
+}
+
 /// Лигатура Inter «->» (одна стрелка вместо двух символов) попадает в ToUnicode
 /// обоими символами: копирование даёт «->», а не «-» или пустоту.
 #[test]
