@@ -718,6 +718,14 @@ impl Scene {
                     Some(rest),
                 )
             }
+            // «Вычитание» — всегда из нижнего видимого слоя, как в Figma: без
+            // площади у него (линия, пустая группа) результат пуст, верхний
+            // слой основой не становится.
+            None if op == ferrum_doc::BooleanOp::Subtract
+                && shapes.first().is_some_and(|c| c.is_empty()) =>
+            {
+                (Contours::default(), None)
+            }
             None => {
                 let nonempty: Vec<Contours> =
                     shapes.into_iter().filter(|c| !c.is_empty()).collect();

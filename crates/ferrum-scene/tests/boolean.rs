@@ -320,6 +320,54 @@ fn hidden_children_lines_and_empty_results() {
     let _ = r;
 }
 
+/// «Вычитание» — из нижнего видимого слоя, как в Figma: если у него нет
+/// площади (линия, пустая группа), результат пуст, а верхний слой основой не
+/// становится. Скрытый нижний слой в операции не участвует.
+#[test]
+fn subtract_from_a_bottom_layer_without_area_is_empty() {
+    let (mut doc, page, [b, r, e]) = sample(BooleanOp::Subtract);
+    let line = doc
+        .transact(page, vec![], |tx| {
+            // Линия — ниже прямоугольника и эллипса.
+            let l = tx.create_node(Some(b), Some(0), NodeKind::Line)?;
+            tx.set_props(l, &patch(0.0, 50.0, 100.0, 0.0))?;
+            Ok(vec![l])
+        })
+        .unwrap()[0];
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let n = scene.node(b).unwrap();
+    assert!(n.boolean.as_ref().unwrap().contours.is_empty());
+    assert_eq!(scene.hit_test(Point::new(110.0, 150.0), 0.0), None);
+    // Пустая группа снизу — так же.
+    let group = doc
+        .transact(page, vec![], |tx| {
+            tx.delete_nodes(&[line])?;
+            Ok(vec![tx.create_node(Some(b), Some(0), NodeKind::Group)?])
+        })
+        .unwrap()[0];
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let n = scene.node(b).unwrap();
+    assert!(n.boolean.as_ref().unwrap().contours.is_empty());
+    // Скрытая — не участвует: основа — прямоугольник без половины эллипса.
+    doc.transact(page, vec![], |tx| {
+        tx.set_props(
+            group,
+            &PropsPatch {
+                visible: Some(false),
+                ..Default::default()
+            },
+        )
+        .map(|_| vec![])
+    })
+    .unwrap();
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let total = area(&scene.node(b).unwrap().boolean.as_ref().unwrap().contours);
+    let expected = 100.0 * 100.0 - std::f64::consts::PI * 50.0 * 50.0 / 2.0;
+    assert!((total - expected).abs() < 5.0, "{total} ≈ {expected}");
+    assert_eq!(scene.hit_test(Point::new(110.0, 150.0), 0.0), Some(r));
+    let _ = e;
+}
+
 #[test]
 fn nested_booleans_groups_and_flipped_children() {
     let (mut doc, page, [b, _, _]) = sample(BooleanOp::Union);
@@ -367,6 +415,54 @@ fn nested_booleans_groups_and_flipped_children() {
     let ellipse_right = std::f64::consts::PI * 50.0 * 50.0 / 2.0;
     let expected = 100.0 * 100.0 + ellipse_right + 30.0 * 100.0 + 50.0 * 100.0;
     assert!((total - expected).abs() < 5.0, "{total} ≈ {expected}");
+}
+
+/// Объединение(Вычитание(A, B), C): дети внутренней группы попадают только
+/// там, где рисуется и она, и внешняя; в дыре внутренней группы, которую
+/// закрывает C, щелчок не выбирает A и B.
+#[test]
+fn children_of_nested_booleans_are_hit_only_inside_every_enclosing_result() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let [outer, inner, a, b, c]: [NodeId; 5] = doc
+        .transact(page, vec![], |tx| {
+            let outer = tx.create_with_props(
+                None,
+                None,
+                &Props {
+                    boolean_op: Some(BooleanOp::Union),
+                    ..Props::defaults(NodeKind::Boolean)
+                },
+            )?;
+            let inner = tx.create_with_props(
+                Some(outer),
+                None,
+                &Props {
+                    boolean_op: Some(BooleanOp::Subtract),
+                    ..Props::defaults(NodeKind::Boolean)
+                },
+            )?;
+            let a = tx.create_node(Some(inner), None, NodeKind::Rect)?;
+            tx.set_props(a, &patch(0.0, 0.0, 100.0, 100.0))?;
+            let b = tx.create_node(Some(inner), None, NodeKind::Rect)?;
+            tx.set_props(b, &patch(25.0, 25.0, 50.0, 50.0))?;
+            let c = tx.create_node(Some(outer), None, NodeKind::Rect)?;
+            tx.set_props(c, &patch(40.0, 40.0, 20.0, 20.0))?;
+            Ok(vec![outer, inner, a, b, c])
+        })
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    // В дыре «Вычитания», закрытой C: только C и внешняя группа.
+    let hits = scene.hit_test_all(Point::new(50.0, 50.0), 0.0);
+    assert_eq!(hits, vec![c, outer]);
+    // В дыре, которую C не закрывает: ничего.
+    assert!(scene.hit_test_all(Point::new(30.0, 30.0), 0.0).is_empty());
+    // На основе: A, обе группы.
+    let hits = scene.hit_test_all(Point::new(10.0, 10.0), 0.0);
+    assert_eq!(hits, vec![a, inner, outer]);
+    assert!(!hits.contains(&b));
 }
 
 #[test]
@@ -441,54 +537,6 @@ fn grid(op: BooleanOp) -> (Document, PageId, NodeId, Vec<NodeId>) {
         .unwrap();
     let b = ids.remove(0);
     (doc, page, b, ids)
-}
-
-/// Объединение(Вычитание(A, B), C): дети внутренней группы попадают только
-/// там, где рисуется и она, и внешняя; в дыре внутренней группы, которую
-/// закрывает C, щелчок не выбирает A и B.
-#[test]
-fn children_of_nested_booleans_are_hit_only_inside_every_enclosing_result() {
-    let mut doc = Document::new();
-    let page = doc.pages()[0].0;
-    let [outer, inner, a, b, c]: [NodeId; 5] = doc
-        .transact(page, vec![], |tx| {
-            let outer = tx.create_with_props(
-                None,
-                None,
-                &Props {
-                    boolean_op: Some(BooleanOp::Union),
-                    ..Props::defaults(NodeKind::Boolean)
-                },
-            )?;
-            let inner = tx.create_with_props(
-                Some(outer),
-                None,
-                &Props {
-                    boolean_op: Some(BooleanOp::Subtract),
-                    ..Props::defaults(NodeKind::Boolean)
-                },
-            )?;
-            let a = tx.create_node(Some(inner), None, NodeKind::Rect)?;
-            tx.set_props(a, &patch(0.0, 0.0, 100.0, 100.0))?;
-            let b = tx.create_node(Some(inner), None, NodeKind::Rect)?;
-            tx.set_props(b, &patch(25.0, 25.0, 50.0, 50.0))?;
-            let c = tx.create_node(Some(outer), None, NodeKind::Rect)?;
-            tx.set_props(c, &patch(40.0, 40.0, 20.0, 20.0))?;
-            Ok(vec![outer, inner, a, b, c])
-        })
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let scene = Scene::from_page(doc.page(page).unwrap());
-    // В дыре «Вычитания», закрытой C: только C и внешняя группа.
-    let hits = scene.hit_test_all(Point::new(50.0, 50.0), 0.0);
-    assert_eq!(hits, vec![c, outer]);
-    // В дыре, которую C не закрывает: ничего.
-    assert!(scene.hit_test_all(Point::new(30.0, 30.0), 0.0).is_empty());
-    // На основе: A, обе группы.
-    let hits = scene.hit_test_all(Point::new(10.0, 10.0), 0.0);
-    assert_eq!(hits, vec![a, inner, outer]);
-    assert!(!hits.contains(&b));
 }
 
 #[test]
