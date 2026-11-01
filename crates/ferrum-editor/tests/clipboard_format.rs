@@ -577,6 +577,11 @@ fn boolean_with_children_round_trips_and_op_is_checked() {
     let props = &plain.nodes[0].props;
     assert_eq!(props.boolean_op, Some(BooleanOp::Union));
     assert_eq!((props.w, props.h), (0.0, 0.0));
-    // У прямоугольника поле операции пропускается.
-    assert!(p.nodes[1].props.boolean_op.is_none());
+    // У прямоугольника поле операции из чужих данных пропускается.
+    let rect = node_json(None, "rect").replacen("\"kind\"", "\"booleanOp\":\"union\",\"kind\"", 1);
+    assert!(rect.contains("\"booleanOp\":\"union\""), "{rect}");
+    let foreign =
+        ClipPayload::decode(&with_json(&doc_json(&[rect], &[], "[0.0,0.0,10.0,10.0]"))).unwrap();
+    assert_eq!(foreign.nodes[0].props.kind, NodeKind::Rect);
+    assert!(foreign.nodes[0].props.boolean_op.is_none());
 }
