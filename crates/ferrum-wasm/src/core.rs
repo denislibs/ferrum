@@ -271,6 +271,7 @@ impl Core {
         };
         // Таблица команд, их состояния и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
+        core.push_main_menu();
         core.push_presets();
         if let Some(changed) = core.editor.take_command_states() {
             core.push_command_states(changed);

@@ -15,6 +15,7 @@ pub mod geometry;
 pub mod input;
 pub mod keymap;
 pub mod measure;
+pub mod menu;
 mod ops;
 mod outline;
 pub mod pages;
@@ -39,6 +40,7 @@ pub use commands::{Command, CommandGroup, CommandId, COMMANDS};
 pub use editor::{Editor, EditorEvent, Settings, ThemeChoice, WHEEL_ZOOM_SPEED};
 pub use input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 pub use keymap::{browser_reserved, BindError, Conflict, Keymap, KeymapError, Shortcut};
+pub use menu::{main_menu, menu_commands, MenuNode};
 pub use pages::{clean_name, MAX_NAME_CHARS};
 pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,

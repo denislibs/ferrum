@@ -288,6 +288,20 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::UiCommand {
             key: "ui.main_menu".into(),
         },
+        CoreEvent::MainMenu {
+            tree: vec![
+                MenuItemDto::Submenu {
+                    title: "Правка".into(),
+                    items: vec![
+                        MenuItemDto::Command {
+                            key: "edit.undo".into(),
+                        },
+                        MenuItemDto::Separator,
+                    ],
+                },
+                MenuItemDto::Separator,
+            ],
+        },
         CoreEvent::CommandStates {
             changed: vec![
                 CommandStateDto {

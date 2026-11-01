@@ -796,6 +796,24 @@ pub struct KeymapEntry {
     pub overridden: bool,
 }
 
+/// Пункт меню: команда по ключу таблицы, подменю или разделитель.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum MenuItemDto {
+    Command {
+        key: String,
+    },
+    Submenu {
+        title: String,
+        items: Vec<MenuItemDto>,
+    },
+    Separator,
+}
+
 /// Состояние команды: доступна ли и (у переключателя) отмечена ли.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -944,6 +962,11 @@ pub enum CoreEvent {
     /// первым — все команды таблицы. Основной поток ничего не вычисляет.
     CommandStates {
         changed: Vec<CommandStateDto>,
+    },
+    /// Главное меню (спека подсистемы 2, раздел 4): дерево команд — один раз,
+    /// при запуске ядра.
+    MainMenu {
+        tree: Vec<MenuItemDto>,
     },
     /// Измерения с Alt в оверлее: значения расстояний по порядку и число
     /// пунктирных направляющих.

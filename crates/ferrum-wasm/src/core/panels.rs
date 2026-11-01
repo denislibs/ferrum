@@ -6,8 +6,8 @@
 use ferrum_doc::{Color, Fill, FillKind, NodeId, PageId, ScaleMode, Stroke, StrokeAlign};
 use ferrum_editor::scale::{Anchor, MAX_SCALE_FACTOR, MIN_SCALE_FACTOR};
 use ferrum_editor::{
-    browser_reserved, frame_presets, BindError, CommandId, DropTarget, KeymapError, NumField,
-    PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
+    browser_reserved, frame_presets, main_menu, BindError, CommandId, DropTarget, KeymapError,
+    MenuNode, NumField, PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
 };
 use ferrum_render::{decode_png, export_area, ExportBudget, ExportError, SvgOptions};
 use ferrum_scene::shape::COORD_LIMIT;
@@ -16,8 +16,8 @@ use serde_bytes::ByteBuf;
 use super::Core;
 use crate::protocol::{
     Align, Command, ConflictInfo, CoreEvent, DropPosition, Edit, EditPhase, ExportFormat, Field,
-    FillDto, KeymapEntry, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
-    EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
+    FillDto, KeymapEntry, MenuItemDto, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode,
+    StrokeDto, EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
 };
 use crate::summary::{cap_of, join_of, summarize, MAX_PAINTS};
 
@@ -750,6 +750,24 @@ impl Core {
             reserved,
             overrides,
         });
+    }
+
+    /// Главное меню: дерево ядра ключами команд.
+    pub(super) fn push_main_menu(&mut self) {
+        fn dto(n: &MenuNode) -> MenuItemDto {
+            match n {
+                MenuNode::Command(c) => MenuItemDto::Command {
+                    key: c.key().to_string(),
+                },
+                MenuNode::Submenu { title, items } => MenuItemDto::Submenu {
+                    title: title.to_string(),
+                    items: items.iter().map(dto).collect(),
+                },
+                MenuNode::Separator => MenuItemDto::Separator,
+            }
+        }
+        let tree = main_menu().iter().map(dto).collect();
+        self.events.push(CoreEvent::MainMenu { tree });
     }
 
     pub(super) fn push_presets(&mut self) {

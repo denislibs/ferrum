@@ -1720,3 +1720,34 @@ fn disabled_command_from_the_interface_is_silent() {
     assert!(errors(&ev).is_empty() && ev.is_empty(), "{ev:?}");
     assert_eq!(document_steps(&core), 0.0);
 }
+
+#[test]
+fn main_menu_is_sent_once_with_keys_of_the_table() {
+    let mut core = Core::new(Platform::Windows, VIEW, 1.0, Backend::Cpu);
+    let ev = core.take_events();
+    let menus: Vec<&Vec<MenuItemDto>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            CoreEvent::MainMenu { tree } => Some(tree),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(menus.len(), 1);
+    let tree = menus[0];
+    let MenuItemDto::Submenu { title, items } = &tree[0] else {
+        panic!("первым — подменю «Файл»: {tree:?}");
+    };
+    assert_eq!(title, "Файл");
+    assert_eq!(
+        items[0],
+        MenuItemDto::Command {
+            key: "ui.new_file".into()
+        }
+    );
+    // Новый документ дерево не присылает: оно не зависит от документа.
+    core.command(Command::Demo { nodes: 10 });
+    assert!(!core
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::MainMenu { .. })));
+}
