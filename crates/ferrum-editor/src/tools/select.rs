@@ -1,5 +1,8 @@
 //! Инструмент «Перемещение» (V): выделение, перемещение, рамка выделения, ресайз
-//! за восемь ручек (у линии — за концы), поворот за зоной угловых ручек.
+//! за восемь ручек (у линии — за концы), поворот за зоной угловых ручек. Он же —
+//! инструмент «Масштаб» (K, `SelectTool::scaling`): ручки масштабируют выделение
+//! равномерно вместе со свойствами (`crate::scale`), поворота нет, у линии —
+//! обычная рамка.
 //!
 //! Состояния: `Idle → Pressed → Dragging | Marquee | Resizing | Rotating | LineEnd`.
 //! Из `Pressed` жест начинается, когда указатель ушёл на 3 экранных пикселя; иначе
@@ -14,11 +17,12 @@ use kurbo::{Affine, Line, Point, Rect, Vec2};
 
 use super::{Ctx, Cursor, Flow, Tool, ToolKind, ToolOverlay, DRAG_THRESHOLD_PX};
 use crate::geometry::{
-    bases, normalize_deg, rect_map, resize_rect, rigid_patches, scale_patches_in, snap_angle,
-    top_level, world_box, Base, Handle, SelectionBox, MIN_SIDE,
+    bases, bases_deep, normalize_deg, rect_map, resize_rect, rigid_patches, scale_patches_in,
+    snap_angle, top_level, world_box, Base, Handle, SelectionBox, MIN_SIDE,
 };
 use crate::input::{Modifiers, PointerEvent};
 use crate::ops::{duplicate, local_delta, reposition};
+use crate::scale::{scale_patches, uniform_factor};
 use crate::selection::{
     deeper, drop_frame_at, frame_label_at, locked, resolve_with, root_frame_at, selection_parents,
     top_hit, Pick,
@@ -110,6 +114,8 @@ struct Resize {
     bases: Vec<Base>,
     snapper: Snapper,
     transform: Affine,
+    /// Равномерный коэффициент жеста инструмента «Масштаб» (у ресайза — 1).
+    k: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +160,8 @@ pub struct SelectTool {
     last_click: Option<(f64, Point)>,
     /// То, что наведение и нажатие берут из выделения (см. `SelCache`).
     cache: Option<SelCache>,
+    /// Инструмент «Масштаб» (K): ручки масштабируют выделение со свойствами.
+    scale: bool,
 }
 
 /// Что наведение берёт из выделения: рамку редактируемых выделенных и родителей
@@ -204,6 +212,15 @@ impl SelectTool {
             last: None,
             last_click: None,
             cache: None,
+            scale: false,
+        }
+    }
+
+    /// Инструмент «Масштаб» (K).
+    pub fn scaling() -> SelectTool {
+        SelectTool {
+            scale: true,
+            ..SelectTool::new()
         }
     }
 
@@ -231,8 +248,11 @@ impl SelectTool {
         self.cache.as_ref().expect("кэш только что заполнен")
     }
 
-    /// Единственная выделенная линия.
-    fn single_line(cx: &Ctx) -> Option<NodeId> {
+    /// Единственная выделенная линия (у «Масштаба» её концов нет — обычная рамка).
+    fn single_line(cx: &Ctx, scale: bool) -> Option<NodeId> {
+        if scale {
+            return None;
+        }
         match cx.selection[..] {
             [id] => cx
                 .scene
@@ -245,10 +265,15 @@ impl SelectTool {
 
     /// Ручка или зона поворота под экранной точкой; `sbox` — рамка редактируемых
     /// выделенных из `SelCache`.
-    fn box_hit(cx: &Ctx, sbox: Option<SelectionBox>, screen: Point) -> Option<(BoxHit, f64)> {
+    fn box_hit(
+        cx: &Ctx,
+        sbox: Option<SelectionBox>,
+        screen: Point,
+        scale: bool,
+    ) -> Option<(BoxHit, f64)> {
         let sbox = sbox?;
         let to_screen = |p: Point| cx.camera.world_to_screen(p);
-        if Self::single_line(cx).is_some() {
+        if Self::single_line(cx, scale).is_some() {
             for h in [Handle::LineStart, Handle::LineEnd] {
                 let (fx, fy) = h.frac();
                 let p = sbox.point(fx, fy);
@@ -286,7 +311,8 @@ impl SelectTool {
             let local = sbox.to_world.inverse() * cx.to_world(screen);
             sbox.rect.contains(local)
         };
-        if !inside {
+        // У «Масштаба» поворота нет: зона за углом — пустое место.
+        if !inside && !scale {
             for (fx, fy) in corners {
                 let p = sbox.point(fx, fy);
                 if (to_screen(p) - screen).hypot() <= ROTATE_HIT_PX {
@@ -327,7 +353,7 @@ impl SelectTool {
     fn update_hover(&mut self, cx: &mut Ctx, e: &PointerEvent) {
         let cache = self.sel_cache(cx);
         let sbox = cache.sbox;
-        if let Some((hit, angle)) = Self::box_hit(cx, sbox, e.point) {
+        if let Some((hit, angle)) = Self::box_hit(cx, sbox, e.point, self.scale) {
             *cx.hover = None;
             self.cursor = match hit {
                 BoxHit::Handle(_) => Cursor::Resize { angle },
@@ -379,7 +405,7 @@ impl SelectTool {
                 })
             }
             Target::Handle(handle @ (Handle::LineStart | Handle::LineEnd)) => {
-                let Some(id) = Self::single_line(cx) else {
+                let Some(id) = Self::single_line(cx, self.scale) else {
                     self.state = State::Idle;
                     return;
                 };
@@ -400,7 +426,11 @@ impl SelectTool {
                     self.state = State::Idle;
                     return;
                 };
-                let mut bases = bases(cx.scene, &ids, true);
+                let mut bases = if self.scale {
+                    bases_deep(cx.scene, &ids)
+                } else {
+                    bases(cx.scene, &ids, true)
+                };
                 let sbox = widen_zero_sides(&mut bases, sbox);
                 State::Resizing(Resize {
                     handle,
@@ -408,6 +438,7 @@ impl SelectTool {
                     bases,
                     snapper: Snapper::new(cx.scene, &ids),
                     transform: Affine::IDENTITY,
+                    k: 1.0,
                 })
             }
             Target::Rotate => {
@@ -438,6 +469,7 @@ impl SelectTool {
         let mods = e.modifiers;
         let threshold = SNAP_THRESHOLD_PX / cx.camera.zoom();
         let view = cx.view();
+        let scale = self.scale;
         self.lines.clear();
         match &mut self.state {
             State::Idle | State::Pressed(_) => {}
@@ -538,9 +570,24 @@ impl SelectTool {
                     self.lines = s.lines;
                 }
                 let local = r.sbox.to_world.inverse() * p;
-                let new = resize_rect(r.sbox.rect, r.handle, local, mods.shift, mods.alt);
+                // «Масштаб» всегда сохраняет пропорции; Alt — от центра, как у ресайза.
+                let keep = mods.shift || scale;
+                let new = resize_rect(r.sbox.rect, r.handle, local, keep, mods.alt);
                 r.transform =
                     r.sbox.to_world * rect_map(r.sbox.rect, new) * r.sbox.to_world.inverse();
+                if scale {
+                    let (w, h) = (r.sbox.rect.width(), r.sbox.rect.height());
+                    r.k = uniform_factor(r.transform, r.sbox.to_world, w, h);
+                    let patches = scale_patches(
+                        &r.bases,
+                        r.transform,
+                        r.sbox.to_world,
+                        r.k,
+                        Some(&mut cx.fonts.borrow_mut()),
+                    );
+                    cx.scene.set_preview(&patches);
+                    return;
+                }
                 let mut patches = scale_patches_in(
                     &r.bases,
                     r.transform,
@@ -630,6 +677,20 @@ impl SelectTool {
             }
             State::Dragging(d) => commit_drag(cx, d, cx.to_world(e.point)),
             State::Marquee(_) => {}
+            State::Resizing(r) if self.scale => {
+                if r.transform == Affine::IDENTITY {
+                    cx.scene.clear_preview();
+                    return;
+                }
+                let patches = scale_patches(
+                    &r.bases,
+                    r.transform,
+                    r.sbox.to_world,
+                    r.k,
+                    Some(&mut cx.fonts.borrow_mut()),
+                );
+                commit_patches(cx, patches);
+            }
             State::Resizing(r) => {
                 let mut patches = scale_patches_in(
                     &r.bases,
@@ -868,7 +929,11 @@ fn commit_drag(cx: &mut Ctx, d: Drag, pointer: Point) {
 
 impl Tool for SelectTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Move
+        if self.scale {
+            ToolKind::Scale
+        } else {
+            ToolKind::Move
+        }
     }
 
     fn pointer_down(&mut self, cx: &mut Ctx, e: &PointerEvent) {
@@ -881,6 +946,7 @@ impl Tool for SelectTool {
         }
         let world = cx.to_world(e.point);
         let shift = e.modifiers.shift;
+        let scale = self.scale;
         let cache = self.sel_cache(cx);
         let sbox = cache.sbox;
         // Двойной щелчок по тексту — его правка (спека подсистемы 3, раздел 7),
@@ -916,7 +982,7 @@ impl Tool for SelectTool {
                 }
             }
         }
-        let target = if let Some((hit, _)) = Self::box_hit(cx, sbox, e.point) {
+        let target = if let Some((hit, _)) = Self::box_hit(cx, sbox, e.point, scale) {
             match hit {
                 BoxHit::Handle(h) => Target::Handle(h),
                 BoxHit::Rotate => Target::Rotate,

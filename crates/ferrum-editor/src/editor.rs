@@ -715,7 +715,7 @@ impl Editor {
     /// hit-test, что и при движении. Точка — из колеса или щипка, иначе последняя
     /// точка указателя. Наведение есть только у «Перемещения».
     fn rehover(&mut self, point: Option<Point>, modifiers: Option<Modifiers>) {
-        if self.is_busy() || self.tool.kind() != ToolKind::Move {
+        if self.is_busy() || !self.tool.kind().is_select_like() {
             return;
         }
         let mut e = match (self.last_pointer, point) {
@@ -869,6 +869,7 @@ impl Editor {
         self.hover = None;
         self.tool = match kind {
             ToolKind::Move => Box::new(SelectTool::new()),
+            ToolKind::Scale => Box::new(SelectTool::scaling()),
             ToolKind::Frame => Box::new(DrawTool::new(Shape::Frame)),
             ToolKind::Rect => Box::new(DrawTool::new(Shape::Rect)),
             ToolKind::Ellipse => Box::new(DrawTool::new(Shape::Ellipse)),
@@ -1060,7 +1061,7 @@ impl Editor {
         if !self.alt.held()
             || self.is_busy()
             || self.panel.is_some()
-            || self.tool.kind() != ToolKind::Move
+            || !self.tool.kind().is_select_like()
             || self.selection.is_empty()
             || over_box
         {

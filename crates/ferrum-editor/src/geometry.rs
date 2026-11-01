@@ -507,6 +507,87 @@ pub fn bases(scene: &Scene, ids: &[NodeId], with_group_children: bool) -> Vec<Ba
     out
 }
 
+/// Базы для инструмента «Масштаб» (K): узлы верхнего уровня и всё их поддерево —
+/// у групп, булевых групп и фреймов (масштаб меняет и содержимое фреймов, в
+/// отличие от ресайза). Обход без рекурсии: глубина дерева из файла не ограничена.
+pub fn bases_deep(scene: &Scene, ids: &[NodeId]) -> Vec<Base> {
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(slot) = scene.slot(*id) else {
+            continue;
+        };
+        let n = scene.at(slot);
+        out.push(Base {
+            id: n.id,
+            props: n.props.clone(),
+            local: n.local,
+            parent: None,
+            parent_world: parent_world(scene, slot),
+        });
+        let mut stack = vec![(slot, out.len() - 1)];
+        while let Some((s, at)) = stack.pop() {
+            for &c in &scene.at(s).children {
+                let cn = scene.at(c);
+                out.push(Base {
+                    id: cn.id,
+                    props: cn.props.clone(),
+                    local: cn.local,
+                    parent: Some(at),
+                    parent_world: Affine::IDENTITY,
+                });
+                stack.push((c, out.len() - 1));
+            }
+        }
+    }
+    out
+}
+
+/// Правки положения и размера для равномерного масштаба `t` в мире (инструмент
+/// «Масштаб»): как `scale_patches_in`, но поддерево фреймов тоже масштабируется —
+/// ребёнок фрейма получает масштаб в осях фрейма после его правки. Без привязки к
+/// пикселям: округление нарушило бы пропорции содержимого. `bases` — из
+/// `bases_deep` (родитель всегда раньше ребёнка).
+pub fn scale_patches_deep(bases: &[Base], t: Affine, frame: Affine) -> Vec<(NodeId, PropsPatch)> {
+    let t = if finite_affine(t) {
+        t
+    } else {
+        Affine::IDENTITY
+    };
+    let axes = mirror_axes(t, frame);
+    let off = PixelSnap { x: false, y: false };
+    // Масштаб в координатах родителя каждого узла и его новая локальная матрица.
+    let mut in_parent: Vec<Affine> = Vec::with_capacity(bases.len());
+    let mut new_local: Vec<Affine> = Vec::with_capacity(bases.len());
+    let mut out = Vec::with_capacity(bases.len());
+    for b in bases {
+        let tp = match b.parent {
+            None => b.parent_world.inverse() * t * b.parent_world,
+            // Мир ребёнка после правки — новая матрица родителя × новая своя; она
+            // должна совпасть с масштабом родителя поверх прежних матриц.
+            Some(i) => new_local[i].inverse() * in_parent[i] * bases[i].local,
+        };
+        in_parent.push(tp);
+        if b.props.kind.is_group_like() {
+            new_local.push(b.local);
+            continue;
+        }
+        let m = tp * b.local;
+        let hint = match axes {
+            Some((ax, ay)) => (b.props.flip_x ^ ax, b.props.flip_y ^ ay),
+            None => mirror_hint(&b.props, b.local, m),
+        };
+        let pose = if b.props.kind == NodeKind::Line {
+            decompose_hinted(m, b.props.w, b.props.h, b.props.rotation, hint)
+        } else {
+            decompose_centred(m, b.props.w, b.props.h, b.props.rotation, hint)
+        };
+        let patch = pose_patch(&b.props, pose, true, off);
+        new_local.push(local_with(&b.props, &patch));
+        out.push((b.id, patch));
+    }
+    out
+}
+
 /// Какие оси округлять до пикселя. Ось, которую притянул сосед (раздел 7.3 спеки),
 /// не округляется: привязка к соседу важнее сетки пикселей.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

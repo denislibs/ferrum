@@ -26,6 +26,7 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::ToolEllipse, &["KeyO"]),
     (CommandId::ToolLine, &["KeyL"]),
     (CommandId::ToolHand, &["KeyH"]),
+    (CommandId::ToolScale, &["KeyK"]),
     (CommandId::HandHold, &["Space"]),
     (CommandId::ToolImage, &["Mod+Shift+KeyK"]),
     (CommandId::Delete, &["Delete", "Backspace"]),
@@ -105,7 +106,7 @@ fn defaults_match_figma_on_both_platforms() {
         assert!(!map.bindings(c.id).is_empty(), "{:?}", c.id);
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 53);
+    assert_eq!(COMMANDS.len(), 54);
 }
 
 #[test]

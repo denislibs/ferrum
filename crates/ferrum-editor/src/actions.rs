@@ -58,6 +58,7 @@ impl Editor {
             C::ToolText => self.set_tool(ToolKind::Text),
             C::ToolPen => self.set_tool(ToolKind::Pen),
             C::ToolArrow => self.set_tool(ToolKind::Arrow),
+            C::ToolScale => self.set_tool(ToolKind::Scale),
             C::Flatten => self.flatten(),
             C::BooleanUnion => self.boolean(ferrum_doc::BooleanOp::Union),
             C::BooleanSubtract => self.boolean(ferrum_doc::BooleanOp::Subtract),

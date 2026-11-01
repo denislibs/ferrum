@@ -422,7 +422,7 @@ fn bad_commands_are_errors_not_panics() {
         json!({"type": "demo"}),
         json!({"type": "demo", "nodes": -1}),
         json!({"type": "demo", "nodes": 1, "extra": 1}),
-        json!({"type": "setTool", "tool": "scale"}),
+        json!({"type": "setTool", "tool": "slice"}),
         json!({"tool": "rect"}),
         json!("save"),
         json!(null),

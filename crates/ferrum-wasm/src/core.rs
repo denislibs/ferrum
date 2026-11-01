@@ -123,6 +123,7 @@ fn tool_kind(t: Tool) -> ToolKind {
         Tool::Text => ToolKind::Text,
         Tool::Pen => ToolKind::Pen,
         Tool::Arrow => ToolKind::Arrow,
+        Tool::Scale => ToolKind::Scale,
     }
 }
 
@@ -138,6 +139,7 @@ fn tool(k: ToolKind) -> Tool {
         ToolKind::Text => Tool::Text,
         ToolKind::Pen => Tool::Pen,
         ToolKind::Arrow => Tool::Arrow,
+        ToolKind::Scale => Tool::Scale,
     }
 }
 

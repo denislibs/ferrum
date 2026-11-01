@@ -18,6 +18,8 @@ pub enum CommandId {
     ToolPen,
     /// «Стрелка»: линия со стрелкой на конце.
     ToolArrow,
+    /// «Масштаб» (K, подсистема 3, этап 5).
+    ToolScale,
     /// «Сплющить»: выделение — в один вектор.
     Flatten,
     /// Булевы операции над выделением (подсистема 3, этап 4); у выделенных
@@ -135,6 +137,7 @@ pub const COMMANDS: &[Command] = &[
     cmd(C::ToolHand, "tool.hand", "Рука", &["KeyH"]),
     cmd(C::ToolText, "tool.text", "Текст", &["KeyT"]),
     cmd(C::ToolPen, "tool.pen", "Перо", &["KeyP"]),
+    cmd(C::ToolScale, "tool.scale", "Масштабирование", &["KeyK"]),
     cmd(C::ToolArrow, "tool.arrow", "Стрелка", &["Shift+KeyL"]),
     cmd(
         C::HandHold,
