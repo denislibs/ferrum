@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use common::text::{add_text, text_h};
 use common::*;
+use ferrum_doc::TextSizing as Sizing;
 use ferrum_doc::{
     Color, LetterSpacing, LineHeight, NodeKind, PropsPatch, Stroke, StrokeAlign, StrokeCap,
     TextAttrs, TextContent, TextRun, TextSizing, VectorNetwork, VectorPoint, VectorSegment,
@@ -376,4 +377,197 @@ fn line_scales_by_its_length() {
     let p = h.props(id);
     assert!(close(p.w, 200.0), "{}", p.w);
     assert!(close(p.strokes[0].width, 2.0));
+}
+
+fn panel_scale(h: &mut H, factor: f64, anchor: Anchor) {
+    h.ed.edit_selection(&PanelEdit::Scale { factor, anchor }, Phase::Commit);
+}
+
+fn flip(h: &mut H, id: ferrum_doc::NodeId, x: bool, y: bool) {
+    h.set(
+        id,
+        PropsPatch {
+            flip_x: Some(x),
+            flip_y: Some(y),
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
+fn panel_anchor_is_visual_on_flipped_nodes() {
+    // Отражённый по X: TOP_LEFT — видимый левый верхний угол, он на месте.
+    let mut h = H::new();
+    let id = h.rect(None, 200.0, 200.0, 100.0, 100.0);
+    flip(&mut h, id, true, false);
+    h.ed.select(&[id]);
+    panel_scale(&mut h, 2.0, Anchor::TOP_LEFT);
+    let p = h.props(id);
+    assert!(
+        close(p.x, 200.0) && close(p.w, 200.0),
+        "x {} w {}",
+        p.x,
+        p.w
+    );
+    assert!(close(p.y, 200.0) && p.flip_x);
+
+    // Отражённый по Y.
+    let id = h.rect(None, 500.0, 200.0, 100.0, 100.0);
+    flip(&mut h, id, false, true);
+    h.ed.select(&[id]);
+    panel_scale(&mut h, 2.0, Anchor::TOP_LEFT);
+    let p = h.props(id);
+    assert!(
+        close(p.y, 200.0) && close(p.h, 200.0),
+        "y {} h {}",
+        p.y,
+        p.h
+    );
+    assert!(close(p.x, 500.0) && p.flip_y);
+}
+
+#[test]
+fn panel_anchor_is_visual_on_flipped_group_and_nested_child() {
+    let mut h = H::new();
+    let a = h.rect(None, 300.0, 300.0, 50.0, 50.0);
+    let b = h.rect(None, 400.0, 300.0, 50.0, 50.0);
+    flip(&mut h, a, true, false);
+    h.ed.select(&[a, b]);
+    h.ed.execute(CommandId::Group);
+    let group = h.sel()[0];
+    flip(&mut h, group, true, false);
+    h.ed.select(&[group]);
+    let b0 = h.ed.scene().node(group).unwrap().world_bounds.unwrap();
+    panel_scale(&mut h, 2.0, Anchor::TOP_LEFT);
+    let a0 = h.ed.scene().node(group).unwrap().world_bounds.unwrap();
+    assert!(close(a0.x0, b0.x0) && close(a0.y0, b0.y0), "{a0:?} {b0:?}");
+    assert!(close(a0.width(), 2.0 * b0.width()));
+    // Вложенный отражённый ребёнок сохранил отражение и вырос вдвое.
+    let (pa, pb) = (h.props(a), h.props(b));
+    assert!(pa.flip_x && close(pa.w, 100.0) && close(pb.w, 100.0));
+}
+
+#[test]
+fn nan_or_foreign_anchor_is_rejected() {
+    assert!(Anchor::new(f64::NAN, 0.0).is_none());
+    assert!(Anchor::new(0.0, f64::INFINITY).is_none());
+    assert!(Anchor::new(0.3, 0.5).is_none());
+    assert_eq!(
+        Anchor::new(0.5, 1.0).map(|a| (a.fx(), a.fy())),
+        Some((0.5, 1.0))
+    );
+}
+
+#[test]
+fn zero_height_child_of_a_frame_stays_zero() {
+    let mut h = H::new();
+    let frame = h.frame(None, 0.0, 0.0, 100.0, 100.0);
+    let flat = h.rect(Some(frame), 10.0, 10.0, 40.0, 0.0);
+    h.ed.select(&[frame]);
+    h.ed.execute(CommandId::ToolScale);
+    h.drag((100.0, 100.0), (200.0, 200.0), none());
+    let p = h.props(flat);
+    assert!(close(p.w, 80.0), "{}", p.w);
+    // Не растёт вместе с масштабом (MIN_SIDE·k = 0,02): остаётся на MIN_SIDE позы.
+    assert!(p.h <= 0.0101, "высота нулевого ребёнка: {}", p.h);
+}
+
+#[test]
+fn tiny_factor_keeps_fixed_text_box_in_proportion() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "Привет", 20.0);
+    let mut t = (*h.props(id).text.unwrap()).clone();
+    t.props.sizing = Sizing::Fixed;
+    h.set(
+        id,
+        PropsPatch {
+            text: Some(t.props),
+            x: Some(100.0),
+            y: Some(100.0),
+            w: Some(200.0),
+            h: Some(100.0),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[id]);
+    panel_scale(&mut h, 0.01, Anchor::CENTER);
+    let p = h.props(id);
+    // Кегль 20 → 1 (зажим), а не 0,2: рамка 200×100 → 10×5 вокруг прежнего центра.
+    assert!(close(p.text.as_ref().unwrap().props.style.size, 1.0));
+    assert!(close(p.w, 10.0) && close(p.h, 5.0), "{} × {}", p.w, p.h);
+    assert!(close(p.x + p.w / 2.0, 200.0) && close(p.y + p.h / 2.0, 150.0));
+}
+
+#[test]
+fn text_in_auto_height_and_fixed_modes_scales_by_gesture() {
+    for mode in [Sizing::AutoHeight, Sizing::Fixed] {
+        let mut h = text_h();
+        let id = add_text(&mut h, 100.0, 100.0, "Привет", 12.0);
+        let mut t = (*h.props(id).text.unwrap()).clone();
+        t.props.sizing = mode;
+        h.set(
+            id,
+            PropsPatch {
+                text: Some(t.props),
+                x: Some(100.0),
+                y: Some(100.0),
+                w: Some(100.0),
+                h: Some(60.0),
+                ..Default::default()
+            },
+        );
+        h.ed.select(&[id]);
+        h.ed.execute(CommandId::ToolScale);
+        let steps = h.ed.step_count();
+        let before = h.state();
+        // Правый нижний угол рамки 100..200 × 100..160 — на +100, +60.
+        h.drag((200.0, 160.0), (300.0, 220.0), none());
+        let p = h.props(id);
+        let t = p.text.as_ref().unwrap();
+        assert_eq!(t.props.sizing, mode);
+        assert!(
+            close(t.props.style.size, 24.0),
+            "{mode:?}: {}",
+            t.props.style.size
+        );
+        assert!(close(p.w, 200.0), "{mode:?}: w {}", p.w);
+        h.assert_one_step(steps, &before);
+    }
+}
+
+#[test]
+fn hidden_and_locked_children_and_nested_boolean_scale_with_the_group() {
+    let mut h = H::new();
+    let a = h.rect(None, 100.0, 100.0, 50.0, 50.0);
+    let b = h.rect(None, 130.0, 100.0, 50.0, 50.0);
+    h.ed.select(&[a, b]);
+    h.ed.execute(CommandId::BooleanUnion);
+    let boolean = h.sel()[0];
+    let hidden = h.rect(None, 300.0, 100.0, 40.0, 40.0);
+    let locked = h.rect(None, 350.0, 100.0, 40.0, 40.0);
+    h.set(
+        hidden,
+        PropsPatch {
+            visible: Some(false),
+            ..Default::default()
+        },
+    );
+    h.set(
+        locked,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    h.ed.select(&[boolean, hidden, locked]);
+    h.ed.execute(CommandId::Group);
+    let group = h.sel()[0];
+    h.ed.select(&[group]);
+    let steps = h.ed.step_count();
+    panel_scale(&mut h, 2.0, Anchor::TOP_LEFT);
+    assert_eq!(h.ed.step_count(), steps + 1);
+    assert!(close(h.props(hidden).w, 80.0) && close(h.props(locked).w, 80.0));
+    assert!(close(h.props(a).w, 100.0) && close(h.props(b).w, 100.0));
+    assert!(close(h.props(b).x - h.props(a).x, 60.0));
+    h.assert_scene_clean();
 }

@@ -69,8 +69,8 @@ pub enum PanelEdit {
     },
     /// Поле «Масштаб» инструмента K: выделение (верхний уровень) масштабируется
     /// равномерно в `factor` раз вокруг точки `anchor` его рамки вместе с
-    /// обводками, радиусами и текстом (`crate::scale`). Вне 1 %…10 000 % —
-    /// зажимается.
+    /// обводками, радиусами и текстом (`crate::scale`). Зажим к 1 %…10 000 % —
+    /// лишь защитный: недопустимый коэффициент протокол отклоняет ошибкой.
     Scale { factor: f64, anchor: Anchor },
 }
 
@@ -259,7 +259,15 @@ fn scale_edit(
     if (k - 1.0).abs() < 1e-12 {
         return vec![];
     }
-    let t = anchor_transform(sbox, anchor, k);
+    let mut tops = bases.iter().filter(|b| b.parent.is_none());
+    let flip = match (tops.next(), tops.next()) {
+        (Some(b), None) => (b.props.flip_x, b.props.flip_y),
+        _ => (false, false),
+    };
+    let t = anchor_transform(sbox, anchor, k, flip);
+    if !t.as_coeffs().iter().all(|c| c.is_finite()) {
+        return vec![];
+    }
     scale_patches(bases, t, sbox.to_world, k, Some(fonts))
 }
 

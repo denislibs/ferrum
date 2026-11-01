@@ -32,8 +32,8 @@ const TEXT_LIMIT: f64 = 10_000.0;
 /// сетка 3×3 у инструмента Scale в Figma.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Anchor {
-    pub fx: f64,
-    pub fy: f64,
+    fx: f64,
+    fy: f64,
 }
 
 impl Anchor {
@@ -44,6 +44,14 @@ impl Anchor {
     pub fn new(fx: f64, fy: f64) -> Option<Anchor> {
         let ok = |v: f64| v == 0.0 || v == 0.5 || v == 1.0;
         (ok(fx) && ok(fy)).then_some(Anchor { fx, fy })
+    }
+
+    pub fn fx(self) -> f64 {
+        self.fx
+    }
+
+    pub fn fy(self) -> f64 {
+        self.fy
     }
 }
 
@@ -69,10 +77,15 @@ pub fn uniform_factor(t: Affine, frame: Affine, width: f64, height: f64) -> f64 
     }
 }
 
-/// Матрица масштаба `k` вокруг якоря рамки выделения (в мире).
-pub fn anchor_transform(sbox: &SelectionBox, anchor: Anchor, k: f64) -> Affine {
+/// Матрица масштаба `k` вокруг якоря рамки выделения (в мире). `flip` — отражение
+/// единственного узла выделения (его `flip_x`/`flip_y`): рамка узла отражена
+/// вместе с ним, а сетка 3×3 панели — по видимой картинке, поэтому доли якоря по
+/// отражённой оси зеркалятся. Поворот остаётся в рамке (решение 4 плана).
+pub fn anchor_transform(sbox: &SelectionBox, anchor: Anchor, k: f64, flip: (bool, bool)) -> Affine {
     let r = sbox.rect;
-    let p = Point::new(r.x0 + anchor.fx * r.width(), r.y0 + anchor.fy * r.height());
+    let fx = if flip.0 { 1.0 - anchor.fx } else { anchor.fx };
+    let fy = if flip.1 { 1.0 - anchor.fy } else { anchor.fy };
+    let p = Point::new(r.x0 + fx * r.width(), r.y0 + fy * r.height());
     let local = Affine::translate(p.to_vec2()) * Affine::scale(k) * Affine::translate(-p.to_vec2());
     sbox.to_world * local * sbox.to_world.inverse()
 }
@@ -185,6 +198,7 @@ pub fn scale_patches(
             }
         }
     }
+    keep_fixed_text_in_proportion(bases, k, &mut out);
     if let Some(fonts) = fonts {
         let by_id: HashMap<NodeId, &Props> = bases.iter().map(|b| (b.id, &b.props)).collect();
         for (id, patch) in &mut out {
@@ -208,6 +222,37 @@ pub fn scale_patches(
         }
     }
     out
+}
+
+/// Кегль не меньше 1 px, а рамка «Фикс.» текста при малом масштабе продолжала бы
+/// сжиматься: текст и рамка разошлись бы. Рамка берёт коэффициент кегля после
+/// зажима, центр остаётся там, куда его привёл масштаб.
+fn keep_fixed_text_in_proportion(bases: &[Base], k: f64, out: &mut [(NodeId, PropsPatch)]) {
+    for b in bases {
+        let Some(t) = b.props.text_props() else {
+            continue;
+        };
+        let size = t.style.size;
+        if t.sizing != TextSizing::Fixed
+            || size <= 0.0
+            || size.is_nan()
+            || size * k >= TEXT_SIZE_MIN
+        {
+            continue;
+        }
+        let k_eff = TEXT_SIZE_MIN / size;
+        let Some((_, patch)) = out.iter_mut().find(|(id, _)| *id == b.id) else {
+            continue;
+        };
+        let (Some(x), Some(y), Some(w), Some(h)) = (patch.x, patch.y, patch.w, patch.h) else {
+            continue;
+        };
+        let (nw, nh) = (b.props.w * k_eff, b.props.h * k_eff);
+        patch.x = Some(x + (w - nw) / 2.0);
+        patch.y = Some(y + (h - nh) / 2.0);
+        patch.w = Some(nw);
+        patch.h = Some(nh);
+    }
 }
 
 /// Поля `extra` поверх `patch` (только масштабируемые свойства).

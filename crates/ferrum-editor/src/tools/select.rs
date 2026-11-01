@@ -742,7 +742,8 @@ fn editable(cx: &Ctx, ids: &[NodeId]) -> Vec<NodeId> {
 /// остаётся: масштаб по ней — 1, линию нельзя растянуть вширь.
 fn widen_zero_sides(bases: &mut [Base], sbox: SelectionBox) -> SelectionBox {
     let (mut wide_x, mut wide_y) = (false, false);
-    for b in bases.iter_mut() {
+    // Только узлы выделения: дети (у «Масштаба» это поддерево) нулевыми остаются.
+    for b in bases.iter_mut().filter(|b| b.parent.is_none()) {
         if b.props.kind == NodeKind::Line || b.props.kind.is_group_like() {
             continue;
         }
@@ -764,7 +765,8 @@ fn widen_zero_sides(bases: &mut [Base], sbox: SelectionBox) -> SelectionBox {
         return sbox;
     }
     let mut sbox = sbox;
-    if let [b] = bases {
+    let mut tops = bases.iter().filter(|b| b.parent.is_none());
+    if let (Some(b), None) = (tops.next(), tops.next()) {
         // Один узел: рамка — его собственная, в его осях.
         sbox.rect = Rect::new(0.0, 0.0, b.props.w, b.props.h);
         sbox.to_world = b.parent_world * b.local;
