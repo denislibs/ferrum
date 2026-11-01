@@ -37,6 +37,11 @@ enum Arrange {
 impl Editor {
     pub(crate) fn run(&mut self, cmd: CommandId) {
         use CommandId as C;
+        // Недоступная команда ничего не делает: ни шага, ни сообщения (спека
+        // подсистемы 2, раздел 3) — так же, как её пункт в меню.
+        if !self.command_state(cmd).enabled {
+            return;
+        }
         // Команда с зажатой кнопкой: жест отменяется, а не записывается.
         self.cancel_stale_vector_drag();
         // Правка вектора перехватывает свои команды (удаление, сдвиг, Esc…).
@@ -182,7 +187,10 @@ impl Editor {
                     ..Default::default()
                 },
             ),
-            C::ToggleUi => self.out.events.push(EditorEvent::ToggleUi),
+            C::ToggleUi => {
+                self.settings.ui_hidden = !self.settings.ui_hidden;
+                self.out.events.push(EditorEvent::ToggleUi);
+            }
             C::Save => self.out.events.push(EditorEvent::SaveRequested),
             C::UiMainMenu
             | C::UiNewFile

@@ -1660,3 +1660,63 @@ fn ui_commands_come_back_as_events() {
     );
     assert_eq!(document_steps(&core), 0.0);
 }
+
+fn states(ev: &[CoreEvent]) -> Vec<Vec<CommandStateDto>> {
+    ev.iter()
+        .filter_map(|e| match e {
+            CoreEvent::CommandStates { changed } => Some(changed.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn command_states_arrive_whole_then_as_changes() {
+    let mut core = Core::new(Platform::Windows, VIEW, 1.0, Backend::Cpu);
+    let all = states(&core.take_events());
+    assert_eq!(all.len(), 1, "одно событие");
+    assert_eq!(
+        all[0].len(),
+        ferrum_editor::COMMANDS.len(),
+        "до документа — все"
+    );
+    let grid = all[0].iter().find(|s| s.key == "view.pixel_grid").unwrap();
+    assert_eq!((grid.enabled, grid.checked), (true, Some(true)));
+    let delete = all[0].iter().find(|s| s.key == "edit.delete").unwrap();
+    assert_eq!((delete.enabled, delete.checked), (false, None));
+    // Новый документ — снова все, одним событием в пачке.
+    core.command(Command::Demo { nodes: 10 });
+    let ev = core.take_events();
+    let got = states(&ev);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].len(), ferrum_editor::COMMANDS.len());
+    // Выделение: только изменившиеся, удаление стало доступно.
+    core.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    let got = states(&core.take_events());
+    assert_eq!(got.len(), 1, "изменения пачки — одним событием");
+    assert!(got[0].len() < ferrum_editor::COMMANDS.len());
+    assert!(got[0].iter().any(|s| s.key == "edit.delete" && s.enabled));
+    // Тема «как в системе» — отметка в меню.
+    core.command(Command::SetTheme {
+        theme: Theme::Light,
+        system: Some(true),
+    });
+    let got = states(&core.take_events());
+    let checked = |key: &str| got[0].iter().find(|s| s.key == key).and_then(|s| s.checked);
+    assert_eq!(checked("ui.theme_system"), Some(true));
+    assert_eq!(checked("ui.theme_dark"), Some(false));
+}
+
+#[test]
+fn disabled_command_from_the_interface_is_silent() {
+    let mut core = demo(10);
+    core.take_events();
+    core.command(Command::Execute {
+        command: "edit.delete".into(),
+    });
+    let ev = core.take_events();
+    assert!(errors(&ev).is_empty() && ev.is_empty(), "{ev:?}");
+    assert_eq!(document_steps(&core), 0.0);
+}

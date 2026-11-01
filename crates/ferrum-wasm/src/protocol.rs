@@ -529,6 +529,10 @@ pub enum Command {
     },
     SetTheme {
         theme: Theme,
+        /// Тема выбрана «как в системе» (`theme` — то, что система дала сейчас):
+        /// для отметки в меню «Настройки».
+        #[serde(default)]
+        system: Option<bool>,
     },
     /// Вставить содержимое буфера обмена (формат `web application/x-ferrum`).
     Paste {
@@ -792,6 +796,17 @@ pub struct KeymapEntry {
     pub overridden: bool,
 }
 
+/// Состояние команды: доступна ли и (у переключателя) отмечена ли.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandStateDto {
+    pub key: String,
+    pub enabled: bool,
+    #[serde(default)]
+    #[tsify(optional)]
+    pub checked: Option<bool>,
+}
+
 /// Сочетание, занятое несколькими командами (ключи команд).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -924,6 +939,11 @@ pub enum CoreEvent {
     /// основной поток (спека подсистемы 2, раздел 3).
     UiCommand {
         key: String,
+    },
+    /// Состояния команд изменились (доступна, отмечена): только изменившиеся;
+    /// первым — все команды таблицы. Основной поток ничего не вычисляет.
+    CommandStates {
+        changed: Vec<CommandStateDto>,
     },
     /// Измерения с Alt в оверлее: значения расстояний по порядку и число
     /// пунктирных направляющих.

@@ -118,6 +118,7 @@ fn text_waits_for_requested_fonts_then_appears_and_draws() {
     let mut c = core();
     c.command(Command::SetTheme {
         theme: Theme::Light,
+        system: None,
     });
     // Камера примера (зум 0.5, центр 720×512) показывает x 320…1120, y 212…812.
     let create_at = |c: &mut Core| {

@@ -31,6 +31,7 @@ fn commands() -> Vec<Command> {
         },
         Command::SetTheme {
             theme: Theme::Light,
+            system: Some(true),
         },
         Command::Paste { bytes: bytes(&[1]) },
         Command::PlaceImage {
@@ -286,6 +287,20 @@ fn events() -> Vec<CoreEvent> {
         },
         CoreEvent::UiCommand {
             key: "ui.main_menu".into(),
+        },
+        CoreEvent::CommandStates {
+            changed: vec![
+                CommandStateDto {
+                    key: "edit.undo".into(),
+                    enabled: false,
+                    checked: None,
+                },
+                CommandStateDto {
+                    key: "view.pixel_grid".into(),
+                    enabled: true,
+                    checked: Some(true),
+                },
+            ],
         },
         CoreEvent::Keymap {
             commands: vec![KeymapEntry {

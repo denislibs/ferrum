@@ -17,7 +17,9 @@ use std::collections::{HashSet, VecDeque};
 
 use ferrum_doc::{container, fixture, DocResult, Document, NodeId, Tx};
 use ferrum_editor::geometry::SelectionBox;
-use ferrum_editor::{CommandId, Cursor, Editor, EditorEvent, Input, Platform, ToolKind};
+use ferrum_editor::{
+    CommandId, CommandState, Cursor, Editor, EditorEvent, Input, Platform, ThemeChoice, ToolKind,
+};
 use ferrum_render::{
     decode_png, Clock, ExportBudget, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba,
     SvgOptions,
@@ -32,8 +34,8 @@ use crate::input::{decode_all, Record};
 use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
-    Backend, Command, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES, MAX_DEMO_TEXTS,
-    MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
+    Backend, Command, CommandStateDto, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES,
+    MAX_DEMO_TEXTS, MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -267,9 +269,12 @@ impl Core {
             now_ms: 0.0,
             export_clock: ferrum_render::default_clock(),
         };
-        // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
+        // Таблица команд, их состояния и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
         core.push_presets();
+        if let Some(changed) = core.editor.take_command_states() {
+            core.push_command_states(changed);
+        }
         core
     }
 
@@ -314,6 +319,11 @@ impl Core {
         *editor.keymap_mut() = self.editor.keymap().clone();
         editor.take_events();
         self.editor = editor;
+        // Состояния команд нового документа — интерфейсу целиком.
+        self.editor.reset_command_states();
+        if let Some(changed) = self.editor.take_command_states() {
+            self.push_command_states(changed);
+        }
         self.images = DocImages::default();
         self.selection = None;
         self.layers.reset();
@@ -335,6 +345,32 @@ impl Core {
         self.text_state = text::TextState::default();
         self.preload_page_fonts();
         Ok(())
+    }
+
+    /// Событие `CommandStates`: изменения из одной пачки — одним событием
+    /// (у команды — последнее состояние).
+    fn push_command_states(&mut self, changed: Vec<(CommandId, CommandState)>) {
+        let dto = |(id, s): (CommandId, CommandState)| CommandStateDto {
+            key: id.key().to_string(),
+            enabled: s.enabled,
+            checked: s.checked,
+        };
+        if let Some(CoreEvent::CommandStates { changed: list }) = self
+            .events
+            .iter_mut()
+            .find(|e| matches!(e, CoreEvent::CommandStates { .. }))
+        {
+            for c in changed.into_iter().map(dto) {
+                match list.iter_mut().find(|x| x.key == c.key) {
+                    Some(x) => *x = c,
+                    None => list.push(c),
+                }
+            }
+            return;
+        }
+        self.events.push(CoreEvent::CommandStates {
+            changed: changed.into_iter().map(dto).collect(),
+        });
     }
 
     /// Документ изменён: признак `modified` и новая ревизия.
@@ -680,9 +716,16 @@ impl Core {
                 None => self.error(format!("Неизвестная команда «{}»", clip(&command))),
             },
             Command::SetTool { tool } => self.editor.set_tool(tool_kind(tool)),
-            Command::SetTheme { theme } => {
+            Command::SetTheme { theme, system } => {
                 self.theme = theme;
                 self.editor.set_theme(overlay_theme(theme));
+                let mut s = self.editor.settings().clone();
+                s.theme = match (system, theme) {
+                    (Some(true), _) => ThemeChoice::System,
+                    (_, Theme::Dark) => ThemeChoice::Dark,
+                    (_, Theme::Light) => ThemeChoice::Light,
+                };
+                self.editor.set_settings(s);
             }
             Command::Paste { bytes } => {
                 self.editor.take_text_pending();
@@ -802,6 +845,7 @@ impl Core {
                 EditorEvent::UiCommand(id) => self.events.push(CoreEvent::UiCommand {
                     key: id.key().to_string(),
                 }),
+                EditorEvent::CommandStates(changed) => self.push_command_states(changed),
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
             }
         }

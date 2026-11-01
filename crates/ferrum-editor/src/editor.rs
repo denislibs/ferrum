@@ -20,6 +20,7 @@ use ferrum_scene::Scene;
 use ferrum_text::{Fonts, SharedFonts, TextLayout};
 use kurbo::{Point, Size, Vec2};
 
+use crate::command_state::{CommandState, StatesCache};
 use crate::commands::CommandId;
 use crate::geometry::world_box;
 use crate::input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
@@ -49,6 +50,20 @@ pub struct Settings {
     pub snapping: bool,
     /// Пиксельная сетка при зуме от 800%.
     pub pixel_grid: bool,
+    /// Выбранная тема интерфейса (для отметки в меню «Настройки»): её присылает
+    /// интерфейс вместе с темой оверлеев.
+    pub theme: ThemeChoice,
+    /// Интерфейс скрыт (Ctrl/Cmd+\): отметка у «Скрыть интерфейс».
+    pub ui_hidden: bool,
+}
+
+/// Тема, которую выбрал пользователь: тёмная, светлая или как в системе.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThemeChoice {
+    #[default]
+    Dark,
+    Light,
+    System,
 }
 
 impl Settings {
@@ -58,6 +73,8 @@ impl Settings {
             pixel_snap: true,
             snapping: true,
             pixel_grid: true,
+            theme: ThemeChoice::Dark,
+            ui_hidden: false,
         }
     }
 }
@@ -94,6 +111,8 @@ pub enum EditorEvent {
     SaveRequested,
     /// Вызвана команда интерфейса (`ui.*`): её выполняет основной поток.
     UiCommand(CommandId),
+    /// Изменились состояния команд (доступна, отмечена) — только изменившиеся.
+    CommandStates(Vec<(CommandId, CommandState)>),
     /// Сообщение об ошибке для пользователя.
     Error(String),
 }
@@ -151,7 +170,7 @@ pub struct Editor {
     pub(crate) camera: Camera,
     pub(crate) selection: Selection,
     /// Растёт при каждой замене сцены целиком (переключение страницы).
-    scene_epoch: u64,
+    pub(crate) scene_epoch: u64,
     pub(crate) hover: Option<NodeId>,
     pub(crate) tool: Box<dyn Tool>,
     /// Инструмент, который рука временно заменила на время удержания клавиши,
@@ -191,6 +210,8 @@ pub struct Editor {
     /// группы остался без формы — `sync_text_outlines` пересчитает её на
     /// следующем `emit`.
     pub(crate) outlines_missed: Rc<Cell<bool>>,
+    /// Состояния команд, отправленные интерфейсу, и их ключ.
+    pub(crate) states: StatesCache,
 }
 
 /// Ставит сцене источник контуров глифов для текста в булевых группах — реестр
@@ -283,6 +304,7 @@ impl Editor {
             vector_edit: None,
             outlines_generation: 0,
             outlines_missed,
+            states: StatesCache::default(),
         })
     }
 
@@ -1149,6 +1171,9 @@ impl Editor {
             self.out.events.push(EditorEvent::NeedsRedraw);
         }
         self.seen = now;
+        if let Some(changed) = self.take_command_states() {
+            self.out.events.push(EditorEvent::CommandStates(changed));
+        }
     }
 
     /// Точка мира в центре вьюпорта (для вставки изображения и пресетов).

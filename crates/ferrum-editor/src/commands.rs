@@ -692,7 +692,8 @@ pub const COMMANDS: &[Command] = &[
         "Скрыть интерфейс",
         &["панели", "полный экран", "hide ui", "interface"],
         &["Mod+Backslash"],
-    ),
+    )
+    .toggle(),
     // Shift+H и Shift+V, как в Figma: H без модификаторов — «Рука», V — «Перемещение»,
     // Ctrl/Cmd+Shift+H — «Скрыть»; сочетания сравниваются точным набором модификаторов.
     cmd(

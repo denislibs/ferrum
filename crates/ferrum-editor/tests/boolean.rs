@@ -157,7 +157,7 @@ fn selected_booleans_switch_their_op_and_default_name() {
 }
 
 #[test]
-fn single_layers_and_frames_are_refused_with_a_message() {
+fn single_layers_are_unavailable_and_frames_are_refused_with_a_message() {
     let mut h = H::new();
     let a = h.rect(None, 0.0, 0.0, 50.0, 50.0);
     let f = h.frame(None, 300.0, 0.0, 100.0, 100.0);
@@ -165,12 +165,11 @@ fn single_layers_and_frames_are_refused_with_a_message() {
     let steps = h.ed.step_count();
     h.ed.select(&[a]);
     h.ed.take_events();
+    // Один слой: команда недоступна (как в Figma) — ни шага, ни сообщения.
+    assert!(!h.ed.command_state(CommandId::BooleanUnion).enabled);
     h.key("KeyU", alt_shift());
     assert_eq!(h.ed.step_count(), steps);
-    assert_eq!(
-        errors(&mut h),
-        vec!["Для булевой операции выделите хотя бы два слоя"]
-    );
+    assert!(errors(&mut h).is_empty());
     h.ed.select(&[a, f]);
     h.key("KeyU", alt_shift());
     assert_eq!(h.ed.step_count(), steps);
