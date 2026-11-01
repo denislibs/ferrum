@@ -536,3 +536,36 @@ fn ellipsis_does_not_follow_a_trailing_space() {
         "последний глиф перед многоточием — пробел"
     );
 }
+
+/// Прогоны помнят свой текст (с регистром) и кластеры глифов — по ним экспорт
+/// SVG пишет `<text>`, а PDF — текст для поиска и копирования; обрезка с
+/// многоточием укорачивает и текст.
+#[test]
+fn runs_carry_their_text_and_glyph_clusters() {
+    let mut fonts = fonts();
+    let t = text("Привет, fi мир\nВторой", |p| {
+        p.style.case = TextCase::Upper
+    });
+    let l = lay(&mut fonts, &t, 0.0, 0.0);
+    let all: String = l.runs.iter().map(|r| r.glyph_text()).collect();
+    assert_eq!(all, "ПРИВЕТ, FI МИРВТОРОЙ");
+    for r in &l.runs {
+        let mut prev = 0;
+        for g in &r.glyphs {
+            assert!(g.cluster[0] <= g.cluster[1] && g.cluster[1] as usize <= r.text.len());
+            assert!(g.cluster[0] >= prev, "кластеры по порядку");
+            prev = g.cluster[0];
+        }
+    }
+    let cut = text("ШШШШШШШШШШШШШШШШШШШШ", |p| {
+        p.sizing = TextSizing::Fixed;
+        p.truncate = true;
+    });
+    let l = lay(&mut fonts, &cut, 160.0, 30.0);
+    let shown: String = l.runs.iter().map(|r| r.glyph_text()).collect();
+    assert!(
+        shown.ends_with('…') && shown.chars().count() < 20,
+        "{shown}"
+    );
+    assert!(l.runs.iter().all(|r| r.letter_spacing == 0.0));
+}

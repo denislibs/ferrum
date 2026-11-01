@@ -389,6 +389,154 @@ fn errors_and_limits() {
     assert_eq!(run(&mut r, &[id], &tight), Err(ExportError::TooBig));
 }
 
+fn font_file(rel: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/web/public/fonts")
+        .join(rel);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// Реестр с загруженным вшитым Inter.
+fn inter() -> ferrum_render::SharedFonts {
+    let shared = ferrum_render::Fonts::shared();
+    {
+        let mut f = shared.borrow_mut();
+        let files = [
+            "inter/Inter-Variable.ttf",
+            "inter/Inter-Italic-Variable.ttf",
+        ];
+        let faces = files
+            .iter()
+            .flat_map(|r| ferrum_text::read_faces(&font_file(r), r))
+            .collect::<Vec<_>>();
+        f.add_catalog(ferrum_text::SourceKind::Bundled, ferrum_text::group(faces));
+        for r in files {
+            f.load("Inter", r, font_file(r)).unwrap();
+        }
+    }
+    shared
+}
+
+/// Текст «Привет <мир> & co» Inter Bold 24 с трекингом 1 px; « & co» — красным.
+fn styled_text(p: &mut Page, family: &str) -> NodeId {
+    let mut props = TextProps::default();
+    props.style.size = 24.0;
+    props.style.font = FontName::new(family, "Bold");
+    props.style.letter_spacing = LetterSpacing::Px(1.0);
+    let content = TextContent {
+        runs: vec![
+            TextRun {
+                text: "Привет <мир>".into(),
+                attrs: TextAttrs::default(),
+            },
+            TextRun {
+                text: " & co\n".into(),
+                attrs: TextAttrs {
+                    fill: Some(Fill::solid(Color::rgba(255, 0, 0, 255))),
+                    ..Default::default()
+                },
+            },
+        ],
+    };
+    p.doc
+        .transact(p.page, vec![], |tx| {
+            let id = tx.create_node(None, None, NodeKind::Text)?;
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    text: Some(props.clone()),
+                    strokes: stroke(1.0, StrokeAlign::Outside),
+                    ..rect(10.0, 10.0, 300.0, 40.0)
+                },
+            )?;
+            tx.set_text_content(id, &content)?;
+            Ok(vec![id])
+        })
+        .unwrap()[0]
+}
+
+#[test]
+fn text_as_elements_or_outlines() {
+    let fonts = inter();
+    let mut p = Page::new();
+    let id = styled_text(&mut p, "Inter");
+    let scene = p.scene();
+    let mut r = Renderer::new();
+    r.set_fonts(fonts);
+    let mut run = |outline_text: bool| {
+        r.export_svg(
+            &scene,
+            &[id],
+            &NoImageBytes,
+            SvgOptions {
+                outline_text,
+                ids: false,
+            },
+            &ExportBudget::unlimited(),
+        )
+        .unwrap()
+    };
+    // Текстом: <text> со шрифтом, текст с экранированием читается обратно.
+    let svg = run(false);
+    let doc = Xml::parse(&svg).unwrap();
+    let texts: Vec<_> = by_tag(&doc, "text")
+        .into_iter()
+        .filter(|n| !n.ancestors().any(|a| a.tag_name().name() == "defs"))
+        .collect();
+    let filled: Vec<_> = texts
+        .iter()
+        .filter(|t| t.attribute("fill").is_some())
+        .collect();
+    // Прогон — элемент: участок другого цвета и смена письменности делят строку.
+    assert_eq!(filled.len(), 3, "по элементу на прогон");
+    let t = filled[0];
+    assert_eq!(t.attribute("font-family"), Some("Inter"));
+    assert_eq!(t.attribute("font-weight"), Some("700"));
+    assert_eq!(t.attribute("font-size"), Some("24"));
+    assert_eq!(t.attribute("letter-spacing"), Some("1"));
+    let spans: String = filled
+        .iter()
+        .flat_map(|t| t.children())
+        .map(|s| s.text().unwrap_or_default())
+        .collect();
+    assert_eq!(spans, "Привет <мир> & co");
+    assert_eq!(filled[1].attribute("fill"), Some("#FF0000"));
+    // Внешняя обводка текста — маской с тем же <text>.
+    assert_eq!(by_tag(&doc, "mask").len(), 3);
+    golden_svg("svg_text_elements", &svg);
+    // Кривыми: ни одного <text>, глифы — пути.
+    let svg = run(true);
+    let doc = Xml::parse(&svg).unwrap();
+    assert!(by_tag(&doc, "text").is_empty());
+    assert!(by_tag(&doc, "path")
+        .iter()
+        .any(|n| n.attribute("fill") == Some("#FF0000")));
+}
+
+/// Отсутствующий шрифт: текст разложен запасным Inter — так он и пишется.
+#[test]
+fn missing_font_is_written_with_the_fallback() {
+    let fonts = inter();
+    let mut p = Page::new();
+    let id = styled_text(&mut p, "Нет Такого");
+    let scene = p.scene();
+    let mut r = Renderer::new();
+    r.set_fonts(fonts);
+    let svg = r
+        .export_svg(
+            &scene,
+            &[id],
+            &NoImageBytes,
+            SvgOptions {
+                outline_text: false,
+                ids: false,
+            },
+            &ExportBudget::unlimited(),
+        )
+        .unwrap();
+    assert!(svg.contains("font-family=\"Inter\"") && !svg.contains("Нет Такого"));
+}
+
 /// Все `id` уникальны, а каждая ссылка `url(#…)` ведёт на `clipPath`, `mask` или
 /// `pattern`.
 #[track_caller]

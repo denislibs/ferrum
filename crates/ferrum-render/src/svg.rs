@@ -2,7 +2,7 @@
 //! «Export → SVG» в Figma. Узлы — элементы `<g>`, `<rect>`, `<ellipse>`,
 //! `<line>`, `<path>`; фрейм — `<g>` с обрезкой `<clipPath>` по своей форме,
 //! заливка под детьми и обводка над ними; векторы и булевы группы — пути их
-//! областей; текст — контуры глифов. Заливки — цвет (`fill` и `fill-opacity`) и
+//! областей; текст — контуры глифов («Текст кривыми») или элементы `<text>`. Заливки — цвет (`fill` и `fill-opacity`) и
 //! изображение (`<pattern>` с `<image>` — `data:` PNG, байты один раз на файл).
 //! Обводки — настоящие `stroke` с соединением и пределом угла; положение «внутри»
 //! — двойная толщина с `<clipPath>` по форме, «снаружи» — двойная толщина с
@@ -36,7 +36,8 @@ use crate::ExportError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SvgOptions {
     /// «Текст кривыми»: текст — контурами глифов (по умолчанию, как в Figma), без
-    /// него — элементы `<text>` со шрифтом (этап 5, задача 4).
+    /// него — элементы `<text>` со шрифтом (семейство, кегль, вес, курсив,
+    /// трекинг): текст можно править, но вид зависит от шрифтов у зрителя.
     pub outline_text: bool,
     /// «Атрибут id»: у элементов — `id` из имён слоёв (по умолчанию нет).
     pub ids: bool,
@@ -241,13 +242,43 @@ impl Place {
 /// Форма элемента в координатах узла.
 #[derive(Debug, Clone)]
 enum Form {
-    Rect { rect: Rect, radius: f64 },
+    Rect {
+        rect: Rect,
+        radius: f64,
+    },
     Ellipse(Rect),
     Line(f64),
     Path(BezPath, FillRule),
+    /// Текст элементом `<text>`: атрибуты шрифта, строки `(x, y, текст)` на базовой
+    /// линии и рамка (для маски внешней обводки).
+    Text {
+        font: String,
+        spans: Vec<(f64, f64, String)>,
+        bbox: Rect,
+    },
 }
 
 impl Form {
+    /// Элемент целиком с атрибутами `attrs` (краска, обрезка).
+    fn el(&self, p: &Place, attrs: &str) -> String {
+        let Form::Text { font, spans, .. } = self else {
+            return format!("{}{attrs}/>", self.open(p));
+        };
+        let mut s = format!("<text{font}{}{attrs}>", p.attr);
+        for (x, y, text) in spans {
+            let at = p.g * kurbo::Point::new(*x, *y);
+            let _ = write!(
+                s,
+                "<tspan x=\"{}\" y=\"{}\">{}</tspan>",
+                num(at.x),
+                num(at.y),
+                escape(text)
+            );
+        }
+        s.push_str("</text>");
+        s
+    }
+
     /// Открывающий тег без закрытия (`<rect … `): дальше — атрибуты краски и `/>`.
     fn open(&self, p: &Place) -> String {
         let g = p.g;
@@ -299,6 +330,7 @@ impl Form {
                 s.push_str(&p.attr);
                 s
             }
+            Form::Text { .. } => unreachable!("текст пишется целиком (`el`)"),
         }
     }
 
@@ -326,6 +358,7 @@ impl Form {
                 out
             }
             Form::Path(p, _) => p.clone(),
+            Form::Text { bbox, .. } => bbox.to_path(PATH_TOLERANCE),
         }
     }
 }
@@ -468,10 +501,14 @@ impl<'a> Writer<'a> {
                 self.check()?;
             }
             let n = self.scene.at(slot);
+            // Скрытый узел ничего не рисует: его прозрачность не проверяется.
+            if n.subtree_bounds.is_none() {
+                continue;
+            }
             if n.props.opacity.is_nan() {
                 return Err(ExportError::Write("прозрачность узла не число".to_string()));
             }
-            if n.subtree_bounds.is_none() || n.props.opacity <= 0.0 {
+            if n.props.opacity <= 0.0 {
                 continue;
             }
             let id = self.id_attr(&n.props);
@@ -504,8 +541,8 @@ impl<'a> Writer<'a> {
                         let form = form_of(n.geometry()).expect("у фрейма есть форма");
                         let _ = write!(
                             self.defs,
-                            "<clipPath id=\"{clip}\">{}/></clipPath>",
-                            form.open(&place)
+                            "<clipPath id=\"{clip}\">{}</clipPath>",
+                            form.el(&place, "")
                         );
                         let _ = write!(self.body, "<g clip-path=\"url(#{clip})\">");
                         stack.push(Visit::Close("</g>"));
@@ -561,12 +598,16 @@ impl<'a> Writer<'a> {
         area: Rect,
         place: &Place,
     ) -> Result<Option<String>, ExportError> {
+        // Скрытая заливка ничего не рисует: её прозрачность не проверяется.
+        if !f.visible {
+            return Ok(None);
+        }
         if f.opacity.is_nan() {
             return Err(ExportError::Write(
                 "прозрачность заливки не число".to_string(),
             ));
         }
-        if !f.visible || f.opacity <= 0.0 {
+        if f.opacity <= 0.0 {
             return Ok(None);
         }
         match f.kind {
@@ -650,7 +691,7 @@ impl<'a> Writer<'a> {
                         self.check_size(r.path.elements().len() * 24)?;
                         if let Some(attr) = self.paint(f, area, &place)? {
                             let form = Form::Path(r.path.clone(), r.rule);
-                            let _ = write!(self.body, "{}{attr}/>", form.open(&place));
+                            self.body.push_str(&form.el(&place, &attr));
                         }
                     }
                 }
@@ -663,7 +704,7 @@ impl<'a> Writer<'a> {
                 for f in &p.fills {
                     self.check_size(0)?;
                     if let Some(attr) = self.paint(f, area, &place)? {
-                        let _ = write!(self.body, "{}{attr}/>", form.open(&place));
+                        self.body.push_str(&form.el(&place, &attr));
                     }
                 }
             }
@@ -671,8 +712,8 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Текст контурами глифов: прогоны своей краской (участка или заливками
-    /// узла), украшения — прямоугольниками.
+    /// Текст контурами глифов («Текст кривыми») или элементами `<text>`: прогоны
+    /// своей краской (участка или заливками узла), украшения — прямоугольниками.
     fn text_fills(&mut self, slot: Slot, place: &Place) -> Result<(), ExportError> {
         let n = self.scene.at(slot);
         let p = &n.props;
@@ -684,12 +725,9 @@ impl<'a> Writer<'a> {
             return Ok(());
         }
         let area = Rect::new(0.0, 0.0, p.w.max(0.0), p.h.max(0.0));
-        for run in &layout.runs {
-            let glyphs = glyphs_path(&mut fonts, std::iter::once(run));
-            if glyphs.elements().is_empty() {
-                continue;
-            }
-            let form = Form::Path(glyphs, FillRule::NonZero);
+        let forms = text_forms(&mut fonts, &layout, self.opts.outline_text, area);
+        for (run, form) in layout.runs.iter().zip(forms) {
+            let Some(form) = form else { continue };
             let paints: Vec<&Fill> = match &run.paint {
                 Some(f) => vec![f],
                 None => p.fills.iter().collect(),
@@ -697,7 +735,7 @@ impl<'a> Writer<'a> {
             for f in paints {
                 self.check_size(form_len(&form))?;
                 if let Some(attr) = self.paint(f, area, place)? {
-                    let _ = write!(self.body, "{}{attr}/>", form.open(place));
+                    self.body.push_str(&form.el(place, &attr));
                 }
             }
         }
@@ -716,7 +754,8 @@ impl<'a> Writer<'a> {
                 rect: d.rect,
                 radius: 0.0,
             };
-            let _ = write!(self.body, "{}{attr}/>", form.open(place));
+            self.check_size(0)?;
+            self.body.push_str(&form.el(place, &attr));
         }
         Ok(())
     }
@@ -740,17 +779,30 @@ impl<'a> Writer<'a> {
         let place = self.place(slot);
         if p.kind == NodeKind::Text {
             let Some(t) = &p.text else { return Ok(()) };
-            let glyphs = {
+            let area = Rect::new(0.0, 0.0, p.w.max(0.0), p.h.max(0.0));
+            let forms: Vec<Form> = {
                 let mut fonts = self.fonts.borrow_mut();
                 let layout = fonts.layout(&LayoutRequest::for_node(t, &p.fills, p.w, p.h));
                 if layout.loading {
                     return Ok(());
                 }
-                glyphs_path(&mut fonts, layout.runs.iter())
+                if self.opts.outline_text {
+                    // Контуром — все глифы одним путём (как обводит рендер).
+                    vec![Form::Path(
+                        glyphs_path(&mut fonts, layout.runs.iter()),
+                        FillRule::NonZero,
+                    )]
+                } else {
+                    text_forms(&mut fonts, &layout, false, area)
+                        .into_iter()
+                        .flatten()
+                        .collect()
+                }
             };
-            let form = Form::Path(glyphs, FillRule::NonZero);
             for s in &strokes {
-                self.ring_stroke(&form, s, StrokeJoin::Miter, 4.0, &place, true)?;
+                for form in &forms {
+                    self.ring_stroke(form, s, StrokeJoin::Miter, 4.0, &place, true)?;
+                }
             }
             return Ok(());
         }
@@ -792,8 +844,8 @@ impl<'a> Writer<'a> {
                 let clip = self.fresh("clip");
                 let _ = write!(
                     self.defs,
-                    "<clipPath id=\"{clip}\">{}/></clipPath>",
-                    form.open(&local)
+                    "<clipPath id=\"{clip}\">{}</clipPath>",
+                    form.el(&local, "")
                 );
                 Ok(format!(" clip-path=\"url(#{clip})\""))
             }
@@ -808,8 +860,8 @@ impl<'a> Writer<'a> {
                     .inflate(reach, reach);
                 let _ = write!(
                     self.defs,
-                    "<mask id=\"{mask}\" maskUnits=\"userSpaceOnUse\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"><rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"white\"/>{}fill=\"black\"/></mask>",
-                    form.open(&local) + " ",
+                    "<mask id=\"{mask}\" maskUnits=\"userSpaceOnUse\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"><rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"white\"/>{}</mask>",
+                    form.el(&local, " fill=\"black\""),
                     x = num(b.x0),
                     y = num(b.y0),
                     w = num(b.width()),
@@ -855,7 +907,7 @@ impl<'a> Writer<'a> {
         if bind {
             attrs.push_str(&self.align_ref(form, align, w, miter, place)?);
         }
-        let _ = write!(self.body, "{}{attrs}/>", form.open(place));
+        self.body.push_str(&form.el(place, &attrs));
         Ok(())
     }
 
@@ -934,22 +986,17 @@ impl<'a> Writer<'a> {
         self.check_size(fill.elements().len() * 24 + lines.elements().len() * 24)?;
         if !fill.elements().is_empty() {
             let form = Form::Path(fill, FillRule::NonZero);
-            let _ = write!(
-                self.body,
-                "{}{}/>",
-                form.open(place),
-                color_attr("fill", color, 1.0)
-            );
+            self.body
+                .push_str(&form.el(place, &color_attr("fill", color, 1.0)));
         }
         if !lines.elements().is_empty() {
             let form = Form::Path(lines, FillRule::NonZero);
-            let _ = write!(
-                self.body,
-                "{}{} stroke-width=\"{}\"/>",
-                form.open(place),
+            let attrs = format!(
+                "{} stroke-width=\"{}\"",
                 color_attr("stroke", color, 1.0),
                 num(w)
             );
+            self.body.push_str(&form.el(place, &attrs));
         }
         if shared {
             self.body.push_str("</g>");
@@ -995,10 +1042,84 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Грубо: сколько байт займёт путь формы в файле (для проверки предела до записи).
+/// Имя семейства для `font-family`: буквы, цифры, пробелы и дефисы — как есть,
+/// иначе в кавычках.
+fn font_family(name: &str) -> String {
+    let plain = !name.is_empty()
+        && name.starts_with(|c: char| c.is_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == ' ' || c == '-');
+    if plain {
+        escape(name)
+    } else {
+        format!("'{}'", escape(&name.replace(['\\', '\''], "")))
+    }
+}
+
+/// Форма каждого прогона раскладки: контуром глифов (`outline`) или элементом
+/// `<text>` (шрифт, кегль, вес, курсив, ширина и трекинг прогона, строка от
+/// первого глифа на базовой линии). Пустой прогон — `None`.
+fn text_forms(
+    fonts: &mut ferrum_text::Fonts,
+    layout: &ferrum_text::TextLayout,
+    outline: bool,
+    area: Rect,
+) -> Vec<Option<Form>> {
+    layout
+        .runs
+        .iter()
+        .map(|run| {
+            if outline {
+                let glyphs = glyphs_path(fonts, std::iter::once(run));
+                return (!glyphs.elements().is_empty())
+                    .then_some(Form::Path(glyphs, FillRule::NonZero));
+            }
+            let first = run.glyphs.first()?;
+            let text = run.glyph_text();
+            if text.trim().is_empty() {
+                return None;
+            }
+            let f = &run.face;
+            let mut font = format!(
+                " xml:space=\"preserve\" style=\"white-space: pre\" font-family=\"{}\" font-size=\"{}\"",
+                font_family(&f.family),
+                num(run.size as f64)
+            );
+            if (f.weight - 400.0).abs() > 0.5 {
+                let _ = write!(font, " font-weight=\"{}\"", num(f.weight as f64));
+            }
+            if f.italic || run.skew.is_some() {
+                font.push_str(" font-style=\"italic\"");
+            }
+            if (f.stretch - 1.0).abs() > 1e-3 {
+                let _ = write!(font, " font-stretch=\"{}%\"", num(f.stretch as f64 * 100.0));
+            }
+            if run.letter_spacing != 0.0 {
+                let _ = write!(font, " letter-spacing=\"{}\"", num(run.letter_spacing as f64));
+            }
+            Some(Form::Text {
+                font,
+                spans: vec![(first.x as f64, first.y as f64, text.to_string())],
+                bbox: area,
+            })
+        })
+        .collect()
+}
+
+/// Грубо: сколько байт займёт форма в файле (для проверки предела до записи):
+/// путь — по числу элементов, текст — атрибуты шрифта и строки с худшим
+/// экранированием (`&quot;` — 6 байт на символ).
 fn form_len(form: &Form) -> usize {
     match form {
         Form::Path(p, _) => p.elements().len() * 24,
+        Form::Text { font, spans, .. } => {
+            font.len()
+                + spans
+                    .iter()
+                    .map(|(_, _, t)| t.len() * 6 + 64)
+                    .sum::<usize>()
+        }
         _ => 0,
     }
 }

@@ -60,6 +60,9 @@ pub struct PlacedGlyph {
     pub y: f32,
     /// Ширина глифа (шаг по базовой линии) — по ней ставится многоточие.
     pub advance: f32,
+    /// Байты кластера глифа в `GlyphRun::text` (экспорт текста в SVG и PDF: какие
+    /// символы он рисует).
+    pub cluster: [u32; 2],
 }
 
 /// Начертание прогона в коллекции шрифтов (для многоточия тем же шрифтом).
@@ -85,7 +88,21 @@ pub struct GlyphRun {
     pub paint: Option<Fill>,
     /// Синтетический наклон (курсив без своего файла), градусы.
     pub skew: Option<f32>,
+    /// Трекинг участка в пикселях (экспорт `<text>` в SVG).
+    pub letter_spacing: f32,
+    /// Текст прогона (с учётом регистра), на который ссылаются кластеры глифов.
+    pub text: String,
     pub glyphs: Vec<PlacedGlyph>,
+}
+
+impl GlyphRun {
+    /// Символы, которые рисуют оставшиеся глифы (обрезка с многоточием снимает
+    /// глифы с конца): от начала первого кластера до конца последнего.
+    pub fn glyph_text(&self) -> &str {
+        let lo = self.glyphs.iter().map(|g| g.cluster[0]).min().unwrap_or(0) as usize;
+        let hi = self.glyphs.iter().map(|g| g.cluster[1]).max().unwrap_or(0) as usize;
+        self.text.get(lo..hi.max(lo)).unwrap_or("")
+    }
 }
 
 /// Строка: прямоугольник (для LOD «полосой») и базовая линия.
@@ -391,7 +408,7 @@ impl Fonts {
             let first_line = out.lines.len();
             let first_caret = out.carets.len();
             let (first_run, first_deco) = (out.runs.len(), out.decorations.len());
-            collect_lines(&layout, &styles, indent_x, y, &mut out);
+            collect_lines(&layout, &text, &styles, indent_x, y, &mut out);
             collect_carets(&layout, &map, indent_x, y, &mut out.carets);
             if let (Some(m), Some(line)) = (marker, out.lines.get(first_line).copied()) {
                 let x = level as f64 * LIST_INDENT_EM * first.size;
@@ -518,7 +535,14 @@ impl Fonts {
         let mut layout: Layout<u32> = builder.build(marker);
         layout.break_all_lines(None);
         let mut tmp = TextLayout::default();
-        collect_lines(&layout, std::slice::from_ref(&plain), 0.0, 0.0, &mut tmp);
+        collect_lines(
+            &layout,
+            marker,
+            std::slice::from_ref(&plain),
+            0.0,
+            0.0,
+            &mut tmp,
+        );
         let Some(line) = tmp.lines.first() else {
             return;
         };
@@ -658,7 +682,14 @@ impl Fonts {
         let mut layout: Layout<u32> = builder.build(text);
         layout.break_all_lines(None);
         let mut tmp = TextLayout::default();
-        collect_lines(&layout, std::slice::from_ref(&style), 0.0, 0.0, &mut tmp);
+        collect_lines(
+            &layout,
+            text,
+            std::slice::from_ref(&style),
+            0.0,
+            0.0,
+            &mut tmp,
+        );
         let width = layout.width() as f64;
         let mut run = tmp.runs.into_iter().next()?;
         run.color = like.color;
@@ -725,6 +756,7 @@ fn push_style(
 /// Строки и глифы раскладки абзаца со сдвигом `(dx, dy)`.
 fn collect_lines(
     layout: &Layout<u32>,
+    text: &str,
     styles: &[SpanStyle],
     dx: f64,
     dy: f64,
@@ -733,6 +765,8 @@ fn collect_lines(
     for line in layout.lines() {
         let m = line.metrics();
         let mut line_color = None;
+        // Кластеры текущего шейпинга: его текст, глифы по порядку и сколько взято.
+        let mut shaped: Option<(Range<usize>, Vec<Range<usize>>, usize)> = None;
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
@@ -744,13 +778,41 @@ fn collect_lines(
             };
             let color = span.color;
             line_color.get_or_insert(color);
-            let glyphs: Vec<PlacedGlyph> = glyph_run
-                .positioned_glyphs()
-                .map(|g| PlacedGlyph {
+            // Текст прогона и кластер каждого глифа. Прогоны одного шейпинга
+            // (`Run`) идут на строке подряд в визуальном порядке, как и его
+            // кластеры: прогон берёт следующие свои глифы из общего списка.
+            let positioned: Vec<_> = glyph_run.positioned_glyphs().collect();
+            let key = run.text_range();
+            if shaped.as_ref().is_none_or(|(k, _, _)| *k != key) {
+                let mut list: Vec<Range<usize>> = Vec::new();
+                for c in run.visual_clusters() {
+                    let r = c.text_range();
+                    list.extend(std::iter::repeat_n(r, c.glyphs().count()));
+                }
+                shaped = Some((key, list, 0));
+            }
+            let (_, list, at) = shaped.as_mut().expect("задан выше");
+            let mine: Vec<Range<usize>> = match list.get(*at..*at + positioned.len()) {
+                Some(slice) => slice.to_vec(),
+                // Так быть не должно: каждому глифу — весь текст шейпинга.
+                None => vec![run.text_range(); positioned.len()],
+            };
+            *at += positioned.len();
+            let lo = mine.iter().map(|r| r.start).min().unwrap_or(0);
+            let hi = mine.iter().map(|r| r.end).max().unwrap_or(lo);
+            let run_text = text.get(lo..hi).unwrap_or("").to_string();
+            let clusters = mine
+                .iter()
+                .map(|r| [(r.start - lo) as u32, (r.end - lo) as u32]);
+            let glyphs: Vec<PlacedGlyph> = positioned
+                .into_iter()
+                .zip(clusters)
+                .map(|(g, cluster)| PlacedGlyph {
                     id: g.id,
                     x: g.x + dx as f32,
                     y: g.y + dy as f32,
                     advance: g.advance,
+                    cluster,
                 })
                 .collect();
             let fm = run.font_metrics();
@@ -796,6 +858,8 @@ fn collect_lines(
                 color,
                 paint: span.paint.clone(),
                 skew: synthesis.skew(),
+                letter_spacing: letter_spacing(span.letter_spacing, span.size),
+                text: run_text,
                 glyphs,
             });
         }
