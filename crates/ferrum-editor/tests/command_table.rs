@@ -50,8 +50,7 @@ fn every_command_has_group_keywords_and_unique_key() {
                 c.id
             );
         }
-        // Команды интерфейса — по ключу `ui.*`; у остальных ключ начинается с группы
-        // (кроме «Сохранить»: `file.save` — в группе «Файл»).
+        // Команды интерфейса — по ключу `ui.*`; у остальных ключ начинается с группы.
         assert_eq!(c.id.is_ui(), c.key.starts_with("ui."));
         if !c.id.is_ui() {
             assert_eq!(c.key.split('.').next(), Some(c.group.key()), "{:?}", c.id);

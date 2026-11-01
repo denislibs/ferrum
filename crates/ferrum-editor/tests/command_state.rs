@@ -266,6 +266,37 @@ fn view_and_settings_toggles() {
     );
 }
 
+/// Инструмент и вид не входят в `StatesKey`: ни одно состояние от них не
+/// зависит. Если зависимость появится, свежий расчёт здесь разойдётся с прежним —
+/// тогда нужно новое поле в `StatesKey`, иначе события о ней не придут.
+#[test]
+fn tool_and_view_do_not_change_states() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 50.0, 50.0);
+    fresh(&mut h);
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    let before = h.ed.command_states();
+    for t in [
+        ToolKind::Rect,
+        ToolKind::Ellipse,
+        ToolKind::Frame,
+        ToolKind::Text,
+        ToolKind::Hand,
+        ToolKind::Line,
+        ToolKind::Arrow,
+        ToolKind::Move,
+    ] {
+        h.ed.set_tool(t);
+        assert_eq!(h.ed.command_states(), before, "{t:?}");
+    }
+    for c in [C::ZoomIn, C::ZoomIn, C::ZoomOut, C::Zoom100, C::ZoomToFit] {
+        h.ed.execute(c);
+        assert_eq!(h.ed.command_states(), before, "{c:?}");
+    }
+    assert!(changed(&mut h).is_empty());
+}
+
 #[test]
 fn events_carry_only_changes_after_steps_that_may_change_them() {
     let mut h = H::new();
