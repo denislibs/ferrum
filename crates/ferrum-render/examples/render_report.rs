@@ -634,6 +634,149 @@ fn boolean_section(report: &mut Report) {
     );
 }
 
+/// Экспорт SVG и PDF (подсистема 3, этап 5): SVG страницы из 10 000 узлов
+/// (фреймы по 100: фрейм + 99 фигур) и PDF страницы с текстом и вектором в
+/// 100 000 точек — в worker'е, без замирания интерфейса; цель — секунда.
+fn export_section(report: &mut Report) {
+    use ferrum_render::{ExportBudget, SvgOptions};
+    use std::sync::Arc;
+    const SVG_NODES: usize = 10_000;
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    doc.transact(page, vec![], |p| fill(p, SVG_NODES).map(|_| vec![]))
+        .unwrap();
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let roots: Vec<NodeId> = scene.roots().iter().map(|s| scene.at(*s).id).collect();
+    let mut renderer = Renderer::new();
+    let runs: Vec<Duration> = (0..3)
+        .map(|_| {
+            let t = Instant::now();
+            std::hint::black_box(
+                renderer
+                    .export_svg(
+                        &scene,
+                        &roots,
+                        &doc.images,
+                        SvgOptions::default(),
+                        &ExportBudget::unlimited(),
+                    )
+                    .unwrap(),
+            );
+            t.elapsed()
+        })
+        .collect();
+    let svg = renderer
+        .export_svg(
+            &scene,
+            &roots,
+            &doc.images,
+            SvgOptions::default(),
+            &ExportBudget::unlimited(),
+        )
+        .unwrap();
+    report.gate(
+        "Экспорт SVG страницы из 10 000 узлов (медиана)",
+        median(runs),
+        1000.0,
+        "≤ 1000 мс",
+    );
+    report.info(
+        "Экспорт SVG 10 000 узлов: размер файла",
+        format!("{} КБ", svg.len() / 1024),
+    );
+
+    // PDF: фрейм с сотней текстов и вектором в 100 000 точек — страница.
+    let fonts = inter_fonts();
+    let net = ferrum_doc::fixture::wavy_network(100_000);
+    let b = ferrum_scene::vector::network_bounds(&net).unwrap();
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let frame = doc
+        .transact(page, vec![], |tx| {
+            let frame = tx.create_node(None, None, NodeKind::Frame)?;
+            tx.set_props(
+                frame,
+                &PropsPatch {
+                    w: Some(b.width().max(1440.0)),
+                    h: Some(b.height() + 2000.0),
+                    ..Default::default()
+                },
+            )?;
+            let v = tx.create_node(Some(frame), None, NodeKind::Vector)?;
+            tx.set_props(
+                v,
+                &PropsPatch {
+                    w: Some(b.width()),
+                    h: Some(b.height()),
+                    fills: Some(vec![ferrum_doc::Fill::solid(ferrum_doc::Color::SHAPE_GRAY)]),
+                    vector: Some(Arc::new(net.clone())),
+                    ..Default::default()
+                },
+            )?;
+            for i in 0..100 {
+                let t = tx.create_node(Some(frame), None, NodeKind::Text)?;
+                tx.set_props(
+                    t,
+                    &PropsPatch {
+                        y: Some(b.height() + 20.0 * i as f64),
+                        w: Some(1400.0),
+                        h: Some(20.0),
+                        text: Some(ferrum_doc::TextProps {
+                            sizing: ferrum_doc::TextSizing::Fixed,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )?;
+                tx.set_text_content(
+                    t,
+                    &ferrum_doc::TextContent::plain(&format!(
+                        "Строка {i}: съешь же ещё этих мягких французских булок, да выпей чаю"
+                    )),
+                )?;
+            }
+            Ok(vec![frame])
+        })
+        .unwrap()[0];
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    let mut renderer = Renderer::new();
+    renderer.set_fonts(fonts);
+    let runs: Vec<Duration> = (0..3)
+        .map(|_| {
+            let t = Instant::now();
+            std::hint::black_box(
+                renderer
+                    .export_pdf(
+                        &scene,
+                        &[vec![frame]],
+                        &NoImages,
+                        &ExportBudget::unlimited(),
+                    )
+                    .unwrap(),
+            );
+            t.elapsed()
+        })
+        .collect();
+    let pdf = renderer
+        .export_pdf(
+            &scene,
+            &[vec![frame]],
+            &NoImages,
+            &ExportBudget::unlimited(),
+        )
+        .unwrap();
+    report.gate(
+        "Экспорт PDF страницы: 100 текстов и вектор 100 000 точек (медиана)",
+        median(runs),
+        1000.0,
+        "≤ 1000 мс",
+    );
+    report.info(
+        "Экспорт PDF той же страницы: размер файла",
+        format!("{} КБ", pdf.len() / 1024),
+    );
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -1209,6 +1352,7 @@ fn main() {
         );
     }
 
+    export_section(&mut report);
     text_section(&mut report);
     vector_section(&mut report);
     curvy_vector_section(&mut report);
