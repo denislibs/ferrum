@@ -67,6 +67,6 @@ test('PDF без выделения — фрейм страницей своег
   expect(pages(pdf)).toBe(1);
   // Назад к PNG — снова масштаб и прежний файл.
   file = await exportAs(page, 'PNG');
-  expect(file.suggestedFilename()).toBe('Экран 0@1x.png');
+  expect(file.suggestedFilename()).toBe('Экран 0.png');
   await expect(page.getByRole('radiogroup', { name: 'Масштаб экспорта' })).toBeVisible();
 });

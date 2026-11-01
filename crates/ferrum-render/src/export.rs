@@ -123,6 +123,12 @@ pub(crate) fn export_items(
     Ok((items, area))
 }
 
+/// Область экспорта узла по идентификатору (как у `node_area`): страница PDF и
+/// её место в порядке чтения. Неизвестный узел — `None`.
+pub fn export_area(scene: &Scene, id: NodeId) -> Option<Rect> {
+    node_area(scene, scene.slot(id)?)
+}
+
 /// Область узла для экспорта: у фрейма — его форма, у остальных — границы с
 /// обводкой и потомками.
 pub(crate) fn node_area(scene: &Scene, slot: Slot) -> Option<Rect> {

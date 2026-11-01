@@ -9,7 +9,7 @@ use ferrum_editor::{
     browser_reserved, frame_presets, BindError, CommandId, DropTarget, KeymapError, NumField,
     PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
 };
-use ferrum_render::{decode_png, ExportBudget, ExportError, SvgOptions};
+use ferrum_render::{decode_png, export_area, ExportBudget, ExportError, SvgOptions};
 use ferrum_scene::shape::COORD_LIMIT;
 use serde_bytes::ByteBuf;
 
@@ -32,44 +32,59 @@ pub(super) fn event_name(name: &str) -> String {
 }
 
 /// Страницы PDF (спека подсистемы 3, раздел 11): у выделения — каждый узел
-/// верхнего уровня, без выделения — каждый фрейм верхнего уровня, а если
-/// фреймов нет — вся страница одной; по порядку чтения (сверху вниз, слева
-/// направо, как «Export frames to PDF» в Figma).
+/// верхнего уровня, без выделения — каждый видимый фрейм верхнего уровня, а
+/// если фреймов нет — вся страница одной; по порядку чтения (сверху вниз, слева
+/// направо, как «Export frames to PDF» в Figma). Скрытый фрейм страницей не
+/// становится (как в Figma: скрытый слой не экспортируется); фреймы есть, но
+/// все скрыты — `None`, «нечего экспортировать».
 fn pdf_pages(
     scene: &ferrum_scene::Scene,
     selection: &[NodeId],
     all: &[NodeId],
-) -> Vec<Vec<NodeId>> {
+) -> Option<Vec<Vec<NodeId>>> {
     let tops: Vec<NodeId> = if selection.is_empty() {
-        all.iter()
+        let frames: Vec<NodeId> = all
+            .iter()
             .copied()
             .filter(|id| {
                 scene
                     .node(*id)
                     .is_some_and(|n| n.props.kind == ferrum_doc::NodeKind::Frame)
             })
-            .collect()
+            .collect();
+        if frames.is_empty() {
+            return Some(vec![all.to_vec()]);
+        }
+        // Видимость — как у экспорта: у скрытого узла нет `subtree_bounds`.
+        let visible: Vec<NodeId> = frames
+            .into_iter()
+            .filter(|id| scene.node(*id).is_some_and(|n| n.subtree_bounds.is_some()))
+            .collect();
+        if visible.is_empty() {
+            return None;
+        }
+        visible
     } else {
         ferrum_editor::geometry::top_level(scene, selection)
     };
     if tops.is_empty() {
-        return vec![all.to_vec()];
+        return Some(vec![all.to_vec()]);
     }
+    // Ключ — та же область, что станет страницей (у фрейма — его форма, а не
+    // потомки, выступающие за край): строка — по верху с точностью до пикселя.
     let mut keyed: Vec<(f64, f64, NodeId)> = tops
         .into_iter()
         .map(|id| {
-            let b = scene
-                .node(id)
-                .and_then(|n| n.subtree_bounds.or(n.world_bounds))
-                .unwrap_or_default();
+            let b = export_area(scene, id).unwrap_or_default();
             (b.y0.round(), b.x0, id)
         })
         .collect();
     keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    keyed.into_iter().map(|(_, _, id)| vec![id]).collect()
+    Some(keyed.into_iter().map(|(_, _, id)| vec![id]).collect())
 }
 
-/// Имя файла экспорта: без знаков, которые не любят файловые системы.
+/// Имя файла экспорта: без знаков, которые не любят файловые системы; у PNG
+/// масштаб — суффиксом «@2x», при 1× — без него (как в Figma).
 fn file_name(name: &str, scale: f64, format: ExportFormat) -> String {
     let base: String = name
         .chars()
@@ -85,6 +100,8 @@ fn file_name(name: &str, scale: f64, format: ExportFormat) -> String {
     let base = base.trim();
     let base = if base.is_empty() { "Ferrum" } else { base };
     match format {
+        // Как в Figma: при 1× суффикса нет («Слой.png»), иначе «Слой@2x.png».
+        ExportFormat::Png if scale == 1.0 => format!("{base}.png"),
         ExportFormat::Png => format!("{base}@{scale}x.png"),
         _ => format!("{base}.{}", format.extension()),
     }
@@ -795,12 +812,14 @@ impl Core {
                     &budget,
                 )
                 .map(String::into_bytes),
-            ExportFormat::Pdf => {
-                let pages = pdf_pages(self.editor.scene(), &selection, &ids);
-                let provider = self.images.export_provider(&self.editor.document().images);
-                self.renderer
-                    .export_pdf(self.editor.scene(), &pages, &provider, &budget)
-            }
+            ExportFormat::Pdf => match pdf_pages(self.editor.scene(), &selection, &ids) {
+                Some(pages) => {
+                    let provider = self.images.export_provider(&self.editor.document().images);
+                    self.renderer
+                        .export_pdf(self.editor.scene(), &pages, &provider, &budget)
+                }
+                None => Err(ExportError::Empty),
+            },
         };
         if self.images.placeholders_served() != before {
             self.error("Не удалось экспортировать: часть изображений не читается или не помещается в память");
@@ -920,5 +939,123 @@ mod tests {
             assert_eq!(export_message(&e), text, "{e:?}");
         }
         assert!(export_message(&ExportError::TooLarge(20_000, 10)).starts_with("Картинка 20000×10"));
+    }
+
+    /// Имя файла: как в Figma — при 1× без «@1x», при 2× и 3× — с суффиксом;
+    /// у SVG и PDF масштаба в имени нет.
+    #[test]
+    fn png_name_has_no_suffix_at_1x() {
+        assert_eq!(file_name("Кнопка", 1.0, ExportFormat::Png), "Кнопка.png");
+        assert_eq!(file_name("Кнопка", 2.0, ExportFormat::Png), "Кнопка@2x.png");
+        assert_eq!(file_name("Кнопка", 3.0, ExportFormat::Png), "Кнопка@3x.png");
+        assert_eq!(file_name("Кнопка", 1.0, ExportFormat::Svg), "Кнопка.svg");
+        assert_eq!(file_name(" a/b ", 1.0, ExportFormat::Pdf), "a_b.pdf");
+    }
+
+    /// Страница документа с узлами для `pdf_pages`.
+    struct Doc {
+        doc: ferrum_doc::Document,
+        page: PageId,
+    }
+
+    impl Doc {
+        fn new() -> Doc {
+            let doc = ferrum_doc::Document::new();
+            let page = doc.pages()[0].0;
+            Doc { doc, page }
+        }
+
+        fn add(
+            &mut self,
+            parent: Option<NodeId>,
+            kind: ferrum_doc::NodeKind,
+            (x, y, w, h): (f64, f64, f64, f64),
+            visible: bool,
+        ) -> NodeId {
+            let patch = ferrum_doc::PropsPatch {
+                x: Some(x),
+                y: Some(y),
+                w: Some(w),
+                h: Some(h),
+                visible: Some(visible),
+                // Без обрезки: потомок за краем расширяет границы поддерева, а
+                // страница PDF — всё равно форма фрейма.
+                clip_content: (kind == ferrum_doc::NodeKind::Frame).then_some(false),
+                fills: Some(vec![Fill::solid(Color::BLACK)]),
+                ..Default::default()
+            };
+            self.doc
+                .transact(self.page, vec![], |p| {
+                    let id = p.create_node(parent, None, kind)?;
+                    p.set_props(id, &patch)?;
+                    Ok(vec![id])
+                })
+                .unwrap()[0]
+        }
+
+        fn scene(&mut self) -> ferrum_scene::Scene {
+            self.doc.take_changes(self.page);
+            ferrum_scene::Scene::from_page(self.doc.page(self.page).unwrap())
+        }
+    }
+
+    fn roots(scene: &ferrum_scene::Scene) -> Vec<NodeId> {
+        scene.roots().iter().map(|s| scene.at(*s).id).collect()
+    }
+
+    /// Порядок страниц — по области самой страницы (форме фрейма), а не по
+    /// потомку, что выступает за край фрейма вверх: сверху вниз, затем слева
+    /// направо. Фреймы созданы не по порядку чтения.
+    #[test]
+    fn pdf_pages_follow_reading_order_of_frame_shapes() {
+        use ferrum_doc::NodeKind::{Frame, Rect};
+        let mut d = Doc::new();
+        let low_right = d.add(None, Frame, (500.0, 400.0, 100.0, 100.0), true);
+        let top_right = d.add(None, Frame, (500.0, 0.0, 100.0, 100.0), true);
+        // Фрейм ниже `top_left`, но его потомок выступает вверх за край: по
+        // границам поддерева он оказался бы первым.
+        let low_left = d.add(None, Frame, (0.0, 200.0, 100.0, 100.0), true);
+        d.add(Some(low_left), Rect, (0.0, -500.0, 50.0, 550.0), true);
+        let top_left = d.add(None, Frame, (0.0, 0.0, 100.0, 100.0), true);
+        let scene = d.scene();
+        let pages = pdf_pages(&scene, &[], &roots(&scene)).unwrap();
+        assert_eq!(
+            pages,
+            [
+                vec![top_left],
+                vec![top_right],
+                vec![low_left],
+                vec![low_right]
+            ]
+        );
+        // С выделением — тот же порядок чтения.
+        let pages = pdf_pages(&scene, &[low_right, low_left, top_left], &roots(&scene)).unwrap();
+        assert_eq!(pages, [vec![top_left], vec![low_left], vec![low_right]]);
+    }
+
+    /// (поведение) Скрытый фрейм страницей не становится; фреймы есть, но все
+    /// скрыты — «нечего экспортировать», а не пустые страницы. Без фреймов —
+    /// вся страница одной.
+    #[test]
+    fn pdf_pages_skip_hidden_frames() {
+        use ferrum_doc::NodeKind::{Frame, Rect};
+        let mut d = Doc::new();
+        d.add(None, Frame, (0.0, 0.0, 100.0, 100.0), false);
+        d.add(None, Rect, (0.0, 300.0, 100.0, 100.0), true);
+        let scene = d.scene();
+        assert_eq!(pdf_pages(&scene, &[], &roots(&scene)), None);
+        let shown = d.add(None, Frame, (200.0, 0.0, 100.0, 100.0), true);
+        let scene = d.scene();
+        assert_eq!(
+            pdf_pages(&scene, &[], &roots(&scene)),
+            Some(vec![vec![shown]])
+        );
+        let mut d = Doc::new();
+        let only = d.add(None, Rect, (0.0, 0.0, 10.0, 10.0), true);
+        let scene = d.scene();
+        assert_eq!(
+            pdf_pages(&scene, &[], &roots(&scene)),
+            Some(vec![vec![only]])
+        );
     }
 }

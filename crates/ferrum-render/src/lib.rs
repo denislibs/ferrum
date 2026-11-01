@@ -30,7 +30,7 @@ pub use draw::{
     FrameStats, EVICT_AFTER_FRAMES, LOD_RECT_PX, LOD_SKIP_PX, RASTER_BUILDS_PER_FRAME,
     RASTER_BUILD_TIME_PER_FRAME, RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
-pub use export::{ExportBudget, EXPORT_TIME_MS, MAX_EXPORT_BYTES};
+pub use export::{export_area, ExportBudget, EXPORT_TIME_MS, MAX_EXPORT_BYTES};
 pub use ferrum_text::{Fonts, SharedFonts};
 #[cfg(feature = "gpu")]
 pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, GPU_ATLAS_SIDE};
