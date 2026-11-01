@@ -16,7 +16,7 @@ import { createEffect, createSignal, Index, Match, on, onCleanup, onMount, Show,
 import { Portal } from 'solid-js/web';
 import { EditorContext } from './context';
 import { Icon } from './icons';
-import { placeMenu, SUBMENU_DELAY_MS, typeAhead } from './menu-logic';
+import { EDGE, placeMenu, SUBMENU_DELAY_MS, typeAhead } from './menu-logic';
 import { shortcutLabel } from './shortcuts';
 
 export type MenuItem =
@@ -262,6 +262,9 @@ function Level(props: LevelProps): JSX.Element {
       mutate(() => {
         el.style.left = `${x}px`;
         el.style.top = `${y}px`;
+        // Высота — до низа окна от уже известного `top`: поиск может показать
+        // десятки пунктов, а место меню от их числа не зависит.
+        el.style.maxHeight = `${innerHeight - y - EDGE}px`;
         el.style.visibility = 'visible';
         placed = true;
         if (input) input.focus();

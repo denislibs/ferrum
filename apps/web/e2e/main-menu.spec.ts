@@ -188,6 +188,26 @@ test('подменю у нижнего края окна поднимается 
   expect(box.x).toBeGreaterThanOrEqual(item.x + item.width - 1);
 });
 
+test('поиск с десятками результатов: корневое меню не уходит за низ окна', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await openApp(page);
+  await page.getByRole('button', { name: 'Главное меню' }).click();
+  const menu = root(page);
+  await menu.getByRole('searchbox').fill('о');
+  await expect(menu.getByRole('menuitem').nth(20)).toBeAttached();
+  await menu.evaluate((el) => Promise.all(el.getAnimations().map((x) => x.finished)));
+  const box = (await menu.boundingBox())!;
+  expect(box.y + box.height).toBeLessThanOrEqual(420 - 8 + 0.5);
+  // End — последний пункт виден внутри окна.
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('End');
+  const last = menu.getByRole('menuitem').last();
+  await expect(last).toBeFocused();
+  const lb = (await last.boundingBox())!;
+  expect(lb.y + lb.height).toBeLessThanOrEqual(420 - 8 + 0.5);
+  expect(await warnings(page)).toEqual([]);
+});
+
 test('команды интерфейса: «Экспорт…» сочетанием, «О программе» и «Настройки…» из меню', async ({ page }) => {
   await openApp(page);
   await page.locator('canvas').click({ position: { x: 600, y: 40 } });
