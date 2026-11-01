@@ -34,8 +34,9 @@ use crate::input::{decode_all, Record};
 use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
-    Backend, Command, CommandStateDto, CoreEvent, CursorKind, Theme, Tool, MAX_DEMO_NODES,
-    MAX_DEMO_TEXTS, MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT, THUMB_WIDTH,
+    Backend, Command, CommandStateDto, CoreEvent, CursorKind, TextInputKindDto, Theme, Tool,
+    MAX_DEMO_NODES, MAX_DEMO_TEXTS, MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT,
+    THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -680,6 +681,21 @@ impl Core {
     /// Команда основного потока. Пока что-то ждёт шрифтов, команды, меняющие
     /// документ, выделение, камеру или правку, встают в очередь за ним
     /// (`waits_behind_fonts`): порядок действий пользователя сохраняется.
+    /// Вставка из системного буфера (Ctrl/Cmd+V приходит событием `paste`, мимо
+    /// `Editor::run`) подчиняется состоянию «Вставить»: недоступна — молчит, как
+    /// серый пункт меню (без сообщения, без шага, правка не кончается).
+    fn paste_disabled(&self, cmd: &Command) -> bool {
+        let paste = match cmd {
+            Command::Paste { .. } | Command::PasteImage { .. } => true,
+            Command::TextInput {
+                kind: TextInputKindDto::Paste,
+                ..
+            } => !self.editor.is_editing_text(),
+            _ => false,
+        };
+        paste && !self.editor.command_state(CommandId::Paste).enabled
+    }
+
     pub fn command(&mut self, cmd: Command) {
         if self.fonts_awaited() && waits_behind_fonts(&cmd) {
             self.wait(fonts::Waiting::Command(cmd));
@@ -690,6 +706,9 @@ impl Core {
     }
 
     fn run_command(&mut self, cmd: Command) {
+        if self.paste_disabled(&cmd) {
+            return;
+        }
         match cmd {
             Command::Open { bytes } => self.open(&bytes),
             Command::Demo { nodes } => self.demo(nodes),
