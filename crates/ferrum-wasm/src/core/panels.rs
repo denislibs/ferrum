@@ -4,18 +4,19 @@
 //! неверное — событие `Error` на русском, документ не меняется.
 
 use ferrum_doc::{Color, Fill, FillKind, NodeId, PageId, ScaleMode, Stroke, StrokeAlign};
+use ferrum_editor::scale::{Anchor, MAX_SCALE_FACTOR, MIN_SCALE_FACTOR};
 use ferrum_editor::{
     browser_reserved, frame_presets, BindError, CommandId, DropTarget, KeymapError, NumField,
     PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
 };
-use ferrum_render::decode_png;
+use ferrum_render::{decode_png, export_area, ExportBudget, ExportError, SvgOptions};
 use ferrum_scene::shape::COORD_LIMIT;
 use serde_bytes::ByteBuf;
 
 use super::Core;
 use crate::protocol::{
-    Align, Command, ConflictInfo, CoreEvent, DropPosition, Edit, EditPhase, Field, FillDto,
-    KeymapEntry, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
+    Align, Command, ConflictInfo, CoreEvent, DropPosition, Edit, EditPhase, ExportFormat, Field,
+    FillDto, KeymapEntry, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
     EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
 };
 use crate::summary::{cap_of, join_of, summarize, MAX_PAINTS};
@@ -30,8 +31,61 @@ pub(super) fn event_name(name: &str) -> String {
     name.chars().take(MAX_NAME_CHARS).collect()
 }
 
-/// Имя файла экспорта: без знаков, которые не любят файловые системы.
-fn file_name(name: &str, scale: f64) -> String {
+/// Страницы PDF (спека подсистемы 3, раздел 11): у выделения — каждый узел
+/// верхнего уровня, без выделения — каждый видимый фрейм верхнего уровня, а
+/// если фреймов нет — вся страница одной; по порядку чтения (сверху вниз, слева
+/// направо, как «Export frames to PDF» в Figma). Скрытый фрейм страницей не
+/// становится (как в Figma: скрытый слой не экспортируется); фреймы есть, но
+/// все скрыты — `None`, «нечего экспортировать».
+fn pdf_pages(
+    scene: &ferrum_scene::Scene,
+    selection: &[NodeId],
+    all: &[NodeId],
+) -> Option<Vec<Vec<NodeId>>> {
+    let tops: Vec<NodeId> = if selection.is_empty() {
+        let frames: Vec<NodeId> = all
+            .iter()
+            .copied()
+            .filter(|id| {
+                scene
+                    .node(*id)
+                    .is_some_and(|n| n.props.kind == ferrum_doc::NodeKind::Frame)
+            })
+            .collect();
+        if frames.is_empty() {
+            return Some(vec![all.to_vec()]);
+        }
+        // Видимость — как у экспорта: у скрытого узла нет `subtree_bounds`.
+        let visible: Vec<NodeId> = frames
+            .into_iter()
+            .filter(|id| scene.node(*id).is_some_and(|n| n.subtree_bounds.is_some()))
+            .collect();
+        if visible.is_empty() {
+            return None;
+        }
+        visible
+    } else {
+        ferrum_editor::geometry::top_level(scene, selection)
+    };
+    if tops.is_empty() {
+        return Some(vec![all.to_vec()]);
+    }
+    // Ключ — та же область, что станет страницей (у фрейма — его форма, а не
+    // потомки, выступающие за край): строка — по верху с точностью до пикселя.
+    let mut keyed: Vec<(f64, f64, NodeId)> = tops
+        .into_iter()
+        .map(|id| {
+            let b = export_area(scene, id).unwrap_or_default();
+            (b.y0.round(), b.x0, id)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    Some(keyed.into_iter().map(|(_, _, id)| vec![id]).collect())
+}
+
+/// Имя файла экспорта: без знаков, которые не любят файловые системы; у PNG
+/// масштаб — суффиксом «@2x», при 1× — без него (как в Figma).
+fn file_name(name: &str, scale: f64, format: ExportFormat) -> String {
     let base: String = name
         .chars()
         .take(MAX_NAME_CHARS)
@@ -45,7 +99,43 @@ fn file_name(name: &str, scale: f64) -> String {
         .collect();
     let base = base.trim();
     let base = if base.is_empty() { "Ferrum" } else { base };
-    format!("{base}@{scale}x.png")
+    match format {
+        // Как в Figma: при 1× суффикса нет («Слой.png»), иначе «Слой@2x.png».
+        ExportFormat::Png if scale == 1.0 => format!("{base}.png"),
+        ExportFormat::Png => format!("{base}@{scale}x.png"),
+        _ => format!("{base}.{}", format.extension()),
+    }
+}
+
+/// Ошибка экспорта для интерфейса: законченная фраза по-русски. Тексты
+/// `TooBig`, `Timeout`, `Empty` и `TooLarge` уже говорят, что не так и что
+/// делать, — без приставки «Не удалось экспортировать».
+fn export_message(e: &ExportError) -> String {
+    match e {
+        ExportError::TooBig
+        | ExportError::Timeout
+        | ExportError::Empty
+        | ExportError::TooLarge(..) => e.to_string(),
+        ExportError::NotFound => "Нечего экспортировать: слой не найден".to_string(),
+        ExportError::BadScale => "Масштаб экспорта — 1×, 2× или 3×".to_string(),
+        ExportError::Write(why) => format!("Не удалось экспортировать: файл не собран ({why})"),
+        ExportError::Encode(why) => {
+            format!("Не удалось экспортировать: PNG не закодирован ({why})")
+        }
+    }
+}
+
+/// Ошибка «Копировать как SVG»: те же законченные фразы, что у экспорта (без
+/// второй приставки «Не удалось скопировать: Нечего экспортировать…»); свои —
+/// только предел буфера обмена и сбой сборки.
+pub(super) fn copy_svg_message(e: &ExportError) -> String {
+    match e {
+        ExportError::TooBig => {
+            "Не удалось скопировать: SVG больше 64 МБ — экспортируйте его в файл".to_string()
+        }
+        ExportError::Write(why) => format!("Не удалось скопировать: SVG не собран ({why})"),
+        e => export_message(e),
+    }
 }
 
 fn field(f: Field) -> NumField {
@@ -182,6 +272,19 @@ fn panel_edit(e: &Edit) -> Result<PanelEdit, String> {
                 cap_end: cap_end.map(cap_of),
                 join: join.map(join_of),
                 miter_limit: *miter_limit,
+            }
+        }
+        Edit::Scale { factor, anchor } => {
+            // Недоверенный ввод: вне пределов — отказ (панель зажимает сама).
+            if !(factor.is_finite() && (MIN_SCALE_FACTOR..=MAX_SCALE_FACTOR).contains(factor)) {
+                return Err("Масштаб — от 1 до 10 000 %".into());
+            }
+            let Some(anchor) = Anchor::new(anchor[0], anchor[1]) else {
+                return Err("Точка масштаба — угол, середина стороны или центр рамки".into());
+            };
+            PanelEdit::Scale {
+                factor: *factor,
+                anchor,
             }
         }
     })
@@ -447,7 +550,18 @@ impl Core {
                     self.error("Неверный масштаб");
                 }
             }
-            Command::Export { scale } => self.export(scale),
+            Command::Export {
+                scale,
+                format,
+                outline_text,
+                svg_ids,
+            } => {
+                let svg = SvgOptions {
+                    outline_text: outline_text.unwrap_or(true),
+                    ids: svg_ids.unwrap_or(false),
+                };
+                self.export(scale, format.unwrap_or_default(), svg)
+            }
             Command::PasteImage { bytes } => self.paste_image(bytes),
             Command::Bind {
                 command,
@@ -649,7 +763,7 @@ impl Core {
         self.events.push(CoreEvent::Presets { presets });
     }
 
-    fn export(&mut self, scale: f64) {
+    fn export(&mut self, scale: f64, format: ExportFormat, svg: SvgOptions) {
         if !EXPORT_SCALES.contains(&scale) {
             self.error("Масштаб экспорта — 1×, 2× или 3×");
             return;
@@ -682,7 +796,7 @@ impl Core {
                     .unwrap_or_default(),
                 _ => "Выделение".to_string(),
             };
-            (selection, name)
+            (selection.clone(), name)
         };
         if ids.is_empty() {
             self.error("Нечего экспортировать: страница пуста");
@@ -694,20 +808,43 @@ impl Core {
             return;
         }
         let before = self.images.placeholders_served();
-        let provider = self.images.export_provider(&self.editor.document().images);
-        let result = self
-            .renderer
-            .export_png_nodes(self.editor.scene(), &ids, scale, &provider);
+        let budget = ExportBudget::new(self.export_clock.as_deref());
+        let result = match format {
+            ExportFormat::Png => {
+                let provider = self.images.export_provider(&self.editor.document().images);
+                self.renderer
+                    .export_png_nodes(self.editor.scene(), &ids, scale, &provider)
+            }
+            ExportFormat::Svg => self
+                .renderer
+                .export_svg(
+                    self.editor.scene(),
+                    &ids,
+                    &self.editor.document().images,
+                    svg,
+                    &budget,
+                )
+                .map(String::into_bytes),
+            ExportFormat::Pdf => match pdf_pages(self.editor.scene(), &selection, &ids) {
+                Some(pages) => {
+                    let provider = self.images.export_provider(&self.editor.document().images);
+                    self.renderer
+                        .export_pdf(self.editor.scene(), &pages, &provider, &budget)
+                }
+                None => Err(ExportError::Empty),
+            },
+        };
         if self.images.placeholders_served() != before {
             self.error("Не удалось экспортировать: часть изображений не читается или не помещается в память");
             return;
         }
         match result {
-            Ok(png) => self.events.push(CoreEvent::Exported {
-                name: file_name(&name, scale),
-                bytes: ByteBuf::from(png),
+            Ok(bytes) => self.events.push(CoreEvent::Exported {
+                name: file_name(&name, scale, format),
+                bytes: ByteBuf::from(bytes),
+                mime: format.mime().to_string(),
             }),
-            Err(e) => self.error(format!("Не удалось экспортировать: {e}")),
+            Err(e) => self.error(export_message(&e)),
         }
     }
 
@@ -773,5 +910,190 @@ impl Core {
                 background,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Каждая ошибка экспорта — законченная фраза по-русски, без двойного «Не
+    /// удалось экспортировать: Экспорт…» и без паники (решение 24 плана).
+    #[test]
+    fn export_errors_are_clear_russian_messages() {
+        let cases = [
+            (
+                ExportError::TooBig,
+                "Экспорт слишком велик: файл или его содержимое больше 256 МБ. Экспортируйте часть документа",
+            ),
+            (
+                ExportError::Timeout,
+                "Экспорт идёт дольше 30 секунд и прерван: экспортируйте часть документа",
+            ),
+            (
+                ExportError::Empty,
+                "Нечего экспортировать: у узла нулевой размер или он скрыт",
+            ),
+            (
+                ExportError::NotFound,
+                "Нечего экспортировать: слой не найден",
+            ),
+            (ExportError::BadScale, "Масштаб экспорта — 1×, 2× или 3×"),
+            (
+                ExportError::Write("шрифт не встраивается".into()),
+                "Не удалось экспортировать: файл не собран (шрифт не встраивается)",
+            ),
+            (
+                ExportError::Encode("нет памяти".into()),
+                "Не удалось экспортировать: PNG не закодирован (нет памяти)",
+            ),
+        ];
+        for (e, text) in cases {
+            assert_eq!(export_message(&e), text, "{e:?}");
+        }
+        assert!(export_message(&ExportError::TooLarge(20_000, 10)).starts_with("Картинка 20000×10"));
+    }
+
+    /// Ошибки «Копировать как SVG» — без двойной приставки.
+    #[test]
+    fn copy_svg_errors_have_one_prefix() {
+        assert_eq!(
+            copy_svg_message(&ExportError::Timeout),
+            ExportError::Timeout.to_string()
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::Empty),
+            ExportError::Empty.to_string()
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::TooBig),
+            "Не удалось скопировать: SVG больше 64 МБ — экспортируйте его в файл"
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::Write("x".into())),
+            "Не удалось скопировать: SVG не собран (x)"
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::NotFound),
+            "Нечего экспортировать: слой не найден"
+        );
+    }
+
+    /// Имя файла: как в Figma — при 1× без «@1x», при 2× и 3× — с суффиксом;
+    /// у SVG и PDF масштаба в имени нет.
+    #[test]
+    fn png_name_has_no_suffix_at_1x() {
+        assert_eq!(file_name("Кнопка", 1.0, ExportFormat::Png), "Кнопка.png");
+        assert_eq!(file_name("Кнопка", 2.0, ExportFormat::Png), "Кнопка@2x.png");
+        assert_eq!(file_name("Кнопка", 3.0, ExportFormat::Png), "Кнопка@3x.png");
+        assert_eq!(file_name("Кнопка", 1.0, ExportFormat::Svg), "Кнопка.svg");
+        assert_eq!(file_name(" a/b ", 1.0, ExportFormat::Pdf), "a_b.pdf");
+    }
+
+    /// Страница документа с узлами для `pdf_pages`.
+    struct Doc {
+        doc: ferrum_doc::Document,
+        page: PageId,
+    }
+
+    impl Doc {
+        fn new() -> Doc {
+            let doc = ferrum_doc::Document::new();
+            let page = doc.pages()[0].0;
+            Doc { doc, page }
+        }
+
+        fn add(
+            &mut self,
+            parent: Option<NodeId>,
+            kind: ferrum_doc::NodeKind,
+            (x, y, w, h): (f64, f64, f64, f64),
+            visible: bool,
+        ) -> NodeId {
+            let patch = ferrum_doc::PropsPatch {
+                x: Some(x),
+                y: Some(y),
+                w: Some(w),
+                h: Some(h),
+                visible: Some(visible),
+                // Без обрезки: потомок за краем расширяет границы поддерева, а
+                // страница PDF — всё равно форма фрейма.
+                clip_content: (kind == ferrum_doc::NodeKind::Frame).then_some(false),
+                fills: Some(vec![Fill::solid(Color::BLACK)]),
+                ..Default::default()
+            };
+            self.doc
+                .transact(self.page, vec![], |p| {
+                    let id = p.create_node(parent, None, kind)?;
+                    p.set_props(id, &patch)?;
+                    Ok(vec![id])
+                })
+                .unwrap()[0]
+        }
+
+        fn scene(&mut self) -> ferrum_scene::Scene {
+            self.doc.take_changes(self.page);
+            ferrum_scene::Scene::from_page(self.doc.page(self.page).unwrap())
+        }
+    }
+
+    fn roots(scene: &ferrum_scene::Scene) -> Vec<NodeId> {
+        scene.roots().iter().map(|s| scene.at(*s).id).collect()
+    }
+
+    /// Порядок страниц — по области самой страницы (форме фрейма), а не по
+    /// потомку, что выступает за край фрейма вверх: сверху вниз, затем слева
+    /// направо. Фреймы созданы не по порядку чтения.
+    #[test]
+    fn pdf_pages_follow_reading_order_of_frame_shapes() {
+        use ferrum_doc::NodeKind::{Frame, Rect};
+        let mut d = Doc::new();
+        let low_right = d.add(None, Frame, (500.0, 400.0, 100.0, 100.0), true);
+        let top_right = d.add(None, Frame, (500.0, 0.0, 100.0, 100.0), true);
+        // Фрейм ниже `top_left`, но его потомок выступает вверх за край: по
+        // границам поддерева он оказался бы первым.
+        let low_left = d.add(None, Frame, (0.0, 200.0, 100.0, 100.0), true);
+        d.add(Some(low_left), Rect, (0.0, -500.0, 50.0, 550.0), true);
+        let top_left = d.add(None, Frame, (0.0, 0.0, 100.0, 100.0), true);
+        let scene = d.scene();
+        let pages = pdf_pages(&scene, &[], &roots(&scene)).unwrap();
+        assert_eq!(
+            pages,
+            [
+                vec![top_left],
+                vec![top_right],
+                vec![low_left],
+                vec![low_right]
+            ]
+        );
+        // С выделением — тот же порядок чтения.
+        let pages = pdf_pages(&scene, &[low_right, low_left, top_left], &roots(&scene)).unwrap();
+        assert_eq!(pages, [vec![top_left], vec![low_left], vec![low_right]]);
+    }
+
+    /// (поведение) Скрытый фрейм страницей не становится; фреймы есть, но все
+    /// скрыты — «нечего экспортировать», а не пустые страницы. Без фреймов —
+    /// вся страница одной.
+    #[test]
+    fn pdf_pages_skip_hidden_frames() {
+        use ferrum_doc::NodeKind::{Frame, Rect};
+        let mut d = Doc::new();
+        d.add(None, Frame, (0.0, 0.0, 100.0, 100.0), false);
+        d.add(None, Rect, (0.0, 300.0, 100.0, 100.0), true);
+        let scene = d.scene();
+        assert_eq!(pdf_pages(&scene, &[], &roots(&scene)), None);
+        let shown = d.add(None, Frame, (200.0, 0.0, 100.0, 100.0), true);
+        let scene = d.scene();
+        assert_eq!(
+            pdf_pages(&scene, &[], &roots(&scene)),
+            Some(vec![vec![shown]])
+        );
+        let mut d = Doc::new();
+        let only = d.add(None, Rect, (0.0, 0.0, 10.0, 10.0), true);
+        let scene = d.scene();
+        assert_eq!(
+            pdf_pages(&scene, &[], &roots(&scene)),
+            Some(vec![vec![only]])
+        );
     }
 }

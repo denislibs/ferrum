@@ -22,3 +22,8 @@ blake3.workspace = true
 parley.workspace = true
 skrifa.workspace = true
 thiserror.workspace = true
+krilla.workspace = true
+
+[dev-dependencies]
+roxmltree.workspace = true
+flate2.workspace = true

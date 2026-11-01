@@ -401,10 +401,29 @@ fn export_copy_and_thumbnail_do_not_leave_loading_text_out() {
     let mut c = core();
     c.command(Command::DemoText { texts: 100 });
     let loading = c.take_events();
-    c.command(Command::Export { scale: 1.0 });
+    c.command(Command::Export {
+        scale: 1.0,
+        format: None,
+        outline_text: None,
+        svg_ids: None,
+    });
     let ev = c.take_events();
     assert_eq!(errors_of(&ev), [STILL_LOADING]);
     assert!(!ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+    // SVG и PDF — так же (решение 24): текст без шрифта в файл не попал бы.
+    for format in [ExportFormat::Svg, ExportFormat::Pdf] {
+        for outline_text in [true, false] {
+            c.command(Command::Export {
+                scale: 1.0,
+                format: Some(format),
+                outline_text: Some(outline_text),
+                svg_ids: None,
+            });
+            let ev = c.take_events();
+            assert_eq!(errors_of(&ev), [STILL_LOADING], "{format:?}");
+            assert!(!ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+        }
+    }
     c.command(Command::Execute {
         command: "edit.select_all".into(),
     });
@@ -416,6 +435,14 @@ fn export_copy_and_thumbnail_do_not_leave_loading_text_out() {
     assert!(!ev
         .iter()
         .any(|e| matches!(e, CoreEvent::ClipboardPng { .. })));
+    c.command(Command::Execute {
+        command: "edit.copy_svg".into(),
+    });
+    let ev = c.take_events();
+    assert_eq!(errors_of(&ev), [STILL_LOADING]);
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ClipboardSvg { .. })));
     // Превью: прежнее остаётся.
     c.command(Command::Snapshot { thumbnail: true });
     let ev = c.take_events();
@@ -430,10 +457,30 @@ fn export_copy_and_thumbnail_do_not_leave_loading_text_out() {
     // Шрифты пришли — всё работает.
     serve(&mut c, &loading);
     c.take_events();
-    c.command(Command::Export { scale: 1.0 });
+    c.command(Command::Export {
+        scale: 1.0,
+        format: None,
+        outline_text: None,
+        svg_ids: None,
+    });
     let ev = c.take_events();
     assert!(errors_of(&ev).is_empty(), "{ev:?}");
     assert!(ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+    for format in [ExportFormat::Svg, ExportFormat::Pdf] {
+        c.command(Command::Export {
+            scale: 1.0,
+            format: Some(format),
+            outline_text: Some(false),
+            svg_ids: None,
+        });
+        let ev = c.take_events();
+        assert!(
+            errors_of(&ev).is_empty(),
+            "{format:?}: {:?}",
+            errors_of(&ev)
+        );
+        assert!(ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+    }
     c.command(Command::Snapshot { thumbnail: true });
     let ev = c.take_events();
     assert!(ev.iter().any(|e| matches!(
@@ -453,7 +500,12 @@ fn export_contains_text_pixels_once_fonts_are_loaded() {
     let events = c.take_events();
     serve(&mut c, &events);
     c.take_events();
-    c.command(Command::Export { scale: 1.0 });
+    c.command(Command::Export {
+        scale: 1.0,
+        format: None,
+        outline_text: None,
+        svg_ids: None,
+    });
     let ev = c.take_events();
     let bytes = ev
         .iter()

@@ -133,6 +133,37 @@ test('копировать как PNG кладёт картинку в буфе�
   expect(size).toEqual([120, 80]);
 });
 
+test('копировать как SVG: текст и image/svg+xml из меню холста', async ({ page, browserName }) => {
+  await openApp(page);
+  await selectShape(page);
+  const at = await appScreen(page, await live(page), 200, 40);
+  await page.mouse.click(at.x, at.y, { button: 'right' });
+  await page.getByRole('menu').getByRole('menuitem', { name: /Копировать как SVG/ }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Скопировано как SVG' })).toBeVisible();
+  const got = await page.evaluate(async () => {
+    const item = (await navigator.clipboard.read())[0];
+    const text = await (await item.getType('text/plain')).text();
+    const svg = item.types.includes('image/svg+xml') ? await (await item.getType('image/svg+xml')).text() : null;
+    return { text, svg, types: item.types };
+  });
+  // «Слой 1» 120 × 80: разбирается как SVG того же размера.
+  expect(got.text).toMatch(/^<svg width="120" height="80" viewBox="0 0 120 80"/);
+  const size = await page.evaluate((t) => {
+    const doc = new DOMParser().parseFromString(t, 'image/svg+xml');
+    return doc.querySelector('parsererror') ? null : [doc.documentElement.getAttribute('width'), doc.documentElement.getAttribute('height')];
+  }, got.text);
+  expect(size).toEqual(['120', '80']);
+  expect(got.types).toContain('text/plain');
+  if (browserName === 'chromium') {
+    // Chromium (124+) записывает image/svg+xml, очистив разметку: размер на месте.
+    expect(got.types).toContain('image/svg+xml');
+    expect(got.svg).toMatch(/<svg[^>]*width="120"[^>]*height="80"/);
+  } else {
+    // Остальные движки — только обычный текст.
+    expect(got.svg).toBeNull();
+  }
+});
+
 test('в поле ввода копирование, вырезание и вставка — обычный текст', async ({ page }) => {
   await openApp(page);
   await selectShape(page);

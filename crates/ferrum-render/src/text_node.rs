@@ -85,7 +85,10 @@ fn glyph_transform(fonts: &mut Fonts, run: &GlyphRun, x: f32, y: f32) -> Affine 
 
 /// Контур глифов прогонов одним путём в координатах узла (заливка изображением
 /// и обводка).
-fn glyphs_path<'a>(fonts: &mut Fonts, runs: impl Iterator<Item = &'a GlyphRun>) -> BezPath {
+pub(crate) fn glyphs_path<'a>(
+    fonts: &mut Fonts,
+    runs: impl Iterator<Item = &'a GlyphRun>,
+) -> BezPath {
     let mut out = BezPath::new();
     for run in runs {
         for g in &run.glyphs {
@@ -130,7 +133,8 @@ fn text_paths(fonts: &mut Fonts, p: &Props) -> Option<(BezPath, BezPath)> {
 }
 
 /// Заливка глифов прогона краской `paint`. Изображение — по рамке узла `area`;
-/// `false` — картинки ещё нет (нарисована заглушка).
+/// `false` — картинки ещё нет (нарисована заглушка). `as_text` — сплошную краску
+/// можно отдать бэкенду настоящим текстом (PDF); иначе — контуры глифов.
 #[allow(clippy::too_many_arguments)]
 fn fill_run(
     backend: &mut impl RenderBackend,
@@ -141,6 +145,7 @@ fn fill_run(
     to_device: Affine,
     alpha: f32,
     images: &dyn ImageProvider,
+    as_text: bool,
 ) -> bool {
     // Скрытая или прозрачная заливка не рисует ничего — и для участка тоже
     // (не откатывается ни к заливкам узла, ни к чёрному).
@@ -154,7 +159,12 @@ fn fill_run(
         (FillKind::Solid, _) => None,
     };
     let Some(hash) = image else {
-        backend.set_color(color(paint.color).multiply_alpha(a));
+        let c = color(paint.color).multiply_alpha(a);
+        // Бэкенд с настоящим текстом (PDF) рисует прогон сам.
+        if as_text && backend.fill_glyphs(run, to_device, c) {
+            return true;
+        }
+        backend.set_color(c);
         for g in &run.glyphs {
             let path = fonts.outline(&run.font, g.id, &run.coords);
             if path.elements().is_empty() {
@@ -212,13 +222,22 @@ pub(crate) fn paint_glyphs(
         .filter(|s| s.width > 0.0 && s.color.a > 0)
         .collect();
     let outline = (!strokes.is_empty()).then(|| glyphs_path(fonts, layout.runs.iter()));
+    // Настоящим текстом (PDF) прогон пишется один раз — верхней сплошной
+    // заливкой; нижние — контурами, как на экране: иначе поиск и копирование
+    // находили бы текст по разу на заливку.
+    let text_fill = fills.iter().rposition(|f| f.kind == FillKind::Solid);
     let mut ready = true;
     for run in &layout.runs {
         match &run.paint {
-            Some(p) => ready &= fill_run(backend, fonts, run, p, area, to_device, alpha, images),
+            Some(p) => {
+                ready &= fill_run(backend, fonts, run, p, area, to_device, alpha, images, true)
+            }
             None => {
-                for f in &fills {
-                    ready &= fill_run(backend, fonts, run, f, area, to_device, alpha, images);
+                for (i, f) in fills.iter().enumerate() {
+                    let as_text = Some(i) == text_fill;
+                    ready &= fill_run(
+                        backend, fonts, run, f, area, to_device, alpha, images, as_text,
+                    );
                 }
             }
         }

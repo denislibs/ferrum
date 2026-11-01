@@ -7,14 +7,17 @@ mod camera;
 mod clock;
 mod display;
 mod draw;
+mod export;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod image;
 mod overlay;
+mod pdf;
+mod svg;
 mod text;
 mod text_node;
 
-use ferrum_doc::{NodeId, NodeKind};
+use ferrum_doc::NodeId;
 use ferrum_scene::Scene;
 use kurbo::{Affine, Rect};
 
@@ -27,6 +30,7 @@ pub use draw::{
     FrameStats, EVICT_AFTER_FRAMES, LOD_RECT_PX, LOD_SKIP_PX, RASTER_BUILDS_PER_FRAME,
     RASTER_BUILD_TIME_PER_FRAME, RASTER_CACHE_BYTES, RASTER_MAX_PX, RASTER_MAX_SCALE,
 };
+pub use export::{export_area, ExportBudget, EXPORT_TIME_MS, MAX_EXPORT_BYTES};
 pub use ferrum_text::{Fonts, SharedFonts};
 #[cfg(feature = "gpu")]
 pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, GPU_ATLAS_SIDE};
@@ -36,6 +40,8 @@ pub use overlay::{
     HANDLE_SIZE, LABEL_SIZE, MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, TEXT_SELECTION_ALPHA,
     VECTOR_HANDLE_RADIUS, VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
 };
+pub use pdf::MAX_PDF_SIDE;
+pub use svg::{ImageBytes, NoImageBytes, SvgOptions};
 pub use text::{Label, TextEngine, ONEST};
 pub use text_node::{
     text_glyphs_outline, text_outline, TEXT_GREEK_ALPHA, TEXT_LAYOUT_TIME_PER_FRAME, TEXT_LOD_PX,
@@ -63,6 +69,12 @@ pub enum ExportError {
     TooLarge(u32, u32),
     #[error("Не удалось закодировать PNG: {0}")]
     Encode(String),
+    #[error("Экспорт слишком велик: файл или его содержимое больше 256 МБ. Экспортируйте часть документа")]
+    TooBig,
+    #[error("Экспорт идёт дольше 30 секунд и прерван: экспортируйте часть документа")]
+    Timeout,
+    #[error("Не удалось собрать файл: {0}")]
+    Write(String),
 }
 
 /// Рендерер одного холста: кэши списков отрисовки, растров и шрифтов живут между кадрами.
@@ -232,58 +244,8 @@ impl Renderer {
         if !(scale.is_finite() && scale > 0.0) {
             return Err(ExportError::BadScale);
         }
-        let mut items = Vec::with_capacity(ids.len());
-        let mut known = false;
-        for id in ids {
-            let Some(slot) = scene.slot(*id) else {
-                continue;
-            };
-            known = true;
-            let n = scene.at(slot);
-            // Скрытый узел (и узел без видимого содержимого) картинки не даёт. Скрытые
-            // предки здесь не проверяются: скрытый родитель скрывает всё поддерево,
-            // так что `subtree_bounds` у потомка уже пусто.
-            if n.subtree_bounds.is_none() {
-                continue;
-            }
-            let own = match (n.props.kind, n.local_bounds) {
-                (NodeKind::Frame, Some(b)) => Some(n.world.transform_rect_bbox(b)),
-                _ => match (n.world_bounds, n.subtree_bounds) {
-                    (Some(a), Some(b)) => Some(a.union(b)),
-                    (a, b) => a.or(b),
-                },
-            };
-            if let Some(own) = own {
-                items.push((slot, own));
-            }
-        }
-        if !known {
-            return Err(ExportError::NotFound);
-        }
-        // Узел, чей предок тоже экспортируется, уже нарисован вместе с предком:
-        // второй раз он лёг бы поверх (полупрозрачный — темнее). Область считаем
-        // только по оставшимся: потомок, выступающий за обрезающий фрейм, холст
-        // не расширяет.
-        let chosen: std::collections::HashSet<_> = items.iter().map(|(s, _)| *s).collect();
-        items.retain(|&(s, _)| {
-            let mut cur = scene.at(s).parent;
-            while let Some(p) = cur {
-                if chosen.contains(&p) {
-                    return false;
-                }
-                cur = scene.at(p).parent;
-            }
-            true
-        });
-        let area = items
-            .iter()
-            .map(|&(_, r)| r)
-            .reduce(|a, b| a.union(b))
-            .ok_or(ExportError::Empty)?;
-        // Порядок отрисовки: ключ — позиции от корня, без повторов.
-        let mut slots: Vec<_> = items.into_iter().map(|(s, _)| s).collect();
-        slots.sort_by_cached_key(|s| scene.order_key(*s));
-        slots.dedup();
+        let (items, area) = export::export_items(scene, ids)?;
+        let slots: Vec<_> = items.into_iter().map(|(s, _)| s).collect();
         let w = (area.width() * scale).round();
         let h = (area.height() * scale).round();
         // Нечисловые границы (NaN, бесконечность) картинки не дают: до приведения
@@ -323,6 +285,33 @@ impl Renderer {
         painter.begin_frame();
         painter.draw(&mut backend, &ctx, &slots);
         Ok(backend.render())
+    }
+
+    /// Экспорт узлов в SVG (спека подсистемы 3, раздел 11): та же область и тот же
+    /// порядок, что у `export_png_nodes`, в единицах документа (масштаб 1).
+    /// Картинки заливок — из `images` (`data:` PNG); текст — по `opts`.
+    pub fn export_svg(
+        &mut self,
+        scene: &Scene,
+        ids: &[NodeId],
+        images: &dyn ImageBytes,
+        opts: SvgOptions,
+        budget: &ExportBudget,
+    ) -> Result<String, ExportError> {
+        svg::export_svg(scene, ids, images, &self.fonts, opts, budget)
+    }
+
+    /// Экспорт в PDF (спека подсистемы 3, раздел 11): каждый список узлов
+    /// `pages` — страница размера их области (фрейм — своего размера, 1 px =
+    /// 1 pt), векторная, с подмножествами шрифтов и картинками из `images`.
+    pub fn export_pdf(
+        &mut self,
+        scene: &Scene,
+        pages: &[Vec<NodeId>],
+        images: &dyn ImageProvider,
+        budget: &ExportBudget,
+    ) -> Result<Vec<u8>, ExportError> {
+        pdf::export_pdf(scene, pages, images, &self.fonts, budget)
     }
 
     /// Превью страницы для экрана файлов: всё содержимое (границы корней с полем

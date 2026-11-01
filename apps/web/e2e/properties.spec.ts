@@ -120,7 +120,7 @@ test('экспорт PNG выделения и страницы', async ({ page 
   await expect(button).toHaveText('Экспортировать страницу');
   let download = page.waitForEvent('download');
   await button.click();
-  expect((await download).suggestedFilename()).toBe('Страница 1@1x.png');
+  expect((await download).suggestedFilename()).toBe('Страница 1.png');
   await selectRow(page, 'Экран 0');
   await page.getByRole('radio', { name: '2×' }).click();
   download = page.waitForEvent('download');

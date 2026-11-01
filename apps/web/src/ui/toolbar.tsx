@@ -1,4 +1,5 @@
-// Плавающий тулбар внизу по центру холста (раскладка UI3): перемещение, фрейм с
+// Плавающий тулбар внизу по центру холста (раскладка UI3): перемещение и масштаб
+// (K) со стрелкой (как в Figma: последний выбранный на кнопке), фрейм с
 // пресетами, фигуры со стрелкой (последняя выбранная на кнопке), перо, текст,
 // булевы операции со стрелкой (как в Figma: операция выделенной булевой группы
 // или последняя выбранная на кнопке, в списке — ещё «Сплющить» и «Контур
@@ -13,6 +14,12 @@ import { Menu, type MenuItem } from './menu';
 import { roving } from './roving';
 
 type Shape = 'rect' | 'ellipse' | 'line' | 'arrow' | 'image';
+type Mover = 'move' | 'scale';
+
+const MOVERS: { tool: Mover; name: string; command: string; icon: IconName }[] = [
+  { tool: 'move', name: 'Перемещение', command: 'tool.move', icon: 'move' },
+  { tool: 'scale', name: 'Масштабирование', command: 'tool.scale', icon: 'scale' },
+];
 
 const SHAPES: { tool: Shape; name: string; command: string; icon: IconName }[] = [
   { tool: 'rect', name: 'Прямоугольник', command: 'tool.rect', icon: 'rect' },
@@ -36,7 +43,9 @@ const LATER: { name: string; key: string; when: string; icon: IconName }[] = [
 export function Toolbar() {
   const ed = useEditor();
   const [shape, setShape] = createSignal<Shape>('rect');
-  const [menu, setMenu] = createSignal<{ kind: 'frame' | 'shapes' | 'boolean'; anchor: HTMLElement } | null>(null);
+  const [mover, setMover] = createSignal<Mover>('move');
+  type MenuKind = 'move' | 'frame' | 'shapes' | 'boolean';
+  const [menu, setMenu] = createSignal<{ kind: MenuKind; anchor: HTMLElement } | null>(null);
   // Операция на кнопке: у выделенной булевой группы — её, иначе последняя выбранная.
   const [lastOp, setLastOp] = createSignal<BooleanOpDto>('union');
   const boolean = createMemo(() => {
@@ -52,10 +61,12 @@ export function Toolbar() {
   onMount(() => onCleanup(roving(bar, 'button')));
   const tool = () => ed.store.state.tool;
   const current = createMemo(() => SHAPES.find((s) => s.tool === shape())!);
-  // Фигура, выбранная клавишей, становится и фигурой кнопки.
+  const currentMover = createMemo(() => MOVERS.find((m) => m.tool === mover())!);
+  // Фигура (и перемещение или масштаб), выбранные клавишей, становятся и на кнопке.
   createEffect(() => {
     const t = tool() as Tool;
     if (SHAPES.some((s) => s.tool === t)) setShape(t as Shape);
+    if (MOVERS.some((m) => m.tool === t)) setMover(t as Mover);
   });
 
   const setTool = (t: Tool) => ed.send({ type: 'setTool', tool: t });
@@ -76,6 +87,17 @@ export function Toolbar() {
     });
     return out;
   };
+
+  const moverItems = (): MenuItem[] =>
+    MOVERS.map((m) => ({
+      label: m.name,
+      command: m.command,
+      checked: m.tool === mover(),
+      onSelect: () => {
+        setMover(m.tool);
+        setTool(m.tool);
+      },
+    }));
 
   const shapeItems = (): MenuItem[] =>
     SHAPES.map((s) => ({
@@ -101,24 +123,43 @@ export function Toolbar() {
     { label: 'Контур обводки', command: 'object.outline_stroke', disabled: !hasSelection() },
   ];
 
-  const menuLabel = (kind: 'frame' | 'shapes' | 'boolean') =>
-    kind === 'frame' ? 'Пресеты фреймов' : kind === 'shapes' ? 'Фигуры' : 'Булевы операции';
-  const menuItems = (kind: 'frame' | 'shapes' | 'boolean') =>
-    kind === 'frame' ? frameItems() : kind === 'shapes' ? shapeItems() : booleanItems();
+  const menuLabel = (kind: MenuKind) =>
+    kind === 'move'
+      ? 'Инструменты перемещения'
+      : kind === 'frame'
+        ? 'Пресеты фреймов'
+        : kind === 'shapes'
+          ? 'Фигуры'
+          : 'Булевы операции';
+  const menuItems = (kind: MenuKind) =>
+    kind === 'move' ? moverItems() : kind === 'frame' ? frameItems() : kind === 'shapes' ? shapeItems() : booleanItems();
 
   return (
     <div ref={bar} class="fe-toolbar" role="toolbar" aria-label="Инструменты">
-      <button
-        class="fe-tool"
-        aria-pressed={tool() === 'move'}
-        aria-label="Перемещение"
-        data-tip="Перемещение"
-        data-command="tool.move"
-        data-tip-side="top"
-        onClick={() => setTool('move')}
-      >
-        <Icon name="move" />
-      </button>
+      <div class="fe-tool-split">
+        <button
+          class="fe-tool"
+          aria-pressed={tool() === currentMover().tool}
+          aria-label={currentMover().name}
+          data-tip={currentMover().name}
+          data-command={currentMover().command}
+          data-tip-side="top"
+          onClick={() => setTool(currentMover().tool)}
+        >
+          <Icon name={currentMover().icon} />
+        </button>
+        <button
+          class="fe-tool fe-tool--caret"
+          aria-haspopup="menu"
+          aria-expanded={menu()?.kind === 'move'}
+          aria-label="Инструменты перемещения"
+          data-tip="Инструменты перемещения"
+          data-tip-side="top"
+          onClick={(e) => setMenu({ kind: 'move', anchor: e.currentTarget })}
+        >
+          <Caret />
+        </button>
+      </div>
       <div class="fe-tool-split">
         <button
           class="fe-tool"

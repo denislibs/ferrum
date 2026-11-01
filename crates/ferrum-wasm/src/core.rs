@@ -18,7 +18,10 @@ use std::collections::{HashSet, VecDeque};
 use ferrum_doc::{container, fixture, DocResult, Document, NodeId, Tx};
 use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{CommandId, Cursor, Editor, EditorEvent, Input, Platform, ToolKind};
-use ferrum_render::{decode_png, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba};
+use ferrum_render::{
+    decode_png, Clock, ExportBudget, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba,
+    SvgOptions,
+};
 use ferrum_scene::Scene;
 use ferrum_text::{Fonts, SharedFonts};
 use kurbo::{Point, Size};
@@ -42,6 +45,8 @@ pub const CANVAS_DARK: Rgba = Rgba::new([26.0 / 255.0, 25.0 / 255.0, 24.0 / 255.
 pub const CANVAS_LIGHT: Rgba = Rgba::new([233.0 / 255.0, 231.0 / 255.0, 228.0 / 255.0, 1.0]);
 /// Масштаб «Скопировать как PNG».
 pub const COPY_PNG_SCALE: f64 = 1.0;
+/// Наибольший SVG для буфера обмена (как предел вставки).
+pub const MAX_CLIPBOARD_SVG: usize = 64 << 20;
 
 /// Значения выделения для живого состояния и ключ, при котором они посчитаны.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,6 +106,8 @@ pub struct Core {
     text_state: text::TextState,
     /// Время ядра (мс) из `set_time`: начало ожидания шрифтов.
     now_ms: f64,
+    /// Часы пределов экспорта SVG и PDF (в worker'е — `performance.now()`).
+    export_clock: Option<Box<dyn Clock>>,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -123,6 +130,7 @@ fn tool_kind(t: Tool) -> ToolKind {
         Tool::Text => ToolKind::Text,
         Tool::Pen => ToolKind::Pen,
         Tool::Arrow => ToolKind::Arrow,
+        Tool::Scale => ToolKind::Scale,
     }
 }
 
@@ -138,6 +146,7 @@ fn tool(k: ToolKind) -> Tool {
         ToolKind::Text => Tool::Text,
         ToolKind::Pen => Tool::Pen,
         ToolKind::Arrow => Tool::Arrow,
+        ToolKind::Scale => Tool::Scale,
     }
 }
 
@@ -256,6 +265,7 @@ impl Core {
             font_state: fonts::FontState::default(),
             text_state: text::TextState::default(),
             now_ms: 0.0,
+            export_clock: ferrum_render::default_clock(),
         };
         // Таблица команд и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -785,6 +795,7 @@ impl Core {
                 }
                 EditorEvent::PasteRequested => self.events.push(CoreEvent::PasteRequested),
                 EditorEvent::ExportPng(ids) => self.copy_png(&ids),
+                EditorEvent::ExportSvg(ids) => self.copy_svg(&ids),
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),
                 EditorEvent::ToggleUi => self.events.push(CoreEvent::ToggleUi),
                 EditorEvent::SaveRequested => self.events.push(CoreEvent::SaveRequested),
@@ -817,6 +828,36 @@ impl Core {
         self.push_text_state(properties);
         self.push_modified();
         self.push_font_requests();
+    }
+
+    /// Часы пределов экспорта (в wasm — `performance.now()`; без них — только
+    /// предел байтов).
+    pub fn set_export_clock(&mut self, clock: Option<Box<dyn Clock>>) {
+        self.export_clock = clock;
+    }
+
+    /// «Копировать как SVG»: тот же писатель, что у экспорта (текст — кривыми,
+    /// как в Figma), не больше `MAX_CLIPBOARD_SVG` байт.
+    fn copy_svg(&mut self, ids: &[NodeId]) {
+        if fonts::fonts_loading(self.editor.scene(), &self.fonts) {
+            self.error(fonts::FONTS_LOADING);
+            return;
+        }
+        let mut budget = ExportBudget::new(self.export_clock.as_deref());
+        budget.max_bytes = MAX_CLIPBOARD_SVG;
+        let result = self.renderer.export_svg(
+            self.editor.scene(),
+            ids,
+            &self.editor.document().images,
+            SvgOptions::default(),
+            &budget,
+        );
+        match result {
+            Ok(text) => self.events.push(CoreEvent::ClipboardSvg {
+                bytes: ByteBuf::from(text.into_bytes()),
+            }),
+            Err(e) => self.error(panels::copy_svg_message(&e)),
+        }
     }
 
     fn copy_png(&mut self, ids: &[NodeId]) {

@@ -139,7 +139,12 @@ fn commands() -> Vec<Command> {
         },
         Command::AddFramePreset { index: 3 },
         Command::SetZoom { zoom: 2.0 },
-        Command::Export { scale: 3.0 },
+        Command::Export {
+            scale: 3.0,
+            format: None,
+            outline_text: None,
+            svg_ids: None,
+        },
         Command::PasteImage {
             bytes: bytes(&[0x89]),
         },
@@ -316,6 +321,7 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::Exported {
             name: "Фон@2x.png".into(),
             bytes: bytes(b"png"),
+            mime: "image/png".into(),
         },
         CoreEvent::DocumentName {
             name: "Лендинг".into(),
@@ -422,7 +428,7 @@ fn bad_commands_are_errors_not_panics() {
         json!({"type": "demo"}),
         json!({"type": "demo", "nodes": -1}),
         json!({"type": "demo", "nodes": 1, "extra": 1}),
-        json!({"type": "setTool", "tool": "scale"}),
+        json!({"type": "setTool", "tool": "slice"}),
         json!({"tool": "rect"}),
         json!("save"),
         json!(null),
@@ -488,6 +494,8 @@ fn malformed_commands_never_panic() {
         json!({"type": "setLayerFlags", "ids": ["1@2"], "visible": "no", "locked": null}),
         json!({"type": "bind", "command": "tool.rect", "shortcut": "KeyQ"}),
         json!({"type": "export", "scale": "2"}),
+        json!({"type": "export", "scale": 1, "format": "gif"}),
+        json!({"type": "export", "scale": 1, "format": "svg", "outlineText": "да"}),
         json!({"type": "addFramePreset", "index": -3}),
         json!({"type": "setSettings", "pixelSnap": 1}),
         json!({"type": "setSettings", "pixel_snap": true}),

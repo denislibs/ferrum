@@ -58,6 +58,7 @@ impl Editor {
             C::ToolText => self.set_tool(ToolKind::Text),
             C::ToolPen => self.set_tool(ToolKind::Pen),
             C::ToolArrow => self.set_tool(ToolKind::Arrow),
+            C::ToolScale => self.set_tool(ToolKind::Scale),
             C::Flatten => self.flatten(),
             C::BooleanUnion => self.boolean(ferrum_doc::BooleanOp::Union),
             C::BooleanSubtract => self.boolean(ferrum_doc::BooleanOp::Subtract),
@@ -109,6 +110,12 @@ impl Editor {
                 let ids = self.ordered_selection();
                 if !ids.is_empty() {
                     self.out.events.push(EditorEvent::ExportPng(ids));
+                }
+            }
+            C::CopyAsSvg => {
+                let ids = self.ordered_selection();
+                if !ids.is_empty() {
+                    self.out.events.push(EditorEvent::ExportSvg(ids));
                 }
             }
             C::Duplicate => {

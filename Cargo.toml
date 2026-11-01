@@ -61,3 +61,15 @@ serde-wasm-bindgen = "=0.6.5"
 serde_bytes = "=0.11.19"
 console_error_panic_hook = "=0.1.7"
 wasm-bindgen-test = "=0.3.79"
+# Экспорт PDF (спека подсистемы 3, раздел 11): векторные страницы, подмножества
+# шрифтов, картинки. 0.8.2 — последняя (2026-06-04), MIT OR Apache-2.0, Rust 1.92,
+# собирается под wasm32 без фич по умолчанию: `raster-images` нужен для картинок
+# (png той же версии, что у vello_cpu), `simple-text` (rustybuzz) не нужен — глифы
+# раскладывает parley. Тянет свой skrifa 0.42 (у нас 0.44) — цена версии.
+# `raster-images` тянет декодеры gif/webp/jpeg (`gif`, `image-webp`, `zune-jpeg`): мы
+# их не вызываем (только `Image::from_rgba8`), но они в зависимостях и аудите.
+krilla = { version = "=0.8.2", default-features = false, features = ["raster-images"] }
+# Проверка экспорта SVG в тестах: файл разбирается как XML (только dev-зависимость).
+roxmltree = "=0.21.1"
+# Проверка экспорта PDF в тестах: потоки PDF сжаты Deflate (та же версия, что тянет krilla).
+flate2 = "=1.1.10"

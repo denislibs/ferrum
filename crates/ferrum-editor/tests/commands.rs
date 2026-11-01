@@ -180,6 +180,9 @@ fn zoom_commands_and_events() {
     assert!(events.contains(&EditorEvent::SaveRequested));
     assert!(events.contains(&EditorEvent::ExportPng(vec![b])));
     assert!(events.contains(&EditorEvent::PasteRequested));
+    // «Копировать как SVG» — только командой (сочетания нет, как в Figma).
+    h.ed.execute(CommandId::CopyAsSvg);
+    assert_eq!(h.ed.take_events(), vec![EditorEvent::ExportSvg(vec![b])]);
 }
 
 #[test]

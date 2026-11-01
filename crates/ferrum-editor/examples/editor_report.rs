@@ -757,6 +757,7 @@ fn main() {
         ferrum_doc::fixture::curvy_network(100_000, 2000.0),
     );
     boolean_child_drag(&mut report);
+    scale_selection(&mut report);
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -782,6 +783,109 @@ fn main() {
 /// Правка ребёнка большой булевой группы (подсистема 3, этап 4): 1000
 /// перекрывающихся кругов в «Объединении», перетаскивание одного круга — кадр
 /// жеста (превью сцены пересчитывает результат) и запись одним шагом.
+/// Инструмент «Масштаб» (подсистема 3, этап 5) на большом выделении: 100 фреймов
+/// по 100 узлов (10 000 узлов в поддереве, у фигур — обводки) — кадр жеста ручкой
+/// (превью всего поддерева со свойствами), запись жеста и поле «Масштаб» панели —
+/// одним шагом.
+fn scale_selection(report: &mut Report) {
+    use ferrum_editor::scale::Anchor;
+    use ferrum_editor::{PanelEdit, Phase};
+    const N: usize = 10_000;
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    doc.transact(page, vec![], |p| fill(p, N).map(|_| vec![]))
+        .unwrap();
+    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    ed.execute(CommandId::SelectAll);
+    ed.execute(CommandId::ToolScale);
+    let sel = ed.selection().to_vec();
+    let bounds = sel
+        .iter()
+        .filter_map(|id| ed.scene().node(*id).and_then(|n| n.world_bounds))
+        .reduce(|a, b| a.union(b))
+        .unwrap();
+    let mut cam = Camera::new(VIEWPORT, 1.0);
+    cam.fit(bounds, 48.0);
+    ed.set_camera(cam);
+    ed.take_events();
+    let steps = ed.step_count();
+    // Жест ручкой: правый нижний угол рамки выделения.
+    let mut clock = Clock(0.0);
+    let corner = screen(&ed, bounds.x1, bounds.y1);
+    ed.handle(Input::PointerDown(clock.at(corner)));
+    let kick = Point::new(corner.x + 4.0, corner.y + 4.0);
+    let first = timed(&mut ed, Input::PointerMove(clock.at(kick)));
+    let mut times = Vec::new();
+    let mut end = corner;
+    for i in 1..=MOVES {
+        end = Point::new(
+            corner.x + 4.0 + 3.0 * i as f64,
+            corner.y + 4.0 + 2.0 * i as f64,
+        );
+        times.push(timed(&mut ed, Input::PointerMove(clock.at(end))));
+    }
+    report.gate_median(
+        "Масштаб (K): 10 000 узлов — кадр жеста ручкой (превью поддерева со свойствами)",
+        &times,
+        50.0,
+    );
+    report.info(
+        "Масштаб (K): 10 000 узлов — первое движение (базы поддерева)",
+        ms(first),
+    );
+    let t = Instant::now();
+    ed.handle(Input::PointerUp(clock.at(end)));
+    let commit = t.elapsed();
+    ed.take_events();
+    report.gate(
+        "Масштаб (K): 10 000 узлов — запись жеста (отпускание)",
+        commit,
+        500.0,
+    );
+    // Поле «Масштаб» панели: превью и запись.
+    let preview: Vec<Duration> = (1..=10)
+        .map(|i| {
+            let t = Instant::now();
+            ed.edit_selection(
+                &PanelEdit::Scale {
+                    factor: 1.0 + 0.05 * i as f64,
+                    anchor: Anchor::TOP_LEFT,
+                },
+                Phase::Preview,
+            );
+            let d = t.elapsed();
+            ed.take_events();
+            d
+        })
+        .collect();
+    report.gate_median(
+        "Масштаб (K): 10 000 узлов — превью поля «Масштаб»",
+        &preview,
+        50.0,
+    );
+    let t = Instant::now();
+    ed.edit_selection(
+        &PanelEdit::Scale {
+            factor: 0.5,
+            anchor: Anchor::TOP_LEFT,
+        },
+        Phase::Commit,
+    );
+    let panel = t.elapsed();
+    ed.take_events();
+    report.gate(
+        "Масштаб (K): 10 000 узлов — запись поля «Масштаб»",
+        panel,
+        500.0,
+    );
+    report.check(
+        "Масштаб (K): жест и поле — по шагу",
+        ed.step_count() == steps + 2,
+        format!("{} шага", ed.step_count() - steps),
+        "2 шага",
+    );
+}
+
 fn boolean_child_drag(report: &mut Report) {
     let mut ed =
         Editor::new(Document::new(), None, VIEWPORT, 1.0, Platform::Mac).expect("страница");

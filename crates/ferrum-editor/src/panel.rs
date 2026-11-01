@@ -17,11 +17,12 @@ use kurbo::{Affine, Point, Rect};
 
 use crate::editor::Editor;
 use crate::geometry::{
-    bases, normalize_deg, parent_world, rigid_patches, scale_patches_in, top_level, Base,
-    PixelSnap, MIN_SIDE,
+    bases, bases_deep, normalize_deg, parent_world, rigid_patches, scale_patches_in, top_level,
+    Base, PixelSnap, SelectionBox, MIN_SIDE,
 };
 use crate::ops::reposition;
 use crate::pages::clean_name;
+use crate::scale::{anchor_transform, scale_patches, Anchor, MAX_SCALE_FACTOR, MIN_SCALE_FACTOR};
 use crate::text::resize_texts;
 
 /// Числовое поле панели свойств.
@@ -66,6 +67,11 @@ pub enum PanelEdit {
         join: Option<StrokeJoin>,
         miter_limit: Option<f64>,
     },
+    /// Поле «Масштаб» инструмента K: выделение (верхний уровень) масштабируется
+    /// равномерно в `factor` раз вокруг точки `anchor` его рамки вместе с
+    /// обводками, радиусами и текстом (`crate::scale`). Зажим к 1 %…10 000 % —
+    /// лишь защитный: недопустимый коэффициент протокол отклоняет ошибкой.
+    Scale { factor: f64, anchor: Anchor },
 }
 
 /// Фаза правки: превью жеста, запись одним шагом или отмена жеста.
@@ -158,6 +164,8 @@ pub(crate) struct PanelGesture {
     targets: Vec<Target>,
     /// Базы групп собраны вместе с поддеревом (нужно только для размера).
     deep: bool,
+    /// Для поля «Масштаб»: всё поддерево верхнего уровня и рамка выделения.
+    scale: Option<(Vec<Base>, SelectionBox)>,
 }
 
 /// Правке нужно поддерево групп: ширина и высота масштабируют детей группы.
@@ -218,7 +226,81 @@ fn capture(scene: &Scene, ids: &[NodeId], deep: bool) -> PanelGesture {
             }
         })
         .collect();
-    PanelGesture { targets, deep }
+    PanelGesture {
+        targets,
+        deep,
+        scale: None,
+    }
+}
+
+/// Жест поля «Масштаб»: узлы верхнего уровня выделения с поддеревом и их рамка
+/// (у одного узла — его повёрнутая рамка, как у ручек).
+fn capture_scale(scene: &Scene, ids: &[NodeId]) -> PanelGesture {
+    let mut g = capture(scene, ids, false);
+    let tops: Vec<NodeId> = g.targets.iter().filter(|t| t.top).map(|t| t.id).collect();
+    g.scale = SelectionBox::of(scene, &tops).map(|sbox| (bases_deep(scene, &tops), sbox));
+    g
+}
+
+/// Правки поля «Масштаб».
+fn scale_edit(
+    g: &PanelGesture,
+    factor: f64,
+    anchor: Anchor,
+    fonts: &mut ferrum_text::Fonts,
+) -> Vec<(NodeId, PropsPatch)> {
+    let Some((bases, sbox)) = &g.scale else {
+        return vec![];
+    };
+    if !factor.is_finite() {
+        return vec![];
+    }
+    let k = factor.clamp(MIN_SCALE_FACTOR, MAX_SCALE_FACTOR);
+    if (k - 1.0).abs() < 1e-12 {
+        return vec![];
+    }
+    let mut tops = bases.iter().filter(|b| b.parent.is_none());
+    let flip = match (tops.next(), tops.next()) {
+        (Some(b), None) => (b.props.flip_x, b.props.flip_y),
+        _ => (false, false),
+    };
+    let t = anchor_transform(sbox, anchor, k, flip);
+    if !t.as_coeffs().iter().all(|c| c.is_finite()) {
+        return vec![];
+    }
+    scale_patches(bases, t, sbox.to_world, k, Some(fonts))
+}
+
+/// Правки жеста панели для `edit` (с правилами ресайза текстов).
+fn gesture_patches(
+    g: &PanelGesture,
+    edit: &PanelEdit,
+    fonts: &mut ferrum_text::Fonts,
+) -> Vec<(NodeId, PropsPatch)> {
+    if let PanelEdit::Scale { factor, anchor } = edit {
+        return scale_edit(g, *factor, *anchor, fonts);
+    }
+    let mut p = patches(g, edit);
+    resize_texts(fonts, gesture_bases(g), &mut p);
+    p
+}
+
+/// Снимок начала жеста под правку `edit`.
+fn capture_for(scene: &Scene, ids: &[NodeId], edit: &PanelEdit) -> PanelGesture {
+    if matches!(edit, PanelEdit::Scale { .. }) {
+        capture_scale(scene, ids)
+    } else {
+        capture(scene, ids, needs_children(edit))
+    }
+}
+
+/// Снимок жеста годится для правки `edit` (иначе собирается заново).
+fn gesture_fits(g: &PanelGesture, edit: &PanelEdit) -> bool {
+    if matches!(edit, PanelEdit::Scale { .. }) {
+        g.scale.is_some()
+    } else {
+        g.deep || !needs_children(edit)
+    }
 }
 
 fn finite_or(v: f64, base: f64) -> f64 {
@@ -412,6 +494,8 @@ fn patches(g: &PanelGesture, edit: &PanelEdit) -> Vec<(NodeId, PropsPatch)> {
                     out.extend(size_patches(t, Some(*w), h));
                 }
             }
+            // Считается целиком в `scale_edit`.
+            PanelEdit::Scale { .. } => {}
             PanelEdit::ClipContent(on) => {
                 if kind == NodeKind::Frame {
                     out.push((
@@ -488,36 +572,32 @@ impl Editor {
         match phase {
             Phase::Cancel => self.cancel_panel(),
             Phase::Preview => {
-                let deep = needs_children(edit);
-                // Жест начался с правки без поддерева групп, а теперь оно нужно:
-                // превью снимается, базы собираются заново.
-                if self.panel.as_ref().is_some_and(|g| deep && !g.deep) {
+                // Жест начался с правки без поддерева групп (или не масштабом), а
+                // теперь оно нужно: превью снимается, базы собираются заново.
+                if self.panel.as_ref().is_some_and(|g| !gesture_fits(g, edit)) {
                     self.cancel_panel();
                 }
                 if self.panel.is_none() {
                     self.cancel_gesture();
-                    self.panel = Some(capture(&self.scene, &targets(self), deep));
+                    self.panel = Some(capture_for(&self.scene, &targets(self), edit));
                 }
                 let g = self.panel.as_ref().expect("задан выше");
-                let mut p = patches(g, edit);
-                resize_texts(&mut self.fonts.borrow_mut(), gesture_bases(g), &mut p);
+                let p = gesture_patches(g, edit, &mut self.fonts.borrow_mut());
                 self.scene.set_preview(&p);
             }
             Phase::Commit => {
-                let deep = needs_children(edit);
                 let g = match self.panel.take() {
-                    Some(g) if g.deep || !deep => g,
+                    Some(g) if gesture_fits(&g, edit) => g,
                     _ => {
                         // Адресат задан ids — жест холста, начавшийся позже, не трогаем.
                         if ids.is_none() {
                             self.cancel_gesture();
                         }
                         self.scene.clear_preview();
-                        capture(&self.scene, &targets(self), deep)
+                        capture_for(&self.scene, &targets(self), edit)
                     }
                 };
-                let mut p = patches(&g, edit);
-                resize_texts(&mut self.fonts.borrow_mut(), gesture_bases(&g), &mut p);
+                let p = gesture_patches(&g, edit, &mut self.fonts.borrow_mut());
                 self.scene.clear_preview();
                 if !p.is_empty() {
                     let selection = self.selection.to_vec();

@@ -60,6 +60,36 @@ pub enum Tool {
     Pen,
     /// Стрелка: линия со стрелкой на конце.
     Arrow,
+    /// Масштаб (K, подсистема 3, этап 5).
+    Scale,
+}
+
+/// Формат экспорта, как в разделе «Export» Figma (подсистема 3, этап 5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportFormat {
+    #[default]
+    Png,
+    Svg,
+    Pdf,
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Png => "png",
+            ExportFormat::Svg => "svg",
+            ExportFormat::Pdf => "pdf",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            ExportFormat::Png => "image/png",
+            ExportFormat::Svg => "image/svg+xml",
+            ExportFormat::Pdf => "application/pdf",
+        }
+    }
 }
 
 /// Тема оверлеев.
@@ -448,6 +478,12 @@ pub enum Edit {
         #[serde(default)]
         miter_limit: Option<f64>,
     },
+    /// Поле «Масштаб» инструмента K: коэффициент (1 — 100 %, от 0,01 до 100) и
+    /// точка рамки выделения `[x, y]` в долях (0, 0,5 или 1 по каждой оси).
+    Scale {
+        factor: f64,
+        anchor: [f64; 2],
+    },
 }
 
 /// Команда основного потока worker'у.
@@ -615,9 +651,18 @@ pub enum Command {
     SetZoom {
         zoom: f64,
     },
-    /// Экспорт PNG выделения (без выделения — всей страницы): ответ — `Exported`.
+    /// Экспорт выделения (без выделения — всей страницы; PDF — каждого фрейма
+    /// страницей): ответ — `Exported`. `scale` — у PNG (1, 2, 3), у SVG и PDF
+    /// не читается; `outlineText` («Текст кривыми», по умолчанию да) и `svgIds`
+    /// («Атрибут id») — у SVG.
     Export {
         scale: f64,
+        #[serde(default)]
+        format: Option<ExportFormat>,
+        #[serde(default)]
+        outline_text: Option<bool>,
+        #[serde(default)]
+        svg_ids: Option<bool>,
     },
     /// Изображение из системного буфера: встаёт в центр видимой части.
     PasteImage {
@@ -821,6 +866,14 @@ pub enum CoreEvent {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
     },
+    /// SVG выделения для буфера обмена («Копировать как SVG»): байты UTF-8 (до
+    /// 64 МБ — переносятся без копии, как у PNG); интерфейс кладёт их в
+    /// `image/svg+xml` (где браузер умеет) и, раскодировав один раз, в
+    /// `text/plain`.
+    ClipboardSvg {
+        #[tsify(type = "Uint8Array")]
+        bytes: ByteBuf,
+    },
     /// Пора прочитать системный буфер и прислать `Paste`.
     PasteRequested,
     /// Выбрать файл изображения и прислать `PlaceImage`.
@@ -938,11 +991,13 @@ pub enum CoreEvent {
     Presets {
         presets: Vec<PresetInfo>,
     },
-    /// PNG экспорта и имя файла.
+    /// Файл экспорта: имя, байты и тип (`image/png`, `image/svg+xml`,
+    /// `application/pdf`).
     Exported {
         name: String,
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
+        mime: String,
     },
     /// Имя документа изменилось.
     DocumentName {

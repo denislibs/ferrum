@@ -1,5 +1,5 @@
 // Связь ядра с системным буфером обмена и выбором файлов: события `copy`, `cut`,
-// `paste` документа, события ядра `clipboard`, `clipboardPng`, `pasteRequested`,
+// `paste` документа, события ядра `clipboard`, `clipboardPng`, `clipboardSvg`, `pasteRequested`,
 // `requestImage`. Разбор форматов — в clipboard.ts, байты и текст с меткой
 // разбирает worker: основной поток только переносит их.
 
@@ -15,6 +15,7 @@ import {
   supportsCustomFormat,
   type PasteData,
 } from './clipboard';
+import { asyncWriter, copyPng, copySvg, type ClipboardSink } from './clipboard-write';
 import { fileBytes, IMAGE_FILE, pickFile } from './files';
 import { editableTarget, modalOpen } from './keys';
 import { isTextField } from './text-input';
@@ -42,7 +43,8 @@ export function installClipboard(ed: Editor): () => void {
   let hinted = false;
   const toast = (m: string) => ed.store.toast(m, 'error');
 
-  const writeText = (text: string, cut: boolean) => {
+  /** Обычный текст через событие `copy` (`execCommand`); `false` — отказ. */
+  const execText = (text: string): boolean => {
     pending = text;
     let ok = false;
     try {
@@ -51,10 +53,16 @@ export function installClipboard(ed: Editor): () => void {
     } catch {
       ok = false;
     }
-    if (!ok || pending) {
-      pending = null;
-      toast(writeFailed(cut));
-    }
+    ok = ok && pending === null;
+    pending = null;
+    return ok;
+  };
+  const writeText = (text: string, cut: boolean) => {
+    if (!execText(text)) toast(writeFailed(cut));
+  };
+  const sink: ClipboardSink = {
+    toast: (m, kind) => (kind === 'error' ? toast(m) : ed.store.toast(m)),
+    writeText: execText,
   };
 
   /** Браузер отказал асинхронному API: текст с меткой — от worker'а, затем execCommand. */
@@ -71,18 +79,15 @@ export function installClipboard(ed: Editor): () => void {
   let lastFragment: string | null = null;
   const writeFragment = (bytes: Uint8Array, plain: string, cut: boolean) => {
     lastFragment = plain;
-    if (!supportsCustomFormat() || typeof ClipboardItem === 'undefined') {
+    const writer = supportsCustomFormat() ? asyncWriter() : null;
+    if (!writer) {
       writeText(plain, cut);
       return;
     }
-    navigator.clipboard
-      .write([
-        new ClipboardItem({
-          'text/plain': new Blob([plain], { type: 'text/plain' }),
-          [FERRUM_MIME]: new Blob([bytes as BlobPart], { type: FERRUM_MIME }),
-        }),
-      ])
-      .catch(() => writeText(plain, cut));
+    writer({
+      'text/plain': new Blob([plain], { type: 'text/plain' }),
+      [FERRUM_MIME]: new Blob([bytes as BlobPart], { type: FERRUM_MIME }),
+    }).catch(() => writeText(plain, cut));
   };
 
   const write = (e: { bytes: Uint8Array; plain?: string } & ClipboardExtra) => {
@@ -91,21 +96,15 @@ export function installClipboard(ed: Editor): () => void {
       writeFragment(e.bytes, e.plain, cut);
       return;
     }
-    if (!supportsCustomFormat()) {
+    const writer = supportsCustomFormat() ? asyncWriter() : null;
+    if (!writer) {
       if (typeof e.text === 'string') writeText(e.text, cut);
       else writeViaWorker(e.bytes, cut);
       return;
     }
-    navigator.clipboard
-      .write([new ClipboardItem({ [FERRUM_MIME]: new Blob([e.bytes as BlobPart], { type: FERRUM_MIME }) })])
-      .catch(() => writeViaWorker(e.bytes, cut));
-  };
-
-  const writePng = (bytes: Uint8Array) => {
-    navigator.clipboard
-      .write([new ClipboardItem({ 'image/png': new Blob([bytes as BlobPart], { type: 'image/png' }) })])
-      .then(() => ed.store.toast('Скопировано как PNG'))
-      .catch(() => toast('Не удалось скопировать картинку: браузер не дал доступа к буферу обмена'));
+    writer({ [FERRUM_MIME]: new Blob([e.bytes as BlobPart], { type: FERRUM_MIME }) }).catch(() =>
+      writeViaWorker(e.bytes, cut),
+    );
   };
 
   /** Асинхронное чтение (Chromium может спросить разрешение). `quiet` — вставка
@@ -208,7 +207,8 @@ export function installClipboard(ed: Editor): () => void {
   document.addEventListener('paste', paste);
   const off = ed.core.on((e) => {
     if (e.type === 'clipboard') write(e);
-    else if (e.type === 'clipboardPng') writePng(e.bytes);
+    else if (e.type === 'clipboardPng') void copyPng(e.bytes, sink);
+    else if (e.type === 'clipboardSvg') void copySvg(e.bytes, sink);
     else if (e.type === 'pasteRequested') void readAsync(false).then(deliver);
     else if (e.type === 'requestImage') {
       pickFile(IMAGE_FILE)

@@ -87,6 +87,11 @@ struct WriteArgs {
 }
 
 #[derive(Deserialize)]
+struct ExportArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct ThumbArgs {
     id: String,
 }
@@ -282,6 +287,135 @@ async fn files_copy_dialog(
     desk.lib().copy_to(&id, &path).map(|()| true)
 }
 
+/// Подпись фильтра и расширение файла экспорта по имени (`.png`, `.svg`, `.pdf`).
+fn export_kind(name: &str) -> Option<(&'static str, &'static str)> {
+    let (_, ext) = name.rsplit_once('.')?;
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => Some(("Изображение PNG", "png")),
+        "svg" => Some(("Изображение SVG", "svg")),
+        "pdf" => Some(("Документ PDF", "pdf")),
+        _ => None,
+    }
+}
+
+/// Предел экспорта: как в ядре (256 МБ).
+const EXPORT_MAX: usize = 256 * 1024 * 1024;
+/// Предел основы имени в байтах: вместе с расширением укладывается в 255 байт
+/// имени файла (NAME_MAX).
+const EXPORT_STEM_MAX: usize = 200;
+
+/// Имя файла экспорта для диалога: расширение (`.png`, `.svg`, `.pdf`) сохраняется,
+/// основа очищается — без разделителей пути, символов, недопустимых в Windows,
+/// управляющих и двунаправленных, без точек и пробелов в конце, без зарезервированных
+/// имён (`CON`, `NUL`…), не длиннее 200 байт по границе символа; пустая — «Экспорт».
+fn export_name(name: &str) -> String {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if export_kind(name).is_some() => (s, Some(e)),
+        _ => (name, None),
+    };
+    let mut stem: String = stem
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(*c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if stem.len() > EXPORT_STEM_MAX {
+        let mut end = EXPORT_STEM_MAX;
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        stem.truncate(end);
+    }
+    let mut stem = stem.trim_end_matches(['.', ' ']).to_string();
+    if stem.is_empty() {
+        stem = "Экспорт".into();
+    }
+    let head = stem
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(head.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (head.len() == 4
+            && (head.starts_with("COM") || head.starts_with("LPT"))
+            && matches!(head.as_bytes()[3], b'1'..=b'9'));
+    if reserved {
+        stem.insert(0, '_');
+    }
+    match ext {
+        Some(e) => format!("{stem}.{e}"),
+        None => stem,
+    }
+}
+
+/// Проверка запроса экспорта: размер, имя и тип. Возвращает очищенное имя, подпись
+/// фильтра и расширение.
+fn export_prepare(name: &str, len: usize) -> Res<(String, &'static str, &'static str)> {
+    if len > EXPORT_MAX {
+        return Err("Файл экспорта больше 256 МБ: его нельзя сохранить".into());
+    }
+    let name = export_name(name);
+    let (label, ext) = export_kind(&name).ok_or_else(|| BAD.to_string())?;
+    Ok((name, label, ext))
+}
+
+/// Путь с нужным расширением: выбранное в диалоге расширение другое или его нет —
+/// дописывается правильное. О замене диалог спрашивал только для выбранного имени:
+/// если файл с дописанным расширением уже есть — ошибка, а не тихая перезапись.
+fn export_path(picked: PathBuf, ext: &str) -> Res<PathBuf> {
+    let right = picked
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    if right {
+        return Ok(picked);
+    }
+    let mut full = picked.into_os_string();
+    full.push(".");
+    full.push(ext);
+    let path = PathBuf::from(full);
+    // `symlink_metadata` — и висячая ссылка считается занятым именем.
+    if path.symlink_metadata().is_ok() {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return Err(format!("Файл «{name}» уже есть — выберите другое имя"));
+    }
+    Ok(path)
+}
+
+/// Экспорт PNG, SVG и PDF (подсистема 3, этап 5): родной диалог «Сохранить» с
+/// именем из интерфейса и фильтром по типу; байты — сырым телом запроса, запись
+/// атомарная. Ответ — имя записанного файла, `None` — отказ в диалоге. Путь
+/// интерфейс не видит.
+#[tauri::command(async)]
+fn export_save(request: Request<'_>, app: AppHandle, window: WebviewWindow) -> Res<Option<String>> {
+    let (bytes, a): (&[u8], ExportArgs) = raw(&request)?;
+    let (name, label, ext) = export_prepare(&a.name, bytes.len())?;
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_file_name(&name)
+        .add_filter(label, &[ext])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = export_path(picked.into_path().map_err(|_| NOT_A_PATH.to_string())?, ext)?;
+    ferrum_desktop_store::atomic_write(&path, bytes)
+        .map_err(|e| format!("Не удалось сохранить файл: {}", io_error(&e)))?;
+    Ok(path.file_name().map(|n| n.to_string_lossy().into_owned()))
+}
+
 #[tauri::command(async)]
 fn settings_get(desk: State<'_, Desk>) -> Res<Map<String, Value>> {
     Ok(desk.settings().all())
@@ -474,6 +608,7 @@ pub fn run() {
             files_open_dialog,
             files_save_dialog,
             files_copy_dialog,
+            export_save,
             settings_get,
             settings_set,
             fonts_list,
@@ -483,4 +618,98 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Ferrum не запустился");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Тип экспорта — только по расширению PNG, SVG и PDF; имя без путей.
+    #[test]
+    fn export_names_are_checked_and_cleaned() {
+        assert_eq!(export_kind("Экран.svg"), Some(("Изображение SVG", "svg")));
+        assert_eq!(export_kind("a@2x.PNG"), Some(("Изображение PNG", "png")));
+        assert_eq!(export_kind("Отчёт.pdf").map(|k| k.1), Some("pdf"));
+        assert_eq!(export_kind("файл.ferrum"), None);
+        assert_eq!(export_kind("без расширения"), None);
+        assert_eq!(export_name("../a/b\\c:d\u{0}.svg"), ".._a_b_c_d.svg");
+    }
+
+    #[test]
+    fn export_name_keeps_extension_and_fits_bytes() {
+        let long = export_name(&format!("{}.pdf", "я".repeat(400)));
+        assert!(
+            long.ends_with(".pdf") && long.len() <= 255,
+            "{}",
+            long.len()
+        );
+        assert!(export_kind(&long).is_some());
+        // Граница символа: 200 байт — ровно 100 «я».
+        assert_eq!(long, format!("{}.pdf", "я".repeat(100)));
+        assert_eq!(export_name(&format!("{}.png", "x".repeat(900))).len(), 204);
+    }
+
+    #[test]
+    fn export_name_windows_and_format_chars() {
+        assert_eq!(export_name("a*b?c\"d<e>f|g.svg"), "a_b_c_d_e_f_g.svg");
+        assert_eq!(export_name("имя. . .pdf"), "имя.pdf");
+        assert_eq!(export_name("CON.pdf"), "_CON.pdf");
+        assert_eq!(export_name("nul.svg"), "_nul.svg");
+        assert_eq!(export_name("com1.png"), "_com1.png");
+        assert_eq!(export_name("LPT9.pdf"), "_LPT9.pdf");
+        assert_eq!(export_name("COM0.pdf"), "COM0.pdf");
+        assert_eq!(export_name("CONSOLE.pdf"), "CONSOLE.pdf");
+        assert_eq!(export_name("a\u{202E}fdp\u{2066}b.pdf"), "afdpb.pdf");
+        assert_eq!(export_name(".pdf"), "Экспорт.pdf");
+        assert_eq!(export_name("\u{202E}. .svg"), "Экспорт.svg");
+    }
+
+    #[test]
+    fn export_prepare_errors_and_final_path() {
+        assert_eq!(export_prepare("a.pdf", 5).unwrap().0, "a.pdf");
+        assert_eq!(export_prepare("a.pdf", EXPORT_MAX).unwrap().2, "pdf");
+        assert!(export_prepare("a.pdf", EXPORT_MAX + 1)
+            .unwrap_err()
+            .contains("256 МБ"));
+        assert_eq!(export_prepare("без расширения", 1).unwrap_err(), BAD);
+        assert_eq!(export_prepare("a.exe", 1).unwrap_err(), BAD);
+        assert_eq!(
+            export_path(PathBuf::from("/x/a.pdf"), "pdf").unwrap(),
+            PathBuf::from("/x/a.pdf")
+        );
+        assert_eq!(
+            export_path(PathBuf::from("/x/a.PDF"), "pdf").unwrap(),
+            PathBuf::from("/x/a.PDF")
+        );
+        assert_eq!(
+            export_path(PathBuf::from("/x/a"), "pdf").unwrap(),
+            PathBuf::from("/x/a.pdf")
+        );
+        assert_eq!(
+            export_path(PathBuf::from("/x/a.svg"), "pdf").unwrap(),
+            PathBuf::from("/x/a.svg.pdf")
+        );
+    }
+
+    /// Диалог подтвердил замену только выбранного имени: файл с дописанным
+    /// расширением уже есть — ошибка, без перезаписи; выбранный существующий файл с
+    /// верным расширением — замена (её подтвердил диалог).
+    #[test]
+    fn export_path_does_not_overwrite_a_file_the_dialog_did_not_confirm() {
+        let dir = std::env::temp_dir().join(format!("ferrum-export-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let taken = dir.join("a.pdf");
+        std::fs::write(&taken, b"old").unwrap();
+        assert_eq!(
+            export_path(dir.join("a"), "pdf").unwrap_err(),
+            "Файл «a.pdf» уже есть — выберите другое имя"
+        );
+        assert_eq!(export_path(taken.clone(), "pdf").unwrap(), taken);
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        assert_eq!(
+            export_path(dir.join("b"), "pdf").unwrap(),
+            dir.join("b.pdf")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

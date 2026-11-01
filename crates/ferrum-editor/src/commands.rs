@@ -18,6 +18,8 @@ pub enum CommandId {
     ToolPen,
     /// «Стрелка»: линия со стрелкой на конце.
     ToolArrow,
+    /// «Масштаб» (K, подсистема 3, этап 5).
+    ToolScale,
     /// «Сплющить»: выделение — в один вектор.
     Flatten,
     /// Булевы операции над выделением (подсистема 3, этап 4); у выделенных
@@ -37,6 +39,8 @@ pub enum CommandId {
     Cut,
     Paste,
     CopyAsPng,
+    /// «Копировать как SVG» (подсистема 3, этап 5): без сочетания, как в Figma.
+    CopyAsSvg,
     Duplicate,
     Delete,
     SelectAll,
@@ -135,6 +139,7 @@ pub const COMMANDS: &[Command] = &[
     cmd(C::ToolHand, "tool.hand", "Рука", &["KeyH"]),
     cmd(C::ToolText, "tool.text", "Текст", &["KeyT"]),
     cmd(C::ToolPen, "tool.pen", "Перо", &["KeyP"]),
+    cmd(C::ToolScale, "tool.scale", "Масштабирование", &["KeyK"]),
     cmd(C::ToolArrow, "tool.arrow", "Стрелка", &["Shift+KeyL"]),
     cmd(
         C::HandHold,
@@ -166,6 +171,7 @@ pub const COMMANDS: &[Command] = &[
         "Копировать как PNG",
         &["Mod+Shift+KeyC"],
     ),
+    cmd(C::CopyAsSvg, "edit.copy_svg", "Копировать как SVG", &[]),
     cmd(C::Duplicate, "edit.duplicate", "Дублировать", &["Mod+KeyD"]),
     cmd(
         C::Delete,

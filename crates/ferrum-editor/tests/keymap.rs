@@ -26,6 +26,7 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::ToolEllipse, &["KeyO"]),
     (CommandId::ToolLine, &["KeyL"]),
     (CommandId::ToolHand, &["KeyH"]),
+    (CommandId::ToolScale, &["KeyK"]),
     (CommandId::HandHold, &["Space"]),
     (CommandId::ToolImage, &["Mod+Shift+KeyK"]),
     (CommandId::Delete, &["Delete", "Backspace"]),
@@ -102,10 +103,16 @@ fn defaults_match_figma_on_both_platforms() {
     let map = Keymap::new(Platform::Linux);
     for c in COMMANDS {
         assert!(!c.name.is_empty() && CommandId::from_key(c.key) == Some(c.id));
-        assert!(!map.bindings(c.id).is_empty(), "{:?}", c.id);
+        // «Копировать как SVG» — без сочетания, как в Figma (меню «Правка»).
+        assert_eq!(
+            map.bindings(c.id).is_empty(),
+            c.id == CommandId::CopyAsSvg,
+            "{:?}",
+            c.id
+        );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 53);
+    assert_eq!(COMMANDS.len(), 55);
 }
 
 #[test]

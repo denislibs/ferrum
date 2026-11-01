@@ -56,9 +56,22 @@ export function systemFontBytes(file: string): Promise<ArrayBuffer> {
   return invoke<ArrayBuffer>('fonts_read', { id: Number(file) });
 }
 
-/** Сырое тело запроса и параметры заголовком `x-ferrum` (ASCII: UUID и числа). */
-function raw<T>(cmd: string, bytes: ArrayBuffer, args: Record<string, unknown>): Promise<T> {
-  return invoke<T>(cmd, new Uint8Array(bytes), { 'x-ferrum': JSON.stringify(args) });
+/** JSON только из ASCII: не-ASCII символы — `\uXXXX` (заголовок HTTP — ASCII). */
+export function asciiJson(v: unknown): string {
+  return JSON.stringify(v).replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/** Сырое тело запроса и параметры заголовком `x-ferrum` (ASCII: UUID, числа, имена
+ * с `\uXXXX`). */
+function raw<T>(cmd: string, bytes: ArrayBuffer | Uint8Array, args: Record<string, unknown>): Promise<T> {
+  return invoke<T>(cmd, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), { 'x-ferrum': asciiJson(args) });
+}
+
+/** Экспорт (PNG, SVG, PDF) родным диалогом «Сохранить» (подсистема 3, этап 5): байты —
+ * сырым телом без копии, имя — заголовком; ответ — имя записанного файла (пользователь
+ * мог его изменить), `null` — отказ. */
+export function saveExport(name: string, bytes: Uint8Array): Promise<string | null> {
+  return raw<string | null>('export_save', bytes, { name });
 }
 
 const bytesOrNull = (b: ArrayBuffer) => (b.byteLength > 0 ? b : null);

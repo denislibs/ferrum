@@ -15,6 +15,7 @@ const ICONS = {
   ellipse: '<circle cx="12" cy="12" r="10"/>',
   line: '<path d="M22 2 2 22"/>',
   arrow: '<path d="M7 17 17 7"/><path d="M7 7h10v10"/>',
+  scale: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M14 15H9v-5"/><path d="M16 3h5v5"/><path d="M21 3 9 15"/>',
   // Булевы операции (тулбар и строки слоёв): два квадрата, закрашено то, что
   // остаётся.
   union: '<path d="M4 4h10v6h6v10H10v-6H4z" fill="currentColor" fill-opacity=".35"/>',

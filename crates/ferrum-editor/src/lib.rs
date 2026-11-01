@@ -19,6 +19,7 @@ mod outline;
 pub mod pages;
 pub mod panel;
 pub mod presets;
+pub mod scale;
 pub mod selection;
 pub mod snap;
 pub mod text;

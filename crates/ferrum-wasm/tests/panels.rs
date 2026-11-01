@@ -386,9 +386,14 @@ fn pages_add_switch_rename_background_delete() {
 #[test]
 fn export_selection_and_page() {
     let mut core = demo(100);
-    core.command(Command::Export { scale: 2.0 });
+    core.command(Command::Export {
+        scale: 2.0,
+        format: None,
+        outline_text: None,
+        svg_ids: None,
+    });
     let ev = core.take_events();
-    let Some(CoreEvent::Exported { name, bytes }) =
+    let Some(CoreEvent::Exported { name, bytes, .. }) =
         ev.iter().find(|e| matches!(e, CoreEvent::Exported { .. }))
     else {
         panic!("{ev:?}")
@@ -397,13 +402,23 @@ fn export_selection_and_page() {
     assert_eq!(&bytes[1..4], b"PNG");
     // 1440 × 1024 при 2× — 2880 × 2048 (IHDR: ширина и высота big-endian).
     assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 2880);
-    core.command(Command::Export { scale: 4.0 });
+    core.command(Command::Export {
+        scale: 4.0,
+        format: None,
+        outline_text: None,
+        svg_ids: None,
+    });
     assert_eq!(
         errors(&core.take_events()),
         ["Масштаб экспорта — 1×, 2× или 3×"]
     );
     core.command(Command::AddPage);
-    core.command(Command::Export { scale: 1.0 });
+    core.command(Command::Export {
+        scale: 1.0,
+        format: None,
+        outline_text: None,
+        svg_ids: None,
+    });
     assert_eq!(
         errors(&core.take_events()),
         ["Нечего экспортировать: страница пуста"]
@@ -473,10 +488,10 @@ fn bind_conflict_replace_reset_and_import() {
         ["Не удалось импортировать раскладку: это не файл раскладки Ferrum (JSON)"],
         "без английского текста разбора"
     );
-    // Неизвестная команда (Scale — этап 5 подсистемы 3) и непонятное сочетание.
+    // Неизвестная команда («Нарезка» Figma у нас нет) и непонятное сочетание.
     core.command(Command::Bind {
-        command: "tool.scale".into(),
-        shortcut: "KeyK".into(),
+        command: "tool.slice".into(),
+        shortcut: "KeyS".into(),
         replace: true,
     });
     core.command(Command::Bind {
@@ -1430,4 +1445,194 @@ fn background_preview_is_dropped_with_the_document() {
     assert_eq!(core.background().to_rgba8().r, 0x10);
     core.command(Command::Demo { nodes: 0 });
     assert_eq!(core.background(), ferrum_wasm::core::CANVAS_DARK);
+}
+
+/// Поле «Масштаб» (инструмент K): правка одним шагом, сводка — вдвое больше;
+/// коэффициент и точка вне сетки — ошибка без правки.
+#[test]
+fn scale_edit_is_one_step_and_rejects_bad_values() {
+    let mut core = demo(100);
+    core.command(Command::LayersWindow {
+        start: 0,
+        count: 40,
+    });
+    let (_, _, rows, _) = layers(&core.take_events()).unwrap();
+    core.command(Command::Select {
+        ids: vec![rows[0].id.clone()],
+        mode: SelectMode::Replace,
+    });
+    core.command(Command::SetTool { tool: Tool::Scale });
+    let w0 = summary(&core.take_events()).unwrap().w.value;
+    let steps = document_steps(&core);
+    let scale = |factor: f64, anchor: [f64; 2], phase: EditPhase| Command::EditSelection {
+        edit: Edit::Scale { factor, anchor },
+        phase,
+        ids: None,
+        selection_version: None,
+    };
+    core.command(scale(1.5, [0.0, 0.0], EditPhase::Preview));
+    core.command(scale(2.0, [0.0, 0.0], EditPhase::Preview));
+    assert_eq!(document_steps(&core), steps, "превью — без шагов");
+    core.command(scale(2.0, [0.0, 0.0], EditPhase::Commit));
+    assert_eq!(document_steps(&core), steps + 1.0);
+    let s = summary(&core.take_events()).expect("сводка обновилась");
+    assert_eq!(s.w.value, 2.0 * w0);
+    for bad in [
+        scale(0.0, [0.0, 0.0], EditPhase::Commit),
+        scale(101.0, [0.5, 0.5], EditPhase::Commit),
+        scale(f64::NAN, [0.5, 0.5], EditPhase::Commit),
+        scale(2.0, [0.3, 0.5], EditPhase::Commit),
+    ] {
+        core.command(bad);
+    }
+    assert_eq!(errors(&core.take_events()).len(), 4);
+    assert_eq!(document_steps(&core), steps + 1.0);
+}
+
+fn exported(ev: &[CoreEvent]) -> (String, Vec<u8>, String) {
+    ev.iter()
+        .find_map(|e| match e {
+            CoreEvent::Exported { name, bytes, mime } => {
+                Some((name.clone(), bytes.to_vec(), mime.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("нет экспорта: {:?}", errors(ev)))
+}
+
+fn export(format: ExportFormat) -> Command {
+    Command::Export {
+        scale: 1.0,
+        format: Some(format),
+        outline_text: Some(false),
+        svg_ids: Some(true),
+    }
+}
+
+/// Экспорт SVG и PDF (подсистема 3, этап 5): без выделения SVG — вся страница,
+/// PDF — фрейм верхнего уровня на страницу по порядку чтения; с выделением —
+/// выделенные; имя — по слою или странице, тип — по формату.
+#[test]
+fn export_svg_and_pdf() {
+    let mut core = demo(100);
+    core.take_events();
+    core.command(export(ExportFormat::Svg));
+    let (name, bytes, mime) = exported(&core.take_events());
+    assert_eq!(
+        (name.as_str(), mime.as_str()),
+        ("Страница 1.svg", "image/svg+xml")
+    );
+    let svg = String::from_utf8(bytes).unwrap();
+    assert!(
+        svg.starts_with("<svg width=\"") && svg.contains(" id=\""),
+        "атрибут id"
+    );
+    // Фреймы верхнего уровня — по странице PDF (второй — из пресета).
+    core.command(Command::AddFramePreset { index: 0 });
+    core.command(Command::Select {
+        ids: vec![],
+        mode: SelectMode::Replace,
+    });
+    core.command(Command::LayersWindow {
+        start: 0,
+        count: 200,
+    });
+    let (_, _, rows, _) = layers(&core.take_events()).unwrap();
+    let frames = rows
+        .iter()
+        .filter(|r| r.depth == 0 && r.kind == NodeType::Frame)
+        .count();
+    assert!(frames > 1);
+    core.command(export(ExportFormat::Pdf));
+    let (name, bytes, mime) = exported(&core.take_events());
+    assert_eq!(
+        (name.as_str(), mime.as_str()),
+        ("Страница 1.pdf", "application/pdf")
+    );
+    assert!(bytes.starts_with(b"%PDF-"));
+    let raw = String::from_utf8_lossy(&bytes);
+    assert_eq!(raw.matches("/Type/Page/").count(), frames);
+    // Выделенный фрейм — одна страница его размера.
+    let first = rows.iter().find(|r| r.depth == 0).unwrap();
+    core.command(Command::Select {
+        ids: vec![first.id.clone()],
+        mode: SelectMode::Replace,
+    });
+    let w = summary(&core.take_events()).unwrap().w.value;
+    core.command(export(ExportFormat::Pdf));
+    let (name, bytes, _) = exported(&core.take_events());
+    assert_eq!(name, format!("{}.pdf", first.name));
+    let raw = String::from_utf8_lossy(&bytes);
+    assert_eq!(raw.matches("/Type/Page/").count(), 1);
+    assert!(raw.contains(&format!("/MediaBox[0 0 {w} ")), "{w}");
+}
+
+/// Часы, что за каждое чтение уходят на 1000 с вперёд: срок экспорта истекает
+/// сразу после его начала.
+struct Racing(std::cell::Cell<f64>);
+
+impl ferrum_render::Clock for Racing {
+    fn now_ms(&self) -> f64 {
+        self.0.set(self.0.get() + 1.0e6);
+        self.0.get()
+    }
+}
+
+/// Ошибки экспорта доходят до интерфейса русским текстом — без паники, без
+/// файла и без двойного «Не удалось экспортировать: Экспорт…»: скрытое
+/// выделение — «Нечего экспортировать», срок вышел — «дольше 30 секунд».
+#[test]
+fn export_errors_reach_the_ui_in_russian() {
+    let mut core = demo(100);
+    core.command(Command::LayersWindow {
+        start: 0,
+        count: 200,
+    });
+    let (_, _, rows, _) = layers(&core.take_events()).unwrap();
+    let first = rows.iter().find(|r| r.depth == 0).unwrap().id.clone();
+    core.command(Command::Select {
+        ids: vec![first.clone()],
+        mode: SelectMode::Replace,
+    });
+    core.command(Command::SetLayerFlags {
+        ids: vec![first.clone()],
+        visible: Some(false),
+        locked: None,
+    });
+    core.take_events();
+    let empty = ferrum_render::ExportError::Empty.to_string();
+    for format in [ExportFormat::Png, ExportFormat::Svg, ExportFormat::Pdf] {
+        core.command(export(format));
+        let ev = core.take_events();
+        assert_eq!(errors(&ev), [empty.as_str()], "{format:?}");
+        assert!(!ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+    }
+    core.command(Command::SetLayerFlags {
+        ids: vec![first],
+        visible: Some(true),
+        locked: None,
+    });
+    core.set_export_clock(Some(Box::new(Racing(std::cell::Cell::new(0.0)))));
+    core.take_events();
+    let timeout = ferrum_render::ExportError::Timeout.to_string();
+    for format in [ExportFormat::Svg, ExportFormat::Pdf] {
+        core.command(export(format));
+        let ev = core.take_events();
+        assert_eq!(errors(&ev), [timeout.as_str()], "{format:?}");
+        assert!(!ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
+    }
+    // «Копировать как SVG» — та же фраза, без второй приставки «Не удалось
+    // скопировать: Экспорт идёт…».
+    core.command(Command::Execute {
+        command: "edit.copy_svg".into(),
+    });
+    let ev = core.take_events();
+    assert_eq!(errors(&ev), [timeout.as_str()]);
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ClipboardSvg { .. })));
+    // Часы вернулись в норму — экспорт снова работает.
+    core.set_export_clock(None);
+    core.command(export(ExportFormat::Pdf));
+    exported(&core.take_events());
 }

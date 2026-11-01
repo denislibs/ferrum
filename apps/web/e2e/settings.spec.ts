@@ -62,7 +62,7 @@ test('импорт, экспорт и предупреждение о сочет
   await openApp(page);
   const mod = await page.evaluate(() => (navigator.platform.toLowerCase().startsWith('mac') ? 'Meta' : 'Ctrl'));
   const dialog = await openSettings(page);
-  const json = JSON.stringify({ format: 'ferrum-keymap', version: 1, overrides: { 'edit.duplicate': [`${mod}+KeyW`], 'tool.scale': ['KeyK'] } });
+  const json = JSON.stringify({ format: 'ferrum-keymap', version: 1, overrides: { 'edit.duplicate': [`${mod}+KeyW`], 'tool.slice': ['KeyS'] } });
   await dialog.locator('input[type=file]').setInputFiles({ name: 'keys.json', mimeType: 'application/json', buffer: Buffer.from(json) });
   await expect(page.getByRole('status').filter({ hasText: /Раскладка импортирована, пропущено: 1/ })).toBeVisible();
   const row = dialog.getByRole('row').filter({ hasText: 'Дублировать' });

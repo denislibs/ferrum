@@ -249,6 +249,8 @@ test('тулбар и вкладки: одна точка Tab, стрелки и
   // Фокус вошёл в тулбар (тулбар в DOM раньше панелей, холст — перед ним).
   await page.getByRole('button', { name: 'Перемещение' }).focus();
   await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('button', { name: 'Инструменты перемещения' })).toBeFocused();
+  await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('button', { name: 'Фрейм', exact: true })).toBeFocused();
   await page.keyboard.press('End');
   await expect(page.getByRole('button', { name: /Комментарии/ })).toBeFocused();
