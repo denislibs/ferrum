@@ -157,7 +157,12 @@ fn fill_run(
         (FillKind::Solid, _) => None,
     };
     let Some(hash) = image else {
-        backend.set_color(color(paint.color).multiply_alpha(a));
+        let c = color(paint.color).multiply_alpha(a);
+        // Бэкенд с настоящим текстом (PDF) рисует прогон сам.
+        if backend.fill_glyphs(run, to_device, c) {
+            return true;
+        }
+        backend.set_color(c);
         for g in &run.glyphs {
             let path = fonts.outline(&run.font, g.id, &run.coords);
             if path.elements().is_empty() {

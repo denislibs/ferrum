@@ -78,6 +78,17 @@ pub trait RenderBackend {
     fn pop_clip(&mut self);
     fn push_opacity_layer(&mut self, alpha: f32);
     fn pop_layer(&mut self);
+    /// Глифы прогона текстом (PDF: шрифт с подмножеством, текст ищется и
+    /// копируется) краской `color`; `to_device` — координаты узла → устройство.
+    /// `false` — бэкенд так не умеет, рендер заливает контуры глифов.
+    fn fill_glyphs(
+        &mut self,
+        _run: &ferrum_text::GlyphRun,
+        _to_device: Affine,
+        _color: Rgba,
+    ) -> bool {
+        false
+    }
     /// Рисует ли бэкенд изображения из `Pixmap`. Без этого рендер не использует
     /// растровый кэш фреймов (он хранится как изображения).
     fn supports_images(&self) -> bool {

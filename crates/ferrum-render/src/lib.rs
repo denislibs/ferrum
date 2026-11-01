@@ -12,6 +12,7 @@ mod export;
 mod gpu;
 mod image;
 mod overlay;
+mod pdf;
 mod svg;
 mod text;
 mod text_node;
@@ -39,6 +40,7 @@ pub use overlay::{
     HANDLE_SIZE, LABEL_SIZE, MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, TEXT_SELECTION_ALPHA,
     VECTOR_HANDLE_RADIUS, VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
 };
+pub use pdf::MAX_PDF_SIDE;
 pub use svg::{ImageBytes, NoImageBytes, SvgOptions};
 pub use text::{Label, TextEngine, ONEST};
 pub use text_node::{
@@ -297,6 +299,19 @@ impl Renderer {
         budget: &ExportBudget,
     ) -> Result<String, ExportError> {
         svg::export_svg(scene, ids, images, &self.fonts, opts, budget)
+    }
+
+    /// Экспорт в PDF (спека подсистемы 3, раздел 11): каждый узел `pages` —
+    /// страница размера его области (фрейм — своего размера, 1 px = 1 pt),
+    /// векторная, с подмножествами шрифтов и картинками из `images`.
+    pub fn export_pdf(
+        &mut self,
+        scene: &Scene,
+        pages: &[NodeId],
+        images: &dyn ImageProvider,
+        budget: &ExportBudget,
+    ) -> Result<Vec<u8>, ExportError> {
+        pdf::export_pdf(scene, pages, images, &self.fonts, budget)
     }
 
     /// Превью страницы для экрана файлов: всё содержимое (границы корней с полем
