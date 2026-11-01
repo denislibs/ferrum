@@ -1094,6 +1094,7 @@ pub(crate) fn as_vector(p: &mut Props) {
     p.corner_radius = 0.0;
     p.clip_content = false;
     p.text = None;
+    p.boolean_op = None;
     p.vector = Some(Arc::new(VectorNetwork::default()));
 }
 

@@ -333,6 +333,10 @@ impl Core {
     /// шрифтов — ещё раз по порядку, списки для интерфейса — если сменились.
     fn after_fonts_changed(&mut self) {
         self.dirty = true;
+        // Булевы группы с текстом — по новым контурам глифов.
+        self.editor.sync_text_outlines();
+        // Рамка выделенной булевой группы могла измениться: сводка (diff'ится).
+        self.ui.properties = true;
         let waiting: Vec<Waiting> = self.font_state.waiting.drain(..).collect();
         self.font_state.waiting_since = None;
         for item in waiting {

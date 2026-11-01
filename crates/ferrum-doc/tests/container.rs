@@ -436,6 +436,7 @@ fn scene_cache_roundtrips_every_field() {
         NodeKind::Image,
         NodeKind::Text,
         NodeKind::Vector,
+        NodeKind::Boolean,
     ];
     doc.transact(page, vec![], |p| {
         let mut parent = None;
@@ -519,6 +520,8 @@ fn scene_cache_roundtrips_every_field() {
                         segments: vec![VectorSegment::line(0, 1)],
                         regions: vec![],
                     })),
+                    // У не булевой группы пропускается; у неё — не объединение.
+                    boolean_op: Some(BooleanOp::Exclude),
                 },
             )?;
             if kind == NodeKind::Text {

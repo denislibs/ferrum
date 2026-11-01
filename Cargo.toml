@@ -29,6 +29,10 @@ kurbo = "=0.13.1"
 # 0.13.0 не годится: после bulk_load вставка падает с «This is a bug in rstar»
 # (листья на разной глубине, georust/rstar#254 ещё не выпущен).
 rstar = "=0.12.2"
+# Булевы операции (спека подсистемы 3, раздел 10): по замеру прототипа этапа 4
+# быстрее `linesweeper` на перекрытиях (1000 кругов — ~20 мс против 70–90 мс), на
+# касаниях и общих рёбрах — то же. Без `allow_multithreading` (rayon в wasm нет).
+i_overlay = { version = "=9.1.0", default-features = false }
 # Рендер: vello_cpu сейчас, vello_gpu (бывший vello_hybrid) — на этапе 4. Без
 # текстовых возможностей vello: глифы рисуются контурами из skrifa (см. text.rs).
 vello_cpu = { version = "=0.3.0", default-features = false, features = ["std", "png", "u8_pipeline"] }

@@ -27,7 +27,13 @@ const KIND_ICON: Record<NodeType, IconName> = {
   image: 'image',
   text: 'text',
   vector: 'pen',
+  boolean: 'union',
 };
+
+/** Иконка строки: у булевой группы — по её операции. */
+function rowIcon(row: LayerRow): IconName {
+  return row.kind === 'boolean' && row.booleanOp ? row.booleanOp : KIND_ICON[row.kind];
+}
 
 /** Окно строк для прокрутки `scrollTop` и высоты `height`. */
 export function windowFor(scrollTop: number, height: number): { start: number; count: number } {
@@ -439,7 +445,7 @@ export function LayersPanel() {
                   </Show>
                 </span>
                 <span class="fe-layer__icon">
-                  <Icon name={KIND_ICON[row().kind]} />
+                  <Icon name={rowIcon(row())} />
                 </span>
                 <Show when={renaming()?.id === row().id} fallback={<span class="fe-layer__name">{row().name}</span>}>
                   {(() => {

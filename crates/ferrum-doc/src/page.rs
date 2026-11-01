@@ -261,9 +261,14 @@ impl PageDoc {
             let id = self.stable_id(tid);
             let props = match codec::read_props(&self.tree.get_meta(tid)?, &id) {
                 Ok(props) => props,
-                // Неверная сеть вектора (чужая сборка, повреждение) — как
-                // неизвестный тип: узел скрыт, документ только для чтения.
-                Err(DocError::UnknownKind(..) | DocError::InvalidVector(..)) => {
+                // Неверная сеть вектора и неизвестная булева операция (чужая
+                // сборка, повреждение) — как неизвестный тип: узел скрыт,
+                // документ только для чтения.
+                Err(
+                    DocError::UnknownKind(..)
+                    | DocError::InvalidVector(..)
+                    | DocError::InvalidBooleanOp(..),
+                ) => {
                     unknown = true;
                     self.collect_hidden_refs(tid, &mut hidden_refs)?;
                     continue;
@@ -339,6 +344,17 @@ impl PageDoc {
         let tid = self.tid(id).expect("узел есть");
         let meta = self.tree.get_meta(tid).expect("карта узла");
         meta.insert(codec::key::VECTOR, LoroValue::Binary(bytes.to_vec().into()))
+            .expect("запись в Loro");
+        self.doc.commit();
+    }
+
+    /// Только для тестов: значение `booleanOp` узла в Loro как есть (как в файле
+    /// чужой сборки) — без проверки и без зеркала.
+    #[doc(hidden)]
+    pub fn force_boolean_op_for_tests(&self, id: NodeId, op: &str) {
+        let tid = self.tid(id).expect("узел есть");
+        let meta = self.tree.get_meta(tid).expect("карта узла");
+        meta.insert(codec::key::BOOLEAN_OP, op)
             .expect("запись в Loro");
         self.doc.commit();
     }
@@ -600,7 +616,8 @@ impl PageDoc {
         let stripped;
         let foreign_text = before.text.is_none() && patch.text.is_some();
         let foreign_vector = before.vector.is_none() && patch.vector.is_some();
-        let patch = if foreign_text || foreign_vector {
+        let foreign_op = before.boolean_op.is_none() && patch.boolean_op.is_some();
+        let patch = if foreign_text || foreign_vector || foreign_op {
             stripped = PropsPatch {
                 text: if foreign_text {
                     None
@@ -612,6 +629,7 @@ impl PageDoc {
                 } else {
                     patch.vector.clone()
                 },
+                boolean_op: if foreign_op { None } else { patch.boolean_op },
                 ..patch.clone()
             };
             &stripped
@@ -645,7 +663,12 @@ impl PageDoc {
         net: std::sync::Arc<VectorNetwork>,
     ) -> DocResult<()> {
         let before = self.props(id)?;
-        if before.text.is_some() || matches!(before.kind, NodeKind::Frame | NodeKind::Group) {
+        if before.text.is_some()
+            || matches!(
+                before.kind,
+                NodeKind::Frame | NodeKind::Group | NodeKind::Boolean
+            )
+        {
             return Err(DocError::NotConvertible(id.to_string()));
         }
         check_vector(&net)?;

@@ -48,6 +48,7 @@ pub enum NodeType {
     Image,
     Text,
     Vector,
+    Boolean,
 }
 
 impl From<NodeKind> for NodeType {
@@ -61,6 +62,7 @@ impl From<NodeKind> for NodeType {
             NodeKind::Image => NodeType::Image,
             NodeKind::Text => NodeType::Text,
             NodeKind::Vector => NodeType::Vector,
+            NodeKind::Boolean => NodeType::Boolean,
         }
     }
 }
@@ -83,6 +85,8 @@ pub struct LayerRow {
     /// Скрыт или заблокирован предок: значок строки тусклый.
     pub ancestor_hidden: bool,
     pub ancestor_locked: bool,
+    /// Операция булевой группы — для иконки строки (у других узлов нет).
+    pub boolean_op: Option<crate::summary::BooleanOpDto>,
 }
 
 /// Окно строк для события `Layers`.
@@ -527,6 +531,7 @@ impl Layers {
                     locked: n.props.locked,
                     ancestor_hidden,
                     ancestor_locked,
+                    boolean_op: n.props.boolean_op.map(Into::into),
                 })
             })
             .collect();

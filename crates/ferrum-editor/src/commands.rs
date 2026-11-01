@@ -20,6 +20,14 @@ pub enum CommandId {
     ToolArrow,
     /// «Сплющить»: выделение — в один вектор.
     Flatten,
+    /// Булевы операции над выделением (подсистема 3, этап 4); у выделенных
+    /// булевых групп — смена операции.
+    BooleanUnion,
+    BooleanSubtract,
+    BooleanIntersect,
+    BooleanExclude,
+    /// «Контур обводки»: обводки выделения — в векторы с заливкой их цветом.
+    OutlineStroke,
     /// Рука, пока клавиша удерживается (по умолчанию Space).
     HandHold,
     ToolImage,
@@ -180,6 +188,38 @@ pub const COMMANDS: &[Command] = &[
         &["Mod+Shift+KeyG"],
     ),
     cmd(C::Flatten, "object.flatten", "Сплющить", &["Mod+KeyE"]),
+    // Как в Figma: Alt+Shift+буква (Option+Shift на macOS), исключение — E.
+    // Свободны на обеих платформах: Alt+Shift и Shift+E в таблице ничем не заняты.
+    cmd(
+        C::BooleanUnion,
+        "object.boolean_union",
+        "Объединение",
+        &["Alt+Shift+KeyU"],
+    ),
+    cmd(
+        C::BooleanSubtract,
+        "object.boolean_subtract",
+        "Вычитание",
+        &["Alt+Shift+KeyS"],
+    ),
+    cmd(
+        C::BooleanIntersect,
+        "object.boolean_intersect",
+        "Пересечение",
+        &["Alt+Shift+KeyI"],
+    ),
+    cmd(
+        C::BooleanExclude,
+        "object.boolean_exclude",
+        "Исключение",
+        &["Alt+Shift+KeyE"],
+    ),
+    cmd(
+        C::OutlineStroke,
+        "object.outline_stroke",
+        "Контур обводки",
+        &["Mod+Alt+KeyO"],
+    ),
     cmd(
         C::FrameSelection,
         "object.frame_selection",

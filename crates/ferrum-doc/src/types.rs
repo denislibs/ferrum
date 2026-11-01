@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use loro::TreeID;
 
+use crate::boolean::BooleanOp;
 use crate::error::DocError;
 use crate::text::{TextContent, TextData, TextProps, TEXT_COLOR};
 use crate::vector::{StrokeCap, StrokeJoin, StrokeStyle, VectorNetwork};
@@ -97,6 +98,9 @@ pub enum NodeKind {
     Text,
     /// Векторная сеть (спека подсистемы 3, раздел 9).
     Vector,
+    /// Булева группа (спека подсистемы 3, раздел 10): дети, как у группы, форма —
+    /// результат операции над ними.
+    Boolean,
 }
 
 impl NodeKind {
@@ -110,6 +114,7 @@ impl NodeKind {
             NodeKind::Image => "image",
             NodeKind::Text => "text",
             NodeKind::Vector => "vector",
+            NodeKind::Boolean => "boolean",
         }
     }
 
@@ -123,6 +128,7 @@ impl NodeKind {
             "image" => NodeKind::Image,
             "text" => NodeKind::Text,
             "vector" => NodeKind::Vector,
+            "boolean" => NodeKind::Boolean,
             _ => return None,
         })
     }
@@ -138,7 +144,14 @@ impl NodeKind {
             NodeKind::Image => "Изображение",
             NodeKind::Text => "Текст",
             NodeKind::Vector => "Вектор",
+            NodeKind::Boolean => BooleanOp::Union.name(),
         }
+    }
+
+    /// Своей рамки нет, границы — по детям (группа и булева группа): размер не
+    /// хранится, ресайз масштабирует детей.
+    pub fn is_group_like(self) -> bool {
+        matches!(self, NodeKind::Group | NodeKind::Boolean)
     }
 }
 
@@ -236,6 +249,8 @@ pub struct Props {
     /// Сеть — только у `NodeKind::Vector`. `Arc`: правка свойств узла не копирует
     /// 100 000 точек, а сравнение одной и той же сети — по указателю.
     pub vector: Option<Arc<VectorNetwork>>,
+    /// Операция — только у `NodeKind::Boolean`.
+    pub boolean_op: Option<BooleanOp>,
 }
 
 impl Props {
@@ -244,6 +259,9 @@ impl Props {
         let (w, h, fills, strokes) = match kind {
             NodeKind::Frame => (100.0, 100.0, vec![Fill::solid(Color::WHITE)], vec![]),
             NodeKind::Group => (0.0, 0.0, vec![], vec![]),
+            // Заливки и обводки булевой группы берутся у детей при создании
+            // (редактор); по умолчанию — серая, как у фигуры.
+            NodeKind::Boolean => (0.0, 0.0, vec![Fill::solid(Color::SHAPE_GRAY)], vec![]),
             NodeKind::Rect | NodeKind::Ellipse => {
                 (100.0, 100.0, vec![Fill::solid(Color::SHAPE_GRAY)], vec![])
             }
@@ -292,6 +310,7 @@ impl Props {
             stroke_style: StrokeStyle::default(),
             text: (kind == NodeKind::Text).then(|| Arc::new(TextData::default())),
             vector: (kind == NodeKind::Vector).then(|| Arc::new(VectorNetwork::default())),
+            boolean_op: (kind == NodeKind::Boolean).then_some(BooleanOp::Union),
         }
     }
 
@@ -335,6 +354,8 @@ pub struct PropsPatch {
     pub stroke_miter_limit: Option<f64>,
     /// Сеть целиком (значение узла заменяется). У не вектора пропускается.
     pub vector: Option<Arc<VectorNetwork>>,
+    /// Операция булевой группы. У другого узла пропускается.
+    pub boolean_op: Option<BooleanOp>,
 }
 
 impl PropsPatch {
@@ -374,6 +395,7 @@ impl PropsPatch {
                 (Some(_), Some(v)) => Some(v.clone()),
                 _ => None,
             },
+            boolean_op: self.boolean_op.and(before.boolean_op),
         }
     }
 
@@ -427,6 +449,9 @@ impl PropsPatch {
         }
         if let (Some(v), Some(dst)) = (&self.vector, &mut p.vector) {
             *dst = v.clone();
+        }
+        if let (Some(v), Some(dst)) = (self.boolean_op, &mut p.boolean_op) {
+            *dst = v;
         }
 
         if let Some(t) = &mut p.text {

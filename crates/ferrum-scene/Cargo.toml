@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 ferrum-doc = { path = "../ferrum-doc" }
 kurbo.workspace = true
+i_overlay.workspace = true
 rstar.workspace = true
 
 [dev-dependencies]

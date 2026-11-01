@@ -93,6 +93,29 @@ pub enum StrokeCapDto {
     Diamond,
 }
 
+/// Булева операция (спека подсистемы 3, раздел 10): строка слоя (иконка) и
+/// сводка выделения (отмеченный пункт списка тулбара).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum BooleanOpDto {
+    Union,
+    Subtract,
+    Intersect,
+    Exclude,
+}
+
+impl From<ferrum_doc::BooleanOp> for BooleanOpDto {
+    fn from(op: ferrum_doc::BooleanOp) -> BooleanOpDto {
+        use ferrum_doc::BooleanOp as B;
+        match op {
+            B::Union => BooleanOpDto::Union,
+            B::Subtract => BooleanOpDto::Subtract,
+            B::Intersect => BooleanOpDto::Intersect,
+            B::Exclude => BooleanOpDto::Exclude,
+        }
+    }
+}
+
 /// Соединение сегментов обводки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +208,8 @@ pub struct Summary {
     pub strokes: Option<Paints<StrokeDto>>,
     /// Окончания и соединения обводки (у групп и текста их нет).
     pub stroke_style: Option<StrokeStyleDto>,
+    /// Операция, если выделены только булевы группы с одной операцией.
+    pub boolean_op: Option<BooleanOpDto>,
 }
 
 impl Summary {
@@ -211,6 +236,7 @@ impl Summary {
             fills: None,
             strokes: None,
             stroke_style: None,
+            boolean_op: None,
         }
     }
 }
@@ -364,6 +390,7 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
     let mut miter: Acc<f64> = Acc::default();
     let (mut ends, mut corners) = (false, false);
     let mut name = None;
+    let mut op: Acc<Option<ferrum_doc::BooleanOp>> = Acc::default();
     for id in ids {
         let Some(slot) = scene.slot(*id) else {
             continue;
@@ -375,6 +402,7 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
         let p = &n.props;
         count += 1;
         kind.add(p.kind);
+        op.add(p.boolean_op);
         let pose = panel_pose(scene, slot);
         x.add_num(pose.x);
         y.add_num(pose.y);
@@ -482,5 +510,6 @@ pub fn summarize(scene: &Scene, ids: &[NodeId]) -> Summary {
                 mixed: false,
             }),
         }),
+        boolean_op: op.first.flatten().filter(|_| !op.mixed).map(Into::into),
     }
 }

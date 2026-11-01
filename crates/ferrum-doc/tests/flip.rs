@@ -233,8 +233,8 @@ fn file_from_before_flips_opens_unmirrored() {
 #[test]
 fn scene_cache_version_covers_flips() {
     assert_eq!(
-        SCENE_CACHE_VERSION, 4,
-        "таблица с флагами отражения (2), текстом (3), стилем обводки и сетью (4)"
+        SCENE_CACHE_VERSION, 5,
+        "таблица с флагами отражения (2), текстом (3), стилем обводки и сетью (4), булевой группой (5)"
     );
     // Кэш прежней версии с честным хэшем снапшота игнорируется без предупреждений.
     let (doc, page, [f, ..]) = sample();

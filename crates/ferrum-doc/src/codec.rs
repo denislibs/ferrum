@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use loro::{Container, LoroMap, LoroValue, ValueOrContainer};
 
+use crate::boolean::BooleanOp;
 use crate::error::{DocError, DocResult};
 use crate::text::TextData;
 use crate::text_codec;
@@ -35,6 +36,8 @@ pub(crate) mod key {
     pub const STROKE_MITER_LIMIT: &str = "strokeMiterLimit";
     /// Сеть узла `vector` — двоичное значение (`VectorNetwork::encode`).
     pub const VECTOR: &str = "vector";
+    /// Операция узла `boolean` — строка (`BooleanOp::as_str`).
+    pub const BOOLEAN_OP: &str = "booleanOp";
 }
 
 pub(crate) fn value(map: &LoroMap, k: &str) -> Option<LoroValue> {
@@ -118,6 +121,19 @@ fn read_vector(map: &LoroMap, id: &NodeId) -> DocResult<VectorNetwork> {
     }
 }
 
+/// Операция булевой группы; нет ключа — объединение. Неизвестная (будущая
+/// сборка, повреждение) — ошибка: узел скрывается, как узел неизвестного типа,
+/// документ — только для чтения (`PageDoc::rebuild_from_loro`).
+fn read_boolean_op(map: &LoroMap, id: &NodeId) -> DocResult<BooleanOp> {
+    match value(map, key::BOOLEAN_OP) {
+        None => Ok(BooleanOp::Union),
+        Some(v) => {
+            let raw = as_str(&v).unwrap_or_default();
+            BooleanOp::parse(&raw).ok_or_else(|| DocError::InvalidBooleanOp(id.to_string(), raw))
+        }
+    }
+}
+
 /// Тип узла читается отдельно: по нему выбираются значения по умолчанию.
 pub(crate) fn read_kind(map: &LoroMap, id: &NodeId) -> DocResult<NodeKind> {
     let raw = value(map, key::TYPE)
@@ -169,6 +185,10 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
         }),
         vector: match kind {
             NodeKind::Vector => Some(Arc::new(read_vector(map, id)?)),
+            _ => None,
+        },
+        boolean_op: match kind {
+            NodeKind::Boolean => Some(read_boolean_op(map, id)?),
             _ => None,
         },
     })
@@ -269,6 +289,7 @@ pub(crate) fn write_props(map: &LoroMap, p: &Props) -> DocResult<()> {
         stroke_join: Some(p.stroke_style.join).filter(|v| *v != StrokeJoin::Miter),
         stroke_miter_limit: neutral(p.stroke_style.miter_limit, crate::DEFAULT_MITER_LIMIT),
         vector: p.vector.clone(),
+        boolean_op: p.boolean_op,
     };
     write_patch(map, &patch)?;
     // Содержимое — в новый `LoroText` узла: узел только что создан (или
@@ -337,13 +358,16 @@ pub(crate) fn write_patch(map: &LoroMap, p: &PropsPatch) -> DocResult<()> {
     if let Some(v) = p.stroke_miter_limit {
         map.insert(key::STROKE_MITER_LIMIT, v)?;
     }
-    // Вызывающий убирает `text` и `vector` из патча узла другого типа
+    // Вызывающий убирает `text`, `vector` и `boolean_op` из патча узла другого типа
     // (`PageDoc::set_props`).
     if let Some(text) = &p.text {
         text_codec::write_text_props(map, text)?;
     }
     if let Some(v) = &p.vector {
         map.insert(key::VECTOR, LoroValue::Binary(v.encode().into()))?;
+    }
+    if let Some(op) = p.boolean_op {
+        map.insert(key::BOOLEAN_OP, op.as_str())?;
     }
     Ok(())
 }

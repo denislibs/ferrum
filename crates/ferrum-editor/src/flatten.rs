@@ -5,32 +5,124 @@
 //! верхнего и берёт его свойства (имя, заливки, обводки), а области других
 //! узлов сохраняют свои заливки цветом. Группа с заблокированным слоем не
 //! сплющивается; скрытые слои группы в вектор не попадают (как в Figma).
+//! Этап 4: булева группа сплющивается в свой результат (дети уходят вместе с
+//! ней), текст — в контуры глифов (с подчёркиванием и зачёркиванием); оба — новым
+//! вектором на своём месте.
 
 use crate::editor::{Editor, EditorEvent};
 use crate::geometry::parent_world;
 use crate::selection::locked;
 use crate::vector_edit::{as_vector, convert_to_vector};
-use crate::vector_ops::{merge_networks, reframe, shape_network};
-use ferrum_doc::{FillKind, NodeId, NodeKind, Props};
+use crate::vector_ops::{merge_networks, path_network, reframe, shape_network};
+use ferrum_doc::{FillKind, FillRule, NodeId, NodeKind, Props, VectorNetwork};
+use ferrum_scene::Slot;
+use std::collections::HashMap;
 
 /// Сплющивается ли узел этого типа.
 fn flattenable(k: NodeKind) -> bool {
     matches!(
         k,
-        NodeKind::Vector | NodeKind::Rect | NodeKind::Ellipse | NodeKind::Line
+        NodeKind::Vector
+            | NodeKind::Rect
+            | NodeKind::Ellipse
+            | NodeKind::Line
+            | NodeKind::Boolean
+            | NodeKind::Text
     )
 }
 
 impl Editor {
+    /// Сеть узла в координатах его формы: фигура и вектор — `shape_network`,
+    /// булева группа — её результат, текст — контуры глифов. `Err` — сообщение
+    /// пользователю: шрифты ещё грузятся (текст узла или внутри булевой группы
+    /// остался бы без контуров и потерялся) или булева группа пуста.
+    pub(crate) fn node_network(&self, slot: Slot) -> Result<VectorNetwork, &'static str> {
+        const LOADING: &str = "Шрифты ещё загружаются — текст не сплющен";
+        let n = self.scene.at(slot);
+        match n.props.kind {
+            NodeKind::Boolean => {
+                // Результат кеша мог посчитаться без текста — ждём шрифты.
+                if self.outlines_missed.get() || self.has_unshaped_text(slot) {
+                    return Err(LOADING);
+                }
+                let b = n
+                    .boolean
+                    .as_ref()
+                    .ok_or("Булева группа пуста — нечего сплющить")?;
+                let net = path_network(&b.contours.to_path(), FillRule::NonZero);
+                if net.regions.is_empty() {
+                    return Err("Булева группа пуста — нечего сплющить");
+                }
+                Ok(net)
+            }
+            NodeKind::Text => {
+                let mut fonts = self.fonts.try_borrow_mut().map_err(|_| LOADING)?;
+                let path = ferrum_render::text_outline(&mut fonts, &n.props).ok_or(LOADING)?;
+                Ok(path_network(&path, FillRule::NonZero))
+            }
+            _ => shape_network(&n.props).ok_or("Нечего сплющить"),
+        }
+    }
+
+    /// Есть ли среди видимых потомков `slot` текст, у которого пока нет контуров
+    /// глифов (шрифты грузятся или реестр занят).
+    pub(crate) fn has_unshaped_text(&self, slot: Slot) -> bool {
+        let mut stack: Vec<Slot> = self.scene.at(slot).children.clone();
+        while let Some(s) = stack.pop() {
+            let n = self.scene.at(s);
+            if !n.props.visible {
+                continue;
+            }
+            // Текст без содержимого (`text == None`) или пустой форм не ждёт.
+            if n.props.kind == NodeKind::Text && n.props.text.is_some() {
+                match self.fonts.try_borrow_mut() {
+                    Ok(mut f) => {
+                        if ferrum_render::text_outline(&mut f, &n.props).is_none() {
+                            return true;
+                        }
+                    }
+                    Err(_) => return true,
+                }
+            }
+            stack.extend(n.children.iter().copied());
+        }
+        false
+    }
+
+    /// Есть ли среди потомков `slot` заблокированный слой.
+    fn has_locked_descendant(&self, slot: Slot) -> bool {
+        let mut stack: Vec<Slot> = self.scene.at(slot).children.clone();
+        while let Some(s) = stack.pop() {
+            let n = self.scene.at(s);
+            if n.props.locked {
+                return true;
+            }
+            stack.extend(n.children.iter().copied());
+        }
+        false
+    }
+
     /// Сплющивает выделение в один вектор.
     pub(crate) fn flatten(&mut self) {
         self.finish_vector_edit();
         let ids = self.ordered_selection();
+        // Результат булевой группы, посчитанный по частям (после жеста),
+        // зависит от истории правок — в документ пишется полный.
+        for id in &ids {
+            if let Some(slot) = self.scene.slot(*id) {
+                self.scene.force_full_booleans(slot);
+            }
+        }
         // Узлы-источники снизу вверх: выделенные фигуры и фигуры в выделенных группах.
         let mut leaves: Vec<NodeId> = Vec::new();
         let mut removed: Vec<NodeId> = Vec::new();
         // Пропущено из-за блокировки или скрытия — пользователь узнает об этом.
         let mut skipped = false;
+        // Булевы группы, которые сейчас не сплющить (шрифты, пустой результат):
+        // остаются на месте, остальное выделение сплющивается.
+        let mut refused: Vec<&'static str> = Vec::new();
+        // Сети булевых групп, посчитанные при отборе (второй раз не считаются).
+        let mut nets: HashMap<NodeId, VectorNetwork> = HashMap::new();
         for id in &ids {
             let Some(slot) = self.scene.slot(*id) else {
                 continue;
@@ -41,6 +133,22 @@ impl Editor {
                 continue;
             }
             let kind = self.scene.at(slot).props.kind;
+            // Булева группа с заблокированным слоем — как обычная группа: не трогается.
+            if kind == NodeKind::Boolean && self.has_locked_descendant(slot) {
+                skipped = true;
+                continue;
+            }
+            if kind == NodeKind::Boolean {
+                match self.node_network(slot) {
+                    Ok(net) => {
+                        nets.insert(*id, net);
+                    }
+                    Err(msg) => {
+                        refused.push(msg);
+                        continue;
+                    }
+                }
+            }
             if flattenable(kind) {
                 leaves.push(*id);
                 removed.push(*id);
@@ -64,11 +172,26 @@ impl Editor {
                     }
                     match n.props.kind {
                         NodeKind::Group => stack.extend(n.children.iter().rev()),
+                        // Булева группа внутри группы — её результатом.
+                        NodeKind::Boolean if self.has_locked_descendant(s) => {
+                            (foreign, held) = (true, true)
+                        }
+                        // Булеву группу внутри группы не сплющить — не терять её.
+                        NodeKind::Boolean => match self.node_network(s) {
+                            Ok(net) => {
+                                nets.insert(n.id, net);
+                                inner.push((self.scene.order_key(s), n.id))
+                            }
+                            Err(msg) => {
+                                refused.push(msg);
+                                foreign = true;
+                            }
+                        },
                         k if flattenable(k) => inner.push((self.scene.order_key(s), n.id)),
                         _ => foreign = true,
                     }
                 }
-                // Группу с текстом, изображением или фреймом сплющить целиком нельзя:
+                // Группу с изображением или фреймом сплющить целиком нельзя:
                 // их пришлось бы потерять вместе с группой.
                 if foreign || inner.is_empty() {
                     skipped |= held || (inner.is_empty() && hidden);
@@ -79,18 +202,22 @@ impl Editor {
                 removed.push(*id);
             }
         }
+        refused.sort_unstable();
+        refused.dedup();
+        // Сообщения о пропущенном уходят после удачной записи (при отказе документа
+        // — одно его сообщение); нечего делать — они и есть результат.
+        let mut notes: Vec<String> = refused.iter().map(|m| (*m).to_string()).collect();
         if skipped {
-            self.out.events.push(EditorEvent::Error(
-                "Заблокированные и скрытые слои не сплющиваются".into(),
-            ));
+            notes.push("Заблокированные и скрытые слои не сплющиваются".into());
         }
         if leaves.is_empty() {
-            if !skipped {
-                self.out.events.push(EditorEvent::Error(
-                    "Нечего сплющить: сплющиваются векторы, прямоугольники, эллипсы, линии и их группы"
+            if notes.is_empty() {
+                notes.push(
+                    "Нечего сплющить: сплющиваются векторы, фигуры, текст, булевы группы и их группы"
                         .into(),
-                ));
+                );
             }
+            self.push_errors(notes);
             return;
         }
         let top = *removed.last().expect("есть узлы");
@@ -100,16 +227,46 @@ impl Editor {
             if one == only {
                 let n = self.scene.at(top_slot);
                 let props = n.props.clone();
-                let Some(net) = shape_network(&props) else {
-                    return;
-                };
                 if props.kind == NodeKind::Vector {
                     return;
                 }
-                let patch = reframe(&props, net);
+                let net = match nets.remove(one) {
+                    Some(net) => net,
+                    None => match self.node_network(top_slot) {
+                        Ok(net) => net,
+                        Err(msg) => {
+                            notes.insert(0, msg.into());
+                            self.push_errors(notes);
+                            return;
+                        }
+                    },
+                };
                 let id = *one;
-                self.ctx()
-                    .commit(|tx, _| Ok(vec![convert_to_vector(tx, id, &patch)?]));
+                // Булева группа и текст — новым вектором на своём месте (у них
+                // есть дети или содержимое, которые вектору не нужны).
+                if matches!(props.kind, NodeKind::Boolean | NodeKind::Text) {
+                    let mut base = props.clone();
+                    as_vector(&mut base);
+                    let patch = reframe(&base, net);
+                    patch.apply_to(&mut base);
+                    let parent = n.parent.map(|p| self.scene.at(p).id);
+                    let index = self.scene.index(top_slot) as usize;
+                    let ok = self.ctx().commit(|tx, _| {
+                        tx.delete_nodes(&[id])?;
+                        Ok(vec![tx.create_with_props(parent, Some(index), &base)?])
+                    });
+                    if ok {
+                        self.push_errors(notes);
+                    }
+                    return;
+                }
+                let patch = reframe(&props, net);
+                if self
+                    .ctx()
+                    .commit(|tx, _| Ok(vec![convert_to_vector(tx, id, &patch)?]))
+                {
+                    self.push_errors(notes);
+                }
                 return;
             }
         }
@@ -124,9 +281,19 @@ impl Editor {
             .clone();
         let mut parts = Vec::new();
         for id in &leaves {
-            let n = self.scene.node(*id).expect("в сцене");
-            let Some(mut net) = shape_network(&n.props) else {
-                continue;
+            let slot = self.scene.slot(*id).expect("в сцене");
+            let n = self.scene.at(slot);
+            // Текст без шрифтов не терять: ничего не сплющивается.
+            let mut net = match nets.remove(id) {
+                Some(net) => net,
+                None => match self.node_network(slot) {
+                    Ok(net) => net,
+                    Err(msg) => {
+                        notes.insert(0, msg.into());
+                        self.push_errors(notes);
+                        return;
+                    }
+                },
             };
             // Заливки узла, отличные от заливок результата, остаются у его областей.
             let own = n.props.fills != top_leaf.fills
@@ -157,10 +324,20 @@ impl Editor {
             self.scene.at(top_slot).parent.map(|p| self.scene.at(p).id),
             self.scene.index(top_slot) as usize + 1,
         );
-        self.ctx().commit(|tx, _| {
+        let ok = self.ctx().commit(|tx, _| {
             let v = tx.create_with_props(parent, Some(index), &base)?;
             tx.delete_nodes(&removed)?;
             Ok(vec![v])
         });
+        if ok {
+            self.push_errors(notes);
+        }
+    }
+
+    /// Сообщения пользователю по порядку.
+    pub(crate) fn push_errors(&mut self, notes: Vec<String>) {
+        for m in notes {
+            self.out.events.push(EditorEvent::Error(m));
+        }
     }
 }

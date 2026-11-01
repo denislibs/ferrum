@@ -516,6 +516,13 @@ fn node_outline(scene: &Scene, id: NodeId, view: Affine, screen: Rect) -> Option
             path.move_to(to_device * Point::ZERO);
             path.line_to(to_device * Point::new(len, 0.0));
         }
+        // Булева группа — контуром результата (пустой — рамкой детей).
+        Geometry::None
+            if n.props.kind == NodeKind::Boolean
+                && n.path_shape().is_some_and(|s| !s.stroke.is_empty()) =>
+        {
+            path = device_path(&n.path_shape()?.stroke, to_device, screen)
+        }
         Geometry::None => path = to_device * n.local_bounds?.to_path(0.1),
         // Вектор подсвечивается своей сетью (контуры из кэша узла), а не рамкой.
         Geometry::Vector(_) => path = device_path(&n.path_shape()?.stroke, to_device, screen),

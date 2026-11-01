@@ -1,10 +1,12 @@
 // Плавающий тулбар внизу по центру холста (раскладка UI3): перемещение, фрейм с
-// пресетами, фигуры со стрелкой (последняя выбранная на кнопке), перо, текст и
-// отключённые комментарии — с подсказкой, когда они появятся. Рука (H, удержание
+// пресетами, фигуры со стрелкой (последняя выбранная на кнопке), перо, текст,
+// булевы операции со стрелкой (как в Figma: операция выделенной булевой группы
+// или последняя выбранная на кнопке, в списке — ещё «Сплющить» и «Контур
+// обводки») и отключённые комментарии — с подсказкой, когда они появятся. Рука (H, удержание
 // Space) работает с клавиатуры и в тулбар не выносится.
 
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
-import type { Tool } from '../wasm/ferrum_wasm';
+import type { BooleanOpDto, Tool } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { Caret, Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
@@ -20,6 +22,13 @@ const SHAPES: { tool: Shape; name: string; command: string; icon: IconName }[] =
   { tool: 'image', name: 'Изображение', command: 'tool.image', icon: 'image' },
 ];
 
+const BOOLEANS: { op: BooleanOpDto; name: string; command: string }[] = [
+  { op: 'union', name: 'Объединение', command: 'object.boolean_union' },
+  { op: 'subtract', name: 'Вычитание', command: 'object.boolean_subtract' },
+  { op: 'intersect', name: 'Пересечение', command: 'object.boolean_intersect' },
+  { op: 'exclude', name: 'Исключение', command: 'object.boolean_exclude' },
+];
+
 const LATER: { name: string; key: string; when: string; icon: IconName }[] = [
   { name: 'Комментарии', key: 'C', when: 'подсистема 4', icon: 'comment' },
 ];
@@ -27,7 +36,18 @@ const LATER: { name: string; key: string; when: string; icon: IconName }[] = [
 export function Toolbar() {
   const ed = useEditor();
   const [shape, setShape] = createSignal<Shape>('rect');
-  const [menu, setMenu] = createSignal<{ kind: 'frame' | 'shapes'; anchor: HTMLElement } | null>(null);
+  const [menu, setMenu] = createSignal<{ kind: 'frame' | 'shapes' | 'boolean'; anchor: HTMLElement } | null>(null);
+  // Операция на кнопке: у выделенной булевой группы — её, иначе последняя выбранная.
+  const [lastOp, setLastOp] = createSignal<BooleanOpDto>('union');
+  const boolean = createMemo(() => {
+    const op = ed.store.state.summary?.booleanOp ?? lastOp();
+    return BOOLEANS.find((b) => b.op === op)!;
+  });
+  const hasSelection = () => (ed.store.state.summary?.count ?? 0) > 0;
+  const runBoolean = (b: (typeof BOOLEANS)[number]) => {
+    setLastOp(b.op);
+    ed.run(b.command);
+  };
   let bar!: HTMLDivElement;
   onMount(() => onCleanup(roving(bar, 'button')));
   const tool = () => ed.store.state.tool;
@@ -67,6 +87,24 @@ export function Toolbar() {
         setTool(s.tool);
       },
     }));
+
+  const booleanItems = (): MenuItem[] => [
+    ...BOOLEANS.map((b) => ({
+      label: b.name,
+      command: b.command,
+      checked: b.op === boolean().op,
+      disabled: !hasSelection(),
+      onSelect: () => runBoolean(b),
+    })),
+    { separator: true as const },
+    { label: 'Сплющить', command: 'object.flatten', disabled: !hasSelection() },
+    { label: 'Контур обводки', command: 'object.outline_stroke', disabled: !hasSelection() },
+  ];
+
+  const menuLabel = (kind: 'frame' | 'shapes' | 'boolean') =>
+    kind === 'frame' ? 'Пресеты фреймов' : kind === 'shapes' ? 'Фигуры' : 'Булевы операции';
+  const menuItems = (kind: 'frame' | 'shapes' | 'boolean') =>
+    kind === 'frame' ? frameItems() : kind === 'shapes' ? shapeItems() : booleanItems();
 
   return (
     <div ref={bar} class="fe-toolbar" role="toolbar" aria-label="Инструменты">
@@ -151,6 +189,31 @@ export function Toolbar() {
       >
         <Icon name="text" />
       </button>
+      <div class="fe-tool-split">
+        <button
+          class="fe-tool"
+          aria-disabled={!hasSelection()}
+          aria-pressed={ed.store.state.summary?.booleanOp != null}
+          aria-label={boolean().name}
+          data-tip={boolean().name}
+          data-command={boolean().command}
+          data-tip-side="top"
+          onClick={() => hasSelection() && runBoolean(boolean())}
+        >
+          <Icon name={boolean().op} />
+        </button>
+        <button
+          class="fe-tool fe-tool--caret"
+          aria-haspopup="menu"
+          aria-expanded={menu()?.kind === 'boolean'}
+          aria-label="Булевы операции"
+          data-tip="Булевы операции"
+          data-tip-side="top"
+          onClick={(e) => setMenu({ kind: 'boolean', anchor: e.currentTarget })}
+        >
+          <Caret />
+        </button>
+      </div>
       <span class="fe-toolbar__sep" role="separator" />
       <For each={LATER}>
         {(t) => (
@@ -168,8 +231,8 @@ export function Toolbar() {
       <Show when={menu()}>
         {(m) => (
           <Menu
-            label={m().kind === 'frame' ? 'Пресеты фреймов' : 'Фигуры'}
-            items={m().kind === 'frame' ? frameItems() : shapeItems()}
+            label={menuLabel(m().kind)}
+            items={menuItems(m().kind)}
             anchor={m().anchor}
             above
             onClose={() => setMenu(null)}

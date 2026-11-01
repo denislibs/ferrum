@@ -405,11 +405,18 @@ impl Core {
         let built;
         let scene = if first == self.editor.page() {
             self.editor.scene()
-        } else if let Some(page) = doc.loaded_page(first) {
-            built = Scene::from_page(page);
-            &built
         } else {
-            built = Scene::from_rows(doc.cached_scene(first).ok_or(())?);
+            let mut s = match doc.loaded_page(first) {
+                Some(page) => Scene::from_page(page),
+                None => Scene::from_rows(doc.cached_scene(first).ok_or(())?),
+            };
+            // Текст в булевых группах — по контурам глифов, как в сцене редактора.
+            let fonts = self.fonts.clone();
+            s.set_text_outlines(Some(std::rc::Rc::new(move |p: &ferrum_doc::Props| {
+                let mut f = fonts.try_borrow_mut().ok()?;
+                ferrum_render::text_outline(&mut f, p)
+            })));
+            built = s;
             &built
         };
         let background = doc.page_background(first).map(|c| {

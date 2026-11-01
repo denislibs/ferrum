@@ -682,7 +682,7 @@ fn editable(cx: &Ctx, ids: &[NodeId]) -> Vec<NodeId> {
 fn widen_zero_sides(bases: &mut [Base], sbox: SelectionBox) -> SelectionBox {
     let (mut wide_x, mut wide_y) = (false, false);
     for b in bases.iter_mut() {
-        if matches!(b.props.kind, NodeKind::Line | NodeKind::Group) {
+        if b.props.kind == NodeKind::Line || b.props.kind.is_group_like() {
             continue;
         }
         let (zw, zh) = (b.props.w <= 0.0, b.props.h <= 0.0);

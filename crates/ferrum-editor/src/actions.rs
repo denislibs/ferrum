@@ -59,6 +59,11 @@ impl Editor {
             C::ToolPen => self.set_tool(ToolKind::Pen),
             C::ToolArrow => self.set_tool(ToolKind::Arrow),
             C::Flatten => self.flatten(),
+            C::BooleanUnion => self.boolean(ferrum_doc::BooleanOp::Union),
+            C::BooleanSubtract => self.boolean(ferrum_doc::BooleanOp::Subtract),
+            C::BooleanIntersect => self.boolean(ferrum_doc::BooleanOp::Intersect),
+            C::BooleanExclude => self.boolean(ferrum_doc::BooleanOp::Exclude),
+            C::OutlineStroke => self.outline_stroke(),
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
@@ -229,8 +234,20 @@ impl Editor {
     /// встаёт на место верхнего выделенного узла; узлы остаются на экране там же.
     fn wrap(&mut self, kind: NodeKind) {
         let ids = self.ordered_selection();
+        self.wrap_with(ids, kind, PropsPatch::default());
+    }
+
+    /// Общая часть `wrap` и булевых операций: `ids` (в порядке слоёв, не пусто)
+    /// оборачиваются новым узлом `kind` с дополнительными свойствами `extra`.
+    /// `false` — пустой список или отказ документа (сообщение ушло).
+    pub(crate) fn wrap_with(
+        &mut self,
+        ids: Vec<NodeId>,
+        kind: NodeKind,
+        extra: PropsPatch,
+    ) -> bool {
         let Some(&top) = ids.last() else {
-            return;
+            return false;
         };
         let top_slot = self.scene.slot(top).expect("выделение в сцене");
         let parent_slot = self.scene.at(top_slot).parent;
@@ -258,7 +275,7 @@ impl Editor {
             let mut patch = PropsPatch {
                 x: Some(origin.x),
                 y: Some(origin.y),
-                ..Default::default()
+                ..extra
             };
             if kind == NodeKind::Frame {
                 patch.w = Some(frame_box.width());
@@ -284,17 +301,21 @@ impl Editor {
                 }
             }
             Ok(vec![c])
-        });
+        })
     }
 
-    /// Ctrl+Shift+G: дети групп и фреймов выделения встают на их место у родителя.
+    /// Ctrl+Shift+G: дети групп, булевых групп и фреймов выделения встают на их
+    /// место у родителя (у булевой группы — снова со своими заливками).
     fn ungroup(&mut self) {
         let mut ids: Vec<(Vec<u32>, NodeId)> = top_level(&self.scene, &self.selection)
             .into_iter()
             .filter_map(|id| self.scene.slot(id).map(|s| (s, id)))
             .filter(|(s, _)| {
                 let n = self.scene.at(*s);
-                matches!(n.props.kind, NodeKind::Group | NodeKind::Frame) && !n.children.is_empty()
+                matches!(
+                    n.props.kind,
+                    NodeKind::Group | NodeKind::Frame | NodeKind::Boolean
+                ) && !n.children.is_empty()
             })
             .map(|(s, id)| (self.scene.order_key(s), id))
             .collect();

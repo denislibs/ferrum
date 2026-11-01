@@ -1,12 +1,16 @@
 #!/bin/sh
-# Совместимость (спека подсистемы 3, разделы 3, 9 и 12): файл с узлом нового вида,
+# Совместимость (спека подсистемы 3, разделы 3, 9, 10 и 12): файл с узлом нового вида,
 # собранный новой сборкой, открывается сборкой без этого вида только для чтения:
 # прямоугольник виден, новый узел — узел неизвестного типа — скрыт, правка
 # отвергается. Старая сборка собирается во временной копии репозитория.
 #   scripts/compat-old-build.sh [ref] [fixture]
 # fixture — пример `ferrum-doc`: `text_fixture` (по умолчанию; ref — сборка без
-# текста, 2710c85) или `vector_fixture` (ref — сборка без векторов, например main
-# до этапа 3).
+# текста, 2710c85), `vector_fixture` (ref — сборка без векторов, например main
+# до этапа 3) или `boolean_fixture` (ref — сборка без булевых групп, например main
+# до этапа 4: группа скрыта вместе с детьми).
+# Старая сборка идёт в свой каталог `$CARGO_TARGET_DIR/compat-old`: у членов workspace
+# хэш артефакта не зависит от пути, и в общем каталоге старый `ferrum-doc` перезаписал
+# бы отладочную библиотеку новой сборки.
 set -eu
 REF="${1:-2710c85}"
 FIXTURE="${2:-text_fixture}"
@@ -36,6 +40,6 @@ fn file_with_new_kind_opens_read_only() {
     assert!(matches!(err, Err(DocError::ReadOnly)));
 }
 RS
-(cd "$TMP/old" && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}" FERRUM_FIXTURE_FILE="$FILE" \
+(cd "$TMP/old" && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}/compat-old" FERRUM_FIXTURE_FILE="$FILE" \
   cargo test -q -p ferrum-doc --test compat_fixture)
 echo "Совместимость с $REF ($FIXTURE): файл открыт только для чтения"

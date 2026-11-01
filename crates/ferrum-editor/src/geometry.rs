@@ -482,10 +482,11 @@ pub fn bases(scene: &Scene, ids: &[NodeId], with_group_children: bool) -> Vec<Ba
             parent: None,
             parent_world: pw,
         });
-        if !with_group_children || n.props.kind != NodeKind::Group {
+        if !with_group_children || !n.props.kind.is_group_like() {
             continue;
         }
-        // Потомки групп (не фреймов: дети фрейма не масштабируются).
+        // Потомки групп и булевых групп (не фреймов: дети фрейма не
+        // масштабируются).
         let mut stack = vec![(slot, out.len() - 1)];
         while let Some((s, at)) = stack.pop() {
             for &c in &scene.at(s).children {
@@ -497,7 +498,7 @@ pub fn bases(scene: &Scene, ids: &[NodeId], with_group_children: bool) -> Vec<Ba
                     parent: Some(at),
                     parent_world: Affine::IDENTITY,
                 });
-                if cn.props.kind == NodeKind::Group {
+                if cn.props.kind.is_group_like() {
                     stack.push((c, out.len() - 1));
                 }
             }
@@ -607,7 +608,7 @@ fn pose_patch(base: &Props, pose: Pose, size: bool, pixel: PixelSnap) -> PropsPa
     if pose.flip_y != base.flip_y {
         patch.flip_y = Some(pose.flip_y);
     }
-    if size && base.kind != NodeKind::Group {
+    if size && !base.kind.is_group_like() {
         patch.w = Some(pose.w);
         if base.kind != NodeKind::Line {
             patch.h = Some(pose.h);
@@ -698,7 +699,7 @@ pub fn scale_patches_in(
             }
         };
         in_parent.push(tp);
-        if b.props.kind == NodeKind::Group {
+        if b.props.kind.is_group_like() {
             continue;
         }
         let m = tp * b.local;

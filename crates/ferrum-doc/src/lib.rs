@@ -2,6 +2,7 @@
 //! и не видят Loro напрямую.
 
 mod binary;
+mod boolean;
 mod changes;
 mod codec;
 pub mod container;
@@ -18,6 +19,7 @@ mod text_codec;
 mod types;
 mod vector;
 
+pub use boolean::BooleanOp;
 pub use changes::Changes;
 pub use document::{Document, Restore, SCHEMA_VERSION};
 pub use error::{DocError, DocResult};

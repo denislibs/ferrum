@@ -5,6 +5,7 @@
 //! одна и та же последовательность событий даёт один и тот же документ.
 
 mod actions;
+mod boolean;
 pub mod clipboard;
 pub mod commands;
 mod editor;
@@ -14,6 +15,7 @@ pub mod input;
 pub mod keymap;
 pub mod measure;
 mod ops;
+mod outline;
 pub mod pages;
 pub mod panel;
 pub mod presets;

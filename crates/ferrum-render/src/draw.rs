@@ -356,7 +356,8 @@ impl Painter {
                 self.stats.too_small += 1;
                 continue;
             }
-            let has_children = !n.children.is_empty();
+            // Дети булевой группы не рисуются: рисуется её результат (как лист).
+            let has_children = !n.children.is_empty() && n.props.kind != NodeKind::Boolean;
             if ctx.raster
                 && ctx.scale <= RASTER_MAX_SCALE
                 && n.parent.is_none()

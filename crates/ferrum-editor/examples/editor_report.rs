@@ -756,6 +756,7 @@ fn main() {
         "Кривой вектор 100 000 точек",
         ferrum_doc::fixture::curvy_network(100_000, 2000.0),
     );
+    boolean_child_drag(&mut report);
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -776,6 +777,76 @@ fn main() {
     if failed {
         std::process::exit(1);
     }
+}
+
+/// Правка ребёнка большой булевой группы (подсистема 3, этап 4): 1000
+/// перекрывающихся кругов в «Объединении», перетаскивание одного круга — кадр
+/// жеста (превью сцены пересчитывает результат) и запись одним шагом.
+fn boolean_child_drag(report: &mut Report) {
+    let mut ed =
+        Editor::new(Document::new(), None, VIEWPORT, 1.0, Platform::Mac).expect("страница");
+    let ids = ed
+        .transact(|tx| {
+            let b = tx.create_node(None, None, ferrum_doc::NodeKind::Boolean)?;
+            let mut kids = vec![b];
+            for i in 0..1000 {
+                let e = tx.create_node(Some(b), None, ferrum_doc::NodeKind::Ellipse)?;
+                tx.set_props(
+                    e,
+                    &PropsPatch {
+                        x: Some((i % 40) as f64 * 15.0),
+                        y: Some((i / 40) as f64 * 15.0),
+                        w: Some(20.0),
+                        h: Some(20.0),
+                        ..Default::default()
+                    },
+                )?;
+                kids.push(e);
+            }
+            Ok(kids)
+        })
+        .unwrap();
+    let (b, child) = (ids[0], ids[501]);
+    let bounds = ed.scene().node(b).unwrap().world_bounds.unwrap();
+    let mut cam = Camera::new(VIEWPORT, 1.0);
+    cam.fit(bounds, 48.0);
+    ed.set_camera(cam);
+    // Ребёнок выделен, как после двойного щелчка по группе.
+    ed.select(&[child]);
+    ed.take_events();
+    let steps = ed.step_count();
+    let c = ed.scene().node(child).unwrap();
+    let center = c.world * Point::new(10.0, 10.0);
+    let from = ed.camera().world_to_screen(center);
+    let mut clock = Clock(0.0);
+    // Шаг 3 px экрана — больше пикселя мира: каждое движение сдвигает круг.
+    let d = drag_moves(&mut ed, &mut clock, &[child], from, 3.0);
+    report.gate_median(
+        "Булева группа 1000 кругов: перетаскивание ребёнка — кадр жеста (части у ребёнка)",
+        &d.times,
+        16.7,
+    );
+    report.info(
+        "Булева группа 1000 кругов: первое движение (остальные складываются один раз)",
+        ms(d.first),
+    );
+    let t = Instant::now();
+    ed.handle(Input::PointerUp(clock.at(d.end)));
+    let commit = t.elapsed();
+    ed.take_events();
+    // Запись: превью снимается, документ пишется — тот же ребёнок, остальные
+    // уже сложены, полного пересчёта нет.
+    report.gate(
+        "Булева группа 1000 кругов: запись перетаскивания ребёнка (отпускание)",
+        commit,
+        16.7,
+    );
+    report.check(
+        "Булева группа 1000 кругов: один шаг, ребёнок сдвинут",
+        ed.step_count() == steps + 1 && d.moved == 1,
+        format!("{} шаг, {} узел", ed.step_count() - steps, d.moved),
+        "1 шаг, 1 узел",
+    );
 }
 
 /// Правка вектора из 100 000 точек (подсистема 3, этап 3): перетаскивание точки в

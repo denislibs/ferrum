@@ -18,7 +18,7 @@ test('редактор запускает ядро и получает раск�
       errors: f.uiEvents!.filter((e) => e.type === 'error'),
     };
   });
-  expect(info).toEqual({ mode: 'sab', commands: 48, presets: 11, pages: 1, total: 10, name: 'Без названия', errors: [] });
+  expect(info).toEqual({ mode: 'sab', commands: 53, presets: 11, pages: 1, total: 10, name: 'Без названия', errors: [] });
 });
 
 test('шрифты и цвета — из дизайн-системы', async ({ page }) => {

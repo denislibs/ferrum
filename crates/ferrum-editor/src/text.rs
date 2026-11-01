@@ -243,6 +243,7 @@ impl Editor {
     /// Общий реестр шрифтов ядра (тот же у рендера).
     pub fn set_fonts(&mut self, fonts: SharedFonts) {
         self.fonts = fonts;
+        crate::editor::install_text_outlines(&mut self.scene, &self.fonts, &self.outlines_missed);
     }
 
     pub fn fonts(&self) -> &SharedFonts {

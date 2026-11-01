@@ -14,7 +14,9 @@
 //! Так же добавлены стиль обводки (`strokeCapStart`, `strokeCapEnd`, `strokeJoin`,
 //! `strokeMiterLimit` — только не нейтральные) и сеть вектора (`vector` — base64
 //! двоичной формы `VectorNetwork`): сборка без векторов пропускает узел «vector»
-//! как неизвестный.
+//! как неизвестный. Булева группа — узел «boolean» с полем `booleanOp` (только
+//! известные операции; без поля — объединение): сборка без булевых групп
+//! пропускает её вместе с детьми.
 //!
 //! Вставка не доверяет данным: размеры и количества ограничены, длины проверяются
 //! до копирования, числа приводятся к пределам сцены, ссылки на родителя — только
@@ -26,8 +28,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ferrum_doc::{
-    Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign, StrokeCap,
-    StrokeJoin, StrokeStyle, TextData, VectorNetwork, DEFAULT_MITER_LIMIT, MITER_LIMIT_RANGE,
+    BooleanOp, Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign,
+    StrokeCap, StrokeJoin, StrokeStyle, TextData, VectorNetwork, DEFAULT_MITER_LIMIT,
+    MITER_LIMIT_RANGE,
 };
 use ferrum_scene::shape;
 use kurbo::Rect;
@@ -128,6 +131,9 @@ struct JsonNode {
     /// Сеть вектора: base64 двоичной формы — только у вектора.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vector: Option<String>,
+    /// Операция булевой группы — только у неё.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boolean_op: Option<String>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -267,6 +273,7 @@ impl ClipPayload {
                         stroke_miter_limit: Some(p.stroke_style.miter_limit)
                             .filter(|m| *m != DEFAULT_MITER_LIMIT),
                         vector: p.vector.as_ref().map(|v| v.to_base64()),
+                        boolean_op: p.boolean_op.map(|op| op.as_str().to_string()),
                     }
                 })
                 .collect(),
@@ -420,7 +427,10 @@ fn build_nodes(json_nodes: Vec<JsonNode>) -> Result<Vec<ClipNode>, ClipboardErro
         let (parent, d) = match parent {
             None => (None, 0),
             Some(k) => {
-                if !matches!(nodes[k].props.kind, NodeKind::Frame | NodeKind::Group) {
+                if !matches!(
+                    nodes[k].props.kind,
+                    NodeKind::Frame | NodeKind::Group | NodeKind::Boolean
+                ) {
                     return Err(corrupted("у узла этого типа не бывает потомков"));
                 }
                 let d = depth[k] + 1;
@@ -537,6 +547,14 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
             (NodeKind::Vector, None) => Some(Arc::new(VectorNetwork::default())),
             _ => None,
         },
+        // Операция — только у булевой группы; неизвестная — отказ вставки.
+        boolean_op: match (kind, n.boolean_op.as_deref()) {
+            (NodeKind::Boolean, Some(s)) => {
+                Some(BooleanOp::parse(s).ok_or_else(|| corrupted("булева операция"))?)
+            }
+            (NodeKind::Boolean, None) => Some(BooleanOp::Union),
+            _ => None,
+        },
     };
     // Нечисловые и огромные значения — к допустимым, как у строк кэша сцены.
     shape::sanitize(&mut props);
@@ -545,7 +563,7 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
     // отражение группы идёт относительно начала её координат (`w = h = 0`).
     match kind {
         NodeKind::Line => props.h = 0.0,
-        NodeKind::Group => (props.w, props.h) = (0.0, 0.0),
+        NodeKind::Group | NodeKind::Boolean => (props.w, props.h) = (0.0, 0.0),
         _ => {}
     }
     Ok(props)
@@ -602,5 +620,6 @@ pub fn full_patch(p: &Props) -> PropsPatch {
         stroke_join: Some(p.stroke_style.join).filter(|j| *j != StrokeJoin::Miter),
         stroke_miter_limit: Some(p.stroke_style.miter_limit).filter(|m| *m != DEFAULT_MITER_LIMIT),
         vector: p.vector.clone(),
+        boolean_op: p.boolean_op,
     }
 }
