@@ -1343,11 +1343,16 @@ impl Scene {
             return false;
         }
         // Дети булевой группы не рисуются: в них попадают только там, где
-        // рисуется сама внешняя группа (дыра «Вычитания» — мимо).
-        match self.boolean_root(slot) {
-            Some(b) => self.hits_own(b, point, tolerance),
-            None => true,
+        // рисуется каждая булева группа над ними, а не одна внешняя (дыра
+        // вложенного «Вычитания» — мимо, даже если её закрывает сосед).
+        let mut cur = self.at(slot).parent;
+        while let Some(p) = cur {
+            if self.at(p).props.kind == NodeKind::Boolean && !self.hits_own(p, point, tolerance) {
+                return false;
+            }
+            cur = self.at(p).parent;
         }
+        true
     }
 
     /// Попадание в собственную форму узла (без проверки видимости).

@@ -443,6 +443,54 @@ fn grid(op: BooleanOp) -> (Document, PageId, NodeId, Vec<NodeId>) {
     (doc, page, b, ids)
 }
 
+/// Объединение(Вычитание(A, B), C): дети внутренней группы попадают только
+/// там, где рисуется и она, и внешняя; в дыре внутренней группы, которую
+/// закрывает C, щелчок не выбирает A и B.
+#[test]
+fn children_of_nested_booleans_are_hit_only_inside_every_enclosing_result() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let [outer, inner, a, b, c]: [NodeId; 5] = doc
+        .transact(page, vec![], |tx| {
+            let outer = tx.create_with_props(
+                None,
+                None,
+                &Props {
+                    boolean_op: Some(BooleanOp::Union),
+                    ..Props::defaults(NodeKind::Boolean)
+                },
+            )?;
+            let inner = tx.create_with_props(
+                Some(outer),
+                None,
+                &Props {
+                    boolean_op: Some(BooleanOp::Subtract),
+                    ..Props::defaults(NodeKind::Boolean)
+                },
+            )?;
+            let a = tx.create_node(Some(inner), None, NodeKind::Rect)?;
+            tx.set_props(a, &patch(0.0, 0.0, 100.0, 100.0))?;
+            let b = tx.create_node(Some(inner), None, NodeKind::Rect)?;
+            tx.set_props(b, &patch(25.0, 25.0, 50.0, 50.0))?;
+            let c = tx.create_node(Some(outer), None, NodeKind::Rect)?;
+            tx.set_props(c, &patch(40.0, 40.0, 20.0, 20.0))?;
+            Ok(vec![outer, inner, a, b, c])
+        })
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let scene = Scene::from_page(doc.page(page).unwrap());
+    // В дыре «Вычитания», закрытой C: только C и внешняя группа.
+    let hits = scene.hit_test_all(Point::new(50.0, 50.0), 0.0);
+    assert_eq!(hits, vec![c, outer]);
+    // В дыре, которую C не закрывает: ничего.
+    assert!(scene.hit_test_all(Point::new(30.0, 30.0), 0.0).is_empty());
+    // На основе: A, обе группы.
+    let hits = scene.hit_test_all(Point::new(10.0, 10.0), 0.0);
+    assert_eq!(hits, vec![a, inner, outer]);
+    assert!(!hits.contains(&b));
+}
+
 #[test]
 fn gesture_on_one_child_recomputes_only_near_it_and_matches_the_full_result() {
     for op in BooleanOp::ALL {
