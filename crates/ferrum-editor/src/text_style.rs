@@ -22,8 +22,9 @@ use ferrum_text::{
     FontStatus,
 };
 
+use crate::commands::{CommandGroup, CommandId};
 use crate::editor::{Editor, EditorEvent};
-use crate::input::Modifiers;
+use crate::input::{KeyEvent, Modifiers};
 use crate::panel::{PanelGesture, Phase};
 use crate::text::{fit_patch, TextError};
 use crate::text_input::{char_attrs, splice, typing_attrs};
@@ -790,84 +791,126 @@ impl Editor {
     /// Жирный и курсив: каждый участок диапазона сохраняет своё семейство
     /// (и вес, если переключается курсив). Все участки уже включены — выключает,
     /// иначе включает у всех (как подчёркивание). Начертания нет в семействе —
-    /// участок не меняется.
+    /// участок не меняется. Вне правки диапазон — весь текст каждого выделенного
+    /// текстового узла, одним шагом.
     fn toggle_font(&mut self, which: FontToggle) -> Result<(), TextError> {
-        let Some(t) = self.text_edit.as_ref() else {
-            return Ok(());
-        };
-        let (id, range, draft) = (t.id, t.range(), t.draft.is_some());
         let usable = |ed: &Editor, f: &FontName| ed.fonts.borrow().status(f) != FontStatus::Missing;
-        if range.is_empty() || draft {
-            // Курсор и черновик: стиль один (следующего ввода или узла).
-            let Some(s) = self.text_style_summary() else {
-                return Ok(());
-            };
-            let old = FontName::new(s.family.value, s.style.value);
-            let font = which.apply(&old, !which.is_on(&old));
-            if !usable(self, &font) {
-                return Ok(());
+        let edit = self
+            .text_edit
+            .as_ref()
+            .map(|t| (t.id, t.range(), t.draft.is_some()));
+        if let Some((_, range, draft)) = &edit {
+            if range.is_empty() || *draft {
+                // Курсор и черновик: стиль один (следующего ввода или узла).
+                let Some(s) = self.text_style_summary() else {
+                    return Ok(());
+                };
+                let old = FontName::new(s.family.value, s.style.value);
+                let font = which.apply(&old, !which.is_on(&old));
+                if !usable(self, &font) {
+                    return Ok(());
+                }
+                return self.edit_text_style(
+                    &TextStylePatch {
+                        font: Some(font),
+                        ..Default::default()
+                    },
+                    Phase::Commit,
+                    None,
+                );
             }
-            return self.edit_text_style(
-                &TextStylePatch {
+        }
+        // Узлы и диапазоны: в правке — выделенный фрагмент, иначе весь текст.
+        let targets: Vec<(NodeId, Range<usize>)> = match edit {
+            Some((id, range, _)) => vec![(id, range)],
+            None => self
+                .style_targets(None)
+                .into_iter()
+                .filter_map(|id| {
+                    let len = self.scene.node(id)?.props.text.as_ref()?.content.char_len();
+                    Some((id, 0..len))
+                })
+                .collect(),
+        };
+        // Участки каждого узла с их позициями и шрифтом.
+        type Runs = Vec<(Range<usize>, FontName, bool)>;
+        let mut nodes: Vec<(NodeId, Props, Runs)> = Vec::new();
+        for (id, range) in targets {
+            let Some(before) = self.doc_props(id) else {
+                continue;
+            };
+            let Some(td) = before.text.as_ref() else {
+                continue;
+            };
+            let d = &td.props.style;
+            let mut runs: Runs = Vec::new();
+            let mut at = range.start;
+            for r in td.content.slice(range) {
+                let len = r.text.chars().count();
+                runs.push((
+                    at..at + len,
+                    r.attrs.font_name(d),
+                    r.text.chars().any(|c| c != '\n'),
+                ));
+                at += len;
+            }
+            nodes.push((id, before, runs));
+        }
+        let on = nodes
+            .iter()
+            .flat_map(|(_, _, runs)| runs.iter())
+            .filter(|r| r.2)
+            .all(|(_, f, _)| which.is_on(f));
+        // Правки каждого узла: участки и подгонка размера под новую раскладку.
+        type NodeChanges = (
+            NodeId,
+            TextContent,
+            TextStyle,
+            Vec<(Range<usize>, TextStylePatch)>,
+            PropsPatch,
+        );
+        let mut all: Vec<NodeChanges> = Vec::new();
+        for (id, before, runs) in nodes {
+            let td = before.text.as_ref().expect("только тексты");
+            let d = &td.props.style;
+            let mut content = td.content.clone();
+            let mut changes: Vec<(Range<usize>, TextStylePatch)> = Vec::new();
+            for (r, f, _) in runs {
+                let font = which.apply(&f, !on);
+                if font == f || !usable(self, &font) {
+                    continue;
+                }
+                let patch = TextStylePatch {
                     font: Some(font),
                     ..Default::default()
-                },
-                Phase::Commit,
-                None,
-            );
-        }
-        let Some(before) = self.doc_props(id) else {
-            return Ok(());
-        };
-        let Some(td) = before.text.as_ref() else {
-            return Ok(());
-        };
-        let d = &td.props.style;
-        // Участки диапазона с их позициями и шрифтом.
-        let mut runs: Vec<(Range<usize>, FontName, bool)> = Vec::new();
-        let mut at = range.start;
-        for r in td.content.slice(range) {
-            let len = r.text.chars().count();
-            runs.push((
-                at..at + len,
-                r.attrs.font_name(d),
-                r.text.chars().any(|c| c != '\n'),
-            ));
-            at += len;
-        }
-        let on = runs.iter().filter(|r| r.2).all(|(_, f, _)| which.is_on(f));
-        let mut content = td.content.clone();
-        let mut changes: Vec<(Range<usize>, TextStylePatch)> = Vec::new();
-        for (r, f, _) in runs {
-            let font = which.apply(&f, !on);
-            if font == f || !usable(self, &font) {
+                };
+                content = restyle(&content, r.clone(), &patch, d);
+                changes.push((r, patch));
+            }
+            if changes.is_empty() {
                 continue;
             }
-            let patch = TextStylePatch {
-                font: Some(font),
-                ..Default::default()
-            };
-            content = restyle(&content, r.clone(), &patch, d);
-            changes.push((r, patch));
+            let mut after = before.clone();
+            after.text = Some(Arc::new(TextData {
+                props: td.props.clone(),
+                content,
+            }));
+            let fit = fit_patch(&mut self.fonts.borrow_mut(), &before, &after)
+                .map_err(|_| TextError::Pending)?;
+            all.push((id, td.content.clone(), d.clone(), changes, fit));
         }
-        if changes.is_empty() {
+        if all.is_empty() {
             return Ok(());
         }
-        let mut after = before.clone();
-        after.text = Some(Arc::new(TextData {
-            props: td.props.clone(),
-            content,
-        }));
-        let fit = fit_patch(&mut self.fonts.borrow_mut(), &before, &after)
-            .map_err(|_| TextError::Pending)?;
         self.cancel_text_preview();
         let selection = self.selection.to_vec();
-        let (content, style) = (td.content.clone(), d.clone());
         self.ctx().commit(|tx, _| {
-            for (r, patch) in &changes {
-                restyle_ops(tx, id, &content, r.clone(), patch, &style)?;
+            for (id, content, style, changes, fit) in &all {
+                for (r, patch) in changes {
+                    restyle_ops(tx, *id, content, r.clone(), patch, style)?;
+                }
+                tx.set_props(*id, fit)?;
             }
-            tx.set_props(id, &fit)?;
             Ok(selection)
         });
         if let Some(t) = self.text_edit.as_mut() {
@@ -877,20 +920,20 @@ impl Editor {
         Ok(())
     }
 
-    /// Сочетания форматирования в правке. Возвращает, обработано ли.
-    pub(crate) fn text_format_key(&mut self, code: &str, mods: Modifiers) -> bool {
-        let platform = self.settings.platform;
-        let primary = mods.primary(platform);
-        let result = match code {
-            "KeyB" | "KeyI" if primary && !mods.alt && !mods.shift => {
-                self.toggle_font(if code == "KeyB" {
-                    FontToggle::Bold
-                } else {
-                    FontToggle::Italic
-                })
-            }
-            "KeyU" | "KeyX" if primary && !mods.alt && (code == "KeyU") != mods.shift => {
-                let want = if code == "KeyU" {
+    /// Команды форматирования текста (группа «Текст» таблицы): в правке — к
+    /// выделенному фрагменту (у курсора — к следующему вводу), иначе — ко всему
+    /// тексту выделенных узлов. Шрифты грузятся — ядро повторит команду.
+    pub(crate) fn text_command(&mut self, cmd: CommandId) {
+        use CommandId as C;
+        let align = |a: AlignH| TextPropsPatch {
+            align_h: Some(a),
+            ..Default::default()
+        };
+        let result = match cmd {
+            C::TextBold => self.toggle_font(FontToggle::Bold),
+            C::TextItalic => self.toggle_font(FontToggle::Italic),
+            C::TextUnderline | C::TextStrike => {
+                let want = if cmd == C::TextUnderline {
                     Decoration::Underline
                 } else {
                     Decoration::Strike
@@ -907,22 +950,36 @@ impl Editor {
                     None,
                 )
             }
-            "KeyL" | "KeyT" | "KeyR" | "KeyJ" if primary && mods.alt && !mods.shift => {
-                let align = match code {
-                    "KeyL" => AlignH::Left,
-                    "KeyT" => AlignH::Center,
-                    "KeyR" => AlignH::Right,
-                    _ => AlignH::Justify,
-                };
-                self.edit_text_props(
-                    &TextPropsPatch {
-                        align_h: Some(align),
-                        ..Default::default()
-                    },
-                    Phase::Commit,
-                    None,
-                )
+            C::TextAlignLeft => self.edit_text_props(&align(AlignH::Left), Phase::Commit, None),
+            C::TextAlignCenter => self.edit_text_props(&align(AlignH::Center), Phase::Commit, None),
+            C::TextAlignRight => self.edit_text_props(&align(AlignH::Right), Phase::Commit, None),
+            C::TextAlignJustify => {
+                self.edit_text_props(&align(AlignH::Justify), Phase::Commit, None)
             }
+            _ => return,
+        };
+        match result {
+            Ok(()) => {}
+            // Шрифты грузятся: ничего не сделано, ядро повторит команду.
+            Err(TextError::Pending) => self.out.text_pending = true,
+            Err(e) => self.out.events.push(EditorEvent::Error(e.to_string())),
+        }
+    }
+
+    /// Сочетания форматирования в правке — по действующей раскладке (команды
+    /// группы «Текст»), Tab — уровень списка. Возвращает, обработано ли.
+    pub(crate) fn text_format_key(&mut self, code: &str, mods: Modifiers) -> bool {
+        let key = KeyEvent::new(code, mods);
+        if let Some(cmd) = self
+            .keymap
+            .lookup(&key)
+            .filter(|c| c.group() == CommandGroup::Text)
+        {
+            self.text_command(cmd);
+            return true;
+        }
+        let primary = mods.primary(self.settings.platform);
+        let result = match code {
             "Tab" if !primary && !mods.alt => {
                 // Уровень списка; вне списка Tab ничего не делает.
                 self.edit_text_style(

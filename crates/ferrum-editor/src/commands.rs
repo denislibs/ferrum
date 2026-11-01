@@ -79,6 +79,21 @@ pub enum CommandId {
     FlipVertical,
     /// Сохранить файл в хранилище (интерфейс получает `EditorEvent::SaveRequested`).
     Save,
+    /// Пиксельная сетка при зуме от 800% (Shift+', как в Figma).
+    PixelGrid,
+    /// Войти в правку выделенного: текст — правка текста, вектор и фигура — правка
+    /// вектора (как Enter).
+    EditObject,
+    /// Стиль текста (в правке — выделенного фрагмента, иначе — всего текста
+    /// выделенных узлов), как Ctrl/Cmd+B, I, U, Shift+X и выравнивание.
+    TextBold,
+    TextItalic,
+    TextUnderline,
+    TextStrike,
+    TextAlignLeft,
+    TextAlignCenter,
+    TextAlignRight,
+    TextAlignJustify,
     // ——— Команды интерфейса (`ui.*`): их выполняет основной поток, ядро только
     // сообщает о вызове событием `EditorEvent::UiCommand` (спека подсистемы 2,
     // раздел 3). ———
@@ -703,6 +718,92 @@ pub const COMMANDS: &[Command] = &[
         "Сохранить",
         &["запись", "save"],
         &["Mod+KeyS"],
+    ),
+    // Как в Figma: «Pixel grid» — Shift+'.
+    cmd(
+        C::PixelGrid,
+        "view.pixel_grid",
+        G::View,
+        "Пиксельная сетка",
+        &["сетка", "пиксели", "pixel grid", "grid"],
+        &["Shift+Quote"],
+    )
+    .toggle(),
+    // Enter — физическая клавиша правки (как Esc у жеста); в таблице — для меню
+    // и подписи.
+    cmd(
+        C::EditObject,
+        "vector.edit",
+        G::Vector,
+        "Войти в правку",
+        &["редактировать", "точки", "узлы", "edit object", "edit"],
+        &["Enter"],
+    ),
+    // Форматирование текста — как в справке Figma; в правке текста действует
+    // та же раскладка.
+    cmd(
+        C::TextBold,
+        "text.bold",
+        G::Text,
+        "Жирный",
+        &["полужирный", "толщина", "bold"],
+        &["Mod+KeyB"],
+    ),
+    cmd(
+        C::TextItalic,
+        "text.italic",
+        G::Text,
+        "Курсив",
+        &["наклонный", "italic"],
+        &["Mod+KeyI"],
+    ),
+    cmd(
+        C::TextUnderline,
+        "text.underline",
+        G::Text,
+        "Подчёркнутый",
+        &["подчеркнуть", "underline"],
+        &["Mod+KeyU"],
+    ),
+    cmd(
+        C::TextStrike,
+        "text.strike",
+        G::Text,
+        "Зачёркнутый",
+        &["зачеркнуть", "strikethrough"],
+        &["Mod+Shift+KeyX"],
+    ),
+    cmd(
+        C::TextAlignLeft,
+        "text.align_left",
+        G::Text,
+        "Выровнять по левому краю",
+        &["выравнивание", "влево", "align left"],
+        &["Mod+Alt+KeyL"],
+    ),
+    cmd(
+        C::TextAlignCenter,
+        "text.align_center",
+        G::Text,
+        "Выровнять по центру",
+        &["выравнивание", "центр", "align center"],
+        &["Mod+Alt+KeyT"],
+    ),
+    cmd(
+        C::TextAlignRight,
+        "text.align_right",
+        G::Text,
+        "Выровнять по правому краю",
+        &["выравнивание", "вправо", "align right"],
+        &["Mod+Alt+KeyR"],
+    ),
+    cmd(
+        C::TextAlignJustify,
+        "text.align_justify",
+        G::Text,
+        "Выровнять по ширине",
+        &["выравнивание", "по ширине", "justify"],
+        &["Mod+Alt+KeyJ"],
     ),
     // Команды интерфейса. Ctrl/Cmd+N и Ctrl/Cmd+O у браузера (новое окно, открыть
     // файл страницей), поэтому у «Нового файла» и «Открыть…» сочетаний нет.

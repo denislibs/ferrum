@@ -61,9 +61,6 @@ fn every_command_has_group_keywords_and_unique_key() {
     // Каждая группа меню непуста; ключи и названия групп различны.
     let groups: HashSet<_> = COMMANDS.iter().map(|c| c.group).collect();
     for g in CommandGroup::ALL {
-        if g == CommandGroup::Text || g == CommandGroup::Vector {
-            continue; // наполняются командами текста и правки вектора
-        }
         assert!(groups.contains(&g), "группа {g:?} пуста");
     }
     let titles: HashSet<_> = CommandGroup::ALL.iter().map(|g| g.title()).collect();
@@ -81,6 +78,7 @@ fn toggles_are_exactly_the_checkable_commands() {
             C::BooleanSubtract,
             C::BooleanIntersect,
             C::BooleanExclude,
+            C::PixelGrid,
             C::UiPixelSnap,
             C::UiThemeDark,
             C::UiThemeLight,

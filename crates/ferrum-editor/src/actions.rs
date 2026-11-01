@@ -201,6 +201,29 @@ impl Editor {
             | C::UiThemeSystem => self.out.events.push(EditorEvent::UiCommand(cmd)),
             C::FlipHorizontal => self.mirror(Vec2::new(-1.0, 1.0)),
             C::FlipVertical => self.mirror(Vec2::new(1.0, -1.0)),
+            C::PixelGrid => self.settings.pixel_grid = !self.settings.pixel_grid,
+            C::EditObject => self.edit_object(),
+            C::TextBold
+            | C::TextItalic
+            | C::TextUnderline
+            | C::TextStrike
+            | C::TextAlignLeft
+            | C::TextAlignCenter
+            | C::TextAlignRight
+            | C::TextAlignJustify => self.text_command(cmd),
+        }
+    }
+
+    /// «Войти в правку» (как Enter): единственный выделенный текст — правка
+    /// текста, вектор или фигура — правка вектора.
+    fn edit_object(&mut self) {
+        if self.vector_edit.is_some() || self.text_edit.is_some() {
+            return;
+        }
+        if let [id] = self.selection[..] {
+            if !self.start_text_edit(id, crate::text_edit::EnterAt::All) {
+                self.start_vector_edit(id);
+            }
         }
     }
 

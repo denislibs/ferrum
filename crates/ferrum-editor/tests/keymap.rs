@@ -69,6 +69,16 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::UiMainMenu, &["Alt+Slash"]),
     (CommandId::UiExport, &["Mod+Shift+KeyE"]),
     (CommandId::UiPixelSnap, &["Mod+Shift+Quote"]),
+    (CommandId::PixelGrid, &["Shift+Quote"]),
+    (CommandId::EditObject, &["Enter"]),
+    (CommandId::TextBold, &["Mod+KeyB"]),
+    (CommandId::TextItalic, &["Mod+KeyI"]),
+    (CommandId::TextUnderline, &["Mod+KeyU"]),
+    (CommandId::TextStrike, &["Mod+Shift+KeyX"]),
+    (CommandId::TextAlignLeft, &["Mod+Alt+KeyL"]),
+    (CommandId::TextAlignCenter, &["Mod+Alt+KeyT"]),
+    (CommandId::TextAlignRight, &["Mod+Alt+KeyR"]),
+    (CommandId::TextAlignJustify, &["Mod+Alt+KeyJ"]),
 ];
 
 /// Команды без сочетания по умолчанию: «Копировать как SVG» (как в Figma) и
@@ -135,7 +145,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 70);
+    assert_eq!(COMMANDS.len(), 80);
 }
 
 #[test]

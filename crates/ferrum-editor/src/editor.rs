@@ -780,6 +780,10 @@ impl Editor {
         let Some(cmd) = self.keymap.lookup(&e) else {
             return;
         };
+        // Удержанная клавиша не входит в правку (как физический Enter выше).
+        if cmd == CommandId::EditObject && e.repeat {
+            return;
+        }
         if cmd == CommandId::HandHold {
             if !e.repeat && self.held.is_none() && self.tool.kind() != ToolKind::Hand {
                 let prev = std::mem::replace(&mut self.tool, Box::new(HandTool::new()));
