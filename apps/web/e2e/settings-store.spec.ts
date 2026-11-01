@@ -3,7 +3,7 @@
 // лету, тема до загрузки приложения — из зеркала `ferrum.theme`.
 
 import { expect, test, type Page } from '@playwright/test';
-import { editorReady, newFileUrl, testMode } from './helpers';
+import { editorReady, mainMenu, newFileUrl, testMode } from './helpers';
 
 const stored = (page: Page) => page.evaluate(() => window.__ferrumFiles!.store.settings());
 
@@ -38,8 +38,7 @@ test('две вкладки меняют разные поля — оба сох
   await b.goto('/');
   await expect(b.getByRole('heading', { level: 1 })).toBeVisible();
   // A: тема «Светлая» в настройках редактора.
-  await a.getByRole('button', { name: 'Меню файла' }).click();
-  await a.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(a, 'Настройки', 'Настройки…');
   const dialog = a.getByRole('dialog', { name: 'Настройки' });
   await dialog.getByRole('tab', { name: 'Тема' }).click();
   await dialog.getByRole('radio', { name: 'Светлая' }).check();
@@ -135,8 +134,7 @@ test('настройки не теряются при перезапуске я�
   await testMode(page);
   await page.goto(newFileUrl(10));
   await editorReady(page);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(page, 'Настройки', 'Настройки…');
   const dialog = page.getByRole('dialog', { name: 'Настройки' });
   await dialog.getByRole('tab', { name: 'Тема' }).click();
   await dialog.getByRole('radio', { name: 'Светлая' }).check();
@@ -170,8 +168,7 @@ test('чужое изменение темы не возвращает в баз
   await a.goto('/');
   await expect(a.getByRole('heading', { level: 1 })).toBeVisible();
   // B (страницы открыты) меняет тему: пишет только тему.
-  await b.getByRole('button', { name: 'Меню файла' }).click();
-  await b.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(b, 'Настройки', 'Настройки…');
   const dialog = b.getByRole('dialog', { name: 'Настройки' });
   await dialog.getByRole('tab', { name: 'Тема' }).click();
   await dialog.getByRole('radio', { name: 'Светлая' }).check();
@@ -218,8 +215,7 @@ test('настройка, изменённая прямо перед перез�
   await editorReady(page);
   // Как при закрытии вкладки: worker уничтожается раньше, чем запись дойдёт до базы.
   await page.evaluate(() => window.__ferrumFiles!.store.holdSettings(true));
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(page, 'Настройки', 'Настройки…');
   const dialog = page.getByRole('dialog', { name: 'Настройки' });
   await dialog.getByRole('tab', { name: 'Тема' }).click();
   await dialog.getByRole('radio', { name: 'Светлая' }).check();

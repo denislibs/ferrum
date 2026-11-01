@@ -523,3 +523,28 @@
 .fe-menu__empty {
   padding-bottom: var(--space-1);
 }
+/* Кнопка с логотипом: главное меню (как в Figma UI3). */
+.fe-logo {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  height: 28px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+}
+.fe-logo:hover,
+.fe-logo[aria-expanded='true'] {
+  background: var(--surface-hover);
+}
+.fe-logo:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.fe-logo svg {
+  width: 12px;
+  height: 12px;
+}

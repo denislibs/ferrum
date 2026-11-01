@@ -4,7 +4,7 @@
 // к экрану файлов стирают журнал.
 
 import { expect, test, type Page } from '@playwright/test';
-import { drawRect, editorReady, fileId, journalCount, live, liveWhen, storedFile } from './helpers';
+import { drawRect, editorReady, fileId, journalCount, live, liveWhen, mainMenu, storedFile } from './helpers';
 
 const meta = (page: Page, id: string) => page.evaluate((i) => window.__ferrumFiles!.store.get(i), id);
 const toast = (page: Page, text: string) => page.locator('.fe-toast', { hasText: text });
@@ -86,8 +86,7 @@ test('уход к экрану файлов пишет полный файл, ж
   const id = await storedFile(page, '&fullSave=600000');
   await drawRect(page, 150);
   await expect.poll(() => journalCount(page, id), { timeout: 10_000 }).toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: 'Все файлы' }).click();
+  await mainMenu(page, 'Файл', 'Все файлы');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   expect(await journalCount(page, id)).toBe(0);
 });

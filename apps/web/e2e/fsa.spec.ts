@@ -5,7 +5,7 @@
 // изменённый другой программой, запрос доступа после перезапуска, нет API — нет пунктов.
 
 import { expect, test, type Page } from '@playwright/test';
-import { drawRect, editorReady, fileId, liveWhen, newFileUrl, storedFile, testMode } from './helpers';
+import { drawRect, editorReady, fileId, liveWhen, mainMenu, newFileUrl, storedFile, testMode } from './helpers';
 
 /** Диалоги выбора — файлы OPFS: открыть — `window.__pick` (или «проект.ferrum»),
  * сохранить — предложенное имя. */
@@ -24,8 +24,7 @@ const diskSize = (page: Page, name: string) =>
 const meta = (page: Page, id: string) => page.evaluate((i) => window.__ferrumFiles!.store.get(i), id);
 const toast = (page: Page, text: string) => page.locator('.fe-toast', { hasText: text });
 const fileMenu = async (page: Page, item: string) => {
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: item }).click();
+  await mainMenu(page, 'Файл', item);
 };
 
 /** Байты открытого документа — файлом `name` в OPFS («на диске»). */
@@ -156,8 +155,8 @@ test('без File System Access пунктов «с диска» и «на ди�
   await expect(page.getByRole('button', { name: 'Открыть с диска…' })).toHaveCount(0);
   await page.goto(newFileUrl(5));
   await editorReady(page);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  const menu = page.getByRole('menu', { name: 'Меню файла' });
+  await mainMenu(page, 'Файл');
+  const menu = page.getByRole('menu', { name: 'Файл', exact: true });
   await expect(menu.getByRole('menuitem', { name: 'Открыть…' })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: 'Открыть с диска…' })).toHaveCount(0);
   await expect(menu.getByRole('menuitem', { name: 'Сохранить на диск…' })).toHaveCount(0);

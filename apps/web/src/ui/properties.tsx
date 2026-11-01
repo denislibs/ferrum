@@ -423,7 +423,7 @@ function ExportSection() {
           <span>Атрибут id</span>
         </label>
       </Show>
-      <button class="fe-btn fe-btn--soft fe-btn--wide" onClick={run}>
+      <button class="fe-btn fe-btn--soft fe-btn--wide" data-export-run onClick={run}>
         <Icon name="download" />
         <span class="fe-ellipsis">Экспортировать {target()}</span>
       </button>

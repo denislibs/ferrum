@@ -69,7 +69,10 @@ export function Menu(props: MenuProps): JSX.Element {
   };
   onMount(() => {
     const outside = (e: PointerEvent) => {
-      if (!(e.target instanceof Element && e.target.closest(`[data-menu-tree="${tree}"]`))) closeAll(false);
+      const t = e.target instanceof Element ? e.target : null;
+      // Якорь-кнопка сама закрывает меню повторным щелчком.
+      const anchor = props.anchor instanceof HTMLElement && t && props.anchor.contains(t);
+      if (!(t?.closest(`[data-menu-tree="${tree}"]`) || anchor)) closeAll(false);
     };
     // Нажатие, которым меню открыли, ещё всплывает: слушаем со следующей задачи.
     const t = setTimeout(() => document.addEventListener('pointerdown', outside, true));
@@ -273,7 +276,8 @@ function Level(props: LevelProps): JSX.Element {
         role="menu"
         aria-label={props.label}
         data-menu-tree={props.tree}
-        style={{ visibility: 'hidden' }}
+        // Невидимым — в углу окна: размер не зависит от места в потоке документа.
+        style={{ visibility: 'hidden', left: '0px', top: '0px' }}
         onKeyDown={onKey}
         onPointerEnter={() => props.onHover?.()}
       >

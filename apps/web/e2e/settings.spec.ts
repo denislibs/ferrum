@@ -4,11 +4,10 @@
 // привязка к пикселям, сохранение между запусками.
 
 import { expect, test, type Page } from '@playwright/test';
-import { appScreen, drag, expectPixel, live, liveWhen, openApp } from './helpers';
+import { appScreen, drag, expectPixel, live, liveWhen, mainMenu, openApp } from './helpers';
 
 async function openSettings(page: Page) {
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(page, 'Настройки', 'Настройки…');
   return page.getByRole('dialog', { name: 'Настройки' });
 }
 
@@ -214,7 +213,7 @@ test('диалог: роли, фокус внутри, Esc закрывает', 
   expect(await dialog.evaluate((d) => d.contains(document.activeElement))).toBe(true);
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Меню файла' })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Главное меню' })).toBeFocused();
 });
 
 /** Выделить «Слой 1» первого фрейма щелчком на холсте (мир (200, 40)). */

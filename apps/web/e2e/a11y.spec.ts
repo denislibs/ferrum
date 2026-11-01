@@ -2,7 +2,7 @@
 // токенам в обеих темах, кольцо фокуса, prefers-reduced-motion.
 
 import { expect, test, type Page } from '@playwright/test';
-import { openApp } from './helpers';
+import { mainMenu, openApp } from './helpers';
 
 /** Контраст двух цветов `#rgb` / `#rrggbb` по WCAG (сборка сокращает `#ffffff`). */
 function contrast(a: string, b: string): number {
@@ -25,9 +25,10 @@ test('роли: тулбар, дерево, вкладки, список стр�
   await expect(page.getByRole('tree', { name: 'Слои' })).toBeVisible();
   await expect(page.getByRole('tablist', { name: 'Режим панели' })).toBeVisible();
   await expect(page.getByRole('listbox', { name: 'Страницы' })).toBeVisible();
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await expect(page.getByRole('menu', { name: 'Меню файла' })).toBeVisible();
-  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  await page.getByRole('button', { name: 'Главное меню' }).click();
+  await expect(page.getByRole('menu', { name: 'Главное меню' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await mainMenu(page, 'Настройки', 'Настройки…');
   await expect(page.getByRole('dialog', { name: 'Настройки' })).toBeVisible();
 });
 
@@ -67,12 +68,12 @@ for (const theme of ['dark', 'light'] as const) {
 test('prefers-reduced-motion: без анимаций', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await openApp(page);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('button', { name: 'Главное меню' }).click();
   const anim = await page.getByRole('menu').evaluate((el) => getComputedStyle(el).animationName);
   expect(anim).toBe('none');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('button', { name: 'Главное меню' }).click();
   expect(await page.getByRole('menu').evaluate((el) => getComputedStyle(el).animationName)).toBe('fe-pop');
 });
 
@@ -129,8 +130,7 @@ test('дерево слоёв: одна точка Tab, множественны
 
 test('диалог настроек: модальный, фокус внутри, Esc закрывает', async ({ page }) => {
   await openApp(page);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(page, 'Настройки', 'Настройки…');
   const dialog = page.getByRole('dialog', { name: 'Настройки' });
   await expect(dialog).toHaveAttribute('aria-modal', 'true');
   await expect.poll(() => dialog.evaluate((el) => el.contains(document.activeElement))).toBe(true);
@@ -176,7 +176,7 @@ test('prefers-reduced-motion: ни у одного элемента нет ан�
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await openApp(page);
   await page.getByRole('treeitem', { name: 'Экран 9', exact: true }).click();
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('button', { name: 'Главное меню' }).click();
   const scan = () =>
     page.evaluate(() =>
       Array.from(document.querySelectorAll<HTMLElement>('body *'))
@@ -197,7 +197,7 @@ test('prefers-reduced-motion: ни у одного элемента нет ан�
   // Положительный контроль: без запроса уменьшить движение та же сканировка находит анимацию.
   await page.keyboard.press('Escape');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await page.getByRole('button', { name: 'Главное меню' }).click();
   await page.getByRole('menu').waitFor();
   expect((await scan()).length, 'сканировка видит анимацию меню').toBeGreaterThan(0);
 });

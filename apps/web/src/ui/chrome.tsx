@@ -1,32 +1,45 @@
-// Шапки панелей (PanelHeader), меню файла, зум, «Поделиться», вкладки, края
+// Шапки панелей (PanelHeader), главное меню, зум, «Поделиться», вкладки, края
 // панелей для изменения ширины и контекстное меню холста.
 
 import { createSignal, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { useEditor } from './context';
 import { Caret, Icon } from './icons';
-import { Menu, type MenuItem } from './menu';
+import { Menu, type MenuItem, type MenuSearch } from './menu';
 import { RenameInput } from './rename-input';
 import { roving } from './roving';
 import { clampPanel, PANEL_MAX, PANEL_MIN } from './settings';
 
 export { clampPanel, PANEL_MAX, PANEL_MIN };
 
-/** Пункты меню файла: другие части интерфейса добавляют свои (открыть, сохранить,
- * настройки). `onBack` — кнопка «Назад к файлам». */
-export function FileHeader(props: { items: () => MenuItem[]; onBack?: () => void }) {
+/** Шапка левой панели: кнопка с логотипом открывает главное меню (как в Figma
+ * UI3; оно же — по `ui.main_menu`, Alt+/), имя файла, «Назад к файлам».
+ * Открыто ли меню, решает редактор (`open`): его открывает и сочетание. */
+export function FileHeader(props: {
+  menu: () => MenuItem[];
+  search: MenuSearch;
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  onBack?: () => void;
+}) {
   const ed = useEditor();
-  const [menu, setMenu] = createSignal<HTMLElement | null>(null);
   const [editing, setEditing] = createSignal(false);
   let file!: HTMLDivElement;
+  let logo!: HTMLButtonElement;
   return (
     <div class="fe-panel-head">
-      <Show when={props.onBack} fallback={<span class="fe-panel-head__mark" aria-hidden="true" />}>
-        {(back) => (
-          <button class="fe-tool fe-tool--small fe-tool--muted" aria-label="Назад к файлам" data-tip="Назад к файлам" onClick={() => back()()}>
-            <Icon name="back" />
-          </button>
-        )}
-      </Show>
+      <button
+        ref={logo}
+        class="fe-logo"
+        aria-haspopup="menu"
+        aria-expanded={props.open}
+        aria-label="Главное меню"
+        data-tip="Главное меню"
+        data-command="ui.main_menu"
+        onClick={() => props.onOpen(!props.open)}
+      >
+        <span class="fe-panel-head__mark" aria-hidden="true" />
+        <Caret />
+      </button>
       <div ref={file} class="fe-panel-head__file">
         <Show
           when={editing()}
@@ -59,18 +72,15 @@ export function FileHeader(props: { items: () => MenuItem[]; onBack?: () => void
         </Show>
         <span class="fe-panel-head__project">Черновики</span>
       </div>
-      <button
-        class="fe-tool fe-tool--small"
-        aria-haspopup="menu"
-        aria-expanded={!!menu()}
-        aria-label="Меню файла"
-        data-tip="Меню файла"
-        onClick={(e) => setMenu(e.currentTarget)}
-      >
-        <Caret />
-      </button>
-      <Show when={menu()}>
-        {(a) => <Menu label="Меню файла" items={props.items()} anchor={a()} onClose={() => setMenu(null)} />}
+      <Show when={props.onBack}>
+        {(back) => (
+          <button class="fe-tool fe-tool--small fe-tool--muted" aria-label="Назад к файлам" data-tip="Назад к файлам" onClick={() => back()()}>
+            <Icon name="back" />
+          </button>
+        )}
+      </Show>
+      <Show when={props.open}>
+        <Menu label="Главное меню" items={props.menu()} anchor={logo} search={props.search} onClose={() => props.onOpen(false)} />
       </Show>
     </div>
   );

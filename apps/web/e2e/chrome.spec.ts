@@ -5,7 +5,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { shortcutLabel } from '../src/ui/shortcuts';
 import type { Platform } from '../src/core/core';
-import { appScreen, drag, live, liveWhen, openApp } from './helpers';
+import { appScreen, drag, live, liveWhen, mainMenu, openApp } from './helpers';
 
 const ui = <T>(page: Page, f: (s: NonNullable<Window['__ferrum']>['ui'] & object) => T) =>
   page.evaluate((src) => new Function('s', `return (${src})(s)`)(window.__ferrum!.ui), f.toString()) as Promise<T>;
@@ -318,8 +318,7 @@ test('«Новый файл» при правках не спрашивает: �
   await liveWhen(page, `l.steps === ${l.steps + 1}`);
   const total = (await live(page)).nodes;
   const first = page.url();
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Новый файл' }).click();
+  await mainMenu(page, 'Файл', 'Новый файл');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect.poll(() => page.url()).not.toBe(first);
   await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true);
@@ -392,7 +391,7 @@ test('стрелки, Delete и Backspace на кнопках панелей н�
     panel.getByRole('button', { name: 'Скрыть заливку' }).first(),
     panel.getByRole('button', { name: 'Цвет заливки' }).first(),
     panel.getByRole('button', { name: 'Удалить обводку' }),
-    page.getByRole('button', { name: 'Меню файла' }),
+    page.getByRole('button', { name: 'Главное меню' }),
     page.getByRole('button', { name: 'Масштаб', exact: true }),
     page.getByRole('button', { name: 'Страницы', exact: true }),
     page.getByRole('button', { name: 'Добавить страницу' }),
@@ -452,8 +451,7 @@ test('масштаб экспорта — группа переключател�
 });
 
 const fileMenu = async (page: Page, item: string | RegExp) => {
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: item }).click();
+  await mainMenu(page, 'Файл', item);
 };
 
 test('правки вне истории (страница, имя файла) — «изменён» и запись в хранилище; копия на диск признак не снимает', async ({ page }) => {

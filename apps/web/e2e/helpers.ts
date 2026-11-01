@@ -172,3 +172,17 @@ export async function storedFile(page: Page, query = ''): Promise<string> {
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
   return id;
 }
+
+/** Главное меню (кнопка с логотипом) и пункты по пути подменю:
+ * `mainMenu(page, 'Файл', 'Новый файл')`. Подменю открываются щелчком; без пути —
+ * только само меню, с одним шагом — меню и подменю. */
+export async function mainMenu(page: Page, ...path: (string | RegExp)[]): Promise<void> {
+  await page.getByRole('button', { name: 'Главное меню' }).click();
+  let menu = page.getByRole('menu', { name: 'Главное меню' });
+  for (const [i, step] of path.entries()) {
+    const last = i === path.length - 1;
+    const name = typeof step === 'string' && !last ? { name: step, exact: true } : { name: step };
+    await menu.getByRole('menuitem', name).or(menu.getByRole('menuitemcheckbox', name)).first().click();
+    if (!last || typeof step === 'string') menu = page.getByRole('menu', { name: step as string, exact: true });
+  }
+}
