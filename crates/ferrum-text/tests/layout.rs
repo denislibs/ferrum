@@ -543,17 +543,21 @@ fn ellipsis_does_not_follow_a_trailing_space() {
 #[test]
 fn runs_carry_their_text_and_glyph_clusters() {
     let mut fonts = fonts();
-    let t = text("Привет, fi мир\nВторой", |p| {
+    let t = text("Привет, fi мир\nВторой\nשלום", |p| {
         p.style.case = TextCase::Upper
     });
     let l = lay(&mut fonts, &t, 0.0, 0.0);
     let all: String = l.runs.iter().map(|r| r.glyph_text()).collect();
-    assert_eq!(all, "ПРИВЕТ, FI МИРВТОРОЙ");
+    assert_eq!(all, "ПРИВЕТ, FI МИРВТОРОЙשלום");
+    assert!(l.runs.iter().any(|r| r.rtl), "есть прогон справа налево");
+    assert!(l.runs.iter().any(|r| !r.rtl), "есть прогон слева направо");
     for r in &l.runs {
         let mut prev = 0;
         for g in &r.glyphs {
             assert!(g.cluster[0] <= g.cluster[1] && g.cluster[1] as usize <= r.text.len());
-            assert!(!r.rtl && g.cluster[0] >= prev, "кластеры по порядку");
+            // Слева направо кластеры растут; справа налево их порядок проверяет
+            // `rtl_runs_are_marked_and_their_clusters_go_backwards`.
+            assert!(r.rtl || g.cluster[0] >= prev, "кластеры по порядку");
             prev = g.cluster[0];
         }
     }

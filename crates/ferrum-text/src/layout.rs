@@ -820,6 +820,9 @@ fn collect_lines(
                     };
                     list.extend(std::iter::repeat_n(r, n));
                 }
+                // Продолжение лигатуры без глифа начала после него не бывает:
+                // иначе его символы потерялись бы для текста PDF и SVG.
+                debug_assert!(pending.is_none(), "продолжение лигатуры без начала");
                 shaped = Some((key, list, 0));
             }
             let (_, list, at) = shaped.as_mut().expect("задан выше");
