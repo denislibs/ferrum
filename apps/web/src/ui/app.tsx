@@ -21,6 +21,7 @@ import { SettingsDialog } from './settings-dialog';
 import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import { systemFonts } from './system-fonts';
+import { isTauri, saveExport } from './tauri';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { restartText, type Restart } from './restart';
 import type { Route } from './router';
@@ -389,8 +390,16 @@ export function App(props: AppProps) {
             });
           }
           if (e.type === 'exported') {
-            downloadBytes(e.name, e.bytes, e.mime);
-            store.toast(`Экспортировано: ${e.name}`);
+            // Десктоп — родной диалог «Сохранить» (путь выбирает Rust), браузер — загрузка.
+            if (isTauri()) {
+              const name = e.name;
+              saveExport(name, e.bytes)
+                .then((saved) => saved && store.toast(`Экспортировано: ${name}`))
+                .catch((err: unknown) => store.toast(err instanceof Error ? err.message : String(err), 'error'));
+            } else {
+              downloadBytes(e.name, e.bytes, e.mime);
+              store.toast(`Экспортировано: ${e.name}`);
+            }
           } else if (e.type === 'saved') {
             // «Сохранить копию на диск…»: байты готовит worker и передаёт без копии.
             downloadBytes(fileName(store.state.documentName, '.ferrum'), e.bytes, 'application/octet-stream');

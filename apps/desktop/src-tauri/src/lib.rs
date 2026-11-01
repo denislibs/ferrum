@@ -87,6 +87,11 @@ struct WriteArgs {
 }
 
 #[derive(Deserialize)]
+struct ExportArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct ThumbArgs {
     id: String,
 }
@@ -282,6 +287,57 @@ async fn files_copy_dialog(
     desk.lib().copy_to(&id, &path).map(|()| true)
 }
 
+/// Подпись фильтра и расширение файла экспорта по имени (`.png`, `.svg`, `.pdf`).
+fn export_kind(name: &str) -> Option<(&'static str, &'static str)> {
+    let (_, ext) = name.rsplit_once('.')?;
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => Some(("Изображение PNG", "png")),
+        "svg" => Some(("Изображение SVG", "svg")),
+        "pdf" => Some(("Документ PDF", "pdf")),
+        _ => None,
+    }
+}
+
+/// Имя файла экспорта для диалога: без разделителей пути и управляющих
+/// символов, не длиннее 255 символов.
+fn export_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_control())
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(255)
+        .collect()
+}
+
+/// Экспорт PNG, SVG и PDF (подсистема 3, этап 5): родной диалог «Сохранить» с
+/// именем из интерфейса и фильтром по типу; байты — сырым телом запроса, запись
+/// атомарная. `false` — отказ в диалоге. Путь интерфейс не видит.
+#[tauri::command(async)]
+fn export_save(request: Request<'_>, app: AppHandle, window: WebviewWindow) -> Res<bool> {
+    let (bytes, a): (&[u8], ExportArgs) = raw(&request)?;
+    let name = export_name(&a.name);
+    let (label, ext) = export_kind(&name).ok_or_else(|| BAD.to_string())?;
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_file_name(&name)
+        .add_filter(label, &[ext])
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = picked.into_path().map_err(|_| NOT_A_PATH.to_string())?;
+    ferrum_desktop_store::atomic_write(&path, bytes)
+        .map_err(|e| format!("Не удалось сохранить файл: {}", io_error(&e)))?;
+    Ok(true)
+}
+
 #[tauri::command(async)]
 fn settings_get(desk: State<'_, Desk>) -> Res<Map<String, Value>> {
     Ok(desk.settings().all())
@@ -474,6 +530,7 @@ pub fn run() {
             files_open_dialog,
             files_save_dialog,
             files_copy_dialog,
+            export_save,
             settings_get,
             settings_set,
             fonts_list,
@@ -483,4 +540,21 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Ferrum не запустился");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Тип экспорта — только по расширению PNG, SVG и PDF; имя без путей.
+    #[test]
+    fn export_names_are_checked_and_cleaned() {
+        assert_eq!(export_kind("Экран.svg"), Some(("Изображение SVG", "svg")));
+        assert_eq!(export_kind("a@2x.PNG"), Some(("Изображение PNG", "png")));
+        assert_eq!(export_kind("Отчёт.pdf").map(|k| k.1), Some("pdf"));
+        assert_eq!(export_kind("файл.ferrum"), None);
+        assert_eq!(export_kind("без расширения"), None);
+        assert_eq!(export_name("../a/b\\c:d\u{0}.svg"), ".._a_b_c_d.svg");
+        assert_eq!(export_name(&"я".repeat(400)).chars().count(), 255);
+    }
 }

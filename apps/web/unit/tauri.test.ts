@@ -5,7 +5,7 @@
 // с тем же текстом.
 
 import { expect, test } from '@playwright/test';
-import { isTauri, TauriFileStore } from '../src/ui/tauri';
+import { asciiJson, isTauri, saveExport, TauriFileStore } from '../src/ui/tauri';
 
 const ID = '0f8e2a06-1111-4222-8333-444455556666';
 
@@ -189,4 +189,20 @@ test('отказы самого Tauri (аргументы, состояние) �
   await expect(s.get(ID)).rejects.toThrow(/^Неверный запрос к хранилищу файлов$/);
   await expect(s.list('drafts', '', 0, 10)).rejects.toThrow(/^Хранилище файлов не открыто$/);
   await expect(s.touch(ID)).rejects.toThrow(/^Неверный запрос к хранилищу файлов$/);
+});
+
+test('заголовок x-ferrum — JSON только из ASCII, имя читается обратно', () => {
+  const args = { name: 'Экран «Главный» 😀.svg', id: '0a1b' };
+  const s = asciiJson(args);
+  expect([...s].every((c) => c.charCodeAt(0) < 0x7f)).toBe(true);
+  expect(JSON.parse(s)).toEqual(args);
+});
+
+test('экспорт на десктопе — export_save: байты сырым телом, имя в заголовке', async () => {
+  const calls = fakeIpc({ export_save: () => true });
+  const bytes = new Uint8Array([1, 2, 3, 4, 5]).subarray(1, 4);
+  expect(await saveExport('Экран.pdf', bytes)).toBe(true);
+  expect(calls[0].cmd).toBe('export_save');
+  expect(Array.from(calls[0].args as Uint8Array)).toEqual([2, 3, 4]);
+  expect(JSON.parse(calls[0].headers!['x-ferrum'])).toEqual({ name: 'Экран.pdf' });
 });

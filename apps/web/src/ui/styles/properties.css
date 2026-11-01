@@ -110,9 +110,15 @@
   align-items: center;
   height: var(--row-height);
   padding: 0 var(--space-2);
+  border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-hover);
   color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+.fe-format:hover {
+  box-shadow: inset 0 0 0 1px var(--line-control);
 }
 .fe-scale {
   display: flex;

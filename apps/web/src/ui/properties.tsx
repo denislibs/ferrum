@@ -7,7 +7,7 @@
 // сверху — секция «Масштаб»: поле в процентах и точка рамки 3×3, как в Figma.
 
 import { createEffect, createSignal, For, Show } from 'solid-js';
-import type { Edit, EditPhase, Field, Num } from '../wasm/ferrum_wasm';
+import type { Edit, EditPhase, ExportFormat, Field, Num } from '../wasm/ferrum_wasm';
 import { Section } from './chrome';
 import { useEditor } from './context';
 import { Caret, Icon } from './icons';
@@ -325,9 +325,20 @@ function ScaleSection() {
 
 const SCALES = [1, 2, 3] as const;
 
+/** Форматы экспорта, как в разделе «Export» Figma (без JPG: его нет в ядре). */
+const FORMATS: { id: ExportFormat; label: string }[] = [
+  { id: 'png', label: 'PNG' },
+  { id: 'svg', label: 'SVG' },
+  { id: 'pdf', label: 'PDF' },
+];
+
 function ExportSection() {
   const ed = useEditor();
   const [scale, setScale] = createSignal<number>(1);
+  const [format, setFormat] = createSignal<ExportFormat>('png');
+  // Настройки SVG, как в Figma: «Текст кривыми» включён, «Атрибут id» — нет.
+  const [outlineText, setOutlineText] = createSignal(true);
+  const [svgIds, setSvgIds] = createSignal(false);
   let group!: HTMLDivElement;
   // Группа переключателей: одна точка Tab (выбранный), стрелки и Home/End выбирают
   // соседний и переводят на него фокус.
@@ -363,27 +374,56 @@ function ExportSection() {
     if (!s || s.count === 0) return 'страницу';
     return s.count === 1 ? `«${s.name ?? ''}»` : 'выделение';
   };
+  // Масштаб — у PNG; SVG и PDF векторные, в единицах документа (1 px = 1 pt).
+  const raster = () => format() === 'png';
+  const run = () =>
+    ed.send({
+      type: 'export',
+      scale: raster() ? scale() : 1,
+      format: format(),
+      outlineText: format() === 'svg' ? outlineText() : undefined,
+      svgIds: format() === 'svg' ? svgIds() : undefined,
+    });
   return (
     <Section title="Экспорт">
       <div class="fe-export">
-        <div ref={group} class="fe-segmented" role="radiogroup" aria-label="Масштаб экспорта" onKeyDown={onKey}>
-          <For each={SCALES}>
-            {(k) => (
-              <button
-                role="radio"
-                aria-checked={scale() === k}
-                tabindex={scale() === k ? 0 : -1}
-                class="fe-segmented__item t-num"
-                onClick={() => setScale(k)}
-              >
-                {k}×
-              </button>
-            )}
-          </For>
-        </div>
-        <span class="fe-format t-num">PNG</span>
+        <Show when={raster()}>
+          <div ref={group} class="fe-segmented" role="radiogroup" aria-label="Масштаб экспорта" onKeyDown={onKey}>
+            <For each={SCALES}>
+              {(k) => (
+                <button
+                  role="radio"
+                  aria-checked={scale() === k}
+                  tabindex={scale() === k ? 0 : -1}
+                  class="fe-segmented__item t-num"
+                  onClick={() => setScale(k)}
+                >
+                  {k}×
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+        <select
+          class="fe-format t-num"
+          aria-label="Формат экспорта"
+          value={format()}
+          onChange={(e) => setFormat(e.currentTarget.value as ExportFormat)}
+        >
+          <For each={FORMATS}>{(f) => <option value={f.id}>{f.label}</option>}</For>
+        </select>
       </div>
-      <button class="fe-btn fe-btn--soft fe-btn--wide" onClick={() => ed.send({ type: 'export', scale: scale() })}>
+      <Show when={format() === 'svg'}>
+        <label class="fe-check">
+          <input type="checkbox" checked={outlineText()} onChange={(e) => setOutlineText(e.currentTarget.checked)} />
+          <span>Текст кривыми</span>
+        </label>
+        <label class="fe-check">
+          <input type="checkbox" checked={svgIds()} onChange={(e) => setSvgIds(e.currentTarget.checked)} />
+          <span>Атрибут id</span>
+        </label>
+      </Show>
+      <button class="fe-btn fe-btn--soft fe-btn--wide" onClick={run}>
         <Icon name="download" />
         <span class="fe-ellipsis">Экспортировать {target()}</span>
       </button>
