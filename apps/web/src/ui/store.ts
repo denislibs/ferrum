@@ -65,6 +65,14 @@ export interface UiState {
   textStyle: TextStyleDto | null;
   /** Семейства текстов текущей страницы (группа «В документе» выбора шрифта). */
   pageFonts: string[];
+  /** Состояние команд по ключу (доступна, отмечена) — как его прислало ядро. */
+  commands: Record<string, CommandStatus>;
+}
+
+/** Состояние команды: `checked` есть только у переключателей. */
+export interface CommandStatus {
+  enabled: boolean;
+  checked?: boolean;
 }
 
 const initial: UiState = {
@@ -94,6 +102,7 @@ const initial: UiState = {
   text: { editing: false, draft: false },
   textStyle: null,
   pageFonts: [],
+  commands: {},
 };
 
 /** Сколько уведомлений видно одновременно и сколько секунд живёт каждое. */
@@ -195,6 +204,10 @@ export function createUiStore() {
         break;
       case 'pageFonts':
         setState('pageFonts', e.families);
+        break;
+      case 'commandStates':
+        // Только изменившиеся команды: остальные остаются как были.
+        for (const c of e.changed) setState('commands', c.key, { enabled: c.enabled, checked: c.checked ?? undefined });
         break;
       case 'error':
         // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.

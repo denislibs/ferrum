@@ -183,6 +183,31 @@ test('меню: Home/End, Enter, Tab; фокус возвращается к я�
   await expect(menu).toHaveCount(0);
 });
 
+test('меню: серые пункты доступны стрелками, но не выполняются; переход по первой букве', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  // Пустое место холста: выделения нет — «Копировать» серый.
+  const empty = await appScreen(page, l, 100, 1080);
+  await page.mouse.click(empty.x, empty.y, { button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Действия с выделением' });
+  const copy = menu.getByRole('menuitem', { name: /^Копировать/ }).first();
+  await expect(copy).toHaveAttribute('aria-disabled', 'true');
+  await expect(copy).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(menu).toBeVisible();
+  // Буква «В» (русская раскладка: Playwright набирает её без keydown — событие
+  // отправляется прямо): «Вырезать» (серый), затем «Вставить».
+  const letter = (key: string) =>
+    page.evaluate((k) => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: 'KeyD', bubbles: true })), key);
+  await letter('в');
+  await expect(menu.getByRole('menuitem', { name: /^Вырезать/ })).toBeFocused();
+  await letter('В');
+  await expect(menu.getByRole('menuitem', { name: /^Вставить/ })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
+});
+
 test('стрелки в открытом меню не доходят до холста', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
