@@ -394,7 +394,7 @@ export function App(props: AppProps) {
             if (isTauri()) {
               const name = e.name;
               saveExport(name, e.bytes)
-                .then((saved) => saved && store.toast(`Экспортировано: ${name}`))
+                .then((saved) => saved && store.toast(`Экспортировано: ${saved}`))
                 .catch((err: unknown) => store.toast(err instanceof Error ? err.message : String(err), 'error'));
             } else {
               downloadBytes(e.name, e.bytes, e.mime);

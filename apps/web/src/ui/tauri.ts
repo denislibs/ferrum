@@ -63,15 +63,15 @@ export function asciiJson(v: unknown): string {
 
 /** Сырое тело запроса и параметры заголовком `x-ferrum` (ASCII: UUID, числа, имена
  * с `\uXXXX`). */
-function raw<T>(cmd: string, bytes: ArrayBuffer, args: Record<string, unknown>): Promise<T> {
-  return invoke<T>(cmd, new Uint8Array(bytes), { 'x-ferrum': asciiJson(args) });
+function raw<T>(cmd: string, bytes: ArrayBuffer | Uint8Array, args: Record<string, unknown>): Promise<T> {
+  return invoke<T>(cmd, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), { 'x-ferrum': asciiJson(args) });
 }
 
 /** Экспорт (PNG, SVG, PDF) родным диалогом «Сохранить» (подсистема 3, этап 5): байты —
- * сырым телом, имя — заголовком; `false` — пользователь отказался. */
-export function saveExport(name: string, bytes: Uint8Array): Promise<boolean> {
-  const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-  return raw<boolean>('export_save', buf, { name });
+ * сырым телом без копии, имя — заголовком; ответ — имя записанного файла (пользователь
+ * мог его изменить), `null` — отказ. */
+export function saveExport(name: string, bytes: Uint8Array): Promise<string | null> {
+  return raw<string | null>('export_save', bytes, { name });
 }
 
 const bytesOrNull = (b: ArrayBuffer) => (b.byteLength > 0 ? b : null);

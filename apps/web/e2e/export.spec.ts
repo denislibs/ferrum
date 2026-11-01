@@ -45,7 +45,7 @@ test('SVG выделенного фрейма: размер, «Текст кри
       ids: doc.querySelectorAll('[id="Экран_0"]').length,
     };
   }, text);
-  expect(parsed).toEqual({ error: false, size: ['1440', '1024'], clip: parsed.clip, ids: 1 });
+  expect(parsed).toEqual({ error: false, size: ['1440', '1024'], clip: expect.any(Number), ids: 1 });
   expect(parsed.clip).toBeGreaterThan(0);
   await expect(page.getByRole('status').filter({ hasText: 'Экспортировано: Экран 0.svg' })).toBeVisible();
 });

@@ -199,9 +199,9 @@ test('заголовок x-ferrum — JSON только из ASCII, имя чи�
 });
 
 test('экспорт на десктопе — export_save: байты сырым телом, имя в заголовке', async () => {
-  const calls = fakeIpc({ export_save: () => true });
+  const calls = fakeIpc({ export_save: () => 'Экран (1).pdf' });
   const bytes = new Uint8Array([1, 2, 3, 4, 5]).subarray(1, 4);
-  expect(await saveExport('Экран.pdf', bytes)).toBe(true);
+  expect(await saveExport('Экран.pdf', bytes)).toBe('Экран (1).pdf');
   expect(calls[0].cmd).toBe('export_save');
   expect(Array.from(calls[0].args as Uint8Array)).toEqual([2, 3, 4]);
   expect(JSON.parse(calls[0].headers!['x-ferrum'])).toEqual({ name: 'Экран.pdf' });
