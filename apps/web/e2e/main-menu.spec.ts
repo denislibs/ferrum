@@ -77,6 +77,29 @@ test('подменю открывается наведением с задерж
   expect(await warnings(page)).toEqual([]);
 });
 
+test('подменю с клавиатурным фокусом закрыто наведением на другой пункт: фокус остаётся в меню', async ({ page }) => {
+  await openApp(page);
+  const logo = page.getByRole('button', { name: 'Главное меню' });
+  await logo.click();
+  const menu = root(page);
+  await expect(menu.getByRole('searchbox', { name: 'Поиск по командам' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowRight');
+  await expect(submenu(page, 'Файл').getByRole('menuitem', { name: 'Новый файл' })).toBeFocused();
+  // Наведение на «Вид» заменяет подменю «Файл», в котором был фокус.
+  await menu.getByRole('menuitem', { name: 'Вид' }).hover();
+  await expect(submenu(page, 'Вид')).toBeVisible();
+  await expect(submenu(page, 'Файл')).toHaveCount(0);
+  expect(await page.evaluate(() => !!document.activeElement?.closest('[data-menu-tree]'))).toBe(true);
+  // Меню слушает клавиши: стрелка вниз двигает фокус, Esc закрывает меню.
+  await page.keyboard.press('ArrowDown');
+  expect(await page.evaluate(() => !!document.activeElement?.closest('[data-menu-tree]'))).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(logo).toBeFocused();
+  expect(await warnings(page)).toEqual([]);
+});
+
 test('серые пункты и галочки — из состояния команд ядра, сочетания — из раскладки', async ({ page }) => {
   await openApp(page);
   await mainMenu(page, 'Правка');

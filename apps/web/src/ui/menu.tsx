@@ -136,6 +136,12 @@ function Level(props: LevelProps): JSX.Element {
     return it && 'label' in it ? it : undefined;
   };
 
+  /** Фокус в дереве меню, но не на этом уровне (в закрываемом подменю): вернуть его
+   * пункту-родителю, иначе он уйдёт в body, а клавиши — на холст. */
+  const rescueFocus = (parent: HTMLElement | undefined) => {
+    const f = document.activeElement;
+    if (parent && f instanceof Element && !el.contains(f) && f.closest(`[data-menu-tree="${props.tree}"]`)) parent.focus();
+  };
   const openSub = (index: number, target: HTMLElement, focus: boolean) => {
     clearTimeout(timer);
     const cur = sub();
@@ -143,11 +149,13 @@ function Level(props: LevelProps): JSX.Element {
       if (focus) setSub({ ...cur, focus: true });
       return;
     }
+    rescueFocus(cur?.el);
     setSub({ index, el: target, focus });
   };
   const closeSub = (refocus: boolean) => {
     clearTimeout(timer);
     const cur = sub();
+    if (!refocus) rescueFocus(cur?.el);
     setSub(null);
     if (refocus) cur?.el.focus();
   };
