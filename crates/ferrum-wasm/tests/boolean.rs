@@ -200,11 +200,8 @@ fn boolean_area(c: &Core) -> f64 {
         .abs()
 }
 
-/// Шрифт пришёл через `LoadFont` — булева группа с текстом получает глифы
-/// сразу, без ввода и команд, и сводка выделенной группы обновляется.
-#[test]
-fn font_arrival_recomputes_boolean_with_text_and_refreshes_summary() {
-    // Документ с булевой группой «прямоугольник + текст» (шрифт загружен).
+/// Ядро с булевой группой «прямоугольник + текст» (шрифт загружен).
+fn core_with_boolean_text() -> Core {
     let mut a = core_with_inter_catalog();
     a.command(Command::TestCreateText {
         x: 600.0,
@@ -241,6 +238,15 @@ fn font_arrival_recomputes_boolean_with_text_and_refreshes_summary() {
     });
     a.take_events();
     run(&mut a, "object.boolean_union");
+    a
+}
+
+/// Шрифт пришёл через `LoadFont` — булева группа с текстом получает глифы
+/// сразу, без ввода и команд, и сводка выделенной группы обновляется.
+#[test]
+fn font_arrival_recomputes_boolean_with_text_and_refreshes_summary() {
+    // Документ с булевой группой «прямоугольник + текст» (шрифт загружен).
+    let mut a = core_with_boolean_text();
     let full_area = boolean_area(&a);
     a.command(Command::Snapshot { thumbnail: false });
     let bytes = a
@@ -295,5 +301,34 @@ fn font_arrival_recomputes_boolean_with_text_and_refreshes_summary() {
         "ширина в сводке: {} -> {}",
         before.w.value,
         after.w.value
+    );
+}
+
+fn thumbnail(c: &mut Core) -> Vec<u8> {
+    c.command(Command::Snapshot { thumbnail: true });
+    c.take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Snapshot {
+                thumbnail: Some(t), ..
+            } => Some(t.into_vec()),
+            _ => None,
+        })
+        .expect("превью")
+}
+
+/// Превью первой страницы, когда открыта другая, строится по контурам глифов:
+/// текст в булевой группе не пропадает.
+#[test]
+fn thumbnail_of_another_page_keeps_text_in_booleans() {
+    let mut c = core_with_boolean_text();
+    let current = thumbnail(&mut c);
+    let first = c.editor().page();
+    c.command(Command::AddPage);
+    c.take_events();
+    assert_ne!(c.editor().page(), first, "открыта вторая страница");
+    assert!(
+        current == thumbnail(&mut c),
+        "превью то же, что с открытой первой"
     );
 }
