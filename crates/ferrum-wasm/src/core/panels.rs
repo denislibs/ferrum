@@ -711,7 +711,9 @@ impl Core {
             .map(|c| KeymapEntry {
                 key: c.key.to_string(),
                 name: c.name.to_string(),
-                group: c.key.split('.').next().unwrap_or("").to_string(),
+                group: c.group.key().to_string(),
+                keywords: c.keywords.iter().map(|k| k.to_string()).collect(),
+                toggle: c.toggle,
                 bindings: km.bindings(c.id).iter().map(|s| s.to_string()).collect(),
                 labels: km
                     .bindings(c.id)

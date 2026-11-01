@@ -776,13 +776,16 @@ pub struct PageInfo {
 }
 
 /// Команда в таблице раскладки: ключ, название, группа (`tool`, `edit`…),
-/// действующие сочетания (каноническая запись и подпись US) и умолчания.
+/// синонимы для поиска, признак переключателя, действующие сочетания
+/// (каноническая запись и подпись US) и умолчания.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
 pub struct KeymapEntry {
     pub key: String,
     pub name: String,
     pub group: String,
+    pub keywords: Vec<String>,
+    pub toggle: bool,
     pub bindings: Vec<String>,
     pub labels: Vec<String>,
     pub defaults: Vec<String>,
@@ -917,6 +920,11 @@ pub enum CoreEvent {
     },
     /// Команда «Сохранить» (Ctrl/Cmd+S): записать файл в хранилище.
     SaveRequested,
+    /// Вызвана команда интерфейса (`ui.*`: меню, файлы, настройки): её выполняет
+    /// основной поток (спека подсистемы 2, раздел 3).
+    UiCommand {
+        key: String,
+    },
     /// Измерения с Alt в оверлее: значения расстояний по порядку и число
     /// пунктирных направляющих.
     Measurements {

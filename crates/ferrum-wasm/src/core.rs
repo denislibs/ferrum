@@ -799,6 +799,9 @@ impl Core {
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),
                 EditorEvent::ToggleUi => self.events.push(CoreEvent::ToggleUi),
                 EditorEvent::SaveRequested => self.events.push(CoreEvent::SaveRequested),
+                EditorEvent::UiCommand(id) => self.events.push(CoreEvent::UiCommand {
+                    key: id.key().to_string(),
+                }),
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
             }
         }

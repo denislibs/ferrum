@@ -64,6 +64,30 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::Redo, &["Mod+Shift+KeyZ"]),
     (CommandId::SelectAll, &["Mod+KeyA"]),
     (CommandId::Escape, &["Escape"]),
+    // Подсистема 2: главное меню — Alt+/ (в Figma поиск в меню — по логотипу);
+    // «Экспорт…» и «Привязка к пикселям» — как в справке Figma.
+    (CommandId::UiMainMenu, &["Alt+Slash"]),
+    (CommandId::UiExport, &["Mod+Shift+KeyE"]),
+    (CommandId::UiPixelSnap, &["Mod+Shift+Quote"]),
+];
+
+/// Команды без сочетания по умолчанию: «Копировать как SVG» (как в Figma) и
+/// команды интерфейса, чьи привычные сочетания занимает браузер (Ctrl/Cmd+N, O)
+/// или которых в Figma нет.
+const NO_DEFAULTS: &[CommandId] = &[
+    CommandId::CopyAsSvg,
+    CommandId::UiNewFile,
+    CommandId::UiOpen,
+    CommandId::UiOpenDisk,
+    CommandId::UiSaveDisk,
+    CommandId::UiSaveCopy,
+    CommandId::UiAllFiles,
+    CommandId::UiSettings,
+    CommandId::UiShortcuts,
+    CommandId::UiAbout,
+    CommandId::UiThemeDark,
+    CommandId::UiThemeLight,
+    CommandId::UiThemeSystem,
 ];
 
 #[test]
@@ -103,16 +127,15 @@ fn defaults_match_figma_on_both_platforms() {
     let map = Keymap::new(Platform::Linux);
     for c in COMMANDS {
         assert!(!c.name.is_empty() && CommandId::from_key(c.key) == Some(c.id));
-        // «Копировать как SVG» — без сочетания, как в Figma (меню «Правка»).
         assert_eq!(
             map.bindings(c.id).is_empty(),
-            c.id == CommandId::CopyAsSvg,
+            NO_DEFAULTS.contains(&c.id),
             "{:?}",
             c.id
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 55);
+    assert_eq!(COMMANDS.len(), 70);
 }
 
 #[test]

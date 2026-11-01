@@ -284,11 +284,16 @@ fn events() -> Vec<CoreEvent> {
             current: "5@6".into(),
             background: None,
         },
+        CoreEvent::UiCommand {
+            key: "ui.main_menu".into(),
+        },
         CoreEvent::Keymap {
             commands: vec![KeymapEntry {
                 key: "tool.rect".into(),
                 name: "Прямоугольник".into(),
                 group: "tool".into(),
+                keywords: vec!["квадрат".into(), "rectangle".into()],
+                toggle: false,
                 bindings: vec!["KeyR".into()],
                 labels: vec!["R".into()],
                 defaults: vec!["KeyR".into()],

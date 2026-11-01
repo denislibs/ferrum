@@ -93,7 +93,9 @@ test('подписи сочетаний в интерфейсе совпадаю
       checked++;
     });
   }
-  expect(checked).toBeGreaterThanOrEqual(commands.length);
+  // У команд интерфейса без привычного сочетания (новый файл, открыть…) подписей нет.
+  expect(checked).toBeGreaterThanOrEqual(commands.filter((c) => c.bindings.length > 0).length);
+  expect(checked).toBeGreaterThan(50);
 });
 
 test('зум из шапки и меню масштабов', async ({ page }) => {

@@ -90,6 +90,13 @@ fn keymap_and_presets_arrive_before_any_document() {
     );
     let undo = commands.iter().find(|c| c.key == "edit.undo").unwrap();
     assert_eq!(undo.labels, ["⌘Z"], "подпись macOS");
+    // Группа — явная, из таблицы (а не префикс ключа); синонимы и переключатели.
+    let dup = commands.iter().find(|c| c.key == "edit.duplicate").unwrap();
+    assert!(dup.keywords.contains(&"duplicate".to_string()) && !dup.toggle);
+    let settings = commands.iter().find(|c| c.key == "ui.settings").unwrap();
+    assert_eq!(settings.group, "settings");
+    let snap = commands.iter().find(|c| c.key == "ui.pixel_snap").unwrap();
+    assert!(snap.toggle);
     assert!(overrides.contains("ferrum-keymap"));
     assert!(reserved.contains(&"Meta+KeyW".to_string()));
     assert!(ev
@@ -1635,4 +1642,21 @@ fn export_errors_reach_the_ui_in_russian() {
     core.set_export_clock(None);
     core.command(export(ExportFormat::Pdf));
     exported(&core.take_events());
+}
+
+#[test]
+fn ui_commands_come_back_as_events() {
+    let mut core = demo(10);
+    core.take_events();
+    core.command(Command::Execute {
+        command: "ui.settings".into(),
+    });
+    let ev = core.take_events();
+    assert_eq!(
+        ev,
+        vec![CoreEvent::UiCommand {
+            key: "ui.settings".into()
+        }]
+    );
+    assert_eq!(document_steps(&core), 0.0);
 }

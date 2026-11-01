@@ -33,7 +33,7 @@ pub mod vector_ops;
 mod vector_select;
 
 pub use actions::{FIT_PADDING_PX, PRESET_GAP};
-pub use commands::{Command, CommandId, COMMANDS};
+pub use commands::{Command, CommandGroup, CommandId, COMMANDS};
 pub use editor::{Editor, EditorEvent, Settings, WHEEL_ZOOM_SPEED};
 pub use input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 pub use keymap::{browser_reserved, BindError, Conflict, Keymap, KeymapError, Shortcut};

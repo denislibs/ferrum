@@ -81,6 +81,8 @@ const entry = (key: string, name: string, bindings: string[]): KeymapEntry => ({
   key,
   name,
   group: key.split('.')[0],
+  keywords: [],
+  toggle: false,
   bindings,
   labels: [],
   defaults: bindings,

@@ -92,6 +92,8 @@ pub enum EditorEvent {
     ToggleUi,
     /// Сохранить файл (Ctrl/Cmd+S): запись в хранилище ведёт интерфейс.
     SaveRequested,
+    /// Вызвана команда интерфейса (`ui.*`): её выполняет основной поток.
+    UiCommand(CommandId),
     /// Сообщение об ошибке для пользователя.
     Error(String),
 }

@@ -184,6 +184,21 @@ impl Editor {
             ),
             C::ToggleUi => self.out.events.push(EditorEvent::ToggleUi),
             C::Save => self.out.events.push(EditorEvent::SaveRequested),
+            C::UiMainMenu
+            | C::UiNewFile
+            | C::UiOpen
+            | C::UiOpenDisk
+            | C::UiSaveDisk
+            | C::UiSaveCopy
+            | C::UiExport
+            | C::UiAllFiles
+            | C::UiSettings
+            | C::UiShortcuts
+            | C::UiAbout
+            | C::UiPixelSnap
+            | C::UiThemeDark
+            | C::UiThemeLight
+            | C::UiThemeSystem => self.out.events.push(EditorEvent::UiCommand(cmd)),
             C::FlipHorizontal => self.mirror(Vec2::new(-1.0, 1.0)),
             C::FlipVertical => self.mirror(Vec2::new(1.0, -1.0)),
         }
