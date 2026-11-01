@@ -784,7 +784,12 @@ fn forcing_full_booleans_drops_the_history_of_a_gesture() {
         .as_ref()
         .unwrap()
         .is_partial());
+    let before = scene.node(b).unwrap().subtree_version;
+    let kid_before = scene.node(kids[3]).unwrap().subtree_version;
     scene.force_full_booleans(scene.slot(b).unwrap());
+    // Кэши рендера по версии поддерева не держат результат по частям.
+    assert_ne!(scene.node(b).unwrap().subtree_version, before);
+    assert_ne!(scene.node(kids[3]).unwrap().subtree_version, kid_before);
     assert!(!scene
         .node(b)
         .unwrap()

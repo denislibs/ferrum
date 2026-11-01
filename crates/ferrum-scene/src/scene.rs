@@ -639,11 +639,15 @@ impl Scene {
             chain.push(p);
             up = self.at(p).parent;
         }
+        // Новая версия поддерева, как в `recompute`: кэши рендера по ней
+        // (растровые кадры групп) не держат результат по частям.
+        let version = fresh_version();
         for &x in order.iter().rev().chain(chain.iter()) {
             if self.at(x).props.kind == NodeKind::Boolean {
                 self.at_mut(x).boolean = None;
             }
             self.update_bounds(x, true);
+            self.at_mut(x).subtree_version = version;
         }
         self.flush_tree();
     }
