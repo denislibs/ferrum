@@ -221,17 +221,24 @@ fn font_of(run: &GlyphRun) -> Option<Font> {
     }
 }
 
-/// Данные шрифта, на которых `krilla` 0.8.2 паникует (а в воркере паника
-/// убивает ядро), — шрифты приходят от пользователя:
+/// Данные шрифта, на которых `krilla` 0.8.2 и его `subsetter` 0.2.6 паникуют (а
+/// в воркере паника убивает ядро), — шрифты приходят от пользователя:
 /// - PostScript-имя (name ID 6) режется по байтам: `cid.rs` `base_font_name`
 ///   (`[..min(len, 109)]`) и `type3.rs` (`[..min(len, 115)]`) — не на границе
 ///   символа падает в `doc.finish()`; берём только ASCII-имя, как и бывает;
 /// - `cap_height` и `italic_angle` метрик (`font.rs`) идут в `FiniteF32::new(..)
-///   .unwrap()` — они должны быть конечными.
+///   .unwrap()` — они должны быть конечными;
+/// - таблица `name`: `subsetter` складывает смещение и длину строки в `u16`;
+/// - `head.unitsPerEm`: `cid.rs:345` делит на него рамку шрифта и делает
+///   `Rect::from_ltrb(..).unwrap()` — при нуле выходит NaN/inf; допустимый
+///   диапазон OpenType — 16..=16384;
+/// - вещественные числа CFF: `subsetter` при записи Top/Private DICT пишет
+///   `f32` через `{}` и на `inf`/`NaN` (запись «1E99» читается как `inf`) падает
+///   на `unreachable!` (`cff/number.rs`), см. `cff_reals_finite`.
 ///
 /// Прочие `unwrap` krilla на пути текста (`FontRef::from_index` после проверки
-/// в `FontInfo::new`, номера глифов в `u16`/`u8`, рамка `Rect::from_ltrb` из
-/// заведомо проверенных границ) от данных шрифта не зависят.
+/// в `FontInfo::new`, номера глифов в `u16`/`u8`) от данных шрифта не зависят.
+/// Страховка от остальных — тест со случайными порчами файла (`mutated_fonts`).
 fn krilla_safe(font: &skrifa::FontRef, axes: &[(Tag, f32)]) -> bool {
     let name_ok = font.name().map_or(true, |name| {
         name.name_record()
@@ -244,11 +251,171 @@ fn krilla_safe(font: &skrifa::FontRef, axes: &[(Tag, f32)]) -> bool {
             })
             .is_none_or(|s| s.is_ascii())
     });
+    // `subsetter` `name.rs`: `string_offset + length` и `count * 12` считаются в
+    // `u16` (переполнение — паника в отладочной сборке, мусор в релизной).
+    let name_table_ok = font.name().map_or(true, |name| {
+        let records = name.name_record();
+        records.len() <= 5000
+            && records
+                .iter()
+                .all(|n| n.string_offset().to_u32() + n.length() as u32 <= u16::MAX as u32)
+    });
+    let upem_ok = font
+        .head()
+        .map_or(true, |h| (16..=16384).contains(&h.units_per_em()));
+    let cff_ok = font
+        .table_data(skrifa::Tag::new(b"CFF "))
+        .is_none_or(|t| cff_reals_finite(t.as_bytes()));
     let location = font
         .axes()
         .location(axes.iter().map(|(t, v)| (skrifa::Tag::new(t.get()), *v)));
     let metrics = font.metrics(Size::unscaled(), LocationRef::from(&location));
-    name_ok && metrics.italic_angle.is_finite() && metrics.cap_height.is_none_or(f32::is_finite)
+    name_ok
+        && name_table_ok
+        && upem_ok
+        && cff_ok
+        && metrics.italic_angle.is_finite()
+        && metrics.cap_height.is_none_or(f32::is_finite)
+}
+
+/// Индекс CFF в `d` с позиции `pos`: диапазоны элементов и позиция за ним.
+fn cff_index(d: &[u8], pos: usize) -> Option<(Vec<std::ops::Range<usize>>, usize)> {
+    let count = u16::from_be_bytes([*d.get(pos)?, *d.get(pos + 1)?]) as usize;
+    if count == 0 {
+        return Some((Vec::new(), pos + 2));
+    }
+    let size = *d.get(pos + 2)? as usize;
+    if !(1..=4).contains(&size) {
+        return None;
+    }
+    let offsets = pos + 3;
+    let base = offsets
+        .checked_add((count + 1).checked_mul(size)?)?
+        .checked_sub(1)?;
+    let at = |i: usize| -> Option<usize> {
+        let bytes = d.get(offsets + i * size..offsets + (i + 1) * size)?;
+        Some(bytes.iter().fold(0usize, |v, b| (v << 8) | *b as usize))
+    };
+    let mut items = Vec::with_capacity(count);
+    for i in 0..count {
+        let (a, b) = (base.checked_add(at(i)?)?, base.checked_add(at(i + 1)?)?);
+        if a > b || b > d.len() {
+            return None;
+        }
+        items.push(a..b);
+    }
+    let end = base.checked_add(at(count)?)?;
+    Some((items, end))
+}
+
+/// Все вещественные операнды DICT-ов CFF (Top DICT, Font DICT массива FDArray,
+/// их Private DICT) — конечные `f32`. Чтение с проверкой границ, без паник;
+/// всё, что не разобралось, считается небезопасным (текст тогда контурами).
+fn cff_reals_finite(d: &[u8]) -> bool {
+    fn dict(d: &[u8], range: std::ops::Range<usize>, depth: u8) -> Option<bool> {
+        if depth > 2 {
+            return None;
+        }
+        let b = d.get(range)?;
+        let (mut i, mut operands) = (0usize, Vec::<i64>::new());
+        while i < b.len() {
+            let b0 = *b.get(i)?;
+            i += 1;
+            match b0 {
+                0..=21 => {
+                    let op = if b0 == 12 {
+                        i += 1;
+                        1200 + *b.get(i - 1)? as u16
+                    } else {
+                        b0 as u16
+                    };
+                    let last = |n: usize| operands.len().checked_sub(n).map(|k| operands[k]);
+                    if op == 18 {
+                        // Private: размер и смещение от начала CFF.
+                        let (size, off) = (
+                            usize::try_from(last(2)?).ok()?,
+                            usize::try_from(last(1)?).ok()?,
+                        );
+                        if !dict(d, off..off.checked_add(size)?, depth + 1)? {
+                            return Some(false);
+                        }
+                    } else if op == 1236 && depth == 0 {
+                        // FDArray: индекс Font DICT.
+                        let off = usize::try_from(last(1)?).ok()?;
+                        for r in cff_index(d, off)?.0 {
+                            if !dict(d, r, depth + 1)? {
+                                return Some(false);
+                            }
+                        }
+                    }
+                    operands.clear();
+                }
+                28 => {
+                    let v = i16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?]);
+                    i += 2;
+                    operands.push(v as i64);
+                }
+                29 => {
+                    let v = i32::from_be_bytes([
+                        *b.get(i)?,
+                        *b.get(i + 1)?,
+                        *b.get(i + 2)?,
+                        *b.get(i + 3)?,
+                    ]);
+                    i += 4;
+                    operands.push(v as i64);
+                }
+                30 => {
+                    let mut text = String::new();
+                    'real: loop {
+                        let byte = *b.get(i)?;
+                        i += 1;
+                        for nibble in [byte >> 4, byte & 15] {
+                            match nibble {
+                                0..=9 => text.push((b'0' + nibble) as char),
+                                0xA => text.push('.'),
+                                0xB => text.push('E'),
+                                0xC => text.push_str("E-"),
+                                0xE => text.push('-'),
+                                0xF => break 'real,
+                                _ => return None,
+                            }
+                        }
+                    }
+                    if !text.parse::<f32>().ok()?.is_finite() {
+                        return Some(false);
+                    }
+                    operands.push(0);
+                }
+                32..=246 => operands.push(b0 as i64 - 139),
+                247..=250 => {
+                    operands.push((b0 as i64 - 247) * 256 + *b.get(i)? as i64 + 108);
+                    i += 1;
+                }
+                251..=254 => {
+                    operands.push(-(b0 as i64 - 251) * 256 - *b.get(i)? as i64 - 108);
+                    i += 1;
+                }
+                _ => return None,
+            }
+            if operands.len() > 48 {
+                return None;
+            }
+        }
+        Some(true)
+    }
+    let run = || -> Option<bool> {
+        let header = *d.get(2)? as usize;
+        let (_, after_names) = cff_index(d, header)?;
+        let (tops, _) = cff_index(d, after_names)?;
+        for r in tops {
+            if !dict(d, r, 0)? {
+                return Some(false);
+            }
+        }
+        Some(true)
+    };
+    run().unwrap_or(false)
 }
 
 impl PdfBackend<'_, '_> {
@@ -479,12 +646,6 @@ impl RenderBackend for PdfBackend<'_, '_> {
         if !self.text {
             return false;
         }
-        if !self.charge(
-            1,
-            GLYPH_RUN_BYTES + GLYPH_BYTES * run.glyphs.len() + run.text.len(),
-        ) {
-            return true;
-        }
         let Some(first) = run.glyphs.first().copied() else {
             return true;
         };
@@ -501,9 +662,16 @@ impl RenderBackend for PdfBackend<'_, '_> {
             .entry(key)
             .or_insert_with(|| font_of(run))
             .clone();
+        // Шрифт не годится — прогон уйдёт контурами и будет учтён там, один раз.
         let Some(font) = font else {
             return false;
         };
+        if !self.charge(
+            1,
+            GLYPH_RUN_BYTES + GLYPH_BYTES * run.glyphs.len() + run.text.len(),
+        ) {
+            return true;
+        }
         let size = run.size;
         if !(size.is_finite() && size > 0.0) {
             return true;

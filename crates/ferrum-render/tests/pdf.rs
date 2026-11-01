@@ -682,3 +682,412 @@ fn the_budget_stops_tiled_fills_while_drawing() {
     // Часы читались мало: остановка по ходу, а не после всех 400 заливок.
     assert!(clock.0.get() < 200, "{}", clock.0.get());
 }
+
+/// Запись таблицы `tag` в каталоге sfnt: позиция записи.
+fn table_record(font: &[u8], tag: &[u8; 4]) -> Option<usize> {
+    let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+    (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|r| &font[*r..*r + 4] == tag)
+}
+
+/// Показывает текст шрифтом из `bytes` (как загруженным пользователем) и
+/// отдаёт PDF. `Err` — шрифт не загрузился (пользователю он бы отказал заранее).
+fn pdf_with_font(
+    family_name: &str,
+    style: &str,
+    catalog: &[u8],
+    loaded: Vec<u8>,
+    s: &str,
+) -> Result<Vec<u8>, String> {
+    let shared = Fonts::shared();
+    {
+        let mut f = shared.borrow_mut();
+        let faces = ferrum_text::read_faces(catalog, "f.ttf");
+        f.add_catalog(ferrum_text::SourceKind::Bundled, ferrum_text::group(faces));
+        f.load(family_name, "f.ttf", loaded)?;
+    }
+    let mut p = Page::new();
+    let id = add_text_in(
+        &mut p,
+        family_name,
+        s,
+        style,
+        vec![Fill::solid(Color::BLACK)],
+        0.0,
+    );
+    let mut r = Renderer::new();
+    r.set_fonts(shared);
+    let scene = p.scene();
+    Ok(
+        r.export_pdf(&scene, &[id], &NoImages, &ExportBudget::unlimited())
+            .unwrap(),
+    )
+}
+
+/// `head.unitsPerEm = 0` проходит загрузку (раскладка берёт не меньше 1), а
+/// `krilla` делит на него рамку шрифта и падает. Шрифт — контурами.
+#[test]
+fn a_font_with_zero_units_per_em_falls_back_to_outlines() {
+    let file = font_file("ptsans/PTSans-Regular.ttf");
+    let run = |upem: u16| {
+        let mut font = file.clone();
+        let head = table_record(&font, b"head").unwrap();
+        let at = u32::from_be_bytes(font[head + 8..head + 12].try_into().unwrap()) as usize + 18;
+        font[at..at + 2].copy_from_slice(&upem.to_be_bytes());
+        pdf_with_font("PT Sans", "Regular", &file, font, "Привет").unwrap()
+    };
+    let outlined = run(0);
+    // Раскладка при нуле берёт upem 1 (глифы огромны), главное — файл собран
+    // без текстового слоя и шрифта.
+    assert!(!text(&outlined).contains("/FontFile"));
+    assert!(to_unicode(&outlined).is_empty());
+    // Для сравнения: обычный upem (1000) — настоящий текст.
+    assert!(text(&run(1000)).contains("/FontFile"));
+}
+
+fn utf16be(t: &str) -> Vec<u8> {
+    t.encode_utf16().flat_map(u16::to_be_bytes).collect()
+}
+
+/// Маленький OpenType с контурами CFF, собранный в тесте (файлов `.otf` среди
+/// шрифтов приложения нет): один глиф «A» — треугольник. `blue_scale` — запись
+/// вещественного числа (оператор BlueScale в Private DICT) в виде строки.
+fn tiny_cff_font(blue_scale: &str) -> Vec<u8> {
+    let be16 = |v: i32| (v as u16).to_be_bytes().to_vec();
+    let be32 = |v: u32| v.to_be_bytes().to_vec();
+    // Вещественное число DICT: тетрады 0-9, «.» A, «E» B, «E-» C, «-» E, конец F.
+    let real = |t: &str| -> Vec<u8> {
+        let mut nibbles = Vec::new();
+        for c in t.chars() {
+            nibbles.push(match c {
+                '0'..='9' => c as u8 - b'0',
+                '.' => 0xA,
+                'E' => 0xB,
+                '-' => 0xE,
+                _ => unreachable!(),
+            });
+        }
+        nibbles.push(0xF);
+        if nibbles.len() % 2 == 1 {
+            nibbles.push(0xF);
+        }
+        let mut out = vec![30];
+        out.extend(nibbles.chunks(2).map(|n| (n[0] << 4) | n[1]));
+        out
+    };
+    let index = |items: &[Vec<u8>]| -> Vec<u8> {
+        let mut out = be16(items.len() as i32);
+        if items.is_empty() {
+            return out;
+        }
+        out.push(2);
+        let mut at = 1;
+        out.extend(be16(at));
+        for i in items {
+            at += i.len() as i32;
+            out.extend(be16(at));
+        }
+        for i in items {
+            out.extend(i);
+        }
+        out
+    };
+    // Контуры: .notdef пустой, «A» — треугольник (rmoveto, rlineto, endchar).
+    let num = |v: i32| -> Vec<u8> { [vec![28], be16(v)].concat() };
+    let a: Vec<u8> = [
+        num(100),
+        num(0),
+        vec![21],
+        num(500),
+        num(0),
+        vec![5],
+        num(0),
+        num(700),
+        vec![5],
+        vec![14],
+    ]
+    .concat();
+    let charstrings = index(&[vec![14], a]);
+    // Private DICT: BlueScale (12 9).
+    let private = [real(blue_scale), vec![12, 9]].concat();
+    let header = vec![1, 0, 4, 2];
+    let names = index(&[b"Tiny".to_vec()]);
+    let top_len = 5 + 1 + 5 + 5 + 1;
+    let top_index_len = 2 + 1 + 4 + top_len;
+    let strings = index(&[]);
+    let gsubrs = index(&[]);
+    let cs_off = header.len() + names.len() + top_index_len + strings.len() + gsubrs.len();
+    let priv_off = cs_off + charstrings.len();
+    let int29 = |v: usize| [vec![29], be32(v as u32)].concat();
+    let top = [
+        int29(cs_off),
+        vec![17],
+        int29(private.len()),
+        int29(priv_off),
+        vec![18],
+    ]
+    .concat();
+    assert_eq!(top.len(), top_len);
+    let cff = [
+        header,
+        names,
+        index(&[top]),
+        strings,
+        gsubrs,
+        charstrings,
+        private,
+    ]
+    .concat();
+    // Остальные таблицы.
+    let head = [
+        be32(0x0001_0000),
+        be32(0),
+        be32(0),
+        be32(0x5F0F_3CF5),
+        be16(0),
+        be16(1000),
+        vec![0; 16],
+        be16(0),
+        be16(0),
+        be16(600),
+        be16(700),
+        be16(0),
+        be16(8),
+        be16(2),
+        be16(0),
+        be16(0),
+    ]
+    .concat();
+    let hhea = [
+        be32(0x0001_0000),
+        be16(800),
+        be16(-200),
+        be16(0),
+        be16(600),
+        be16(0),
+        be16(0),
+        be16(600),
+        be16(1),
+        be16(0),
+        be16(0),
+        vec![0; 8],
+        be16(0),
+        be16(2),
+    ]
+    .concat();
+    let hmtx = [be16(600), be16(0), be16(600), be16(0)].concat();
+    let maxp = [be32(0x0000_5000), be16(2)].concat();
+    let post = [be32(0x0003_0000), vec![0; 28]].concat();
+    let cmap_sub = [
+        be16(4),
+        be16(32),
+        be16(0),
+        be16(4),
+        be16(4),
+        be16(1),
+        be16(0),
+        be16(0x41),
+        be16(0xFFFF),
+        be16(0),
+        be16(0x41),
+        be16(0xFFFF),
+        be16(1 - 0x41),
+        be16(1),
+        be16(0),
+        be16(0),
+    ]
+    .concat();
+    let cmap = [be16(0), be16(1), be16(3), be16(1), be32(12), cmap_sub].concat();
+    let records = [
+        (1, utf16be("Tiny")),
+        (2, utf16be("Regular")),
+        (4, utf16be("Tiny")),
+        (6, utf16be("Tiny-Regular")),
+    ];
+    let mut name = [
+        be16(0),
+        be16(records.len() as i32),
+        be16(6 + 12 * records.len() as i32),
+    ]
+    .concat();
+    let mut at = 0;
+    for (id, b) in &records {
+        for v in [3, 1, 0x409, *id, b.len() as i32, at] {
+            name.extend(be16(v));
+        }
+        at += b.len() as i32;
+    }
+    for (_, b) in &records {
+        name.extend(b);
+    }
+    let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![
+        (b"CFF ", cff),
+        (b"cmap", cmap),
+        (b"head", head),
+        (b"hhea", hhea),
+        (b"hmtx", hmtx),
+        (b"maxp", maxp),
+        (b"name", name),
+        (b"post", post),
+    ];
+    tables.sort_by_key(|t| *t.0);
+    let mut out = [
+        b"OTTO".to_vec(),
+        be16(tables.len() as i32),
+        be16(128),
+        be16(3),
+        be16(0),
+    ]
+    .concat();
+    let mut offset = 12 + 16 * tables.len();
+    let mut body = Vec::new();
+    for (tag, data) in &tables {
+        out.extend(*tag);
+        out.extend(be32(0));
+        out.extend(be32(offset as u32));
+        out.extend(be32(data.len() as u32));
+        body.extend(data);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        offset = 12 + 16 * tables.len() + body.len();
+    }
+    out.extend(body);
+    out
+}
+
+/// Вещественное число CFF, которое при чтении выходит за `f32` («1E99» читается
+/// как `inf`), роняет `subsetter` на `unreachable!`. Такой шрифт — контурами, а
+/// обычный CFF-шрифт остаётся настоящим текстом.
+#[test]
+fn a_cff_font_with_an_overflowing_real_falls_back_to_outlines() {
+    let good = tiny_cff_font("0.039625");
+    let bytes = pdf_with_font("Tiny", "Regular", &good, good.clone(), "A").unwrap();
+    assert!(
+        text(&bytes).contains("/FontFile3"),
+        "CFF — настоящим текстом"
+    );
+    let bad = tiny_cff_font("1E9999999");
+    let outlined = pdf_with_font("Tiny", "Regular", &good, bad, "A").unwrap();
+    let raw = text(&outlined);
+    assert!(!raw.contains("/FontFile"), "шрифт не встроен");
+    assert!(
+        streams(&outlined).iter().any(|c| text(c).contains("\nf\n")),
+        "треугольник контуром"
+    );
+}
+
+/// Простой детерминированный генератор (xorshift64*).
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+}
+
+/// Портит шрифт: один байт или короткую серию — в служебных таблицах (где живут
+/// размеры, имена, числа CFF), реже в любом месте файла.
+fn mutate(font: &[u8], rng: &mut Rng) -> Vec<u8> {
+    let mut out = font.to_vec();
+    let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+    let small: Vec<(usize, usize)> = (0..tables)
+        .filter_map(|i| {
+            let r = 12 + 16 * i;
+            let tag = &font[r..r + 4];
+            let off = u32::from_be_bytes(font[r + 8..r + 12].try_into().ok()?) as usize;
+            let len = u32::from_be_bytes(font[r + 12..r + 16].try_into().ok()?) as usize;
+            let wanted = [
+                &b"head"[..],
+                b"hhea",
+                b"maxp",
+                b"OS/2",
+                b"name",
+                b"post",
+                b"CFF ",
+                b"cmap",
+                b"hmtx",
+                b"fvar",
+                b"avar",
+            ];
+            (wanted.contains(&tag) && off + len <= font.len()).then_some((off, len.min(512)))
+        })
+        .collect();
+    let (start, span) = if !small.is_empty() && rng.below(4) != 0 {
+        small[rng.below(small.len())]
+    } else {
+        (0, font.len())
+    };
+    let run = if rng.below(3) == 0 {
+        1 + rng.below(4)
+    } else {
+        1
+    };
+    let at = start + rng.below(span);
+    for k in 0..run {
+        if let Some(b) = out.get_mut(at + k) {
+            *b = match rng.below(4) {
+                0 => 0,
+                1 => 0xFF,
+                2 => b.wrapping_add(1),
+                _ => rng.next() as u8,
+            };
+        }
+    }
+    out
+}
+
+/// Порча байтов шрифта не должна ронять экспорт: каждый загрузившийся шрифт
+/// даёт PDF (текстом или контурами) без паник `krilla`/`subsetter`. Сотни
+/// порч на шрифт, с фиксированным зерном; только не wasm (там паника — ловушка).
+/// По умолчанию 24 порчи на шрифт (несколько секунд); глубже:
+/// `FERRUM_FONT_FUZZ=1000 cargo test -p ferrum-render --test pdf mutated`.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn mutated_fonts_never_panic_the_export() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/web/public/fonts");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flat_map(|d| std::fs::read_dir(d.unwrap().path()).into_iter().flatten())
+        .map(|f| f.unwrap().path())
+        .filter(|f| f.extension().is_some_and(|e| e == "ttf"))
+        .collect();
+    files.sort();
+    assert!(files.len() >= 20);
+    let rounds: usize = std::env::var("FERRUM_FONT_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    let (mut loaded, mut total) = (0, 0);
+    for (n, file) in files.iter().enumerate() {
+        let original = std::fs::read(file).unwrap();
+        let faces = ferrum_text::group(ferrum_text::read_faces(&original, "f.ttf"));
+        let (family, style) = (faces[0].family.clone(), faces[0].faces[0].style.clone());
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ ((n as u64 + 1) * 0x1_0000_0001));
+        for round in 0..rounds {
+            let font = mutate(&original, &mut rng);
+            total += 1;
+            let result = std::panic::catch_unwind(|| {
+                pdf_with_font(&family, &style, &original, font, "Aa Привет fi ->")
+            });
+            match result {
+                Err(_) => panic!("{}: порча №{round} уронила экспорт", file.display()),
+                Ok(Ok(bytes)) => {
+                    loaded += 1;
+                    assert!(bytes.starts_with(b"%PDF-"));
+                }
+                Ok(Err(_)) => {}
+            }
+        }
+    }
+    // Часть порч шрифт ломает насовсем (тогда он не загружается) - остальные идут в PDF.
+    assert!(loaded * 2 > total, "{loaded} из {total}");
+}
