@@ -19,8 +19,8 @@ use ferrum_doc::{container, fixture, DocResult, Document, NodeId, Tx};
 use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{CommandId, Cursor, Editor, EditorEvent, Input, Platform, ToolKind};
 use ferrum_render::{
-    decode_png, Clock, ExportBudget, ExportError, FrameStats, OverlayTheme, RenderBackend,
-    Renderer, Rgba, SvgOptions,
+    decode_png, Clock, ExportBudget, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba,
+    SvgOptions,
 };
 use ferrum_scene::Scene;
 use ferrum_text::{Fonts, SharedFonts};
@@ -853,11 +853,10 @@ impl Core {
             &budget,
         );
         match result {
-            Ok(text) => self.events.push(CoreEvent::ClipboardSvg { text }),
-            Err(ExportError::TooBig) => {
-                self.error("Не удалось скопировать: SVG больше 64 МБ — экспортируйте его в файл")
-            }
-            Err(e) => self.error(format!("Не удалось скопировать: {e}")),
+            Ok(text) => self.events.push(CoreEvent::ClipboardSvg {
+                bytes: ByteBuf::from(text.into_bytes()),
+            }),
+            Err(e) => self.error(panels::copy_svg_message(&e)),
         }
     }
 

@@ -125,6 +125,19 @@ fn export_message(e: &ExportError) -> String {
     }
 }
 
+/// Ошибка «Копировать как SVG»: те же законченные фразы, что у экспорта (без
+/// второй приставки «Не удалось скопировать: Нечего экспортировать…»); свои —
+/// только предел буфера обмена и сбой сборки.
+pub(super) fn copy_svg_message(e: &ExportError) -> String {
+    match e {
+        ExportError::TooBig => {
+            "Не удалось скопировать: SVG больше 64 МБ — экспортируйте его в файл".to_string()
+        }
+        ExportError::Write(why) => format!("Не удалось скопировать: SVG не собран ({why})"),
+        e => export_message(e),
+    }
+}
+
 fn field(f: Field) -> NumField {
     match f {
         Field::X => NumField::X,
@@ -939,6 +952,31 @@ mod tests {
             assert_eq!(export_message(&e), text, "{e:?}");
         }
         assert!(export_message(&ExportError::TooLarge(20_000, 10)).starts_with("Картинка 20000×10"));
+    }
+
+    /// Ошибки «Копировать как SVG» — без двойной приставки.
+    #[test]
+    fn copy_svg_errors_have_one_prefix() {
+        assert_eq!(
+            copy_svg_message(&ExportError::Timeout),
+            ExportError::Timeout.to_string()
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::Empty),
+            ExportError::Empty.to_string()
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::TooBig),
+            "Не удалось скопировать: SVG больше 64 МБ — экспортируйте его в файл"
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::Write("x".into())),
+            "Не удалось скопировать: SVG не собран (x)"
+        );
+        assert_eq!(
+            copy_svg_message(&ExportError::NotFound),
+            "Нечего экспортировать: слой не найден"
+        );
     }
 
     /// Имя файла: как в Figma — при 1× без «@1x», при 2× и 3× — с суффиксом;

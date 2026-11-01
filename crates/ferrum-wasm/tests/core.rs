@@ -260,11 +260,12 @@ fn copy_as_svg_puts_the_selection_as_svg_text() {
     core.command(Command::Execute {
         command: "edit.copy_svg".into(),
     });
-    let text = core.take_events().into_iter().find_map(|e| match e {
-        CoreEvent::ClipboardSvg { text } => Some(text),
+    let bytes = core.take_events().into_iter().find_map(|e| match e {
+        CoreEvent::ClipboardSvg { bytes } => Some(bytes),
         _ => None,
     });
-    let text = text.expect("нет SVG");
+    // Байты UTF-8 (переносятся из worker'а без копии), а не строка.
+    let text = String::from_utf8(bytes.expect("нет SVG").into_vec()).expect("UTF-8");
     assert!(
         text.starts_with("<svg width=\"120\" height=\"80\""),
         "{text}"

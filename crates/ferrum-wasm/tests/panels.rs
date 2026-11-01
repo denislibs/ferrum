@@ -1621,6 +1621,16 @@ fn export_errors_reach_the_ui_in_russian() {
         assert_eq!(errors(&ev), [timeout.as_str()], "{format:?}");
         assert!(!ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
     }
+    // «Копировать как SVG» — та же фраза, без второй приставки «Не удалось
+    // скопировать: Экспорт идёт…».
+    core.command(Command::Execute {
+        command: "edit.copy_svg".into(),
+    });
+    let ev = core.take_events();
+    assert_eq!(errors(&ev), [timeout.as_str()]);
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ClipboardSvg { .. })));
     // Часы вернулись в норму — экспорт снова работает.
     core.set_export_clock(None);
     core.command(export(ExportFormat::Pdf));
