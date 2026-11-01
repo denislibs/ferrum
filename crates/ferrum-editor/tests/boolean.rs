@@ -398,3 +398,68 @@ fn boolean_over_other_parents_is_placed_like_a_group() {
     };
     assert_eq!(place(true), place(false));
 }
+
+/// Цепочка из `depth` вложенных групп под `parent` с прямоугольником 0..10 на
+/// дне (заливка 7, 8, 9). Возвращает верхнюю группу цепочки.
+fn group_chain(tx: &Tx, parent: Option<NodeId>, depth: usize) -> DocResult<NodeId> {
+    let head = tx.create_node(parent, None, NodeKind::Group)?;
+    let mut cur = head;
+    for _ in 1..depth {
+        cur = tx.create_node(Some(cur), None, NodeKind::Group)?;
+    }
+    let r = tx.create_node(Some(cur), None, NodeKind::Rect)?;
+    tx.set_props(
+        r,
+        &PropsPatch {
+            fills: Some(solid(7, 8, 9)),
+            ..patch(0.0, 0.0, 10.0, 10.0)
+        },
+    )?;
+    Ok(head)
+}
+
+/// Стиль новой булевой группы над глубокой цепочкой групп и её результат
+/// считаются без рекурсии на стеке worker'а (1 МБ — как у wasm32). Глубина
+/// 3000 — уже больше, чем выдерживал рекурсивный обход, но меньше предела
+/// самого Loro в отладочной сборке (чтение страницы, вне этого этапа); сцена
+/// на 20 000 уровней — в тестах `ferrum-scene`.
+#[test]
+fn style_source_of_a_deep_group_chain_does_not_overflow_the_stack() {
+    let depth = 3_000;
+    // Документ собирается на большом стеке: запись в Loro к этапу не относится.
+    let (doc, [low, chain]) = std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || {
+            let mut doc = Document::new();
+            let page = doc.pages()[0].0;
+            let ids = doc
+                .transact(page, vec![], |tx| {
+                    let low = tx.create_node(None, None, NodeKind::Rect)?;
+                    tx.set_props(low, &patch(5.0, 0.0, 10.0, 10.0))?;
+                    let chain = group_chain(tx, None, depth)?;
+                    Ok(vec![low, chain])
+                })
+                .unwrap();
+            (doc, <[NodeId; 2]>::try_from(ids).unwrap())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let mut ed = Editor::new(doc, None, common::VIEW, 1.0, Platform::Windows).unwrap();
+            // Цепочка сверху: стиль её верхнего листа.
+            ed.select(&[low, chain]);
+            ed.execute(CommandId::BooleanUnion);
+            let g = ed.selection()[0];
+            let n = ed.scene().node(g).unwrap();
+            assert_eq!(n.props.kind, NodeKind::Boolean);
+            assert_eq!(n.props.fills, solid(7, 8, 9));
+            let world = n.world.transform_rect_bbox(n.local_bounds.unwrap());
+            assert!(near(world, Rect::new(0.0, 0.0, 15.0, 10.0)));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

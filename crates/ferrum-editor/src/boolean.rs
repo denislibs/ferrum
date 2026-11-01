@@ -12,17 +12,23 @@ use ferrum_doc::{BooleanOp, NodeId, NodeKind, Props, PropsPatch};
 
 /// Слой, чей стиль берёт новая булева группа: у обычной группы — её верхний
 /// (у «Вычитания» — нижний) лист, есть у него заливки или нет; вложенная
-/// булева группа и фрейм берутся как есть.
+/// булева группа и фрейм берутся как есть. Обход без рекурсии: глубина групп
+/// из файла не ограничена.
 fn style_source(editor: &Editor, id: NodeId, top: bool) -> Option<Props> {
-    let n = editor.scene.node(id)?;
-    if n.props.kind != NodeKind::Group {
-        return Some(n.props.clone());
+    let mut stack = vec![editor.scene.slot(id)?];
+    while let Some(s) = stack.pop() {
+        let n = editor.scene.at(s);
+        if n.props.kind != NodeKind::Group {
+            return Some(n.props.clone());
+        }
+        // Первым снимается верхний ребёнок (у «Вычитания» — нижний).
+        if top {
+            stack.extend(n.children.iter().copied());
+        } else {
+            stack.extend(n.children.iter().rev().copied());
+        }
     }
-    let mut kids: Vec<NodeId> = n.children.iter().map(|&c| editor.scene.at(c).id).collect();
-    if top {
-        kids.reverse();
-    }
-    kids.into_iter().find_map(|c| style_source(editor, c, top))
+    None
 }
 
 impl Editor {

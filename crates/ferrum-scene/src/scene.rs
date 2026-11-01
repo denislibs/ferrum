@@ -734,7 +734,51 @@ impl Scene {
     /// Форма заливки узла с видимыми детьми в его локальных координатах: у
     /// булевой группы — её результат, у группы — объединение детей, у листа —
     /// `boolean::leaf_fill` (у текста — по контурам глифов редактора).
+    ///
+    /// Обход групп без рекурсии (снизу вверх, явным стеком): глубина дерева из
+    /// файла не ограничена, а цепочка из тысяч вложенных групп в булевой
+    /// группе переполнила бы стек worker'а при открытии.
     fn fill_of(&self, slot: Slot) -> Contours {
+        if self.at(slot).props.kind != NodeKind::Group {
+            return self.own_fill(slot);
+        }
+        // Группа, индекс следующего ребёнка и формы уже пройденных детей.
+        let mut stack: Vec<(Slot, usize, Vec<Contours>)> = vec![(slot, 0, Vec::new())];
+        loop {
+            let top = stack.last_mut().expect("стек не пуст до выхода");
+            let kids = &self.at(top.0).children;
+            if let Some(&c) = kids.get(top.1) {
+                top.1 += 1;
+                let cn = self.at(c);
+                if !cn.props.visible {
+                    continue;
+                }
+                if cn.props.kind == NodeKind::Group {
+                    stack.push((c, 0, Vec::new()));
+                } else {
+                    let f = self.own_fill(c).transformed(cn.local);
+                    if !f.is_empty() {
+                        top.2.push(f);
+                    }
+                }
+                continue;
+            }
+            let (g, _, parts) = stack.pop().expect("стек не пуст");
+            let f = boolean::combine(ferrum_doc::BooleanOp::Union, &parts);
+            match stack.last_mut() {
+                None => return f,
+                Some(parent) => {
+                    let f = f.transformed(self.at(g).local);
+                    if !f.is_empty() {
+                        parent.2.push(f);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Форма заливки узла, не группы (у булевой группы — её результат).
+    fn own_fill(&self, slot: Slot) -> Contours {
         let n = self.at(slot);
         match n.props.kind {
             NodeKind::Boolean => n
@@ -742,16 +786,7 @@ impl Scene {
                 .as_ref()
                 .map(|b| b.contours.clone())
                 .unwrap_or_default(),
-            NodeKind::Group => {
-                let parts: Vec<Contours> = n
-                    .children
-                    .iter()
-                    .filter(|&&c| self.at(c).props.visible)
-                    .map(|&c| self.fill_of(c).transformed(self.at(c).local))
-                    .filter(|c| !c.is_empty())
-                    .collect();
-                boolean::combine(ferrum_doc::BooleanOp::Union, &parts)
-            }
+            NodeKind::Group => unreachable!("группу складывает fill_of"),
             NodeKind::Text => {
                 let glyphs = self.text_outlines.as_ref().and_then(|f| f(&n.props));
                 boolean::leaf_fill(&n.props, None, glyphs.as_ref())

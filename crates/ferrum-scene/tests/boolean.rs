@@ -6,7 +6,9 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use ferrum_doc::{BooleanOp, Document, FillRule, NodeId, NodeKind, PageId, Props, PropsPatch};
+use ferrum_doc::{
+    BooleanOp, Document, FillRule, NodeId, NodeKind, PageId, Props, PropsPatch, SceneRow,
+};
 use ferrum_scene::boolean::{combine, flatten_path, normalize, Contours};
 use ferrum_scene::{testing::snapshot, Scene};
 use kurbo::{BezPath, Circle, Point, Rect, Shape};
@@ -794,4 +796,54 @@ fn forcing_full_booleans_drops_the_history_of_a_gesture() {
         snapshot(&scene),
         snapshot(&Scene::from_page(doc.page(page).unwrap()))
     );
+}
+
+/// Файл с булевой группой над цепочкой из 20 000 вложенных групп открывается
+/// на стеке worker'а (1 МБ — как у wasm32): форма группы считается без
+/// рекурсии. Строки цепочки размножены из строк маленькой страницы (тот же
+/// путь, что у кэша сцены и `Scene::from_page`, но без Loro: его чтение
+/// глубокой страницы в отладочной сборке само упирается в стек и к этапу не
+/// относится).
+#[test]
+fn deep_group_chain_in_a_boolean_does_not_overflow_the_stack() {
+    const DEPTH: usize = 20_000;
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    doc.transact(page, vec![], |tx| {
+        let b = tx.create_node(None, None, NodeKind::Boolean)?;
+        let g = tx.create_node(Some(b), None, NodeKind::Group)?;
+        let r = tx.create_node(Some(g), None, NodeKind::Rect)?;
+        tx.set_props(r, &patch(0.0, 0.0, 10.0, 10.0))?;
+        Ok(vec![])
+    })
+    .unwrap();
+    let template = doc.page(page).unwrap().scene_rows().unwrap();
+    let [boolean, group, rect]: [SceneRow; 3] = template.try_into().unwrap();
+    let b = boolean.id;
+    let peer = b.to_string().split('@').nth(1).unwrap().to_string();
+    let fresh = |i: usize| -> NodeId { format!("{}@{peer}", 1_000_000 + i).parse().unwrap() };
+    let mut rows = vec![boolean];
+    for i in 0..DEPTH {
+        let mut g = group.clone();
+        g.id = fresh(i);
+        g.parent = Some(i as u32);
+        rows.push(g);
+    }
+    let mut r = rect;
+    r.id = fresh(DEPTH);
+    r.parent = Some(DEPTH as u32);
+    rows.push(r);
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let scene = Scene::from_rows(&rows);
+            assert_eq!(scene.len(), DEPTH + 2);
+            assert!(near(
+                local_bounds(&scene, b),
+                Rect::new(0.0, 0.0, 10.0, 10.0)
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
