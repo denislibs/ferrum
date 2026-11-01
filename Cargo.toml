@@ -61,3 +61,5 @@ serde-wasm-bindgen = "=0.6.5"
 serde_bytes = "=0.11.19"
 console_error_panic_hook = "=0.1.7"
 wasm-bindgen-test = "=0.3.79"
+# Проверка экспорта SVG в тестах: файл разбирается как XML (только dev-зависимость).
+roxmltree = "=0.21.1"

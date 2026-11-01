@@ -85,7 +85,10 @@ fn glyph_transform(fonts: &mut Fonts, run: &GlyphRun, x: f32, y: f32) -> Affine 
 
 /// Контур глифов прогонов одним путём в координатах узла (заливка изображением
 /// и обводка).
-fn glyphs_path<'a>(fonts: &mut Fonts, runs: impl Iterator<Item = &'a GlyphRun>) -> BezPath {
+pub(crate) fn glyphs_path<'a>(
+    fonts: &mut Fonts,
+    runs: impl Iterator<Item = &'a GlyphRun>,
+) -> BezPath {
     let mut out = BezPath::new();
     for run in runs {
         for g in &run.glyphs {
