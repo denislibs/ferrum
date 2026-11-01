@@ -133,7 +133,7 @@ test('копировать как PNG кладёт картинку в буфе�
   expect(size).toEqual([120, 80]);
 });
 
-test('копировать как SVG: текст и image/svg+xml из меню холста', async ({ page }) => {
+test('копировать как SVG: текст и image/svg+xml из меню холста', async ({ page, browserName }) => {
   await openApp(page);
   await selectShape(page);
   const at = await appScreen(page, await live(page), 200, 40);
@@ -153,8 +153,15 @@ test('копировать как SVG: текст и image/svg+xml из меню
     return doc.querySelector('parsererror') ? null : [doc.documentElement.getAttribute('width'), doc.documentElement.getAttribute('height')];
   }, got.text);
   expect(size).toEqual(['120', '80']);
-  // Chromium записывает image/svg+xml, очистив разметку: размер на месте.
-  if (got.svg !== null) expect(got.svg).toMatch(/<svg[^>]*width="120"[^>]*height="80"/);
+  expect(got.types).toContain('text/plain');
+  if (browserName === 'chromium') {
+    // Chromium (124+) записывает image/svg+xml, очистив разметку: размер на месте.
+    expect(got.types).toContain('image/svg+xml');
+    expect(got.svg).toMatch(/<svg[^>]*width="120"[^>]*height="80"/);
+  } else {
+    // Остальные движки — только обычный текст.
+    expect(got.svg).toBeNull();
+  }
 });
 
 test('в поле ввода копирование, вырезание и вставка — обычный текст', async ({ page }) => {
