@@ -389,7 +389,7 @@ export function App(props: AppProps) {
             });
           }
           if (e.type === 'exported') {
-            downloadBytes(e.name, e.bytes, 'image/png');
+            downloadBytes(e.name, e.bytes, e.mime);
             store.toast(`Экспортировано: ${e.name}`);
           } else if (e.type === 'saved') {
             // «Сохранить копию на диск…»: байты готовит worker и передаёт без копии.

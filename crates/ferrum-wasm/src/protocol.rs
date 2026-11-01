@@ -64,6 +64,34 @@ pub enum Tool {
     Scale,
 }
 
+/// Формат экспорта, как в разделе «Export» Figma (подсистема 3, этап 5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportFormat {
+    #[default]
+    Png,
+    Svg,
+    Pdf,
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Png => "png",
+            ExportFormat::Svg => "svg",
+            ExportFormat::Pdf => "pdf",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            ExportFormat::Png => "image/png",
+            ExportFormat::Svg => "image/svg+xml",
+            ExportFormat::Pdf => "application/pdf",
+        }
+    }
+}
+
 /// Тема оверлеев.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -623,9 +651,18 @@ pub enum Command {
     SetZoom {
         zoom: f64,
     },
-    /// Экспорт PNG выделения (без выделения — всей страницы): ответ — `Exported`.
+    /// Экспорт выделения (без выделения — всей страницы; PDF — каждого фрейма
+    /// страницей): ответ — `Exported`. `scale` — у PNG (1, 2, 3), у SVG и PDF
+    /// не читается; `outlineText` («Текст кривыми», по умолчанию да) и `svgIds`
+    /// («Атрибут id») — у SVG.
     Export {
         scale: f64,
+        #[serde(default)]
+        format: Option<ExportFormat>,
+        #[serde(default)]
+        outline_text: Option<bool>,
+        #[serde(default)]
+        svg_ids: Option<bool>,
     },
     /// Изображение из системного буфера: встаёт в центр видимой части.
     PasteImage {
@@ -951,11 +988,13 @@ pub enum CoreEvent {
     Presets {
         presets: Vec<PresetInfo>,
     },
-    /// PNG экспорта и имя файла.
+    /// Файл экспорта: имя, байты и тип (`image/png`, `image/svg+xml`,
+    /// `application/pdf`).
     Exported {
         name: String,
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
+        mime: String,
     },
     /// Имя документа изменилось.
     DocumentName {

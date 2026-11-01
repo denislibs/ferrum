@@ -7,7 +7,7 @@ use ferrum_editor::{Input, Modifiers, Platform, PointerButton, PointerEvent};
 use ferrum_render::{CpuBackend, Pixmap};
 use ferrum_wasm::core::{Core, CANVAS_DARK};
 use ferrum_wasm::input::{encode, Record};
-use ferrum_wasm::protocol::{Backend, Command, CoreEvent, Tool};
+use ferrum_wasm::protocol::{Backend, Command, CoreEvent, ExportFormat, Tool};
 use kurbo::{Point, Size};
 use serde_bytes::ByteBuf;
 
@@ -724,4 +724,89 @@ fn read_measurements_reports_alt_measurements() {
     assert_eq!(read(&mut core), (vec![20.0], 0));
     core.handle(Input::KeyUp(KeyEvent::new("AltLeft", Modifiers::NONE)));
     assert_eq!(read(&mut core), (vec![], 0), "Alt отпущен");
+}
+
+/// Картинка, которую не прочитать (байты в файле испорчены — при открытии её нет),
+/// в PDF и PNG — ошибка, а не серый квадрат-заглушка (решение 24 плана). SVG по
+/// решению 13 плана пишет заливку без байтов пропуском, без ошибки.
+#[test]
+fn unreadable_images_fail_pdf_export() {
+    let mut core = demo(100);
+    frame(&mut core);
+    let mut src = Pixmap::new(40, 20);
+    for p in src.data_as_u8_slice_mut().chunks_exact_mut(4) {
+        p.copy_from_slice(&[255, 0, 0, 255]);
+    }
+    core.command(Command::PlaceImage {
+        bytes: ByteBuf::from(src.into_png().unwrap()),
+    });
+    let at = screen(300.0, 1100.0);
+    core.handle(Input::PointerDown(pointer(at, 0.0)));
+    core.handle(Input::PointerUp(pointer(at, 10.0)));
+    core.command(Command::Save);
+    let Some(CoreEvent::Saved { bytes }) = core
+        .take_events()
+        .into_iter()
+        .find(|e| matches!(e, CoreEvent::Saved { .. }))
+    else {
+        panic!("нет события Saved");
+    };
+    let export = |format: ExportFormat| Command::Export {
+        scale: 1.0,
+        format: Some(format),
+        outline_text: None,
+        svg_ids: None,
+    };
+    let exported = |ev: &[CoreEvent]| ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. }));
+    let errors = |ev: &[CoreEvent]| -> Vec<String> {
+        ev.iter()
+            .filter_map(|e| match e {
+                CoreEvent::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let open = |bytes: Vec<u8>| {
+        let mut c = Core::new(Platform::Windows, VIEW, 1.0, Backend::Cpu);
+        c.command(Command::Open {
+            bytes: ByteBuf::from(bytes),
+        });
+        c.command(Command::Execute {
+            command: "edit.select_all".into(),
+        });
+        c.take_events();
+        c
+    };
+    // Целый файл: PDF с картинкой собирается.
+    let mut whole = open(bytes.to_vec());
+    whole.command(export(ExportFormat::Pdf));
+    let ev = whole.take_events();
+    assert!(exported(&ev), "{:?}", errors(&ev));
+    // Испорченные байты PNG: при открытии картинка отброшена (контрольная сумма).
+    let mut broken = bytes.to_vec();
+    let sig = b"\x89PNG\r\n\x1a\n";
+    let at: Vec<usize> = broken
+        .windows(sig.len())
+        .enumerate()
+        .filter(|(_, w)| *w == sig)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!at.is_empty(), "в файле нет PNG");
+    for i in at {
+        broken[i + 20] ^= 0xFF;
+    }
+    let mut c = open(broken);
+    for format in [ExportFormat::Pdf, ExportFormat::Png] {
+        c.command(export(format));
+        let ev = c.take_events();
+        assert_eq!(
+            errors(&ev),
+            ["Не удалось экспортировать: часть изображений не читается или не помещается в память"],
+            "{format:?}"
+        );
+        assert!(!exported(&ev), "{format:?}");
+    }
+    c.command(export(ExportFormat::Svg));
+    let ev = c.take_events();
+    assert!(exported(&ev), "{:?}", errors(&ev));
 }

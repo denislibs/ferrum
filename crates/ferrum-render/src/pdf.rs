@@ -35,7 +35,7 @@ use vello_cpu::peniko::{Extend, Fill};
 
 use crate::backend::{ImageKey, ImagePaint, RenderBackend, Rgba};
 use crate::draw::{DrawContext, Painter};
-use crate::export::{node_area, ExportBudget};
+use crate::export::{export_items, ExportBudget};
 use crate::image::ImageProvider;
 use crate::ExportError;
 
@@ -721,11 +721,12 @@ impl RenderBackend for PdfBackend<'_, '_> {
     }
 }
 
-/// Страницы: узел — страница размера его области (не больше `MAX_PDF_SIDE`).
-/// Скрытые и неизвестные узлы пропускаются; не осталось ни одного — ошибка.
+/// Страницы: каждый список узлов — страница размера их общей области (как у
+/// PNG; не больше `MAX_PDF_SIDE`). Скрытые и неизвестные узлы пропускаются; не
+/// осталось ни одной страницы — ошибка.
 pub(crate) fn export_pdf(
     scene: &Scene,
-    pages: &[NodeId],
+    pages: &[Vec<NodeId>],
     images: &dyn ImageProvider,
     fonts: &SharedFonts,
     budget: &ExportBudget,
@@ -739,38 +740,37 @@ pub(crate) fn export_pdf(
     .map_err(|f| match f {
         Fail::Export(e) => e,
         // Повтор без текста шрифта не бывает.
-        Fail::Font => ExportError::Write("шрифт".into()),
+        Fail::Font => ExportError::Write("шрифт не встраивается".into()),
     })
 }
 
 fn build(
     scene: &Scene,
-    pages: &[NodeId],
+    pages: &[Vec<NodeId>],
     images: &dyn ImageProvider,
     fonts: &SharedFonts,
     budget: &ExportBudget,
     text: bool,
 ) -> Result<Vec<u8>, Fail> {
+    // Страница — узлы и их общая область (как у PNG): узлы, которых нет, и
+    // страницы без видимого — пропускаются.
     let mut known = false;
     let mut list = Vec::new();
-    for id in pages {
-        let Some(slot) = scene.slot(*id) else {
-            continue;
-        };
-        known = true;
-        if scene.at(slot).subtree_bounds.is_none() {
-            continue;
+    for ids in pages {
+        match export_items(scene, ids) {
+            Ok((items, area)) => {
+                known = true;
+                if area.width().is_finite()
+                    && area.height().is_finite()
+                    && area.width() >= 0.5
+                    && area.height() >= 0.5
+                {
+                    list.push((items.into_iter().map(|(s, _)| s).collect::<Vec<_>>(), area));
+                }
+            }
+            Err(ExportError::NotFound) => {}
+            Err(_) => known = true,
         }
-        let Some(area) = node_area(scene, slot) else {
-            continue;
-        };
-        if !(area.width().is_finite() && area.height().is_finite())
-            || area.width() < 0.5
-            || area.height() < 0.5
-        {
-            continue;
-        }
-        list.push((slot, area));
     }
     if !known {
         return Err(ExportError::NotFound.into());
@@ -788,7 +788,7 @@ fn build(
     let mut cache = Cache::default();
     // Оценка размера содержимого уже нарисованных страниц.
     let mut carried = 0usize;
-    for (slot, area) in list {
+    for (slots, area) in list {
         let k = (MAX_PDF_SIDE / area.width().max(area.height())).min(1.0);
         let (w, h) = (area.width() * k, area.height() * k);
         let size = KSize::from_wh(w as f32, h as f32).ok_or(ExportError::Empty)?;
@@ -820,7 +820,7 @@ fn build(
         };
         let mut painter = Painter::with_raster_limit(0);
         painter.begin_frame();
-        painter.draw(&mut backend, &ctx, &[slot]);
+        painter.draw(&mut backend, &ctx, &slots);
         let failure = backend.failure.take();
         carried = backend.estimate;
         surface.finish();

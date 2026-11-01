@@ -9,14 +9,14 @@ use ferrum_editor::{
     browser_reserved, frame_presets, BindError, CommandId, DropTarget, KeymapError, NumField,
     PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
 };
-use ferrum_render::decode_png;
+use ferrum_render::{decode_png, ExportBudget, ExportError, SvgOptions};
 use ferrum_scene::shape::COORD_LIMIT;
 use serde_bytes::ByteBuf;
 
 use super::Core;
 use crate::protocol::{
-    Align, Command, ConflictInfo, CoreEvent, DropPosition, Edit, EditPhase, Field, FillDto,
-    KeymapEntry, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
+    Align, Command, ConflictInfo, CoreEvent, DropPosition, Edit, EditPhase, ExportFormat, Field,
+    FillDto, KeymapEntry, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
     EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
 };
 use crate::summary::{cap_of, join_of, summarize, MAX_PAINTS};
@@ -31,8 +31,46 @@ pub(super) fn event_name(name: &str) -> String {
     name.chars().take(MAX_NAME_CHARS).collect()
 }
 
+/// Страницы PDF (спека подсистемы 3, раздел 11): у выделения — каждый узел
+/// верхнего уровня, без выделения — каждый фрейм верхнего уровня, а если
+/// фреймов нет — вся страница одной; по порядку чтения (сверху вниз, слева
+/// направо, как «Export frames to PDF» в Figma).
+fn pdf_pages(
+    scene: &ferrum_scene::Scene,
+    selection: &[NodeId],
+    all: &[NodeId],
+) -> Vec<Vec<NodeId>> {
+    let tops: Vec<NodeId> = if selection.is_empty() {
+        all.iter()
+            .copied()
+            .filter(|id| {
+                scene
+                    .node(*id)
+                    .is_some_and(|n| n.props.kind == ferrum_doc::NodeKind::Frame)
+            })
+            .collect()
+    } else {
+        ferrum_editor::geometry::top_level(scene, selection)
+    };
+    if tops.is_empty() {
+        return vec![all.to_vec()];
+    }
+    let mut keyed: Vec<(f64, f64, NodeId)> = tops
+        .into_iter()
+        .map(|id| {
+            let b = scene
+                .node(id)
+                .and_then(|n| n.subtree_bounds.or(n.world_bounds))
+                .unwrap_or_default();
+            (b.y0.round(), b.x0, id)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    keyed.into_iter().map(|(_, _, id)| vec![id]).collect()
+}
+
 /// Имя файла экспорта: без знаков, которые не любят файловые системы.
-fn file_name(name: &str, scale: f64) -> String {
+fn file_name(name: &str, scale: f64, format: ExportFormat) -> String {
     let base: String = name
         .chars()
         .take(MAX_NAME_CHARS)
@@ -46,7 +84,28 @@ fn file_name(name: &str, scale: f64) -> String {
         .collect();
     let base = base.trim();
     let base = if base.is_empty() { "Ferrum" } else { base };
-    format!("{base}@{scale}x.png")
+    match format {
+        ExportFormat::Png => format!("{base}@{scale}x.png"),
+        _ => format!("{base}.{}", format.extension()),
+    }
+}
+
+/// Ошибка экспорта для интерфейса: законченная фраза по-русски. Тексты
+/// `TooBig`, `Timeout`, `Empty` и `TooLarge` уже говорят, что не так и что
+/// делать, — без приставки «Не удалось экспортировать».
+fn export_message(e: &ExportError) -> String {
+    match e {
+        ExportError::TooBig
+        | ExportError::Timeout
+        | ExportError::Empty
+        | ExportError::TooLarge(..) => e.to_string(),
+        ExportError::NotFound => "Нечего экспортировать: слой не найден".to_string(),
+        ExportError::BadScale => "Масштаб экспорта — 1×, 2× или 3×".to_string(),
+        ExportError::Write(why) => format!("Не удалось экспортировать: файл не собран ({why})"),
+        ExportError::Encode(why) => {
+            format!("Не удалось экспортировать: PNG не закодирован ({why})")
+        }
+    }
 }
 
 fn field(f: Field) -> NumField {
@@ -461,7 +520,18 @@ impl Core {
                     self.error("Неверный масштаб");
                 }
             }
-            Command::Export { scale } => self.export(scale),
+            Command::Export {
+                scale,
+                format,
+                outline_text,
+                svg_ids,
+            } => {
+                let svg = SvgOptions {
+                    outline_text: outline_text.unwrap_or(true),
+                    ids: svg_ids.unwrap_or(false),
+                };
+                self.export(scale, format.unwrap_or_default(), svg)
+            }
             Command::PasteImage { bytes } => self.paste_image(bytes),
             Command::Bind {
                 command,
@@ -663,7 +733,7 @@ impl Core {
         self.events.push(CoreEvent::Presets { presets });
     }
 
-    fn export(&mut self, scale: f64) {
+    fn export(&mut self, scale: f64, format: ExportFormat, svg: SvgOptions) {
         if !EXPORT_SCALES.contains(&scale) {
             self.error("Масштаб экспорта — 1×, 2× или 3×");
             return;
@@ -696,7 +766,7 @@ impl Core {
                     .unwrap_or_default(),
                 _ => "Выделение".to_string(),
             };
-            (selection, name)
+            (selection.clone(), name)
         };
         if ids.is_empty() {
             self.error("Нечего экспортировать: страница пуста");
@@ -708,20 +778,41 @@ impl Core {
             return;
         }
         let before = self.images.placeholders_served();
-        let provider = self.images.export_provider(&self.editor.document().images);
-        let result = self
-            .renderer
-            .export_png_nodes(self.editor.scene(), &ids, scale, &provider);
+        let budget = ExportBudget::new(self.export_clock.as_deref());
+        let result = match format {
+            ExportFormat::Png => {
+                let provider = self.images.export_provider(&self.editor.document().images);
+                self.renderer
+                    .export_png_nodes(self.editor.scene(), &ids, scale, &provider)
+            }
+            ExportFormat::Svg => self
+                .renderer
+                .export_svg(
+                    self.editor.scene(),
+                    &ids,
+                    &self.editor.document().images,
+                    svg,
+                    &budget,
+                )
+                .map(String::into_bytes),
+            ExportFormat::Pdf => {
+                let pages = pdf_pages(self.editor.scene(), &selection, &ids);
+                let provider = self.images.export_provider(&self.editor.document().images);
+                self.renderer
+                    .export_pdf(self.editor.scene(), &pages, &provider, &budget)
+            }
+        };
         if self.images.placeholders_served() != before {
             self.error("Не удалось экспортировать: часть изображений не читается или не помещается в память");
             return;
         }
         match result {
-            Ok(png) => self.events.push(CoreEvent::Exported {
-                name: file_name(&name, scale),
-                bytes: ByteBuf::from(png),
+            Ok(bytes) => self.events.push(CoreEvent::Exported {
+                name: file_name(&name, scale, format),
+                bytes: ByteBuf::from(bytes),
+                mime: format.mime().to_string(),
             }),
-            Err(e) => self.error(format!("Не удалось экспортировать: {e}")),
+            Err(e) => self.error(export_message(&e)),
         }
     }
 
@@ -787,5 +878,47 @@ impl Core {
                 background,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Каждая ошибка экспорта — законченная фраза по-русски, без двойного «Не
+    /// удалось экспортировать: Экспорт…» и без паники (решение 24 плана).
+    #[test]
+    fn export_errors_are_clear_russian_messages() {
+        let cases = [
+            (
+                ExportError::TooBig,
+                "Экспорт слишком велик: файл или его содержимое больше 256 МБ. Экспортируйте часть документа",
+            ),
+            (
+                ExportError::Timeout,
+                "Экспорт идёт дольше 30 секунд и прерван: экспортируйте часть документа",
+            ),
+            (
+                ExportError::Empty,
+                "Нечего экспортировать: у узла нулевой размер или он скрыт",
+            ),
+            (
+                ExportError::NotFound,
+                "Нечего экспортировать: слой не найден",
+            ),
+            (ExportError::BadScale, "Масштаб экспорта — 1×, 2× или 3×"),
+            (
+                ExportError::Write("шрифт не встраивается".into()),
+                "Не удалось экспортировать: файл не собран (шрифт не встраивается)",
+            ),
+            (
+                ExportError::Encode("нет памяти".into()),
+                "Не удалось экспортировать: PNG не закодирован (нет памяти)",
+            ),
+        ];
+        for (e, text) in cases {
+            assert_eq!(export_message(&e), text, "{e:?}");
+        }
+        assert!(export_message(&ExportError::TooLarge(20_000, 10)).starts_with("Картинка 20000×10"));
     }
 }

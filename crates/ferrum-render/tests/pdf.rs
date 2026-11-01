@@ -24,7 +24,8 @@ fn solid(r: u8, g: u8, b: u8) -> Option<Vec<Fill>> {
 
 fn pdf(r: &mut Renderer, p: &mut Page, pages: &[NodeId]) -> Vec<u8> {
     let scene = p.scene();
-    r.export_pdf(&scene, pages, &NoImages, &ExportBudget::unlimited())
+    let pages: Vec<Vec<NodeId>> = pages.iter().map(|id| vec![*id]).collect();
+    r.export_pdf(&scene, &pages, &NoImages, &ExportBudget::unlimited())
         .unwrap()
 }
 
@@ -274,7 +275,7 @@ fn image_fills_become_pdf_images_drawn_once_per_tile() {
     let images: HashMap<String, Arc<Pixmap>> =
         HashMap::from([(hash, Arc::new(decode_png(&png).unwrap()))]);
     let bytes = Renderer::new()
-        .export_pdf(&scene, &[id], &images, &ExportBudget::unlimited())
+        .export_pdf(&scene, &[vec![id]], &images, &ExportBudget::unlimited())
         .unwrap();
     let raw = text(&bytes);
     assert_eq!(raw.matches("/Subtype/Image").count(), 1, "картинка — одна");
@@ -309,7 +310,7 @@ fn huge_frames_shrink_to_the_page_limit_and_errors_are_reported() {
     let scene = p.scene();
     let mut r = Renderer::new();
     let run = |r: &mut Renderer, ids: &[NodeId], b: &ExportBudget| {
-        r.export_pdf(&scene, ids, &NoImages, b)
+        r.export_pdf(&scene, &[ids.to_vec()], &NoImages, b)
     };
     assert_eq!(
         run(&mut r, &[hidden], &ExportBudget::unlimited()),
@@ -319,6 +320,16 @@ fn huge_frames_shrink_to_the_page_limit_and_errors_are_reported() {
         run(&mut r, &[], &ExportBudget::unlimited()),
         Err(ExportError::NotFound)
     );
+    // Несколько узлов на странице — их общая область.
+    let two = r
+        .export_pdf(
+            &scene,
+            &[vec![big, hidden]],
+            &NoImages,
+            &ExportBudget::unlimited(),
+        )
+        .unwrap();
+    assert_eq!(media_boxes(&two), [(MAX_PDF_SIDE, 144.0)]);
     /// Часы, которые всегда «после срока».
     struct Late(Cell<f64>);
     impl Clock for Late {
@@ -622,7 +633,7 @@ fn a_fill_with_too_many_tiles_becomes_a_pattern() {
     let (id, images) = tiled_pixel(&mut p, 100.0);
     let scene = p.scene();
     let bytes = Renderer::new()
-        .export_pdf(&scene, &[id], &images, &ExportBudget::unlimited())
+        .export_pdf(&scene, &[vec![id]], &images, &ExportBudget::unlimited())
         .unwrap();
     let raw = text(&bytes);
     assert!(raw.contains("/PatternType 1"), "узор");
@@ -644,6 +655,8 @@ fn the_budget_stops_tiled_fills_while_drawing() {
         let (id, _) = tiled_pixel(&mut p, 60.0);
         ids.push(id);
     }
+    // Каждая заливка — своя страница.
+    let pages: Vec<Vec<NodeId>> = ids.iter().map(|id| vec![*id]).collect();
     let scene = p.scene();
     let mut r = Renderer::new();
     let small = ExportBudget {
@@ -653,7 +666,7 @@ fn the_budget_stops_tiled_fills_while_drawing() {
     // 400 заливок по 3600 плиток — оценка перевалит предел на первых же.
     let started = std::time::Instant::now();
     assert_eq!(
-        r.export_pdf(&scene, &ids, &images, &small),
+        r.export_pdf(&scene, &pages, &images, &small),
         Err(ExportError::TooBig)
     );
     assert!(started.elapsed().as_secs_f64() < 5.0);
@@ -676,7 +689,7 @@ fn the_budget_stops_tiled_fills_while_drawing() {
         deadline_ms: 1e9,
     };
     assert_eq!(
-        r.export_pdf(&scene, &ids, &images, &timed),
+        r.export_pdf(&scene, &pages, &images, &timed),
         Err(ExportError::Timeout)
     );
     // Часы читались мало: остановка по ходу, а не после всех 400 заливок.
@@ -720,7 +733,7 @@ fn pdf_with_font(
     r.set_fonts(shared);
     let scene = p.scene();
     Ok(
-        r.export_pdf(&scene, &[id], &NoImages, &ExportBudget::unlimited())
+        r.export_pdf(&scene, &[vec![id]], &NoImages, &ExportBudget::unlimited())
             .unwrap(),
     )
 }

@@ -301,13 +301,13 @@ impl Renderer {
         svg::export_svg(scene, ids, images, &self.fonts, opts, budget)
     }
 
-    /// Экспорт в PDF (спека подсистемы 3, раздел 11): каждый узел `pages` —
-    /// страница размера его области (фрейм — своего размера, 1 px = 1 pt),
-    /// векторная, с подмножествами шрифтов и картинками из `images`.
+    /// Экспорт в PDF (спека подсистемы 3, раздел 11): каждый список узлов
+    /// `pages` — страница размера их области (фрейм — своего размера, 1 px =
+    /// 1 pt), векторная, с подмножествами шрифтов и картинками из `images`.
     pub fn export_pdf(
         &mut self,
         scene: &Scene,
-        pages: &[NodeId],
+        pages: &[Vec<NodeId>],
         images: &dyn ImageProvider,
         budget: &ExportBudget,
     ) -> Result<Vec<u8>, ExportError> {
