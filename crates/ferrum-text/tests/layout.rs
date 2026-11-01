@@ -553,7 +553,7 @@ fn runs_carry_their_text_and_glyph_clusters() {
         let mut prev = 0;
         for g in &r.glyphs {
             assert!(g.cluster[0] <= g.cluster[1] && g.cluster[1] as usize <= r.text.len());
-            assert!(g.cluster[0] >= prev, "кластеры по порядку");
+            assert!(!r.rtl && g.cluster[0] >= prev, "кластеры по порядку");
             prev = g.cluster[0];
         }
     }
@@ -568,4 +568,41 @@ fn runs_carry_their_text_and_glyph_clusters() {
         "{shown}"
     );
     assert!(l.runs.iter().all(|r| r.letter_spacing == 0.0));
+}
+
+/// Прогон справа налево: глифы в визуальном порядке, кластеры по ним убывают, текст
+/// прогона — в логическом порядке (с пробелом в конце).
+#[test]
+fn rtl_runs_are_marked_and_their_clusters_go_backwards() {
+    let mut fonts = fonts();
+    let l = lay(&mut fonts, &text("שלום עולם ", |_| {}), 0.0, 0.0);
+    assert!(!l.runs.is_empty());
+    let all: String = l.runs.iter().map(|r| r.glyph_text()).collect();
+    assert_eq!(all.trim_end(), "שלום עולם");
+    for r in &l.runs {
+        assert!(r.rtl, "иврит — справа налево");
+        let mut prev = u32::MAX;
+        for g in &r.glyphs {
+            assert!(g.cluster[0] <= prev, "кластеры убывают слева направо");
+            prev = g.cluster[0];
+        }
+    }
+    // Логически первый символ — самый правый глиф.
+    let r = &l.runs[0];
+    let first = r.glyphs.iter().find(|g| g.cluster[0] == 0).unwrap();
+    assert!(r.glyphs.iter().all(|g| g.x <= first.x));
+}
+
+/// Лигатура (у Inter «->» — стрелка одним глифом): символы продолжения не теряются,
+/// весь «->» — кластер одного глифа.
+#[test]
+fn ligature_glyph_owns_all_its_characters() {
+    let mut fonts = fonts();
+    let l = lay(&mut fonts, &text("a->b", |_| {}), 0.0, 0.0);
+    let all: String = l.runs.iter().map(|r| r.glyph_text()).collect();
+    assert_eq!(all, "a->b");
+    let r = &l.runs[0];
+    let arrow = r.glyphs.iter().find(|g| g.cluster[0] == 1).unwrap();
+    assert_eq!(arrow.cluster, [1, 3]);
+    assert_eq!(r.glyphs.len(), 3, "a, стрелка, b");
 }

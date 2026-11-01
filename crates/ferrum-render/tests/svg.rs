@@ -490,7 +490,7 @@ fn text_as_elements_or_outlines() {
     // Прогон — элемент: участок другого цвета и смена письменности делят строку.
     assert_eq!(filled.len(), 3, "по элементу на прогон");
     let t = filled[0];
-    assert_eq!(t.attribute("font-family"), Some("Inter"));
+    assert_eq!(t.attribute("font-family"), Some("'Inter', sans-serif"));
     assert_eq!(t.attribute("font-weight"), Some("700"));
     assert_eq!(t.attribute("font-size"), Some("24"));
     assert_eq!(t.attribute("letter-spacing"), Some("1"));
@@ -501,8 +501,27 @@ fn text_as_elements_or_outlines() {
         .collect();
     assert_eq!(spans, "Привет <мир> & co");
     assert_eq!(filled[1].attribute("fill"), Some("#FF0000"));
-    // Внешняя обводка текста — маской с тем же <text>.
-    assert_eq!(by_tag(&doc, "mask").len(), 3);
+    // Внешняя обводка текста — одной маской со всеми <text> (как у рендера: обводка
+    // одного прогона не ложится на заливку соседнего), обводки — после заливок.
+    let masks = by_tag(&doc, "mask");
+    assert_eq!(masks.len(), 1);
+    assert_eq!(
+        masks[0]
+            .descendants()
+            .filter(|n| n.tag_name().name() == "text")
+            .count(),
+        3
+    );
+    let stroked = texts
+        .iter()
+        .filter(|t| t.attribute("stroke").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(stroked.len(), 3);
+    for t in &stroked {
+        let g = t.parent_element().unwrap();
+        assert_eq!(g.attribute("mask"), Some("url(#mask0)"));
+        assert!(filled.iter().all(|f| f.range().end <= g.range().start));
+    }
     golden_svg("svg_text_elements", &svg);
     // Кривыми: ни одного <text>, глифы — пути.
     let svg = run(true);
@@ -534,7 +553,341 @@ fn missing_font_is_written_with_the_fallback() {
             &ExportBudget::unlimited(),
         )
         .unwrap();
-    assert!(svg.contains("font-family=\"Inter\"") && !svg.contains("Нет Такого"));
+    assert!(svg.contains("font-family=\"'Inter', sans-serif\"") && !svg.contains("Нет Такого"));
+}
+
+/// Узел текста `content` шириной `w` (Fixed, высота `h`) в (0, 0); `f` правит свойства.
+fn text_node(
+    p: &mut Page,
+    content: &str,
+    w: f64,
+    h: f64,
+    strokes: Option<Vec<Stroke>>,
+    f: impl FnOnce(&mut TextProps),
+) -> NodeId {
+    let mut props = TextProps::default();
+    props.style.size = 20.0;
+    props.sizing = TextSizing::Fixed;
+    f(&mut props);
+    let content = TextContent::plain(content);
+    p.doc
+        .transact(p.page, vec![], |tx| {
+            let id = tx.create_node(None, None, NodeKind::Text)?;
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    text: Some(props.clone()),
+                    fills: solid(0, 0, 0, 255),
+                    strokes: strokes.clone(),
+                    ..rect(0.0, 0.0, w, h)
+                },
+            )?;
+            tx.set_text_content(id, &content)?;
+            Ok(vec![id])
+        })
+        .unwrap()[0]
+}
+
+/// SVG узлов текстом (`<text>`) с вшитым Inter.
+fn text_svg(scene: &ferrum_scene::Scene, ids: &[NodeId]) -> String {
+    let mut r = Renderer::new();
+    r.set_fonts(inter());
+    r.export_svg(
+        scene,
+        ids,
+        &NoImageBytes,
+        SvgOptions {
+            outline_text: false,
+            ids: false,
+        },
+        &ExportBudget::unlimited(),
+    )
+    .unwrap()
+}
+
+/// Числа списка атрибута (`x`, `y`).
+fn numbers(n: &Node, attr: &str) -> Vec<f64> {
+    n.attribute(attr)
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|v| v.parse().unwrap())
+        .collect()
+}
+
+/// `<text>` с заливкой (не в `<defs>`, не обводки).
+fn filled_texts<'a>(doc: &'a Xml<'a>) -> Vec<Node<'a, 'a>> {
+    by_tag(doc, "text")
+        .into_iter()
+        .filter(|n| n.attribute("fill").is_some())
+        .filter(|n| !n.ancestors().any(|a| a.tag_name().name() == "defs"))
+        .collect()
+}
+
+/// Позиции глифов раскладки (левые края глифов с шагом) — как их рисует холст.
+fn glyph_xs(
+    fonts: &ferrum_render::SharedFonts,
+    scene: &ferrum_scene::Scene,
+    id: NodeId,
+) -> Vec<f64> {
+    let p = &scene.at(scene.slot(id).unwrap()).props;
+    let mut f = fonts.borrow_mut();
+    let layout = f.layout(&ferrum_text::LayoutRequest::for_node(
+        p.text.as_ref().unwrap(),
+        &p.fills,
+        p.w,
+        p.h,
+    ));
+    layout
+        .runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter())
+        .filter(|g| g.advance > 0.0)
+        .map(|g| g.x as f64)
+        .collect()
+}
+
+/// Позиции `<text>` — по глифам раскладки: выключка по ширине и кернинг не
+/// теряются (у каждого символа — x его кластера, по единице UTF-16).
+#[test]
+fn text_positions_follow_the_layout_glyphs() {
+    let fonts = inter();
+    let words = "AVAV Ferrum keeps every glyph where the canvas put it, even justified lines";
+    let mut p = Page::new();
+    let justify = text_node(&mut p, words, 260.0, 200.0, None, |t| {
+        t.align_h = AlignH::Justify
+    });
+    let left = text_node(&mut p, words, 260.0, 200.0, None, |_| {});
+    let scene = p.scene();
+    let mut r = Renderer::new();
+    r.set_fonts(fonts.clone());
+    let svg_of = |r: &mut Renderer, id| {
+        r.export_svg(
+            &scene,
+            &[id],
+            &NoImageBytes,
+            SvgOptions {
+                outline_text: false,
+                ids: false,
+            },
+            &ExportBudget::unlimited(),
+        )
+        .unwrap()
+    };
+    let (svg_j, svg_l) = (svg_of(&mut r, justify), svg_of(&mut r, left));
+    assert_ne!(svg_j, svg_l, "выключка по ширине видна в файле");
+    for (svg, id) in [(&svg_j, justify), (&svg_l, left)] {
+        let doc = Xml::parse(svg).unwrap();
+        let texts = filled_texts(&doc);
+        assert!(texts.len() > 1, "несколько строк");
+        let mut got = Vec::new();
+        for t in &texts {
+            let text = t.text().unwrap();
+            let xs = numbers(t, "x");
+            assert_eq!(xs.len(), text.encode_utf16().count(), "{text}");
+            assert_eq!(numbers(t, "y").len(), 1, "y строки — одним числом");
+            got.extend(xs);
+        }
+        got.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        let want = glyph_xs(&fonts, &scene, id);
+        // Узел в (0, 0): координаты файла — координаты раскладки. Пробелы в
+        // конце строк в <text> не попадают.
+        for x in &got {
+            assert!(
+                want.iter().any(|w| (w - x).abs() < 0.01),
+                "x {x} нет среди глифов"
+            );
+        }
+        assert!(got.len() + texts.len() >= want.len());
+    }
+}
+
+/// Прогон справа налево: `direction="rtl"`, позиция символа — правый край его
+/// кластера, пробел в конце не сдвигает буквы.
+#[test]
+fn rtl_text_gets_direction_and_right_edges() {
+    let fonts = inter();
+    let mut p = Page::new();
+    let id = text_node(&mut p, "שלום עולם ", 300.0, 40.0, None, |_| {});
+    let scene = p.scene();
+    let doc_svg = text_svg(&scene, &[id]);
+    let doc = Xml::parse(&doc_svg).unwrap();
+    let texts = filled_texts(&doc);
+    assert_eq!(texts.len(), 1);
+    let t = texts[0];
+    assert_eq!(t.attribute("direction"), Some("rtl"));
+    assert_eq!(t.attribute("unicode-bidi"), Some("embed"));
+    let text = t.text().unwrap();
+    assert!(text.starts_with("שלום"), "{text}");
+    let xs = numbers(&t, "x");
+    assert_eq!(xs.len(), text.encode_utf16().count());
+    assert!(xs.windows(2).all(|w| w[0] >= w[1]), "справа налево: {xs:?}");
+    // Первая буква — у правого края самого правого глифа.
+    let p = &scene.at(scene.slot(id).unwrap()).props;
+    let mut f = fonts.borrow_mut();
+    let layout = f.layout(&ferrum_text::LayoutRequest::for_node(
+        p.text.as_ref().unwrap(),
+        &p.fills,
+        p.w,
+        p.h,
+    ));
+    let right = layout
+        .runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter())
+        .map(|g| (g.x + g.advance) as f64)
+        .fold(f64::MIN, f64::max);
+    assert!((xs[0] - right).abs() < 0.01, "{} {right}", xs[0]);
+}
+
+/// Лигатура (у Inter — стрелка «->»): символы одного кластера — с одной позицией.
+#[test]
+fn ligature_characters_share_their_cluster_position() {
+    let mut p = Page::new();
+    let id = text_node(&mut p, "office ffi fl ->", 300.0, 40.0, None, |_| {});
+    let scene = p.scene();
+    let svg = text_svg(&scene, &[id]);
+    let doc = Xml::parse(&svg).unwrap();
+    let t = filled_texts(&doc)[0];
+    let text = t.text().unwrap();
+    let xs = numbers(&t, "x");
+    assert_eq!(text, "office ffi fl ->", "символы лигатуры не теряются");
+    assert_eq!(xs.len(), text.len());
+    assert!(xs.windows(2).all(|w| w[0] <= w[1]));
+    // У Inter «->» — стрелка одним глифом: оба символа — в позиции её кластера.
+    assert_eq!(xs[14], xs[15]);
+}
+
+/// Недопустимые в XML символы (U+FFFE, U+FFFF, управляющие) выбрасываются вместе
+/// с позицией: файл разбирается, позиций столько же, сколько символов.
+#[test]
+fn non_xml_characters_are_dropped_from_text() {
+    let mut p = Page::new();
+    let id = text_node(
+        &mut p,
+        "a\u{FFFE}b\u{FFFF}c\u{1}d",
+        300.0,
+        40.0,
+        None,
+        |_| {},
+    );
+    let scene = p.scene();
+    let svg = text_svg(&scene, &[id]);
+    let doc = Xml::parse(&svg).expect("файл разбирается");
+    let t = filled_texts(&doc)[0];
+    assert_eq!(t.text(), Some("abcd"));
+    assert_eq!(numbers(&t, "x").len(), 4);
+}
+
+/// Пустой абзац (в раскладке — U+200B) не даёт ни `<text>`, ни обводки, ни маски.
+#[test]
+fn empty_paragraphs_write_nothing() {
+    let mut p = Page::new();
+    let id = text_node(
+        &mut p,
+        "Один\n\nДва",
+        300.0,
+        100.0,
+        stroke(1.0, StrokeAlign::Outside),
+        |_| {},
+    );
+    let scene = p.scene();
+    let svg = text_svg(&scene, &[id]);
+    let doc = Xml::parse(&svg).unwrap();
+    let all: Vec<_> = by_tag(&doc, "text");
+    assert!(all
+        .iter()
+        .all(|t| !t.text().unwrap_or_default().contains('\u{200B}')));
+    assert_eq!(filled_texts(&doc).len(), 2);
+    let masks = by_tag(&doc, "mask");
+    assert_eq!(masks.len(), 1);
+    assert_eq!(
+        masks[0]
+            .descendants()
+            .filter(|n| n.tag_name().name() == "text")
+            .count(),
+        2
+    );
+}
+
+/// Строки за рамкой Fixed не теряют внешнюю обводку: рамка маски — узел вместе с
+/// глифами.
+#[test]
+fn outside_stroke_mask_covers_overflowing_lines() {
+    let mut p = Page::new();
+    let id = text_node(
+        &mut p,
+        "один\nдва\nтри\nчетыре",
+        200.0,
+        20.0,
+        stroke(2.0, StrokeAlign::Outside),
+        |_| {},
+    );
+    let scene = p.scene();
+    let svg = text_svg(&scene, &[id]);
+    let doc = Xml::parse(&svg).unwrap();
+    let masks = by_tag(&doc, "mask");
+    assert_eq!(masks.len(), 1);
+    let m = masks[0];
+    let num = |a: &str| m.attribute(a).unwrap().parse::<f64>().unwrap();
+    let (y0, y1) = (num("y"), num("y") + num("height"));
+    let lines = filled_texts(&doc);
+    assert_eq!(lines.len(), 4);
+    for t in &lines {
+        let y = numbers(t, "y")[0];
+        // Глиф строки — от верха кегля над базовой линией до нижних выносных.
+        assert!(
+            y - 20.0 >= y0 && y + 6.0 <= y1,
+            "строка {y} вне маски {y0}..{y1}"
+        );
+    }
+}
+
+/// Полупрозрачная обводка нескольких прогонов — одним слоем `<g opacity>` с
+/// непрозрачным цветом: перекрытия не темнеют.
+#[test]
+fn translucent_text_stroke_is_one_layer() {
+    let fonts = inter();
+    let mut p = Page::new();
+    let id = styled_text(&mut p, "Inter");
+    p.edit(
+        id,
+        PropsPatch {
+            strokes: Some(vec![Stroke {
+                color: Color::rgba(0, 0, 0, 128),
+                width: 1.0,
+                align: StrokeAlign::Center,
+            }]),
+            ..Default::default()
+        },
+    );
+    let scene = p.scene();
+    let mut r = Renderer::new();
+    r.set_fonts(fonts);
+    let svg = r
+        .export_svg(
+            &scene,
+            &[id],
+            &NoImageBytes,
+            SvgOptions {
+                outline_text: false,
+                ids: false,
+            },
+            &ExportBudget::unlimited(),
+        )
+        .unwrap();
+    let doc = Xml::parse(&svg).unwrap();
+    let stroked: Vec<_> = by_tag(&doc, "text")
+        .into_iter()
+        .filter(|t| t.attribute("stroke").is_some())
+        .collect();
+    assert_eq!(stroked.len(), 3);
+    for t in &stroked {
+        assert_eq!(t.attribute("stroke-opacity"), None);
+        assert_eq!(
+            t.parent_element().unwrap().attribute("opacity"),
+            Some("0.502")
+        );
+    }
 }
 
 /// Все `id` уникальны, а каждая ссылка `url(#…)` ведёт на `clipPath`, `mask` или

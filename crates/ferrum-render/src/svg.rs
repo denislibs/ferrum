@@ -38,6 +38,8 @@ pub struct SvgOptions {
     /// «Текст кривыми»: текст — контурами глифов (по умолчанию, как в Figma), без
     /// него — элементы `<text>` со шрифтом (семейство, кегль, вес, курсив,
     /// трекинг): текст можно править, но вид зависит от шрифтов у зрителя.
+    /// Символы, которых нет в шрифте, холст и «Текст кривыми» рисуют пустым
+    /// глифом (`.notdef`), а `<text>` — запасным шрифтом зрителя.
     pub outline_text: bool,
     /// «Атрибут id»: у элементов — `id` из имён слоёв (по умолчанию нет).
     pub ids: bool,
@@ -151,7 +153,16 @@ fn xml_name_start(c: char) -> bool {
         | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
 }
 
-/// Экранирование текста и значений атрибутов XML.
+/// Символ, допустимый в XML 1.0 (производная `Char`): табуляция, переводы строки
+/// и всё от пробела, кроме суррогатов и U+FFFE, U+FFFF.
+pub(crate) fn xml_char(c: char) -> bool {
+    matches!(c,
+        '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
+}
+
+/// Экранирование текста и значений атрибутов XML. Недопустимые в XML символы
+/// (управляющие, U+FFFE, U+FFFF) выбрасываются; `\r` — ссылкой, иначе разборщик
+/// сольёт `\r\n` в один символ.
 pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -161,8 +172,8 @@ pub(crate) fn escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            // Управляющие символы в XML 1.0 недопустимы (кроме табуляции и переводов строки).
-            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
+            '\r' => out.push_str("&#13;"),
+            c if !xml_char(c) => {}
             c => out.push(c),
         }
     }
@@ -249,11 +260,15 @@ enum Form {
     Ellipse(Rect),
     Line(f64),
     Path(BezPath, FillRule),
-    /// Текст элементом `<text>`: атрибуты шрифта, строки `(x, y, текст)` на базовой
-    /// линии и рамка (для маски внешней обводки).
+    /// Текст элементом `<text>`: атрибуты шрифта (с направлением), текст в
+    /// логическом порядке, позиции символов (по одной на единицу UTF-16, как
+    /// адресует SVG: у каждого символа — край его кластера, у прогона справа
+    /// налево — правый) и рамка — узел вместе с глифами (для маски внешней обводки).
     Text {
         font: String,
-        spans: Vec<(f64, f64, String)>,
+        text: String,
+        x: Vec<f64>,
+        y: Vec<f64>,
         bbox: Rect,
     },
 }
@@ -261,22 +276,35 @@ enum Form {
 impl Form {
     /// Элемент целиком с атрибутами `attrs` (краска, обрезка).
     fn el(&self, p: &Place, attrs: &str) -> String {
-        let Form::Text { font, spans, .. } = self else {
+        let Form::Text {
+            font, text, x, y, ..
+        } = self
+        else {
             return format!("{}{attrs}/>", self.open(p));
         };
-        let mut s = format!("<text{font}{}{attrs}>", p.attr);
-        for (x, y, text) in spans {
-            let at = p.g * kurbo::Point::new(*x, *y);
-            let _ = write!(
-                s,
-                "<tspan x=\"{}\" y=\"{}\">{}</tspan>",
-                num(at.x),
-                num(at.y),
-                escape(text)
-            );
-        }
-        s.push_str("</text>");
-        s
+        // У узлов нет масштаба: `g` — сдвиг (или тождество при `transform`).
+        let (dx, dy) = (p.g.translation().x, p.g.translation().y);
+        let list = |v: &[f64], d: f64| {
+            // Одинаковые значения (y строки) — одним числом: оно действует на все символы.
+            if v.windows(2).all(|w| w[0] == w[1]) {
+                return v.first().map(|a| num(a + d)).unwrap_or_default();
+            }
+            let mut s = String::with_capacity(v.len() * 8);
+            for (i, a) in v.iter().enumerate() {
+                if i > 0 {
+                    s.push(' ');
+                }
+                s.push_str(&num(a + d));
+            }
+            s
+        };
+        format!(
+            "<text{font}{}{attrs} x=\"{}\" y=\"{}\">{}</text>",
+            p.attr,
+            list(x, dx),
+            list(y, dy),
+            escape(text)
+        )
     }
 
     /// Открывающий тег без закрытия (`<rect … `): дальше — атрибуты краски и `/>`.
@@ -735,6 +763,7 @@ impl<'a> Writer<'a> {
             for f in paints {
                 self.check_size(form_len(&form))?;
                 if let Some(attr) = self.paint(f, area, place)? {
+                    self.check_size(form_len(&form) + attr.len() + place.attr.len())?;
                     self.body.push_str(&form.el(place, &attr));
                 }
             }
@@ -786,22 +815,31 @@ impl<'a> Writer<'a> {
                 if layout.loading {
                     return Ok(());
                 }
+                // Контур всех глифов: им обводит рендер (и «Текст кривыми»), а
+                // рамка `<text>` — узел вместе с ним (строки за рамкой не теряют
+                // внешнюю обводку).
+                let glyphs = glyphs_path(&mut fonts, layout.runs.iter());
                 if self.opts.outline_text {
-                    // Контуром — все глифы одним путём (как обводит рендер).
-                    vec![Form::Path(
-                        glyphs_path(&mut fonts, layout.runs.iter()),
-                        FillRule::NonZero,
-                    )]
+                    vec![Form::Path(glyphs, FillRule::NonZero)]
                 } else {
-                    text_forms(&mut fonts, &layout, false, area)
+                    let bbox = if glyphs.elements().is_empty() {
+                        area
+                    } else {
+                        area.union(glyphs.bounding_box())
+                    };
+                    text_forms(&mut fonts, &layout, false, bbox)
                         .into_iter()
                         .flatten()
                         .collect()
                 }
             };
             for s in &strokes {
-                for form in &forms {
-                    self.ring_stroke(form, s, StrokeJoin::Miter, 4.0, &place, true)?;
+                if self.opts.outline_text {
+                    for form in &forms {
+                        self.ring_stroke(form, s, StrokeJoin::Miter, 4.0, &place, true)?;
+                    }
+                } else {
+                    self.text_stroke(&forms, s, &place)?;
                 }
             }
             return Ok(());
@@ -908,6 +946,102 @@ impl<'a> Writer<'a> {
             attrs.push_str(&self.align_ref(form, align, w, miter, place)?);
         }
         self.body.push_str(&form.el(place, &attrs));
+        Ok(())
+    }
+
+    /// Обводка текста элементами `<text>` — как у рендера, одним слоем на все
+    /// прогоны: внутри — одна `<clipPath>` со всеми `<text>`, снаружи — одна
+    /// `<mask>` «всё, кроме всех глифов» с рамкой по узлу и глифам. Так обводка
+    /// одного прогона не ложится на заливку соседнего. Полупрозрачная обводка
+    /// нескольких прогонов — непрозрачным цветом в `<g opacity>`: перекрытия не
+    /// темнеют (у рендера это один контур).
+    fn text_stroke(
+        &mut self,
+        forms: &[Form],
+        s: &ferrum_doc::Stroke,
+        place: &Place,
+    ) -> Result<(), ExportError> {
+        let Some(Form::Text { bbox, .. }) = forms.first() else {
+            return Ok(());
+        };
+        let bbox = *bbox;
+        let w = if s.align == StrokeAlign::Center {
+            s.width
+        } else {
+            2.0 * s.width
+        };
+        let alpha = s.color.a as f64 / 255.0;
+        let layered = forms.len() > 1 && alpha < 1.0;
+        let color = if layered {
+            Color { a: 255, ..s.color }
+        } else {
+            s.color
+        };
+        let mut attrs = color_attr("stroke", color, 1.0);
+        let _ = write!(attrs, " stroke-width=\"{}\"", num(w));
+        let texts: usize = forms.iter().map(form_len).sum();
+        // Тело (по элементу на прогон) и определение со всеми `<text>`.
+        self.check_size(texts * 2 + forms.len() * (attrs.len() + place.attr.len() + 32) + 512)?;
+        let local = Place {
+            g: place.g,
+            attr: String::new(),
+        };
+        let reference = match s.align {
+            StrokeAlign::Center => String::new(),
+            StrokeAlign::Inside => {
+                let clip = self.fresh("clip");
+                let _ = write!(self.defs, "<clipPath id=\"{clip}\">");
+                for f in forms {
+                    self.defs.push_str(&f.el(&local, ""));
+                }
+                self.defs.push_str("</clipPath>");
+                format!(" clip-path=\"url(#{clip})\"")
+            }
+            StrokeAlign::Outside => {
+                let mask = self.fresh("mask");
+                // Рамка маски — узел и глифы с запасом на толщину и острия стыков.
+                let reach = w * 4.0 + 1.0;
+                let b = place.g.transform_rect_bbox(bbox).inflate(reach, reach);
+                let _ = write!(
+                    self.defs,
+                    "<mask id=\"{mask}\" maskUnits=\"userSpaceOnUse\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"><rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"white\"/>",
+                    x = num(b.x0),
+                    y = num(b.y0),
+                    w = num(b.width()),
+                    h = num(b.height()),
+                );
+                for f in forms {
+                    self.defs.push_str(&f.el(&local, " fill=\"black\""));
+                }
+                self.defs.push_str("</mask>");
+                format!(" mask=\"url(#{mask})\"")
+            }
+        };
+        if forms.len() == 1 && !layered {
+            // Один прогон — ссылка прямо на элементе.
+            let attrs = format!("{attrs}{reference}");
+            self.body.push_str(&forms[0].el(place, &attrs));
+            return Ok(());
+        }
+        let group = !reference.is_empty() || layered;
+        let inner = if group {
+            self.body.push_str("<g");
+            self.body.push_str(&place.attr);
+            self.body.push_str(&reference);
+            if layered {
+                let _ = write!(self.body, " opacity=\"{}\"", num(alpha));
+            }
+            self.body.push('>');
+            &local
+        } else {
+            place
+        };
+        for f in forms {
+            self.body.push_str(&f.el(inner, &attrs));
+        }
+        if group {
+            self.body.push_str("</g>");
+        }
         Ok(())
     }
 
@@ -1042,29 +1176,35 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Имя семейства для `font-family`: буквы, цифры, пробелы и дефисы — как есть,
-/// иначе в кавычках.
+/// `font-family`: имя семейства в кавычках (так допустимы любые имена — и с
+/// цифрой в начале слова, и совпадающие с родовыми `serif`, `monospace`) и
+/// родовое запасное. Категории начертания реестр не знает, поэтому запасное —
+/// `sans-serif`.
 fn font_family(name: &str) -> String {
-    let plain = !name.is_empty()
-        && name.starts_with(|c: char| c.is_alphabetic())
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == ' ' || c == '-');
-    if plain {
-        escape(name)
-    } else {
-        format!("'{}'", escape(&name.replace(['\\', '\''], "")))
-    }
+    let name: String = name
+        .chars()
+        .filter(|c| !matches!(c, '\\' | '\'') && !c.is_control())
+        .collect();
+    format!("'{}', sans-serif", escape(&name))
+}
+
+/// Пустой для `<text>` текст: пробелы и пустой абзац (раскладка ставит в него
+/// U+200B) — элемента, обводки и маски не нужно.
+fn blank(text: &str) -> bool {
+    text.chars()
+        .all(|c| c.is_whitespace() || c == '\u{200B}' || !xml_char(c))
 }
 
 /// Форма каждого прогона раскладки: контуром глифов (`outline`) или элементом
-/// `<text>` (шрифт, кегль, вес, курсив, ширина и трекинг прогона, строка от
-/// первого глифа на базовой линии). Пустой прогон — `None`.
+/// `<text>` (шрифт, кегль, вес, курсив, ширина, трекинг и направление прогона;
+/// позиция каждого символа — по глифам раскладки: выключка по ширине, кернинг и
+/// лигатуры совпадают с холстом). `bbox` — рамка формы `<text>` (маска внешней
+/// обводки). Пустой прогон — `None`.
 fn text_forms(
     fonts: &mut ferrum_text::Fonts,
     layout: &ferrum_text::TextLayout,
     outline: bool,
-    area: Rect,
+    bbox: Rect,
 ) -> Vec<Option<Form>> {
     layout
         .runs
@@ -1075,51 +1215,113 @@ fn text_forms(
                 return (!glyphs.elements().is_empty())
                     .then_some(Form::Path(glyphs, FillRule::NonZero));
             }
-            let first = run.glyphs.first()?;
-            let text = run.glyph_text();
-            if text.trim().is_empty() {
-                return None;
-            }
-            let f = &run.face;
-            let mut font = format!(
-                " xml:space=\"preserve\" style=\"white-space: pre\" font-family=\"{}\" font-size=\"{}\"",
-                font_family(&f.family),
-                num(run.size as f64)
-            );
-            if (f.weight - 400.0).abs() > 0.5 {
-                let _ = write!(font, " font-weight=\"{}\"", num(f.weight as f64));
-            }
-            if f.italic || run.skew.is_some() {
-                font.push_str(" font-style=\"italic\"");
-            }
-            if (f.stretch - 1.0).abs() > 1e-3 {
-                let _ = write!(font, " font-stretch=\"{}%\"", num(f.stretch as f64 * 100.0));
-            }
-            if run.letter_spacing != 0.0 {
-                let _ = write!(font, " letter-spacing=\"{}\"", num(run.letter_spacing as f64));
-            }
-            Some(Form::Text {
-                font,
-                spans: vec![(first.x as f64, first.y as f64, text.to_string())],
-                bbox: area,
-            })
+            text_form(run, bbox)
         })
         .collect()
 }
 
+/// Элемент `<text>` прогона; пустой — `None`.
+fn text_form(run: &ferrum_text::GlyphRun, bbox: Rect) -> Option<Form> {
+    // Глифы по кластерам. Край кластера — левый (справа налево — правый) по
+    // глифам с шагом: метки без шага стоят смещением над основой. y — базовая
+    // линия основного (самого широкого) глифа.
+    let mut clusters: std::collections::BTreeMap<u32, Vec<&ferrum_text::PlacedGlyph>> =
+        Default::default();
+    for g in &run.glyphs {
+        clusters.entry(g.cluster[0]).or_default().push(g);
+    }
+    let edges: std::collections::BTreeMap<u32, (f64, f64)> = clusters
+        .into_iter()
+        .map(|(start, glyphs)| {
+            let wide: Vec<_> = glyphs.iter().filter(|g| g.advance > 0.0).collect();
+            let main = if wide.is_empty() {
+                glyphs.iter().collect()
+            } else {
+                wide
+            };
+            let l = main
+                .iter()
+                .map(|g| g.x as f64)
+                .fold(f64::INFINITY, f64::min);
+            let r = main
+                .iter()
+                .map(|g| (g.x + g.advance.max(0.0)) as f64)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let base = main
+                .iter()
+                .max_by(|a, b| a.advance.total_cmp(&b.advance))
+                .expect("у кластера есть глиф");
+            (start, (if run.rtl { r } else { l }, base.y as f64))
+        })
+        .collect();
+    let lo = *edges.keys().next()? as usize;
+    let hi = run.glyphs.iter().map(|g| g.cluster[1]).max()? as usize;
+    let source = run.text.get(lo..hi.max(lo))?;
+    let (mut text, mut xs, mut ys) = (String::new(), Vec::new(), Vec::new());
+    let mut at: Option<(f64, f64)> = None;
+    for (i, c) in source.char_indices() {
+        if let Some(e) = edges.get(&((lo + i) as u32)) {
+            at = Some(*e);
+        }
+        // Недопустимый в XML символ выбрасывается вместе с позицией.
+        if !xml_char(c) {
+            continue;
+        }
+        let (x, y) = at?;
+        text.push(c);
+        for _ in 0..c.len_utf16() {
+            xs.push(x);
+            ys.push(y);
+        }
+    }
+    if blank(&text) {
+        return None;
+    }
+    let f = &run.face;
+    let mut font = format!(
+        " xml:space=\"preserve\" style=\"white-space: pre\" font-family=\"{}\" font-size=\"{}\"",
+        font_family(&f.family),
+        num(run.size as f64)
+    );
+    if (f.weight - 400.0).abs() > 0.5 {
+        let _ = write!(font, " font-weight=\"{}\"", num(f.weight as f64));
+    }
+    if f.italic || run.skew.is_some() {
+        font.push_str(" font-style=\"italic\"");
+    }
+    if (f.stretch - 1.0).abs() > 1e-3 {
+        let _ = write!(font, " font-stretch=\"{}%\"", num(f.stretch as f64 * 100.0));
+    }
+    if run.letter_spacing != 0.0 {
+        let _ = write!(
+            font,
+            " letter-spacing=\"{}\"",
+            num(run.letter_spacing as f64)
+        );
+    }
+    if run.rtl {
+        // Справа налево: позиция символа — его правый край (начало по ходу текста).
+        font.push_str(" direction=\"rtl\" unicode-bidi=\"embed\"");
+    }
+    Some(Form::Text {
+        font,
+        text,
+        x: xs,
+        y: ys,
+        bbox,
+    })
+}
+
 /// Грубо: сколько байт займёт форма в файле (для проверки предела до записи):
-/// путь — по числу элементов, текст — атрибуты шрифта и строки с худшим
-/// экранированием (`&quot;` — 6 байт на символ).
+/// путь — по числу элементов, текст — атрибуты шрифта, позиции и строка с худшим
+/// экранированием (`&quot;` — 6 байт на символ). Атрибуты краски и `transform`
+/// вызывающий прибавляет сам.
 fn form_len(form: &Form) -> usize {
     match form {
         Form::Path(p, _) => p.elements().len() * 24,
-        Form::Text { font, spans, .. } => {
-            font.len()
-                + spans
-                    .iter()
-                    .map(|(_, _, t)| t.len() * 6 + 64)
-                    .sum::<usize>()
-        }
+        Form::Text {
+            font, text, x, y, ..
+        } => font.len() + text.len() * 6 + (x.len() + y.len()) * 12 + 64,
         _ => 0,
     }
 }
@@ -1193,6 +1395,22 @@ mod tests {
     fn escape_keeps_xml_well_formed() {
         assert_eq!(escape("a<b>&\"'"), "a&lt;b&gt;&amp;&quot;&apos;");
         assert_eq!(escape("x\u{1}y\tz"), "xy\tz");
+        assert_eq!(
+            escape("a\u{FFFE}b\u{FFFF}c\u{FFFD}\u{10000}"),
+            "abc\u{FFFD}\u{10000}"
+        );
+        assert_eq!(escape("a\r\nb"), "a&#13;\nb");
+    }
+
+    #[test]
+    fn font_family_is_always_quoted_with_a_generic_fallback() {
+        assert_eq!(font_family("Inter"), "'Inter', sans-serif");
+        assert_eq!(
+            font_family("Font Awesome 6 Free"),
+            "'Font Awesome 6 Free', sans-serif"
+        );
+        assert_eq!(font_family("serif"), "'serif', sans-serif");
+        assert_eq!(font_family("A'b\\c<d"), "'Abc&lt;d', sans-serif");
     }
 
     #[test]

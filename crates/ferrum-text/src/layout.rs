@@ -61,7 +61,9 @@ pub struct PlacedGlyph {
     /// Ширина глифа (шаг по базовой линии) — по ней ставится многоточие.
     pub advance: f32,
     /// Байты кластера глифа в `GlyphRun::text` (экспорт текста в SVG и PDF: какие
-    /// символы он рисует).
+    /// символы он рисует). Глифы идут в визуальном порядке, поэтому кластеры
+    /// возрастают слева направо у прогона слева направо и убывают у прогона
+    /// справа налево (`GlyphRun::rtl`).
     pub cluster: [u32; 2],
 }
 
@@ -92,6 +94,9 @@ pub struct GlyphRun {
     pub letter_spacing: f32,
     /// Текст прогона (с учётом регистра), на который ссылаются кластеры глифов.
     pub text: String,
+    /// Прогон справа налево (иврит, арабский): глифы — в визуальном порядке,
+    /// кластеры по ним убывают.
+    pub rtl: bool,
     pub glyphs: Vec<PlacedGlyph>,
 }
 
@@ -785,14 +790,45 @@ fn collect_lines(
             let key = run.text_range();
             if shaped.as_ref().is_none_or(|(k, _, _)| *k != key) {
                 let mut list: Vec<Range<usize>> = Vec::new();
+                // Продолжение лигатуры — кластер без глифов: его символы рисует
+                // глиф начала (слева направо — предыдущий кластер, справа налево —
+                // следующий), их диапазоны сливаются.
+                let mut pending: Option<Range<usize>> = None;
                 for c in run.visual_clusters() {
                     let r = c.text_range();
-                    list.extend(std::iter::repeat_n(r, c.glyphs().count()));
+                    let n = c.glyphs().count();
+                    if n == 0 {
+                        let last = list.last().cloned();
+                        match last {
+                            Some(l) if l.end == r.start => {
+                                for x in list.iter_mut().rev().take_while(|x| **x == l) {
+                                    x.end = r.end;
+                                }
+                            }
+                            _ => {
+                                pending = Some(match pending.take() {
+                                    Some(p) if r.end == p.start => r.start..p.end,
+                                    _ => r,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                    let r = match pending.take() {
+                        Some(p) if r.end == p.start => r.start..p.end,
+                        _ => r,
+                    };
+                    list.extend(std::iter::repeat_n(r, n));
                 }
                 shaped = Some((key, list, 0));
             }
             let (_, list, at) = shaped.as_mut().expect("задан выше");
-            let mine: Vec<Range<usize>> = match list.get(*at..*at + positioned.len()) {
+            let slice = list.get(*at..*at + positioned.len());
+            debug_assert!(
+                slice.is_some(),
+                "курсор кластеров разошёлся с глифами строки"
+            );
+            let mine: Vec<Range<usize>> = match slice {
                 Some(slice) => slice.to_vec(),
                 // Так быть не должно: каждому глифу — весь текст шейпинга.
                 None => vec![run.text_range(); positioned.len()],
@@ -860,6 +896,7 @@ fn collect_lines(
                 skew: synthesis.skew(),
                 letter_spacing: letter_spacing(span.letter_spacing, span.size),
                 text: run_text,
+                rtl: run.is_rtl(),
                 glyphs,
             });
         }
