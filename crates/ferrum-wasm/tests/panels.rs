@@ -1431,3 +1431,45 @@ fn background_preview_is_dropped_with_the_document() {
     core.command(Command::Demo { nodes: 0 });
     assert_eq!(core.background(), ferrum_wasm::core::CANVAS_DARK);
 }
+
+/// Поле «Масштаб» (инструмент K): правка одним шагом, сводка — вдвое больше;
+/// коэффициент и точка вне сетки — ошибка без правки.
+#[test]
+fn scale_edit_is_one_step_and_rejects_bad_values() {
+    let mut core = demo(100);
+    core.command(Command::LayersWindow {
+        start: 0,
+        count: 40,
+    });
+    let (_, _, rows, _) = layers(&core.take_events()).unwrap();
+    core.command(Command::Select {
+        ids: vec![rows[0].id.clone()],
+        mode: SelectMode::Replace,
+    });
+    core.command(Command::SetTool { tool: Tool::Scale });
+    let w0 = summary(&core.take_events()).unwrap().w.value;
+    let steps = document_steps(&core);
+    let scale = |factor: f64, anchor: [f64; 2], phase: EditPhase| Command::EditSelection {
+        edit: Edit::Scale { factor, anchor },
+        phase,
+        ids: None,
+        selection_version: None,
+    };
+    core.command(scale(1.5, [0.0, 0.0], EditPhase::Preview));
+    core.command(scale(2.0, [0.0, 0.0], EditPhase::Preview));
+    assert_eq!(document_steps(&core), steps, "превью — без шагов");
+    core.command(scale(2.0, [0.0, 0.0], EditPhase::Commit));
+    assert_eq!(document_steps(&core), steps + 1.0);
+    let s = summary(&core.take_events()).expect("сводка обновилась");
+    assert_eq!(s.w.value, 2.0 * w0);
+    for bad in [
+        scale(0.0, [0.0, 0.0], EditPhase::Commit),
+        scale(101.0, [0.5, 0.5], EditPhase::Commit),
+        scale(f64::NAN, [0.5, 0.5], EditPhase::Commit),
+        scale(2.0, [0.3, 0.5], EditPhase::Commit),
+    ] {
+        core.command(bad);
+    }
+    assert_eq!(errors(&core.take_events()).len(), 4);
+    assert_eq!(document_steps(&core), steps + 1.0);
+}

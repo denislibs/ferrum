@@ -3,7 +3,8 @@
 // жеста на холсте значения «Положения» одного узла — из живого состояния (общая
 // память, фаза measure), а не из событий. Секции по порядку дизайн-системы:
 // Фрейм / Положение → Вид → Заливка → Обводка → Экспорт. Без выделения —
-// страница (фон) и экспорт всей страницы.
+// страница (фон) и экспорт всей страницы. У инструмента «Масштабирование» (K)
+// сверху — секция «Масштаб»: поле в процентах и точка рамки 3×3, как в Figma.
 
 import { createEffect, createSignal, For, Show } from 'solid-js';
 import type { Edit, EditPhase, Field, Num } from '../wasm/ferrum_wasm';
@@ -71,6 +72,9 @@ export function PropertiesPanel(props: { theme: 'dark' | 'light' }) {
           </Show>
         }
       >
+        <Show when={ed.store.state.tool === 'scale'}>
+          <ScaleSection />
+        </Show>
         <PositionSection edit={edit} val={val} />
         <AppearanceSection edit={edit} />
         <Show when={ed.store.state.textStyle}>
@@ -227,6 +231,94 @@ function AppearanceSection(props: { edit: (f: Field) => (i: FieldInput, p: EditP
           </label>
         )}
       </Show>
+    </Section>
+  );
+}
+
+/** Точки рамки для масштаба (сетка 3×3 по строкам), подписи — для чтения с экрана. */
+const ANCHORS: { at: [number, number]; name: string }[] = [
+  { at: [0, 0], name: 'Слева сверху' },
+  { at: [0.5, 0], name: 'Сверху по центру' },
+  { at: [1, 0], name: 'Справа сверху' },
+  { at: [0, 0.5], name: 'Слева по центру' },
+  { at: [0.5, 0.5], name: 'По центру' },
+  { at: [1, 0.5], name: 'Справа по центру' },
+  { at: [0, 1], name: 'Слева снизу' },
+  { at: [0.5, 1], name: 'Снизу по центру' },
+  { at: [1, 1], name: 'Справа снизу' },
+];
+
+/** Масштаб в процентах: те же пределы, что у ядра (1 %…10 000 %). */
+export const SCALE_PERCENT_RANGE = [1, 10_000] as const;
+
+/** Коэффициент масштаба из ввода поля «Масштаб» (100 % — без изменений). */
+export function scaleFactor(input: FieldInput): number {
+  const percent = input.kind === 'set' ? input.value : 100 + input.delta;
+  return Math.min(SCALE_PERCENT_RANGE[1], Math.max(SCALE_PERCENT_RANGE[0], percent)) / 100;
+}
+
+function ScaleSection() {
+  const ed = useEditor();
+  // Точка — левый верхний угол, как у полей W и H (Figma).
+  const [anchor, setAnchor] = createSignal(0);
+  let grid!: HTMLDivElement;
+  const onKey = (e: KeyboardEvent) => {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    const at = anchor();
+    const [col, row] = [at % 3, Math.floor(at / 3)];
+    let next: number;
+    switch (e.key) {
+      case 'ArrowRight':
+        next = row * 3 + ((col + 1) % 3);
+        break;
+      case 'ArrowLeft':
+        next = row * 3 + ((col + 2) % 3);
+        break;
+      case 'ArrowDown':
+        next = ((row + 1) % 3) * 3 + col;
+        break;
+      case 'ArrowUp':
+        next = ((row + 2) % 3) * 3 + col;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    setAnchor(next);
+    grid.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
+  return (
+    <Section title="Масштаб">
+      <div class="fe-scale">
+        <div ref={grid} class="fe-anchor" role="radiogroup" aria-label="Точка масштаба" onKeyDown={onKey}>
+          <For each={ANCHORS}>
+            {(a, i) => (
+              <button
+                role="radio"
+                aria-checked={anchor() === i()}
+                aria-label={a.name}
+                tabindex={anchor() === i() ? 0 : -1}
+                class="fe-anchor__dot"
+                onClick={() => setAnchor(i())}
+              />
+            )}
+          </For>
+        </div>
+        <NumberField
+          label={<Icon name="scale" />}
+          name="Масштаб"
+          value={100}
+          suffix="%"
+          decimals={2}
+          min={SCALE_PERCENT_RANGE[0]}
+          max={SCALE_PERCENT_RANGE[1]}
+          percentOf={100}
+          onEdit={(input, phase, target) =>
+            sendEdit(ed.send, { type: 'scale', factor: scaleFactor(input), anchor: ANCHORS[anchor()].at }, phase, target)
+          }
+          class="fe-row__grow"
+        />
+      </div>
     </Section>
   );
 }

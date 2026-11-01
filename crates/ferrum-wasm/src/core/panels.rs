@@ -4,6 +4,7 @@
 //! неверное — событие `Error` на русском, документ не меняется.
 
 use ferrum_doc::{Color, Fill, FillKind, NodeId, PageId, ScaleMode, Stroke, StrokeAlign};
+use ferrum_editor::scale::{Anchor, MAX_SCALE_FACTOR, MIN_SCALE_FACTOR};
 use ferrum_editor::{
     browser_reserved, frame_presets, BindError, CommandId, DropTarget, KeymapError, NumField,
     PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
@@ -182,6 +183,19 @@ fn panel_edit(e: &Edit) -> Result<PanelEdit, String> {
                 cap_end: cap_end.map(cap_of),
                 join: join.map(join_of),
                 miter_limit: *miter_limit,
+            }
+        }
+        Edit::Scale { factor, anchor } => {
+            // Недоверенный ввод: вне пределов — отказ (панель зажимает сама).
+            if !(factor.is_finite() && (MIN_SCALE_FACTOR..=MAX_SCALE_FACTOR).contains(factor)) {
+                return Err("Масштаб — от 1 до 10 000 %".into());
+            }
+            let Some(anchor) = Anchor::new(anchor[0], anchor[1]) else {
+                return Err("Точка масштаба — угол, середина стороны или центр рамки".into());
+            };
+            PanelEdit::Scale {
+                factor: *factor,
+                anchor,
             }
         }
     })

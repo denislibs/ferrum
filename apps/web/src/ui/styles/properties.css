@@ -114,6 +114,42 @@
   background: var(--surface-hover);
   color: var(--ink);
 }
+.fe-scale {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+/* Точка масштаба: сетка 3×3 точек, выбранная — цветом выделения. */
+.fe-anchor {
+  display: grid;
+  grid-template-columns: repeat(3, 12px);
+  grid-template-rows: repeat(3, 12px);
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+}
+.fe-anchor__dot {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+}
+.fe-anchor__dot::after {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: var(--ink-muted);
+}
+.fe-anchor__dot[aria-checked='true']::after {
+  inset: 2px;
+  background: var(--select);
+}
 .fe-export {
   display: flex;
   gap: var(--space-2);
