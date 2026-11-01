@@ -66,6 +66,8 @@ wasm-bindgen-test = "=0.3.79"
 # собирается под wasm32 без фич по умолчанию: `raster-images` нужен для картинок
 # (png той же версии, что у vello_cpu), `simple-text` (rustybuzz) не нужен — глифы
 # раскладывает parley. Тянет свой skrifa 0.42 (у нас 0.44) — цена версии.
+# `raster-images` тянет декодеры gif/webp/jpeg (`gif`, `image-webp`, `zune-jpeg`): мы
+# их не вызываем (только `Image::from_rgba8`), но они в зависимостях и аудите.
 krilla = { version = "=0.8.2", default-features = false, features = ["raster-images"] }
 # Проверка экспорта SVG в тестах: файл разбирается как XML (только dev-зависимость).
 roxmltree = "=0.21.1"

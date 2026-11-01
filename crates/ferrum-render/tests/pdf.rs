@@ -150,16 +150,27 @@ fn inter() -> SharedFonts {
 
 /// Семейство из файлов каталога шрифтов приложения.
 fn family(name: &str, files: &[&str]) -> SharedFonts {
+    let files: Vec<_> = files.iter().map(|r| (*r, font_file(r))).collect();
+    family_with(name, &files, &|bytes| bytes)
+}
+
+/// Семейство из байтов файлов (имя файла, содержимое); `patch` меняет байты
+/// только у загружаемого шрифта, а список шрифтов строится по исходным.
+fn family_with(
+    name: &str,
+    files: &[(&str, Vec<u8>)],
+    patch: &dyn Fn(Vec<u8>) -> Vec<u8>,
+) -> SharedFonts {
     let shared = Fonts::shared();
     {
         let mut f = shared.borrow_mut();
         let faces = files
             .iter()
-            .flat_map(|r| ferrum_text::read_faces(&font_file(r), r))
+            .flat_map(|(r, bytes)| ferrum_text::read_faces(bytes, r))
             .collect::<Vec<_>>();
         f.add_catalog(ferrum_text::SourceKind::Bundled, ferrum_text::group(faces));
-        for r in files.iter().copied() {
-            f.load(name, r, font_file(r)).unwrap();
+        for (r, bytes) in files {
+            f.load(name, r, patch(bytes.clone())).unwrap();
         }
     }
     shared
@@ -209,18 +220,33 @@ fn text_is_real_text_with_font_subsets() {
     let raw = text(&bytes);
     // Шрифт встроен подмножеством (имя с префиксом «ABCDEF+»), по шрифту на вес.
     assert!(raw.contains("/FontFile2") || raw.contains("/FontFile3"));
-    let subsets = raw.matches("/BaseFont/").count();
-    assert!(subsets >= 2, "{subsets}");
-    assert!(raw.contains("+Inter"), "подмножество Inter");
+    // Два веса — два разных встроенных шрифта (имена подмножеств различаются).
+    let mut names: Vec<&str> = raw
+        .match_indices("/BaseFont/")
+        .map(|(i, m)| {
+            let rest = &raw[i + m.len()..];
+            &rest[..rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '-'))
+                .unwrap()]
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.iter().all(|n| n.contains("+Inter")), "{names:?}");
+    assert_eq!(raw.matches("/FontFile2").count(), 2, "по файлу на вес");
     let content: Vec<String> = streams(&bytes).iter().map(|s| text(s)).collect();
     assert!(
         content.iter().any(|c| c.contains("Tj") || c.contains("TJ")),
         "текстовые операторы"
     );
-    // Текст для поиска и копирования — ToUnicode: «П» (U+041F) в UTF-16BE.
-    assert!(content
-        .iter()
-        .any(|c| c.contains("<041F>") || c.contains("041F")));
+    // Текст для поиска и копирования — ToUnicode каждого из двух шрифтов: у
+    // обычного есть «П» (U+041F), у жирного — «Ж», и не наоборот.
+    let maps = to_unicode(&bytes);
+    assert_eq!(maps.len(), 2);
+    let has = |m: &HashMap<u16, String>, c: &str| m.values().any(|v| v == c);
+    assert!(maps.iter().any(|m| has(m, "П") && !has(m, "Ж")));
+    assert!(maps.iter().any(|m| has(m, "Ж") && !has(m, "П")));
     // Кривыми текст не нарисован: контуров глифов (`c` и `f`) почти нет.
     assert!(!content.iter().any(|c| c.matches(" c\n").count() > 50));
 }
@@ -315,18 +341,15 @@ fn huge_frames_shrink_to_the_page_limit_and_errors_are_reported() {
     assert_eq!(run(&mut r, &[big], &small), Err(ExportError::TooBig));
 }
 
-/// Что покажет программа просмотра: коды глифов страниц (в порядке потока) через
-/// ToUnicode; для глифа в `/ActualText` — подставленный им текст. Пары —
-/// (текст, x начала показа в pt) в порядке потока.
-fn shown(bytes: &[u8]) -> Vec<(String, f64)> {
-    let all = streams(bytes);
-    // ToUnicode: «<код> <UTF-16BE>» в bfchar.
-    let mut map: HashMap<u16, String> = HashMap::new();
-    for s in &all {
-        let t = text(s);
+/// Таблицы ToUnicode каждого шрифта: «<код> <UTF-16BE>» из bfchar.
+fn to_unicode(bytes: &[u8]) -> Vec<HashMap<u16, String>> {
+    let mut maps = Vec::new();
+    for s in streams(bytes) {
+        let t = text(&s);
         let Some(i) = t.find("beginbfchar") else {
             continue;
         };
+        let mut map = HashMap::new();
         let body = &t[i..t.find("endbfchar").unwrap()];
         for line in body.lines().skip(1) {
             let hex: Vec<&str> = line
@@ -344,7 +367,17 @@ fn shown(bytes: &[u8]) -> Vec<(String, f64)> {
                 String::from_utf16(&units).unwrap(),
             );
         }
+        maps.push(map);
     }
+    maps
+}
+
+/// Что покажет программа просмотра: коды глифов страниц (в порядке потока) через
+/// ToUnicode; для глифа в `/ActualText` — подставленный им текст. Пары —
+/// (текст, x начала показа в pt) в порядке потока.
+fn shown(bytes: &[u8]) -> Vec<(String, f64)> {
+    let all = streams(bytes);
+    let map: HashMap<u16, String> = to_unicode(bytes).into_iter().flatten().collect();
     let mut out = Vec::new();
     for s in &all {
         let t = text(s);
@@ -478,4 +511,174 @@ fn right_to_left_runs_map_every_glyph_to_its_own_character() {
             .any(|s| text(s).contains("ReversedChars")),
         "обратный порядок помечен"
     );
+}
+
+/// Файл шрифта с PostScript-именем (name ID 6) из `name`: таблица
+/// `name` заменяется одной записью и дописывается в конец файла.
+fn with_postscript_name(mut font: Vec<u8>, name: &str) -> Vec<u8> {
+    let be16 = |v: usize| (v as u16).to_be_bytes();
+    let utf16 = |t: &str| -> Vec<u8> { t.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+    // Имена семейства и начертания остаются, чтобы шрифт загружался.
+    let records = [
+        (1, utf16("PT Sans")),
+        (2, utf16("Regular")),
+        (4, utf16("PT Sans")),
+        (6, utf16(name)),
+    ];
+    let mut table = Vec::new();
+    // format 0, число записей, начало строк; Windows, Unicode BMP, en-US.
+    for v in [0, records.len(), 6 + 12 * records.len()] {
+        table.extend(be16(v));
+    }
+    let mut at = 0;
+    for (id, bytes) in &records {
+        for v in [3, 1, 0x409, *id, bytes.len(), at] {
+            table.extend(be16(v));
+        }
+        at += bytes.len();
+    }
+    for (_, bytes) in &records {
+        table.extend(bytes);
+    }
+    while !font.len().is_multiple_of(4) {
+        font.push(0);
+    }
+    let offset = font.len();
+    let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+    let at = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|r| &font[*r..*r + 4] == b"name")
+        .expect("таблица name");
+    font[at + 8..at + 12].copy_from_slice(&(offset as u32).to_be_bytes());
+    font[at + 12..at + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+    font.extend(table);
+    font
+}
+
+/// `krilla` режет PostScript-имя по байтам (на 109-м) и падает, если там
+/// середина символа; шрифты приходят от пользователя, а паника в воркере
+/// убивает ядро. Такой шрифт — текст контурами, без падения.
+#[test]
+fn a_font_with_an_unsafe_postscript_name_falls_back_to_outlines() {
+    let file = "ptsans/PTSans-Regular.ttf";
+    let run = |name: &str| {
+        let mut p = Page::new();
+        let id = add_text_in(
+            &mut p,
+            "PT Sans",
+            "Привет",
+            "Regular",
+            vec![Fill::solid(Color::BLACK)],
+            0.0,
+        );
+        let mut r = Renderer::new();
+        r.set_fonts(family_with(
+            "PT Sans",
+            &[(file, font_file(file))],
+            &|bytes| with_postscript_name(bytes, name),
+        ));
+        pdf(&mut r, &mut p, &[id])
+    };
+    // 60 символов «Ж» — 120 байт: 109-й байт внутри символа.
+    let outlined = run(&"Ж".repeat(60));
+    let raw = text(&outlined);
+    assert!(!raw.contains("/FontFile"), "шрифт не встроен");
+    assert!(to_unicode(&outlined).is_empty(), "текстового слоя нет");
+    let content: Vec<String> = streams(&outlined).iter().map(|s| text(s)).collect();
+    assert!(
+        content.iter().any(|c| c.matches("\nf\n").count() >= 6),
+        "буквы нарисованы контурами"
+    );
+    // Для сравнения: короткое имя — тот же шрифт встроен настоящим текстом.
+    assert!(text(&run("PTSans-Regular")).contains("/FontFile"));
+}
+
+fn tiled_pixel(p: &mut Page, size: f64) -> (NodeId, HashMap<String, Arc<Pixmap>>) {
+    let mut px = Pixmap::new(1, 1);
+    px.data_as_u8_slice_mut().copy_from_slice(&[0, 128, 0, 255]);
+    let png = px.into_png().unwrap();
+    let hash = p.doc.images.add(png.clone());
+    let id = p.add(
+        None,
+        NodeKind::Rect,
+        PropsPatch {
+            fills: Some(vec![Fill {
+                scale_mode: ScaleMode::Tile,
+                ..Fill::image(hash.clone())
+            }]),
+            ..rect(0.0, 0.0, size, size)
+        },
+    );
+    (
+        id,
+        HashMap::from([(hash, Arc::new(decode_png(&png).unwrap()))]),
+    )
+}
+
+/// Плиток больше 4096 — картинка не пропадает: одна плитка — узор PDF.
+#[test]
+fn a_fill_with_too_many_tiles_becomes_a_pattern() {
+    let mut p = Page::new();
+    let (id, images) = tiled_pixel(&mut p, 100.0);
+    let scene = p.scene();
+    let bytes = Renderer::new()
+        .export_pdf(&scene, &[id], &images, &ExportBudget::unlimited())
+        .unwrap();
+    let raw = text(&bytes);
+    assert!(raw.contains("/PatternType 1"), "узор");
+    assert_eq!(raw.matches("/Subtype/Image").count(), 1);
+    let content: Vec<String> = streams(&bytes).iter().map(|s| text(s)).collect();
+    let draws: usize = content.iter().map(|c| c.matches(" Do").count()).sum();
+    assert!(draws >= 1, "картинка нарисована");
+    assert!(draws < 10, "а не 10 000 раз: {draws}");
+}
+
+/// Предел размера и часы действуют по ходу рисования, а не после него: много
+/// плиток — ошибка раньше, чем страница дорисована.
+#[test]
+fn the_budget_stops_tiled_fills_while_drawing() {
+    let mut p = Page::new();
+    let (first, images) = tiled_pixel(&mut p, 60.0);
+    let mut ids = vec![first];
+    for _ in 0..400 {
+        let (id, _) = tiled_pixel(&mut p, 60.0);
+        ids.push(id);
+    }
+    let scene = p.scene();
+    let mut r = Renderer::new();
+    let small = ExportBudget {
+        max_bytes: 200_000,
+        ..ExportBudget::unlimited()
+    };
+    // 400 заливок по 3600 плиток — оценка перевалит предел на первых же.
+    let started = std::time::Instant::now();
+    assert_eq!(
+        r.export_pdf(&scene, &ids, &images, &small),
+        Err(ExportError::TooBig)
+    );
+    assert!(started.elapsed().as_secs_f64() < 5.0);
+    /// Часы, что «истекают» после нескольких чтений.
+    struct Soon(Cell<u32>);
+    impl Clock for Soon {
+        fn now_ms(&self) -> f64 {
+            self.0.set(self.0.get() + 1);
+            if self.0.get() > 3 {
+                1e12
+            } else {
+                0.0
+            }
+        }
+    }
+    let clock = Soon(Cell::new(0));
+    let timed = ExportBudget {
+        max_bytes: usize::MAX,
+        clock: Some(&clock),
+        deadline_ms: 1e9,
+    };
+    assert_eq!(
+        r.export_pdf(&scene, &ids, &images, &timed),
+        Err(ExportError::Timeout)
+    );
+    // Часы читались мало: остановка по ходу, а не после всех 400 заливок.
+    assert!(clock.0.get() < 200, "{}", clock.0.get());
 }

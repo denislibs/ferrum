@@ -17,15 +17,19 @@ use ferrum_doc::NodeId;
 use ferrum_scene::Scene;
 use ferrum_text::{GlyphRun, SharedFonts};
 use krilla::color::rgb;
+use krilla::error::KrillaError;
 use krilla::geom::{Path, PathBuilder, Point as KPoint, Size as KSize, Transform};
 use krilla::image::Image;
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
-use krilla::paint::{Fill as KFill, FillRule, LineCap, LineJoin, Stroke as KStroke};
+use krilla::paint::{Fill as KFill, FillRule, LineCap, LineJoin, Pattern, Stroke as KStroke};
 use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph, Tag};
 use krilla::{Data, Document, SerializeSettings};
 use kurbo::{Affine, BezPath, PathEl, Rect, Shape};
+use skrifa::instance::{LocationRef, Size};
+use skrifa::raw::types::NameId;
+use skrifa::raw::TableProvider;
 use skrifa::MetadataProvider;
 use vello_cpu::peniko::{Extend, Fill};
 
@@ -41,6 +45,13 @@ pub const MAX_PDF_SIDE: f64 = 14_400.0;
 const MAX_TILES: usize = 4096;
 /// Как часто бэкенд сверяется с часами (вызовов рисования).
 const CHECK_EVERY: usize = 4096;
+/// Оценка размера содержимого страницы до сжатия, байт: путь, элемент пути,
+/// прогон текста, глиф прогона, плитка картинки (`q … cm /Im Do Q`).
+const PATH_BASE_BYTES: usize = 48;
+const PATH_ELEMENT_BYTES: usize = 24;
+const GLYPH_RUN_BYTES: usize = 96;
+const GLYPH_BYTES: usize = 8;
+const TILE_BYTES: usize = 80;
 
 /// Текущая краска.
 #[derive(Clone)]
@@ -49,8 +60,22 @@ enum Paint {
     Image(ImagePaint),
 }
 
-/// Ключ шрифта: байты (по `Blob::id`), номер в коллекции, координаты осей.
-type FontKey = (u64, u32, Vec<i16>);
+/// Ключ шрифта: байты (по `Blob::id`), номер в коллекции, координаты осей, вес и
+/// ширина начертания (`font_of` ставит по ним оси `wght` и `wdth`).
+type FontKey = (u64, u32, Vec<i16>, u32, u32);
+
+/// Причина неудачи сборки: пределы и прочие ошибки экспорта или шрифт, который
+/// `krilla` не смог встроить (тогда файл собирается заново с текстом контурами).
+enum Fail {
+    Export(ExportError),
+    Font,
+}
+
+impl From<ExportError> for Fail {
+    fn from(e: ExportError) -> Self {
+        Fail::Export(e)
+    }
+}
 
 /// Кэши одного документа: шрифты и картинки встраиваются один раз.
 #[derive(Default)]
@@ -71,8 +96,14 @@ struct PdfBackend<'s, 'p> {
     /// Текст — настоящим текстом (иначе контурами).
     text: bool,
     budget: &'s ExportBudget<'s>,
+    /// Учтённая работа: вызовы рисования (плитка и прогон — по вызову) и оценка
+    /// размера содержимого в байтах (до сжатия) — по ним `charge` сверяется с
+    /// пределами, не дожидаясь конца страницы.
     calls: usize,
-    expired: bool,
+    next_check: usize,
+    estimate: usize,
+    /// Предел превышен: дальше бэкенд ничего не рисует.
+    failure: Option<ExportError>,
 }
 
 fn finite(v: f64) -> f32 {
@@ -151,48 +182,101 @@ fn image_of(pixmap: &vello_cpu::Pixmap) -> Image {
 
 /// Шрифт прогона для PDF: байты шрифта и положение на осях вариативного
 /// шрифта — вес и ширина из начертания прогона, остальные оси — из его
-/// нормализованных координат (без `avar`). `None` — шрифт не читается.
+/// нормализованных координат (без `avar`). `None` — шрифт не читается или
+/// `krilla` на нём упадёт (см. `krilla_safe`): текст тогда рисуется контурами.
 fn font_of(run: &GlyphRun) -> Option<Font> {
     let data = run.font.data.clone();
     let index = run.font.index;
     let bytes: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(data);
     let data = Data::from(bytes);
-    if run.coords.iter().all(|c| *c == 0) {
-        return Font::new(data, index);
-    }
     let font = skrifa::FontRef::from_index(data.as_ref(), index).ok()?;
     let mut axes = Vec::new();
-    for (i, axis) in font.axes().iter().enumerate() {
-        let tag = axis.tag().to_be_bytes();
-        let n = run.coords.get(i).copied().unwrap_or(0) as f32 / 16384.0;
-        let value = match &tag {
-            b"wght" => run.face.weight,
-            b"wdth" => run.face.stretch * 100.0,
-            _ => {
-                let (min, def, max) = (axis.min_value(), axis.default_value(), axis.max_value());
-                if n >= 0.0 {
-                    def + n * (max - def)
-                } else {
-                    def + n * (def - min)
+    if run.coords.iter().any(|c| *c != 0) {
+        for (i, axis) in font.axes().iter().enumerate() {
+            let tag = axis.tag().to_be_bytes();
+            let n = run.coords.get(i).copied().unwrap_or(0) as f32 / 16384.0;
+            let value = match &tag {
+                b"wght" => run.face.weight,
+                b"wdth" => run.face.stretch * 100.0,
+                _ => {
+                    let (min, def, max) =
+                        (axis.min_value(), axis.default_value(), axis.max_value());
+                    if n >= 0.0 {
+                        def + n * (max - def)
+                    } else {
+                        def + n * (def - min)
+                    }
                 }
-            }
-        };
-        axes.push((Tag::new(&tag), value));
+            };
+            axes.push((Tag::new(&tag), value));
+        }
     }
-    Font::new_variable(data, index, &axes)
+    if !krilla_safe(&font, &axes) {
+        return None;
+    }
+    if axes.is_empty() {
+        Font::new(data, index)
+    } else {
+        Font::new_variable(data, index, &axes)
+    }
+}
+
+/// Данные шрифта, на которых `krilla` 0.8.2 паникует (а в воркере паника
+/// убивает ядро), — шрифты приходят от пользователя:
+/// - PostScript-имя (name ID 6) режется по байтам: `cid.rs` `base_font_name`
+///   (`[..min(len, 109)]`) и `type3.rs` (`[..min(len, 115)]`) — не на границе
+///   символа падает в `doc.finish()`; берём только ASCII-имя, как и бывает;
+/// - `cap_height` и `italic_angle` метрик (`font.rs`) идут в `FiniteF32::new(..)
+///   .unwrap()` — они должны быть конечными.
+///
+/// Прочие `unwrap` krilla на пути текста (`FontRef::from_index` после проверки
+/// в `FontInfo::new`, номера глифов в `u16`/`u8`, рамка `Rect::from_ltrb` из
+/// заведомо проверенных границ) от данных шрифта не зависят.
+fn krilla_safe(font: &skrifa::FontRef, axes: &[(Tag, f32)]) -> bool {
+    let name_ok = font.name().map_or(true, |name| {
+        name.name_record()
+            .iter()
+            .find_map(|n| {
+                if n.name_id.get() == NameId::POSTSCRIPT_NAME {
+                    return n.string(name.string_data()).ok().map(|s| s.to_string());
+                }
+                None
+            })
+            .is_none_or(|s| s.is_ascii())
+    });
+    let location = font
+        .axes()
+        .location(axes.iter().map(|(t, v)| (skrifa::Tag::new(t.get()), *v)));
+    let metrics = font.metrics(Size::unscaled(), LocationRef::from(&location));
+    name_ok && metrics.italic_angle.is_finite() && metrics.cap_height.is_none_or(f32::is_finite)
 }
 
 impl PdfBackend<'_, '_> {
-    fn tick(&mut self) -> bool {
-        if self.expired {
+    /// Учесть работу: `ops` вызовов рисования и ~`bytes` байт содержимого.
+    /// Размер сверяется с пределом сразу, часы — раз в `CHECK_EVERY` вызовов.
+    /// `false` — предел превышен, рисовать дальше не нужно.
+    fn charge(&mut self, ops: usize, bytes: usize) -> bool {
+        if self.failure.is_some() {
             return false;
         }
-        self.calls += 1;
-        if self.calls.is_multiple_of(CHECK_EVERY) && self.budget.check(0).is_err() {
-            self.expired = true;
-            return false;
+        self.calls = self.calls.saturating_add(ops);
+        self.estimate = self.estimate.saturating_add(bytes);
+        let due = self.calls >= self.next_check;
+        if due {
+            self.next_check = self.calls.saturating_add(CHECK_EVERY);
         }
-        true
+        let verdict = if due {
+            self.budget.check(self.estimate)
+        } else {
+            self.budget.check_bytes(self.estimate)
+        };
+        match verdict {
+            Ok(()) => true,
+            Err(e) => {
+                self.failure = Some(e);
+                false
+            }
+        }
     }
 
     fn fill_solid(&mut self, p: &Path, c: Rgba, r: FillRule) {
@@ -235,6 +319,14 @@ impl PdfBackend<'_, '_> {
                     let (j0, j1) = ((b.y0 / ih).floor() as i64, (b.y1 / ih).ceil() as i64);
                     let n = ((i1 - i0).max(0) as u64).saturating_mul((j1 - j0).max(0) as u64);
                     if n as usize <= MAX_TILES {
+                        // Каждая плитка — вызов рисования с оценкой размера.
+                        if !self.charge(n as usize, TILE_BYTES * n as usize) {
+                            self.surface.pop();
+                            if layered {
+                                self.surface.pop();
+                            }
+                            return;
+                        }
                         for j in j0..j1 {
                             for i in i0..i1 {
                                 let t = place * Affine::translate((i as f64 * iw, j as f64 * ih));
@@ -243,6 +335,27 @@ impl PdfBackend<'_, '_> {
                                 self.surface.pop();
                             }
                         }
+                    } else if self.charge(1, PATH_BASE_BYTES) {
+                        // Слишком много плиток для отдельных рисований: одна
+                        // плитка — узор PDF (повторяется в программе просмотра).
+                        let mut sb = self.surface.stream_builder();
+                        let mut tile = sb.surface();
+                        tile.draw_image(image, size);
+                        tile.finish();
+                        let stream = sb.finish();
+                        let pattern = Pattern {
+                            stream,
+                            transform: transform(place),
+                            width: size.width(),
+                            height: size.height(),
+                        };
+                        self.surface.set_stroke(None);
+                        self.surface.set_fill(Some(KFill {
+                            paint: pattern.into(),
+                            opacity: NormalizedF32::ONE,
+                            rule: r,
+                        }));
+                        self.surface.draw_path(p);
                     }
                 }
             }
@@ -279,7 +392,7 @@ impl RenderBackend for PdfBackend<'_, '_> {
     }
 
     fn fill_path(&mut self, p: &BezPath, r: Fill) {
-        if !self.tick() {
+        if !self.charge(1, PATH_BASE_BYTES + PATH_ELEMENT_BYTES * p.elements().len()) {
             return;
         }
         let Some(kp) = path(p, self.transform) else {
@@ -301,7 +414,7 @@ impl RenderBackend for PdfBackend<'_, '_> {
     }
 
     fn stroke_path(&mut self, p: &BezPath, stroke: &kurbo::Stroke) {
-        if !self.tick() {
+        if !self.charge(1, PATH_BASE_BYTES + PATH_ELEMENT_BYTES * p.elements().len()) {
             return;
         }
         let Paint::Solid(c) = self.paint else {
@@ -366,13 +479,22 @@ impl RenderBackend for PdfBackend<'_, '_> {
         if !self.text {
             return false;
         }
-        if !self.tick() {
+        if !self.charge(
+            1,
+            GLYPH_RUN_BYTES + GLYPH_BYTES * run.glyphs.len() + run.text.len(),
+        ) {
             return true;
         }
         let Some(first) = run.glyphs.first().copied() else {
             return true;
         };
-        let key: FontKey = (run.font.data.id(), run.font.index, run.coords.clone());
+        let key: FontKey = (
+            run.font.data.id(),
+            run.font.index,
+            run.coords.clone(),
+            run.face.weight.to_bits(),
+            run.face.stretch.to_bits(),
+        );
         let font = self
             .cache
             .fonts
@@ -443,9 +565,14 @@ pub(crate) fn export_pdf(
     match build(scene, pages, images, fonts, budget, true) {
         // Шрифт, который `krilla` не смог встроить (повреждённые таблицы и т. п.):
         // текст — контурами глифов, как у SVG с «Текстом кривыми».
-        Err(ExportError::Write(_)) => build(scene, pages, images, fonts, budget, false),
+        Err(Fail::Font) => build(scene, pages, images, fonts, budget, false),
         other => other,
     }
+    .map_err(|f| match f {
+        Fail::Export(e) => e,
+        // Повтор без текста шрифта не бывает.
+        Fail::Font => ExportError::Write("шрифт".into()),
+    })
 }
 
 fn build(
@@ -455,7 +582,7 @@ fn build(
     fonts: &SharedFonts,
     budget: &ExportBudget,
     text: bool,
-) -> Result<Vec<u8>, ExportError> {
+) -> Result<Vec<u8>, Fail> {
     let mut known = false;
     let mut list = Vec::new();
     for id in pages {
@@ -478,10 +605,10 @@ fn build(
         list.push((slot, area));
     }
     if !known {
-        return Err(ExportError::NotFound);
+        return Err(ExportError::NotFound.into());
     }
     if list.is_empty() {
-        return Err(ExportError::Empty);
+        return Err(ExportError::Empty.into());
     }
     let settings = SerializeSettings {
         // Тегированный PDF нужен для доступности, но без структуры документа теги
@@ -491,6 +618,8 @@ fn build(
     };
     let mut doc = Document::new_with(settings);
     let mut cache = Cache::default();
+    // Оценка размера содержимого уже нарисованных страниц.
+    let mut carried = 0usize;
     for (slot, area) in list {
         let k = (MAX_PDF_SIDE / area.width().max(area.height())).min(1.0);
         let (w, h) = (area.width() * k, area.height() * k);
@@ -506,7 +635,9 @@ fn build(
             text,
             budget,
             calls: 0,
-            expired: false,
+            next_check: CHECK_EVERY,
+            estimate: carried,
+            failure: None,
         };
         let ctx = DrawContext {
             scene,
@@ -522,17 +653,19 @@ fn build(
         let mut painter = Painter::with_raster_limit(0);
         painter.begin_frame();
         painter.draw(&mut backend, &ctx, &[slot]);
-        let expired = backend.expired;
+        let failure = backend.failure.take();
+        carried = backend.estimate;
         surface.finish();
         page.finish();
-        if expired {
-            return Err(ExportError::Timeout);
+        if let Some(e) = failure {
+            return Err(e.into());
         }
-        budget.check(0)?;
+        budget.check(carried)?;
     }
-    let bytes = doc
-        .finish()
-        .map_err(|e| ExportError::Write(format!("{e:?}")))?;
+    let bytes = doc.finish().map_err(|e| match e {
+        KrillaError::Font(..) => Fail::Font,
+        e => Fail::Export(ExportError::Write(format!("{e:?}"))),
+    })?;
     budget.check(bytes.len())?;
     Ok(bytes)
 }
