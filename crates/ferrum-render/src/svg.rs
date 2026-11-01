@@ -94,7 +94,8 @@ pub(crate) fn num(v: f64) -> String {
         return "0".into();
     }
     let r = (v * 1000.0).round() / 1000.0;
-    if r == 0.0 {
+    // `v * 1000` переполняется у очень больших чисел: в SVG не бывает `inf`.
+    if r == 0.0 || !r.is_finite() {
         return "0".into();
     }
     let mut s = format!("{r:.3}");
@@ -137,6 +138,16 @@ pub(crate) fn path_data(path: &BezPath, g: Affine) -> String {
         }
     }
     d
+}
+
+/// Допустимое первое символ имени XML 1.0 (5-е издание) без `:`.
+fn xml_name_start(c: char) -> bool {
+    matches!(c,
+        'A'..='Z' | 'a'..='z' | '_'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
 }
 
 /// Экранирование текста и значений атрибутов XML.
@@ -374,25 +385,32 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// Служебный `id` (обрезка, маска, узор, картинка): уникален и среди имён
+    /// слоёв — в любом порядке создания (`layer_id` сверяется с тем же набором).
     fn fresh(&mut self, prefix: &str) -> String {
-        let id = format!("{prefix}{}", self.next);
-        self.next += 1;
-        id
+        loop {
+            let id = format!("{prefix}{}", self.next);
+            self.next += 1;
+            if self.ids.insert(id.clone()) {
+                return id;
+            }
+        }
     }
 
-    /// `id` из имени слоя: буквы, цифры, `-` и `_`; пробелы — `_`; уникально.
+    /// `id` из имени слоя: допустимые в имени XML буквы, цифры, `-` и `_`; остальное
+    /// (пробелы, знаки, `ª`, `²`) — `_`; уникально.
     fn layer_id(&mut self, name: &str) -> String {
         let mut base: String = name
             .chars()
             .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
+                if xml_name_start(c) || c.is_ascii_digit() || c == '-' {
                     c
                 } else {
                     '_'
                 }
             })
             .collect();
-        if base.is_empty() || !base.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+        if !base.starts_with(xml_name_start) {
             base.insert(0, '_');
         }
         let mut id = base.clone();
@@ -410,6 +428,12 @@ impl<'a> Writer<'a> {
         } else {
             String::new()
         }
+    }
+
+    /// Размер файла с запасом `extra` на то, что собираются дописать.
+    fn check_size(&self, extra: usize) -> Result<(), ExportError> {
+        self.budget
+            .check_bytes(self.body.len() + self.defs.len() + extra)
     }
 
     fn check(&self) -> Result<(), ExportError> {
@@ -438,10 +462,15 @@ impl<'a> Writer<'a> {
                 }
             };
             self.visited += 1;
+            // Размер — после каждого узла (O(1)), часы — раз в 256.
+            self.check_size(0)?;
             if self.visited.is_multiple_of(256) {
                 self.check()?;
             }
             let n = self.scene.at(slot);
+            if n.props.opacity.is_nan() {
+                return Err(ExportError::Write("прозрачность узла не число".to_string()));
+            }
             if n.subtree_bounds.is_none() || n.props.opacity <= 0.0 {
                 continue;
             }
@@ -469,6 +498,7 @@ impl<'a> Writer<'a> {
                     stack.push(Visit::CloseOwn(wrap));
                     stack.push(Visit::FrameStrokes(slot));
                     if n.props.clip_content {
+                        self.check_size(0)?;
                         let clip = self.fresh("clip");
                         let place = self.place(slot);
                         let form = form_of(n.geometry()).expect("у фрейма есть форма");
@@ -500,12 +530,18 @@ impl<'a> Writer<'a> {
 
     /// Изображение в `<defs>` (один раз на хэш): id и размер. Нет байтов или не
     /// PNG — `None`.
-    fn image_def(&mut self, hash: &str) -> Option<(String, u32, u32)> {
+    fn image_def(&mut self, hash: &str) -> Result<Option<(String, u32, u32)>, ExportError> {
         if let Some(d) = self.image_defs.get(hash) {
-            return Some(d.clone());
+            return Ok(Some(d.clone()));
         }
-        let bytes = self.images.png(hash)?;
-        let (w, h) = png_size(bytes)?;
+        let Some(bytes) = self.images.png(hash) else {
+            return Ok(None);
+        };
+        let Some((w, h)) = png_size(bytes) else {
+            return Ok(None);
+        };
+        // Размер base64 известен заранее: сверяемся с пределом до кодирования.
+        self.check_size(bytes.len().div_ceil(3) * 4 + 160)?;
         let id = self.fresh("image");
         self.xlink = true;
         let _ = write!(
@@ -514,22 +550,38 @@ impl<'a> Writer<'a> {
             base64(bytes)
         );
         self.image_defs.insert(hash.to_string(), (id.clone(), w, h));
-        Some((id, w, h))
+        Ok(Some((id, w, h)))
     }
 
     /// Атрибут заливки краской `f` для формы с рамкой `area` (локальные
     /// координаты узла). `None` — нечем заливать (скрыта, прозрачна, нет байтов).
-    fn paint(&mut self, f: &Fill, area: Rect, place: &Place) -> Option<String> {
+    fn paint(
+        &mut self,
+        f: &Fill,
+        area: Rect,
+        place: &Place,
+    ) -> Result<Option<String>, ExportError> {
+        if f.opacity.is_nan() {
+            return Err(ExportError::Write(
+                "прозрачность заливки не число".to_string(),
+            ));
+        }
         if !f.visible || f.opacity <= 0.0 {
-            return None;
+            return Ok(None);
         }
         match f.kind {
-            FillKind::Solid => Some(color_attr("fill", f.color, f.opacity)),
+            FillKind::Solid => Ok(Some(color_attr("fill", f.color, f.opacity))),
             FillKind::Image => {
                 if !(area.width() > 0.0 && area.height() > 0.0) {
-                    return None;
+                    return Ok(None);
                 }
-                let (img, iw, ih) = self.image_def(f.image_hash.as_deref()?)?;
+                let Some(hash) = f.image_hash.as_deref() else {
+                    return Ok(None);
+                };
+                let Some((img, iw, ih)) = self.image_def(hash)? else {
+                    return Ok(None);
+                };
+                self.check_size(512)?;
                 let (t, _, _) = place_image(f.scale_mode, area, iw as f64, ih as f64);
                 let pat = self.fresh("pattern");
                 let g = place.g;
@@ -570,7 +622,7 @@ impl<'a> Writer<'a> {
                 if f.opacity < 1.0 {
                     let _ = write!(s, " fill-opacity=\"{}\"", num(f.opacity));
                 }
-                Some(s)
+                Ok(Some(s))
             }
         }
     }
@@ -587,15 +639,16 @@ impl<'a> Writer<'a> {
                 let Some(ps) = n.path_shape().cloned() else {
                     return Ok(());
                 };
-                // Рамка картинки у булевой группы — границы результата.
-                let area = match p.kind {
-                    NodeKind::Boolean => n.local_bounds.unwrap_or(area),
-                    _ => area,
-                };
                 for r in &ps.regions {
                     let fills = r.fills.as_deref().unwrap_or(&p.fills);
                     for f in fills {
-                        if let Some(attr) = self.paint(f, area, &place) {
+                        // Как у рендера: у булевой группы заливка картинкой не рисуется
+                        // (у результата операции нет рамки картинки).
+                        if p.kind == NodeKind::Boolean && f.kind == FillKind::Image {
+                            continue;
+                        }
+                        self.check_size(r.path.elements().len() * 24)?;
+                        if let Some(attr) = self.paint(f, area, &place)? {
                             let form = Form::Path(r.path.clone(), r.rule);
                             let _ = write!(self.body, "{}{attr}/>", form.open(&place));
                         }
@@ -608,7 +661,8 @@ impl<'a> Writer<'a> {
                     return Ok(());
                 };
                 for f in &p.fills {
-                    if let Some(attr) = self.paint(f, area, &place) {
+                    self.check_size(0)?;
+                    if let Some(attr) = self.paint(f, area, &place)? {
                         let _ = write!(self.body, "{}{attr}/>", form.open(&place));
                     }
                 }
@@ -641,7 +695,8 @@ impl<'a> Writer<'a> {
                 None => p.fills.iter().collect(),
             };
             for f in paints {
-                if let Some(attr) = self.paint(f, area, place) {
+                self.check_size(form_len(&form))?;
+                if let Some(attr) = self.paint(f, area, place)? {
                     let _ = write!(self.body, "{}{attr}/>", form.open(place));
                 }
             }
@@ -695,13 +750,13 @@ impl<'a> Writer<'a> {
             };
             let form = Form::Path(glyphs, FillRule::NonZero);
             for s in &strokes {
-                self.ring_stroke(&form, s, StrokeJoin::Miter, 4.0, &place);
+                self.ring_stroke(&form, s, StrokeJoin::Miter, 4.0, &place, true)?;
             }
             return Ok(());
         }
         if let Some(ps) = n.path_shape().cloned() {
             for s in &strokes {
-                self.path_stroke(&ps, s, p, &place);
+                self.path_stroke(&ps, s, p, &place)?;
             }
             return Ok(());
         }
@@ -709,13 +764,66 @@ impl<'a> Writer<'a> {
             return Ok(());
         };
         for s in &strokes {
-            self.ring_stroke(&form, s, StrokeJoin::Miter, 4.0, &place);
+            self.ring_stroke(&form, s, StrokeJoin::Miter, 4.0, &place, true)?;
         }
         Ok(())
     }
 
+    /// Ссылка на обрезку или маску положения обводки (` clip-path="…"` /
+    /// ` mask="…"`), определение — в `<defs>`; по центру — пусто. Геометрия
+    /// определения без `transform` элемента: `userSpaceOnUse` разбирается в
+    /// пространстве элемента, которому ссылка и `transform` поставлены вместе.
+    fn align_ref(
+        &mut self,
+        form: &Form,
+        align: StrokeAlign,
+        w: f64,
+        miter: f64,
+        place: &Place,
+    ) -> Result<String, ExportError> {
+        let local = Place {
+            g: place.g,
+            attr: String::new(),
+        };
+        match align {
+            StrokeAlign::Center => Ok(String::new()),
+            StrokeAlign::Inside => {
+                self.check_size(form_len(form) + 256)?;
+                let clip = self.fresh("clip");
+                let _ = write!(
+                    self.defs,
+                    "<clipPath id=\"{clip}\">{}/></clipPath>",
+                    form.open(&local)
+                );
+                Ok(format!(" clip-path=\"url(#{clip})\""))
+            }
+            StrokeAlign::Outside => {
+                self.check_size(form_len(form) + 512)?;
+                let mask = self.fresh("mask");
+                // Рамка маски — форма с запасом на толщину и острия стыков.
+                let reach = w * miter.max(1.0) + 1.0;
+                let b = place
+                    .g
+                    .transform_rect_bbox(form.path().bounding_box())
+                    .inflate(reach, reach);
+                let _ = write!(
+                    self.defs,
+                    "<mask id=\"{mask}\" maskUnits=\"userSpaceOnUse\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"><rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"white\"/>{}fill=\"black\"/></mask>",
+                    form.open(&local) + " ",
+                    x = num(b.x0),
+                    y = num(b.y0),
+                    w = num(b.width()),
+                    h = num(b.height()),
+                );
+                Ok(format!(" mask=\"url(#{mask})\""))
+            }
+        }
+    }
+
     /// Обводка формы: по центру — как есть, внутри — двойной толщины с обрезкой
-    /// формой, снаружи — двойной толщины с маской «всё, кроме формы».
+    /// формой, снаружи — двойной толщины с маской «всё, кроме формы». `bind` —
+    /// ставить ли обрезку или маску самой обводке (иначе их ставит вызывающий на
+    /// группу вокруг).
     fn ring_stroke(
         &mut self,
         form: &Form,
@@ -723,7 +831,9 @@ impl<'a> Writer<'a> {
         join: StrokeJoin,
         miter: f64,
         place: &Place,
-    ) {
+        bind: bool,
+    ) -> Result<(), ExportError> {
+        self.check_size(form_len(form) * 2 + 256)?;
         let open = matches!(form, Form::Line(_));
         let align = if open { StrokeAlign::Center } else { s.align };
         let w = if align == StrokeAlign::Center {
@@ -742,55 +852,11 @@ impl<'a> Writer<'a> {
             StrokeJoin::Round => attrs.push_str(" stroke-linejoin=\"round\""),
             StrokeJoin::Bevel => attrs.push_str(" stroke-linejoin=\"bevel\""),
         }
-        match align {
-            StrokeAlign::Center => {
-                let _ = write!(self.body, "{}{attrs}/>", form.open(place));
-            }
-            StrokeAlign::Inside => {
-                let clip = self.fresh("clip");
-                let local = Place {
-                    g: place.g,
-                    attr: String::new(),
-                };
-                let _ = write!(
-                    self.defs,
-                    "<clipPath id=\"{clip}\">{}/></clipPath>",
-                    form.open(&local)
-                );
-                let _ = write!(
-                    self.body,
-                    "{}{attrs} clip-path=\"url(#{clip})\"/>",
-                    form.open(place)
-                );
-            }
-            StrokeAlign::Outside => {
-                let mask = self.fresh("mask");
-                let local = Place {
-                    g: place.g,
-                    attr: String::new(),
-                };
-                // Рамка маски — форма с запасом на толщину и острия стыков.
-                let reach = w * miter.max(1.0) + 1.0;
-                let b = place
-                    .g
-                    .transform_rect_bbox(form.path().bounding_box())
-                    .inflate(reach, reach);
-                let _ = write!(
-                    self.defs,
-                    "<mask id=\"{mask}\" maskUnits=\"userSpaceOnUse\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"><rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"white\"/>{}fill=\"black\"/></mask>",
-                    form.open(&local) + " ",
-                    x = num(b.x0),
-                    y = num(b.y0),
-                    w = num(b.width()),
-                    h = num(b.height()),
-                );
-                let _ = write!(
-                    self.body,
-                    "{}{attrs} mask=\"url(#{mask})\"/>",
-                    form.open(place)
-                );
-            }
+        if bind {
+            attrs.push_str(&self.align_ref(form, align, w, miter, place)?);
         }
+        let _ = write!(self.body, "{}{attrs}/>", form.open(place));
+        Ok(())
     }
 
     /// Обводка по контуру (вектор, результат булевой группы, линия с окончаниями,
@@ -798,7 +864,13 @@ impl<'a> Writer<'a> {
     /// плоскими концами, фигуры окончаний и круги в точках ветвления — заливкой
     /// цветом обводки. Полупрозрачная обводка с фигурами — в `<g opacity>`, чтобы
     /// перекрытия не темнели (как слой у рендера).
-    fn path_stroke(&mut self, ps: &PathShape, s: &ferrum_doc::Stroke, p: &Props, place: &Place) {
+    fn path_stroke(
+        &mut self,
+        ps: &PathShape,
+        s: &ferrum_doc::Stroke,
+        p: &Props,
+        place: &Place,
+    ) -> Result<(), ExportError> {
         let style = &p.stroke_style;
         let w = vector::effective_width(ps, s);
         let extras = !ps.ends.is_empty() || !ps.junctions.is_empty();
@@ -822,9 +894,27 @@ impl<'a> Writer<'a> {
             },
         };
         let form = Form::Path(ps.stroke.clone(), FillRule::NonZero);
-        if !ps.stroke.elements().is_empty() {
-            self.ring_stroke(&form, &stroke, style.join, style.miter_limit, place);
+        // Круги в точках ветвления замкнутого контура режутся тем же положением,
+        // что и обводка (как у рендера): обводка и круги — в одной группе с обрезкой
+        // или маской, а `transform` узла — на группе.
+        let shared = ps.closed && stroke.align != StrokeAlign::Center && !ps.junctions.is_empty();
+        let mut place = place.clone();
+        if shared {
+            let reference = self.align_ref(&form, stroke.align, w, style.miter_limit, &place)?;
+            let _ = write!(self.body, "<g{}{reference}>", place.attr);
+            place.attr.clear();
         }
+        if !ps.stroke.elements().is_empty() {
+            self.ring_stroke(
+                &form,
+                &stroke,
+                style.join,
+                style.miter_limit,
+                &place,
+                !shared,
+            )?;
+        }
+        let place = &place;
         let mut fill = BezPath::new();
         for j in &ps.junctions {
             fill.extend(kurbo::Circle::new(*j, w / 2.0).path_elements(PATH_TOLERANCE));
@@ -841,6 +931,7 @@ impl<'a> Writer<'a> {
                 lines.extend(l.iter());
             }
         }
+        self.check_size(fill.elements().len() * 24 + lines.elements().len() * 24)?;
         if !fill.elements().is_empty() {
             let form = Form::Path(fill, FillRule::NonZero);
             let _ = write!(
@@ -860,32 +951,55 @@ impl<'a> Writer<'a> {
                 num(w)
             );
         }
+        if shared {
+            self.body.push_str("</g>");
+        }
         if layered {
             self.body.push_str("</g>");
         }
+        Ok(())
     }
 
-    fn finish(self, area: Rect) -> String {
+    /// Собирает файл на месте: заголовок вставляется перед телом, без второй
+    /// полной копии (память не вдвое больше предела).
+    fn finish(self, area: Rect) -> Result<String, ExportError> {
         let (w, h) = (area.width(), area.height());
-        let mut out = String::with_capacity(self.body.len() + self.defs.len() + 256);
+        let mut head = String::with_capacity(256);
         let _ = write!(
-            out,
+            head,
             "<svg width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"",
             w = num(w),
             h = num(h)
         );
         if self.xlink {
-            out.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
+            head.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
         }
-        out.push_str(">\n");
-        out.push_str(&self.body);
+        head.push_str(">\n");
+        let tail = if self.defs.is_empty() {
+            "\n</svg>\n".len()
+        } else {
+            "\n<defs></defs>\n</svg>\n".len()
+        };
+        self.budget
+            .check(head.len() + self.body.len() + self.defs.len() + tail)?;
+        let mut out = self.body;
+        out.reserve(head.len() + self.defs.len() + tail);
+        out.insert_str(0, &head);
         if !self.defs.is_empty() {
             out.push_str("\n<defs>");
             out.push_str(&self.defs);
             out.push_str("</defs>");
         }
         out.push_str("\n</svg>\n");
-        out
+        Ok(out)
+    }
+}
+
+/// Грубо: сколько байт займёт путь формы в файле (для проверки предела до записи).
+fn form_len(form: &Form) -> usize {
+    match form {
+        Form::Path(p, _) => p.elements().len() * 24,
+        _ => 0,
     }
 }
 
@@ -910,7 +1024,8 @@ pub(crate) fn export_svg(
 ) -> Result<String, ExportError> {
     let (items, area) = export_items(scene, ids)?;
     if !(area.width().is_finite() && area.height().is_finite())
-        || area.width() <= 0.0 && area.height() <= 0.0
+        || area.width() <= 0.0
+        || area.height() <= 0.0
     {
         return Err(ExportError::Empty);
     }
@@ -920,9 +1035,7 @@ pub(crate) fn export_svg(
         w.write_tree(slot)?;
         w.check()?;
     }
-    let out = w.finish(area);
-    budget.check(out.len())?;
-    Ok(out)
+    w.finish(area)
 }
 
 #[cfg(test)]
@@ -937,6 +1050,8 @@ mod tests {
         assert_eq!(num(2.0 / 3.0), "0.667");
         assert_eq!(num(-12.3456), "-12.346");
         assert_eq!(num(f64::NAN), "0");
+        assert_eq!(num(1e306), "0");
+        assert_eq!(num(f64::INFINITY), "0");
     }
 
     #[test]

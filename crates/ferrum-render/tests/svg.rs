@@ -388,3 +388,254 @@ fn errors_and_limits() {
     };
     assert_eq!(run(&mut r, &[id], &tight), Err(ExportError::TooBig));
 }
+
+/// Все `id` уникальны, а каждая ссылка `url(#…)` ведёт на `clipPath`, `mask` или
+/// `pattern`.
+#[track_caller]
+fn assert_ids_and_refs(doc: &Xml) {
+    let mut seen = std::collections::HashSet::new();
+    for n in doc.descendants().filter(|n| n.is_element()) {
+        if let Some(id) = n.attribute("id") {
+            assert!(seen.insert(id.to_string()), "повторный id {id}");
+        }
+    }
+    for n in doc.descendants().filter(|n| n.is_element()) {
+        for a in n.attributes() {
+            let Some(r) = a.value().strip_prefix("url(#") else {
+                continue;
+            };
+            let id = r.trim_end_matches(')');
+            let target = doc
+                .descendants()
+                .find(|t| t.attribute("id") == Some(id))
+                .unwrap_or_else(|| panic!("нет элемента {id}"));
+            assert!(
+                matches!(target.tag_name().name(), "clipPath" | "mask" | "pattern"),
+                "url(#{id}) ведёт на <{}>",
+                target.tag_name().name()
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_ids_never_collide_with_layer_ids() {
+    let mut p = Page::new();
+    let hash = p.doc.images.add(tiny_png());
+    // Слои названы как служебные id (clip0…, mask0…, pattern0…, image0…): часть
+    // создаётся до служебных, часть после.
+    let mut names = vec![];
+    for i in 0..8 {
+        for prefix in ["clip", "mask", "pattern", "image"] {
+            names.push(format!("{prefix}{i}"));
+        }
+    }
+    let mut tops = vec![];
+    for (i, name) in names.into_iter().enumerate() {
+        let f = p.add(
+            None,
+            NodeKind::Frame,
+            PropsPatch {
+                name: Some(name),
+                fills: Some(vec![Fill::image(hash.clone())]),
+                strokes: Some(vec![
+                    Stroke {
+                        color: Color::BLACK,
+                        width: 2.0,
+                        align: StrokeAlign::Outside,
+                    },
+                    Stroke {
+                        color: Color::BLACK,
+                        width: 2.0,
+                        align: StrokeAlign::Inside,
+                    },
+                ]),
+                clip_content: Some(true),
+                ..rect(i as f64 * 60.0, 0.0, 50.0, 50.0)
+            },
+        );
+        p.add(
+            Some(f),
+            NodeKind::Rect,
+            PropsPatch {
+                name: Some(format!("clip{}", i / 2)),
+                fills: solid(1, 2, 3, 255),
+                ..rect(5.0, 5.0, 60.0, 20.0)
+            },
+        );
+        tops.push(f);
+    }
+    for ids in [true, false] {
+        let svg = export(
+            &mut p,
+            &tops,
+            SvgOptions {
+                ids,
+                ..SvgOptions::default()
+            },
+        );
+        let doc = Xml::parse(&svg).unwrap();
+        assert_ids_and_refs(&doc);
+        assert!(!by_tag(&doc, "clipPath").is_empty() && !by_tag(&doc, "mask").is_empty());
+    }
+}
+
+#[test]
+fn layer_ids_are_valid_xml_names() {
+    let mut p = Page::new();
+    let mut tops = vec![];
+    for (i, name) in ["ª²", "1abc", "", "a:b.c"].into_iter().enumerate() {
+        tops.push(p.add(
+            None,
+            NodeKind::Rect,
+            PropsPatch {
+                name: Some(name.into()),
+                fills: solid(1, 2, 3, 255),
+                ..rect(i as f64 * 20.0, 0.0, 10.0, 10.0)
+            },
+        ));
+    }
+    let svg = export(
+        &mut p,
+        &tops,
+        SvgOptions {
+            ids: true,
+            ..SvgOptions::default()
+        },
+    );
+    let doc = Xml::parse(&svg).unwrap();
+    let ids: Vec<_> = doc
+        .descendants()
+        .filter_map(|n| n.attribute("id"))
+        .collect();
+    assert_eq!(ids, ["__", "_1abc", "_", "a_b_c"]);
+}
+
+/// Квадрат с диагональю: четыре точки степени 3 — замкнутый контур с кругами в
+/// стыках.
+fn junction_square(p: &mut Page, align: StrokeAlign) -> NodeId {
+    let pts = [(0.0, 0.0), (60.0, 0.0), (60.0, 60.0), (0.0, 60.0)];
+    let net = VectorNetwork {
+        points: pts.iter().map(|&(x, y)| VectorPoint::new(x, y)).collect(),
+        segments: vec![
+            VectorSegment::line(0, 1),
+            VectorSegment::line(1, 2),
+            VectorSegment::line(2, 3),
+            VectorSegment::line(3, 0),
+            VectorSegment::line(0, 2),
+        ],
+        regions: vec![],
+    };
+    p.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(Arc::new(net)),
+            strokes: stroke(4.0, align),
+            rotation: Some(10.0),
+            ..rect(10.0, 10.0, 60.0, 60.0)
+        },
+    )
+}
+
+#[test]
+fn junction_dots_share_the_inside_and_outside_clip() {
+    for (align, tag) in [
+        (StrokeAlign::Inside, "clip-path"),
+        (StrokeAlign::Outside, "mask"),
+    ] {
+        let mut p = Page::new();
+        let v = junction_square(&mut p, align);
+        let svg = export(&mut p, &[v], SvgOptions::default());
+        let doc = Xml::parse(&svg).unwrap();
+        assert_ids_and_refs(&doc);
+        // Круги — заливка без обводки; каждая такая заливка вне <defs> лежит
+        // внутри группы с той же обрезкой или маской, что и обводка кольца.
+        let dots: Vec<_> = doc
+            .descendants()
+            .filter(|n| {
+                n.tag_name().name() == "path"
+                    && n.attribute("stroke").is_none()
+                    && n.attribute("fill").is_some()
+                    && !n.ancestors().any(|a| a.tag_name().name() == "defs")
+            })
+            .collect();
+        assert_eq!(dots.len(), 1, "{align:?}: круги стыков");
+        let group = dots[0].parent().unwrap();
+        assert_eq!(group.tag_name().name(), "g");
+        let r = group
+            .attribute(tag)
+            .unwrap_or_else(|| panic!("{align:?}: нет {tag}"));
+        assert!(
+            group.attribute("transform").is_some(),
+            "матрица узла — на группе"
+        );
+        let ring = group
+            .children()
+            .find(|n| n.attribute("stroke-width") == Some("8"))
+            .expect("обводка кольца в той же группе");
+        assert!(ring.attribute("transform").is_none() && ring.attribute(tag).is_none());
+        assert!(r.starts_with("url(#"));
+    }
+}
+
+#[test]
+fn budget_stops_before_encoding_a_large_image() {
+    let mut p = Page::new();
+    // Заголовок PNG 10×10 и 3 МБ мусора: размер читается, байты не декодируются.
+    let mut raw = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    raw.extend_from_slice(&[0, 0, 0, 10, 0, 0, 0, 10]);
+    raw.resize(3_000_000, 7);
+    let hash = p.doc.images.add(raw);
+    let ids: Vec<_> = (0..3)
+        .map(|i| {
+            p.add(
+                None,
+                NodeKind::Rect,
+                PropsPatch {
+                    fills: Some(vec![Fill::image(hash.clone())]),
+                    ..rect(i as f64 * 20.0, 0.0, 10.0, 10.0)
+                },
+            )
+        })
+        .collect();
+    let scene = p.scene();
+    let tight = ExportBudget {
+        max_bytes: 100_000,
+        ..ExportBudget::unlimited()
+    };
+    let run = |budget: &ExportBudget| {
+        Renderer::new().export_svg(&scene, &ids, &p.doc.images, SvgOptions::default(), budget)
+    };
+    assert_eq!(run(&tight), Err(ExportError::TooBig));
+    // Достаточный предел пропускает ту же картинку.
+    let ok = ExportBudget {
+        max_bytes: 5_000_000,
+        ..ExportBudget::unlimited()
+    };
+    assert!(run(&ok).is_ok());
+}
+
+#[test]
+fn zero_size_area_is_empty() {
+    let mut p = Page::new();
+    let f = p.add(
+        None,
+        NodeKind::Frame,
+        PropsPatch {
+            fills: solid(0, 0, 0, 255),
+            ..rect(0.0, 0.0, 50.0, 0.0)
+        },
+    );
+    let scene = p.scene();
+    assert_eq!(
+        Renderer::new().export_svg(
+            &scene,
+            &[f],
+            &NoImageBytes,
+            SvgOptions::default(),
+            &ExportBudget::unlimited()
+        ),
+        Err(ExportError::Empty)
+    );
+}

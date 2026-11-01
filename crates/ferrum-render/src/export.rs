@@ -47,6 +47,14 @@ impl<'a> ExportBudget<'a> {
         }
     }
 
+    /// Только предел размера (дёшево — без чтения часов).
+    pub(crate) fn check_bytes(&self, bytes: usize) -> Result<(), ExportError> {
+        if bytes > self.max_bytes {
+            return Err(ExportError::TooBig);
+        }
+        Ok(())
+    }
+
     pub(crate) fn check(&self, bytes: usize) -> Result<(), ExportError> {
         if bytes > self.max_bytes {
             return Err(ExportError::TooBig);
