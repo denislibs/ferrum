@@ -315,8 +315,16 @@ fn export_name(name: &str) -> String {
     };
     let mut stem: String = stem
         .chars()
-        .filter(|c| !c.is_control() && !matches!(*c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
-        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .filter(|c| {
+            !c.is_control() && !matches!(*c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     if stem.len() > EXPORT_STEM_MAX {
         let mut end = EXPORT_STEM_MAX;
@@ -329,9 +337,16 @@ fn export_name(name: &str) -> String {
     if stem.is_empty() {
         stem = "Экспорт".into();
     }
-    let head = stem.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let head = stem
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
     let reserved = matches!(head.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (head.len() == 4 && (head.starts_with("COM") || head.starts_with("LPT")) && matches!(head.as_bytes()[3], b'1'..=b'9'));
+        || (head.len() == 4
+            && (head.starts_with("COM") || head.starts_with("LPT"))
+            && matches!(head.as_bytes()[3], b'1'..=b'9'));
     if reserved {
         stem.insert(0, '_');
     }
@@ -353,16 +368,28 @@ fn export_prepare(name: &str, len: usize) -> Res<(String, &'static str, &'static
 }
 
 /// Путь с нужным расширением: выбранное в диалоге расширение другое или его нет —
-/// дописывается правильное.
-fn export_path(picked: PathBuf, ext: &str) -> PathBuf {
-    let right = picked.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
+/// дописывается правильное. О замене диалог спрашивал только для выбранного имени:
+/// если файл с дописанным расширением уже есть — ошибка, а не тихая перезапись.
+fn export_path(picked: PathBuf, ext: &str) -> Res<PathBuf> {
+    let right = picked
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
     if right {
-        return picked;
+        return Ok(picked);
     }
     let mut full = picked.into_os_string();
     full.push(".");
     full.push(ext);
-    PathBuf::from(full)
+    let path = PathBuf::from(full);
+    // `symlink_metadata` — и висячая ссылка считается занятым именем.
+    if path.symlink_metadata().is_ok() {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return Err(format!("Файл «{name}» уже есть — выберите другое имя"));
+    }
+    Ok(path)
 }
 
 /// Экспорт PNG, SVG и PDF (подсистема 3, этап 5): родной диалог «Сохранить» с
@@ -383,7 +410,7 @@ fn export_save(request: Request<'_>, app: AppHandle, window: WebviewWindow) -> R
     else {
         return Ok(None);
     };
-    let path = export_path(picked.into_path().map_err(|_| NOT_A_PATH.to_string())?, ext);
+    let path = export_path(picked.into_path().map_err(|_| NOT_A_PATH.to_string())?, ext)?;
     ferrum_desktop_store::atomic_write(&path, bytes)
         .map_err(|e| format!("Не удалось сохранить файл: {}", io_error(&e)))?;
     Ok(path.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -611,7 +638,11 @@ mod tests {
     #[test]
     fn export_name_keeps_extension_and_fits_bytes() {
         let long = export_name(&format!("{}.pdf", "я".repeat(400)));
-        assert!(long.ends_with(".pdf") && long.len() <= 255, "{}", long.len());
+        assert!(
+            long.ends_with(".pdf") && long.len() <= 255,
+            "{}",
+            long.len()
+        );
         assert!(export_kind(&long).is_some());
         // Граница символа: 200 байт — ровно 100 «я».
         assert_eq!(long, format!("{}.pdf", "я".repeat(100)));
@@ -637,12 +668,48 @@ mod tests {
     fn export_prepare_errors_and_final_path() {
         assert_eq!(export_prepare("a.pdf", 5).unwrap().0, "a.pdf");
         assert_eq!(export_prepare("a.pdf", EXPORT_MAX).unwrap().2, "pdf");
-        assert!(export_prepare("a.pdf", EXPORT_MAX + 1).unwrap_err().contains("256 МБ"));
+        assert!(export_prepare("a.pdf", EXPORT_MAX + 1)
+            .unwrap_err()
+            .contains("256 МБ"));
         assert_eq!(export_prepare("без расширения", 1).unwrap_err(), BAD);
         assert_eq!(export_prepare("a.exe", 1).unwrap_err(), BAD);
-        assert_eq!(export_path(PathBuf::from("/x/a.pdf"), "pdf"), PathBuf::from("/x/a.pdf"));
-        assert_eq!(export_path(PathBuf::from("/x/a.PDF"), "pdf"), PathBuf::from("/x/a.PDF"));
-        assert_eq!(export_path(PathBuf::from("/x/a"), "pdf"), PathBuf::from("/x/a.pdf"));
-        assert_eq!(export_path(PathBuf::from("/x/a.svg"), "pdf"), PathBuf::from("/x/a.svg.pdf"));
+        assert_eq!(
+            export_path(PathBuf::from("/x/a.pdf"), "pdf").unwrap(),
+            PathBuf::from("/x/a.pdf")
+        );
+        assert_eq!(
+            export_path(PathBuf::from("/x/a.PDF"), "pdf").unwrap(),
+            PathBuf::from("/x/a.PDF")
+        );
+        assert_eq!(
+            export_path(PathBuf::from("/x/a"), "pdf").unwrap(),
+            PathBuf::from("/x/a.pdf")
+        );
+        assert_eq!(
+            export_path(PathBuf::from("/x/a.svg"), "pdf").unwrap(),
+            PathBuf::from("/x/a.svg.pdf")
+        );
+    }
+
+    /// Диалог подтвердил замену только выбранного имени: файл с дописанным
+    /// расширением уже есть — ошибка, без перезаписи; выбранный существующий файл с
+    /// верным расширением — замена (её подтвердил диалог).
+    #[test]
+    fn export_path_does_not_overwrite_a_file_the_dialog_did_not_confirm() {
+        let dir = std::env::temp_dir().join(format!("ferrum-export-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let taken = dir.join("a.pdf");
+        std::fs::write(&taken, b"old").unwrap();
+        assert_eq!(
+            export_path(dir.join("a"), "pdf").unwrap_err(),
+            "Файл «a.pdf» уже есть — выберите другое имя"
+        );
+        assert_eq!(export_path(taken.clone(), "pdf").unwrap(), taken);
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        assert_eq!(
+            export_path(dir.join("b"), "pdf").unwrap(),
+            dir.join("b.pdf")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
