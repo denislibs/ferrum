@@ -98,7 +98,7 @@ export function DesignHeader() {
     { label: 'Отдалить', command: 'view.zoom_out' },
     { separator: true },
     { label: 'Показать всё', command: 'view.fit_all' },
-    { label: 'Показать выделение', command: 'view.fit_selection', disabled: ed.store.state.selectionCount === 0 },
+    { label: 'Показать выделение', command: 'view.fit_selection' },
     { separator: true },
     ...ZOOMS.map((z) => ({
       label: `Масштаб ${z * 100}%`,
@@ -200,14 +200,14 @@ export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWid
   );
 }
 
-/** Контекстное меню холста: команды редактора по выделению. */
-export function canvasMenu(selection: number): MenuItem[] {
-  const none = selection === 0;
-  const item = (label: string, command: string, needs = true): MenuItem => ({ label, command, disabled: needs && none });
+/** Контекстное меню холста: команды редактора; доступность — из состояния
+ * команд ядра (основной поток о выделении ничего не вычисляет). */
+export function canvasMenu(): MenuItem[] {
+  const item = (label: string, command: string): MenuItem => ({ label, command });
   return [
     item('Копировать', 'edit.copy'),
     item('Вырезать', 'edit.cut'),
-    item('Вставить', 'edit.paste', false),
+    item('Вставить', 'edit.paste'),
     item('Дублировать', 'edit.duplicate'),
     item('Удалить', 'edit.delete'),
     { separator: true },
@@ -227,8 +227,8 @@ export function canvasMenu(selection: number): MenuItem[] {
     { separator: true },
     item('Копировать как PNG', 'edit.copy_png'),
     item('Копировать как SVG', 'edit.copy_svg'),
-    item('Выделить всё', 'edit.select_all', false),
-    item('Показать всё', 'view.fit_all', false),
+    item('Выделить всё', 'edit.select_all'),
+    item('Показать всё', 'view.fit_all'),
   ];
 }
 

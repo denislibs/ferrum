@@ -46,13 +46,14 @@ export function Toolbar() {
   const [mover, setMover] = createSignal<Mover>('move');
   type MenuKind = 'move' | 'frame' | 'shapes' | 'boolean';
   const [menu, setMenu] = createSignal<{ kind: MenuKind; anchor: HTMLElement } | null>(null);
-  // Операция на кнопке: у выделенной булевой группы — её, иначе последняя выбранная.
+  // Состояние команд — из ядра: доступна ли операция и какая отмечена у
+  // выделенных булевых групп (основной поток ничего не вычисляет).
+  const command = (key: string) => ed.store.state.commands[key];
+  const enabled = (key: string) => command(key)?.enabled ?? false;
+  // Операция на кнопке: отмеченная у выделенных групп, иначе последняя выбранная.
   const [lastOp, setLastOp] = createSignal<BooleanOpDto>('union');
-  const boolean = createMemo(() => {
-    const op = ed.store.state.summary?.booleanOp ?? lastOp();
-    return BOOLEANS.find((b) => b.op === op)!;
-  });
-  const hasSelection = () => (ed.store.state.summary?.count ?? 0) > 0;
+  const selectedOp = () => BOOLEANS.find((b) => command(b.command)?.checked);
+  const boolean = createMemo(() => selectedOp() ?? BOOLEANS.find((b) => b.op === lastOp())!);
   const runBoolean = (b: (typeof BOOLEANS)[number]) => {
     setLastOp(b.op);
     ed.run(b.command);
@@ -110,17 +111,16 @@ export function Toolbar() {
       },
     }));
 
+  // Доступность и отметка пунктов — из состояния команд (переключатели ядра).
   const booleanItems = (): MenuItem[] => [
     ...BOOLEANS.map((b) => ({
       label: b.name,
       command: b.command,
-      checked: b.op === boolean().op,
-      disabled: !hasSelection(),
       onSelect: () => runBoolean(b),
     })),
     { separator: true as const },
-    { label: 'Сплющить', command: 'object.flatten', disabled: !hasSelection() },
-    { label: 'Контур обводки', command: 'object.outline_stroke', disabled: !hasSelection() },
+    { label: 'Сплющить', command: 'object.flatten' },
+    { label: 'Контур обводки', command: 'object.outline_stroke' },
   ];
 
   const menuLabel = (kind: MenuKind) =>
@@ -233,13 +233,13 @@ export function Toolbar() {
       <div class="fe-tool-split">
         <button
           class="fe-tool"
-          aria-disabled={!hasSelection()}
-          aria-pressed={ed.store.state.summary?.booleanOp != null}
+          aria-disabled={!enabled(boolean().command)}
+          aria-pressed={selectedOp() !== undefined}
           aria-label={boolean().name}
           data-tip={boolean().name}
           data-command={boolean().command}
           data-tip-side="top"
-          onClick={() => hasSelection() && runBoolean(boolean())}
+          onClick={() => enabled(boolean().command) && runBoolean(boolean())}
         >
           <Icon name={boolean().op} />
         </button>

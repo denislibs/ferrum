@@ -603,7 +603,7 @@ export function App(props: AppProps) {
               {(at) => (
                 <Menu
                   label="Действия с выделением"
-                  items={canvasMenu(store.state.selectionCount)}
+                  items={canvasMenu()}
                   anchor={at()}
                   onClose={() => setContext(null)}
                 />

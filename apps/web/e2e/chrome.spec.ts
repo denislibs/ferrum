@@ -183,6 +183,33 @@ test('меню: Home/End, Enter, Tab; фокус возвращается к я�
   await expect(menu).toHaveCount(0);
 });
 
+test('контекстное меню и тулбар: доступность и отметки — из состояния команд ядра', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  const node = await appScreen(page, l, 200, 40);
+  await page.mouse.click(node.x, node.y);
+  await liveWhen(page, 'l.selectionCount === 1');
+  // Один прямоугольник: разгруппировать нечего, булевой операции нужен второй слой.
+  const toolbar = page.getByRole('toolbar', { name: 'Инструменты' });
+  await expect(toolbar.getByRole('button', { name: 'Объединение' })).toHaveAttribute('aria-disabled', 'true');
+  await expect(toolbar.getByRole('button', { name: 'Объединение' })).toHaveAttribute('aria-pressed', 'false');
+  await toolbar.getByRole('button', { name: 'Булевы операции' }).click();
+  const ops = page.getByRole('menu', { name: 'Булевы операции' });
+  await expect(ops.getByRole('menuitemcheckbox', { name: /Вычитание/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(ops.getByRole('menuitem', { name: /Сплющить/ })).not.toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+  await page.mouse.click(node.x, node.y, { button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Действия с выделением' });
+  await expect(menu.getByRole('menuitem', { name: /^Разгруппировать/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(menu.getByRole('menuitem', { name: /^Сгруппировать/ })).not.toHaveAttribute('aria-disabled', 'true');
+  // Сгруппировать из меню — группа выделена: теперь разгруппировать можно.
+  await menu.getByRole('menuitem', { name: /^Сгруппировать/ }).click();
+  await liveWhen(page, `l.steps === ${l.steps + 1}`);
+  await page.mouse.click(node.x, node.y, { button: 'right' });
+  await expect(menu.getByRole('menuitem', { name: /^Разгруппировать/ })).not.toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+});
+
 test('меню: серые пункты доступны стрелками, но не выполняются; переход по первой букве', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
