@@ -1,5 +1,5 @@
 // Связь ядра с системным буфером обмена и выбором файлов: события `copy`, `cut`,
-// `paste` документа, события ядра `clipboard`, `clipboardPng`, `pasteRequested`,
+// `paste` документа, события ядра `clipboard`, `clipboardPng`, `clipboardSvg`, `pasteRequested`,
 // `requestImage`. Разбор форматов — в clipboard.ts, байты и текст с меткой
 // разбирает worker: основной поток только переносит их.
 
@@ -32,6 +32,16 @@ function writeFailed(cut: boolean): string {
   return cut
     ? 'Не удалось записать в буфер обмена: браузер не дал доступа. Отмена вернёт вырезанные объекты'
     : 'Не удалось записать в буфер обмена: браузер не дал доступа. Повторите копирование';
+}
+
+/** Умеет ли асинхронный буфер записывать `image/svg+xml` (Chromium 124+). */
+function svgSupported(): boolean {
+  const supports = (ClipboardItem as unknown as { supports?: (type: string) => boolean }).supports;
+  try {
+    return typeof supports === 'function' && supports('image/svg+xml');
+  } catch {
+    return false;
+  }
 }
 
 export function installClipboard(ed: Editor): () => void {
@@ -106,6 +116,18 @@ export function installClipboard(ed: Editor): () => void {
       .write([new ClipboardItem({ 'image/png': new Blob([bytes as BlobPart], { type: 'image/png' }) })])
       .then(() => ed.store.toast('Скопировано как PNG'))
       .catch(() => toast('Не удалось скопировать картинку: браузер не дал доступа к буферу обмена'));
+  };
+
+  /** «Копировать как SVG»: `text/plain` всегда, `image/svg+xml` — где браузер умеет
+   * его записать (`ClipboardItem.supports`); отказ асинхронного API — обычный текст
+   * через `execCommand`. */
+  const writeSvg = (text: string) => {
+    const items: Record<string, Blob> = { 'text/plain': new Blob([text], { type: 'text/plain' }) };
+    if (svgSupported()) items['image/svg+xml'] = new Blob([text], { type: 'image/svg+xml' });
+    navigator.clipboard
+      .write([new ClipboardItem(items)])
+      .then(() => ed.store.toast('Скопировано как SVG'))
+      .catch(() => writeText(text, false));
   };
 
   /** Асинхронное чтение (Chromium может спросить разрешение). `quiet` — вставка
@@ -209,6 +231,7 @@ export function installClipboard(ed: Editor): () => void {
   const off = ed.core.on((e) => {
     if (e.type === 'clipboard') write(e);
     else if (e.type === 'clipboardPng') writePng(e.bytes);
+    else if (e.type === 'clipboardSvg') writeSvg(e.text);
     else if (e.type === 'pasteRequested') void readAsync(false).then(deliver);
     else if (e.type === 'requestImage') {
       pickFile(IMAGE_FILE)

@@ -84,6 +84,8 @@ pub enum EditorEvent {
     PasteRequested,
     /// Скопировать как PNG: интерфейс экспортирует узлы и кладёт картинку в буфер.
     ExportPng(Vec<NodeId>),
+    /// Скопировать как SVG: тот же писатель, что у экспорта SVG, — в буфер текстом.
+    ExportSvg(Vec<NodeId>),
     /// Выбрать файл изображения и вызвать `place_image`.
     RequestImage,
     /// Скрыть или показать интерфейс (Ctrl+\).

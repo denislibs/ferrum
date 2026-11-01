@@ -144,6 +144,7 @@ impl WasmCore {
         );
         core.renderer_mut()
             .set_clock(PerformanceClock::new().map(|c| Box::new(c) as _));
+        core.set_export_clock(PerformanceClock::new().map(|c| Box::new(c) as _));
         let forced = force.as_deref().and_then(Backend::parse);
         let order: Vec<Backend> = match forced {
             Some(Backend::Cpu) => vec![Backend::Cpu],

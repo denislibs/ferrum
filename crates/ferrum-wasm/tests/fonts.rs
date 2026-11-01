@@ -416,6 +416,14 @@ fn export_copy_and_thumbnail_do_not_leave_loading_text_out() {
     assert!(!ev
         .iter()
         .any(|e| matches!(e, CoreEvent::ClipboardPng { .. })));
+    c.command(Command::Execute {
+        command: "edit.copy_svg".into(),
+    });
+    let ev = c.take_events();
+    assert_eq!(errors_of(&ev), [STILL_LOADING]);
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ClipboardSvg { .. })));
     // Превью: прежнее остаётся.
     c.command(Command::Snapshot { thumbnail: true });
     let ev = c.take_events();

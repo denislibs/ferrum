@@ -39,6 +39,8 @@ pub enum CommandId {
     Cut,
     Paste,
     CopyAsPng,
+    /// «Копировать как SVG» (подсистема 3, этап 5): без сочетания, как в Figma.
+    CopyAsSvg,
     Duplicate,
     Delete,
     SelectAll,
@@ -169,6 +171,7 @@ pub const COMMANDS: &[Command] = &[
         "Копировать как PNG",
         &["Mod+Shift+KeyC"],
     ),
+    cmd(C::CopyAsSvg, "edit.copy_svg", "Копировать как SVG", &[]),
     cmd(C::Duplicate, "edit.duplicate", "Дублировать", &["Mod+KeyD"]),
     cmd(
         C::Delete,

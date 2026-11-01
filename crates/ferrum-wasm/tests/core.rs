@@ -247,6 +247,31 @@ fn copy_as_png_exports_the_selection() {
     assert_eq!((img.width(), img.height()), (120, 80));
 }
 
+/// «Копировать как SVG» (без сочетания, командой): тот же писатель, что у
+/// экспорта; область — как у PNG.
+#[test]
+fn copy_as_svg_puts_the_selection_as_svg_text() {
+    let mut core = demo(100);
+    frame(&mut core);
+    let at = screen(200.0, 40.0);
+    core.handle(Input::PointerDown(pointer(at, 0.0)));
+    core.handle(Input::PointerUp(pointer(at, 10.0)));
+    core.take_events();
+    core.command(Command::Execute {
+        command: "edit.copy_svg".into(),
+    });
+    let text = core.take_events().into_iter().find_map(|e| match e {
+        CoreEvent::ClipboardSvg { text } => Some(text),
+        _ => None,
+    });
+    let text = text.expect("нет SVG");
+    assert!(
+        text.starts_with("<svg width=\"120\" height=\"80\""),
+        "{text}"
+    );
+    assert!(text.trim_end().ends_with("</svg>"));
+}
+
 #[test]
 fn placed_image_is_drawn() {
     let mut core = demo(100);

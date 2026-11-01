@@ -829,6 +829,11 @@ pub enum CoreEvent {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
     },
+    /// SVG выделения для буфера обмена («Копировать как SVG»): `text/plain` и, где
+    /// браузер умеет, `image/svg+xml`.
+    ClipboardSvg {
+        text: String,
+    },
     /// Пора прочитать системный буфер и прислать `Paste`.
     PasteRequested,
     /// Выбрать файл изображения и прислать `PlaceImage`.

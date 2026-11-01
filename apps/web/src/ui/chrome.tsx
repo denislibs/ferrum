@@ -216,6 +216,7 @@ export function canvasMenu(selection: number): MenuItem[] {
     item('Заблокировать или разблокировать', 'object.toggle_lock'),
     { separator: true },
     item('Копировать как PNG', 'edit.copy_png'),
+    item('Копировать как SVG', 'edit.copy_svg'),
     item('Выделить всё', 'edit.select_all', false),
     item('Показать всё', 'view.fit_all', false),
   ];

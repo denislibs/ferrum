@@ -112,6 +112,12 @@ impl Editor {
                     self.out.events.push(EditorEvent::ExportPng(ids));
                 }
             }
+            C::CopyAsSvg => {
+                let ids = self.ordered_selection();
+                if !ids.is_empty() {
+                    self.out.events.push(EditorEvent::ExportSvg(ids));
+                }
+            }
             C::Duplicate => {
                 let ids = top_level(&self.scene, &self.selection);
                 if !ids.is_empty() {
