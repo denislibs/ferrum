@@ -802,6 +802,11 @@ fn utf16be(t: &str) -> Vec<u8> {
 /// шрифтов приложения нет): один глиф «A» — треугольник. `blue_scale` — запись
 /// вещественного числа (оператор BlueScale в Private DICT) в виде строки.
 fn tiny_cff_font(blue_scale: &str) -> Vec<u8> {
+    tiny_cff_font_with(blue_scale, &[])
+}
+
+/// То же, с дополнительными таблицами `extra` (тег, байты).
+fn tiny_cff_font_with(blue_scale: &str, extra: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     let be16 = |v: i32| (v as u16).to_be_bytes().to_vec();
     let be32 = |v: u32| v.to_be_bytes().to_vec();
     // Вещественное число DICT: тетрады 0-9, «.» A, «E» B, «E-» C, «-» E, конец F.
@@ -979,6 +984,7 @@ fn tiny_cff_font(blue_scale: &str) -> Vec<u8> {
         (b"name", name),
         (b"post", post),
     ];
+    tables.extend(extra.iter().cloned());
     tables.sort_by_key(|t| *t.0);
     let mut out = [
         b"OTTO".to_vec(),
@@ -1024,6 +1030,31 @@ fn a_cff_font_with_an_overflowing_real_falls_back_to_outlines() {
         streams(&outlined).iter().any(|c| text(c).contains("\nf\n")),
         "треугольник контуром"
     );
+}
+
+/// Шрифт с цветными глифами (`COLR`, `CBDT`, `sbix`, `SVG `) krilla рисовала бы
+/// своими путями (Type3, растр), а холст — одноцветными контурами: в PDF такой
+/// шрифт — контурами, как на экране. Без цветной таблицы — настоящий текст.
+#[test]
+fn a_color_glyph_font_falls_back_to_outlines() {
+    let good = tiny_cff_font("0.039625");
+    // Пустой COLR v0: версия, ноль базовых глифов, смещения, ноль слоёв.
+    let table = [0u8, 0, 0, 0, 0, 0, 0, 14, 0, 0, 0, 14, 0, 0].to_vec();
+    for tag in [b"COLR", b"CBDT", b"sbix", b"SVG "] {
+        let font = tiny_cff_font_with("0.039625", &[(tag, table.clone())]);
+        let bytes = pdf_with_font("Tiny", "Regular", &good, font, "A").unwrap();
+        let tag = String::from_utf8_lossy(tag);
+        assert!(
+            !text(&bytes).contains("/FontFile"),
+            "{tag}: шрифт не встроен"
+        );
+        assert!(
+            streams(&bytes).iter().any(|c| text(c).contains("\nf\n")),
+            "{tag}: треугольник контуром"
+        );
+    }
+    let bytes = pdf_with_font("Tiny", "Regular", &good, good.clone(), "A").unwrap();
+    assert!(text(&bytes).contains("/FontFile3"));
 }
 
 /// Простой детерминированный генератор (xorshift64*).
@@ -1094,7 +1125,8 @@ fn mutate(font: &[u8], rng: &mut Rng) -> Vec<u8> {
 }
 
 /// Порча байтов шрифта не должна ронять экспорт: каждый загрузившийся шрифт
-/// даёт PDF (текстом или контурами) без паник `krilla`/`subsetter`. Сотни
+/// (все TTF приложения и собранный в тесте CFF) даёт PDF (текстом или
+/// контурами) без паник `krilla`/`subsetter`. Сотни
 /// порч на шрифт, с фиксированным зерном; только не wasm (там паника — ловушка).
 /// По умолчанию 24 порчи на шрифт (несколько секунд); глубже:
 /// `FERRUM_FONT_FUZZ=1000 cargo test -p ferrum-render --test pdf mutated`.
@@ -1136,6 +1168,29 @@ fn mutated_fonts_never_panic_the_export() {
             }
         }
     }
+    // Шрифт с контурами CFF (файлов `.otf` среди шрифтов приложения нет, а
+    // путь CFF у `subsetter` — свой): те же порчи.
+    let original = tiny_cff_font("0.039625");
+    let mut rng = Rng(0xC0FF_EE00_D15E_A5E5);
+    let (mut cff_loaded, mut cff_total) = (0, 0);
+    for round in 0..rounds * 8 {
+        let font = mutate(&original, &mut rng);
+        cff_total += 1;
+        let result =
+            std::panic::catch_unwind(|| pdf_with_font("Tiny", "Regular", &original, font, "A"));
+        match result {
+            Err(_) => panic!("CFF: порча №{round} уронила экспорт"),
+            Ok(Ok(bytes)) => {
+                cff_loaded += 1;
+                assert!(bytes.starts_with(b"%PDF-"));
+            }
+            Ok(Err(_)) => {}
+        }
+    }
     // Часть порч шрифт ломает насовсем (тогда он не загружается) - остальные идут в PDF.
     assert!(loaded * 2 > total, "{loaded} из {total}");
+    assert!(
+        cff_loaded * 2 > cff_total,
+        "CFF: {cff_loaded} из {cff_total}"
+    );
 }

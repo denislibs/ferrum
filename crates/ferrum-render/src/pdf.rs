@@ -241,6 +241,12 @@ fn font_of(run: &GlyphRun) -> Option<Font> {
 ///   `f32` через `{}` и на `inf`/`NaN` (запись «1E99» читается как `inf`) падает
 ///   на `unreachable!` (`cff/number.rs`), см. `cff_reals_finite`.
 ///
+/// - цветные глифы (таблицы `COLR`, `CBDT`, `sbix`, `SVG `): krilla рисует их
+///   своими путями — шрифтом Type3 с заливками COLR, растровыми картинками
+///   (с их разбором) или пропуском SVG-глифа, а холст, PNG и SVG рисуют такие
+///   шрифты одноцветными контурами; контуры дают тот же вид и не трогают
+///   эти пути.
+///
 /// Прочие `unwrap` krilla на пути текста (`FontRef::from_index` после проверки
 /// в `FontInfo::new`, номера глифов в `u16`/`u8`) от данных шрифта не зависят.
 /// Страховка от остальных — тест со случайными порчами файла (`mutated_fonts`).
@@ -271,11 +277,15 @@ fn krilla_safe(font: &skrifa::FontRef, axes: &[(Tag, f32)]) -> bool {
     let cff_ok = font
         .table_data(skrifa::Tag::new(b"CFF "))
         .is_none_or(|t| cff_reals_finite(t.as_bytes()));
+    let mono = [b"COLR", b"CBDT", b"sbix", b"SVG "]
+        .iter()
+        .all(|t| font.table_data(skrifa::Tag::new(t)).is_none());
     let location = font
         .axes()
         .location(axes.iter().map(|(t, v)| (skrifa::Tag::new(t.get()), *v)));
     let metrics = font.metrics(Size::unscaled(), LocationRef::from(&location));
     name_ok
+        && mono
         && name_table_ok
         && upem_ok
         && cff_ok
