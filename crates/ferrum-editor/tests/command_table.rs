@@ -125,6 +125,39 @@ fn main_menu_shortcut_reaches_the_interface() {
     }
 }
 
+/// «Быстрые действия» (Ctrl/Cmd+K и Ctrl/Cmd+/) и «Сочетания клавиш»
+/// (Ctrl+Shift+? — Ctrl и на маке) с холста доходят до интерфейса событием.
+#[test]
+fn palette_and_shortcuts_panel_shortcuts_reach_the_interface() {
+    for (platform, primary) in [
+        (Platform::Mac, Modifiers::META),
+        (Platform::Windows, ctrl()),
+    ] {
+        let mut h = H::with_platform(platform);
+        h.ed.take_events();
+        for (code, mods, want) in [
+            ("KeyK", primary, CommandId::UiQuickActions),
+            ("Slash", primary, CommandId::UiQuickActions),
+            (
+                "Slash",
+                Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+                CommandId::UiShortcuts,
+            ),
+        ] {
+            h.key(code, mods);
+            assert_eq!(
+                h.ed.take_events(),
+                vec![EditorEvent::UiCommand(want)],
+                "{platform:?} {code}"
+            );
+        }
+    }
+}
+
 #[test]
 fn ui_commands_keep_vector_editing() {
     let mut h = H::new();

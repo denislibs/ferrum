@@ -219,6 +219,7 @@ impl Editor {
             C::UiThemeLight => (true, checked(self.settings.theme == ThemeChoice::Light)),
             C::UiThemeSystem => (true, checked(self.settings.theme == ThemeChoice::System)),
             C::UiMainMenu
+            | C::UiQuickActions
             | C::UiNewFile
             | C::UiOpen
             | C::UiOpenDisk

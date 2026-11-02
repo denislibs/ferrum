@@ -112,6 +112,9 @@ pub enum CommandId {
     // раздел 3). ———
     /// Открыть главное меню (Alt+/).
     UiMainMenu,
+    /// «Быстрые действия» (Ctrl/Cmd+K и Ctrl/Cmd+/, как в Figma): палитра команд,
+    /// слоёв и страниц (спека подсистемы 2, раздел 7).
+    UiQuickActions,
     UiNewFile,
     UiOpen,
     /// «Открыть с диска…» (File System Access и десктоп).
@@ -874,6 +877,22 @@ pub const COMMANDS: &[Command] = &[
         &["меню", "поиск команд", "main menu", "menu"],
         &["Alt+Slash"],
     ),
+    // Как в Figma: «Quick actions» — Ctrl/Cmd+K и Ctrl/Cmd+/.
+    cmd(
+        C::UiQuickActions,
+        "ui.quick_actions",
+        G::View,
+        "Быстрые действия…",
+        &[
+            "палитра команд",
+            "поиск",
+            "найти слой",
+            "quick actions",
+            "command palette",
+            "actions",
+        ],
+        &["Mod+KeyK", "Mod+Slash"],
+    ),
     cmd(
         C::UiNewFile,
         "ui.new_file",
@@ -955,7 +974,8 @@ pub const COMMANDS: &[Command] = &[
             "keyboard shortcuts",
             "hotkeys",
         ],
-        &[],
+        // Как в Figma: Ctrl+Shift+? — и на маке тоже Ctrl, а не Cmd.
+        &["Ctrl+Shift+Slash"],
     ),
     cmd(
         C::UiAbout,
