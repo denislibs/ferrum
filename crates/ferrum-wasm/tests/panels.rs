@@ -90,6 +90,13 @@ fn keymap_and_presets_arrive_before_any_document() {
     );
     let undo = commands.iter().find(|c| c.key == "edit.undo").unwrap();
     assert_eq!(undo.labels, ["⌘Z"], "подпись macOS");
+    // Группа — явная, из таблицы (а не префикс ключа); синонимы и переключатели.
+    let dup = commands.iter().find(|c| c.key == "edit.duplicate").unwrap();
+    assert!(dup.keywords.contains(&"duplicate".to_string()) && !dup.toggle);
+    let settings = commands.iter().find(|c| c.key == "ui.settings").unwrap();
+    assert_eq!(settings.group, "settings");
+    let snap = commands.iter().find(|c| c.key == "ui.pixel_snap").unwrap();
+    assert!(snap.toggle);
     assert!(overrides.contains("ferrum-keymap"));
     assert!(reserved.contains(&"Meta+KeyW".to_string()));
     assert!(ev
@@ -1635,4 +1642,112 @@ fn export_errors_reach_the_ui_in_russian() {
     core.set_export_clock(None);
     core.command(export(ExportFormat::Pdf));
     exported(&core.take_events());
+}
+
+#[test]
+fn ui_commands_come_back_as_events() {
+    let mut core = demo(10);
+    core.take_events();
+    core.command(Command::Execute {
+        command: "ui.settings".into(),
+    });
+    let ev = core.take_events();
+    assert_eq!(
+        ev,
+        vec![CoreEvent::UiCommand {
+            key: "ui.settings".into()
+        }]
+    );
+    assert_eq!(document_steps(&core), 0.0);
+}
+
+fn states(ev: &[CoreEvent]) -> Vec<Vec<CommandStateDto>> {
+    ev.iter()
+        .filter_map(|e| match e {
+            CoreEvent::CommandStates { changed } => Some(changed.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn command_states_arrive_whole_then_as_changes() {
+    let mut core = Core::new(Platform::Windows, VIEW, 1.0, Backend::Cpu);
+    let all = states(&core.take_events());
+    assert_eq!(all.len(), 1, "одно событие");
+    assert_eq!(
+        all[0].len(),
+        ferrum_editor::COMMANDS.len(),
+        "до документа — все"
+    );
+    let grid = all[0].iter().find(|s| s.key == "view.pixel_grid").unwrap();
+    assert_eq!((grid.enabled, grid.checked), (true, Some(true)));
+    let delete = all[0].iter().find(|s| s.key == "edit.delete").unwrap();
+    assert_eq!((delete.enabled, delete.checked), (false, None));
+    // Новый документ — снова все, одним событием в пачке.
+    core.command(Command::Demo { nodes: 10 });
+    let ev = core.take_events();
+    let got = states(&ev);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].len(), ferrum_editor::COMMANDS.len());
+    // Выделение: только изменившиеся, удаление стало доступно.
+    core.command(Command::Execute {
+        command: "edit.select_all".into(),
+    });
+    let got = states(&core.take_events());
+    assert_eq!(got.len(), 1, "изменения пачки — одним событием");
+    assert!(got[0].len() < ferrum_editor::COMMANDS.len());
+    assert!(got[0].iter().any(|s| s.key == "edit.delete" && s.enabled));
+    // Тема «как в системе» — отметка в меню.
+    core.command(Command::SetTheme {
+        theme: Theme::Light,
+        system: Some(true),
+    });
+    let got = states(&core.take_events());
+    let checked = |key: &str| got[0].iter().find(|s| s.key == key).and_then(|s| s.checked);
+    assert_eq!(checked("ui.theme_system"), Some(true));
+    assert_eq!(checked("ui.theme_dark"), Some(false));
+}
+
+#[test]
+fn disabled_command_from_the_interface_is_silent() {
+    let mut core = demo(10);
+    core.take_events();
+    core.command(Command::Execute {
+        command: "edit.delete".into(),
+    });
+    let ev = core.take_events();
+    assert!(errors(&ev).is_empty() && ev.is_empty(), "{ev:?}");
+    assert_eq!(document_steps(&core), 0.0);
+}
+
+#[test]
+fn main_menu_is_sent_once_with_keys_of_the_table() {
+    let mut core = Core::new(Platform::Windows, VIEW, 1.0, Backend::Cpu);
+    let ev = core.take_events();
+    let menus: Vec<&Vec<MenuItemDto>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            CoreEvent::MainMenu { tree } => Some(tree),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(menus.len(), 1);
+    let tree = menus[0];
+    let MenuItemDto::Submenu { title, items } = &tree[0] else {
+        panic!("первым — подменю «Файл»: {tree:?}");
+    };
+    assert_eq!(title, "Файл");
+    assert_eq!(
+        items[0],
+        MenuItemDto::Command {
+            key: "ui.new_file".into()
+        }
+    );
+    // Новый документ дерево не присылает: оно не зависит от документа.
+    core.command(Command::Demo { nodes: 10 });
+    assert!(!core
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::MainMenu { .. })));
 }

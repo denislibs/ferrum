@@ -478,3 +478,73 @@
 .fe-confirm > .fe-ico {
   color: var(--warning);
 }
+
+/* Подменю и поиск главного меню (подсистема 2, этап 1). */
+.fe-menu__item[aria-expanded='true'] {
+  background: var(--surface-hover);
+}
+.fe-menu__item[aria-haspopup] .fe-menu__key {
+  display: flex;
+  align-items: center;
+}
+.fe-menu__item[aria-haspopup] .fe-menu__key svg {
+  width: 12px;
+  height: 12px;
+}
+.fe-menu__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-muted);
+}
+.fe-menu__search svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.fe-menu__search input {
+  flex: 1;
+  min-width: 0;
+  height: var(--row-height);
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+}
+.fe-menu__search:focus-within {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.fe-menu__empty {
+  padding-bottom: var(--space-1);
+}
+/* Кнопка с логотипом: главное меню (как в Figma UI3). */
+.fe-logo {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  height: 28px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+}
+.fe-logo:hover,
+.fe-logo[aria-expanded='true'] {
+  background: var(--surface-hover);
+}
+.fe-logo:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.fe-logo svg {
+  width: 12px;
+  height: 12px;
+}

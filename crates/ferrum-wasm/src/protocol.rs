@@ -529,6 +529,10 @@ pub enum Command {
     },
     SetTheme {
         theme: Theme,
+        /// Тема выбрана «как в системе» (`theme` — то, что система дала сейчас):
+        /// для отметки в меню «Настройки».
+        #[serde(default)]
+        system: Option<bool>,
     },
     /// Вставить содержимое буфера обмена (формат `web application/x-ferrum`).
     Paste {
@@ -776,17 +780,49 @@ pub struct PageInfo {
 }
 
 /// Команда в таблице раскладки: ключ, название, группа (`tool`, `edit`…),
-/// действующие сочетания (каноническая запись и подпись US) и умолчания.
+/// синонимы для поиска, признак переключателя, действующие сочетания
+/// (каноническая запись и подпись US) и умолчания.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
 pub struct KeymapEntry {
     pub key: String,
     pub name: String,
     pub group: String,
+    pub keywords: Vec<String>,
+    pub toggle: bool,
     pub bindings: Vec<String>,
     pub labels: Vec<String>,
     pub defaults: Vec<String>,
     pub overridden: bool,
+}
+
+/// Пункт меню: команда по ключу таблицы, подменю или разделитель.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum MenuItemDto {
+    Command {
+        key: String,
+    },
+    Submenu {
+        title: String,
+        items: Vec<MenuItemDto>,
+    },
+    Separator,
+}
+
+/// Состояние команды: доступна ли и (у переключателя) отмечена ли.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandStateDto {
+    pub key: String,
+    pub enabled: bool,
+    #[serde(default)]
+    #[tsify(optional)]
+    pub checked: Option<bool>,
 }
 
 /// Сочетание, занятое несколькими командами (ключи команд).
@@ -917,6 +953,21 @@ pub enum CoreEvent {
     },
     /// Команда «Сохранить» (Ctrl/Cmd+S): записать файл в хранилище.
     SaveRequested,
+    /// Вызвана команда интерфейса (`ui.*`: меню, файлы, настройки): её выполняет
+    /// основной поток (спека подсистемы 2, раздел 3).
+    UiCommand {
+        key: String,
+    },
+    /// Состояния команд изменились (доступна, отмечена): только изменившиеся;
+    /// первым — все команды таблицы. Основной поток ничего не вычисляет.
+    CommandStates {
+        changed: Vec<CommandStateDto>,
+    },
+    /// Главное меню (спека подсистемы 2, раздел 4): дерево команд — один раз,
+    /// при запуске ядра.
+    MainMenu {
+        tree: Vec<MenuItemDto>,
+    },
     /// Измерения с Alt в оверлее: значения расстояний по порядку и число
     /// пунктирных направляющих.
     Measurements {

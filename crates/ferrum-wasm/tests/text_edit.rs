@@ -816,3 +816,64 @@ fn journal_and_snapshot_apply_typing_that_waits_for_a_font() {
         .iter()
         .any(|e| matches!(e, CoreEvent::Snapshot { .. })));
 }
+
+/// Нативная вставка (Ctrl/Cmd+V приходит событием `paste`, а не командой
+/// `edit.paste`) в документе только для чтения молчит, как серый пункт
+/// «Вставить»: ни сообщения, ни шага, текущий жест не прерывается.
+#[test]
+fn native_paste_in_a_read_only_document_does_nothing() {
+    use ferrum_editor::{Input, Modifiers, PointerButton, PointerEvent};
+    use serde_bytes::ByteBuf;
+
+    let (mut c, _) = core();
+    let bytes = ferrum_doc::container::encode(&ferrum_doc::Document::new()).unwrap();
+    let future =
+        ferrum_doc::container::testing::with_schema_version(&bytes, ferrum_doc::SCHEMA_VERSION + 1);
+    c.command(Command::Open {
+        bytes: ByteBuf::from(future),
+    });
+    assert!(c.editor().document().is_read_only());
+    c.take_events();
+    let steps = c.live().steps;
+    let nodes = c.editor().scene().len();
+    // Панорамирование средней кнопкой — жест, который вставка не должна прервать.
+    let p = |x: f64, t: f64| PointerEvent {
+        point: (x, 100.0).into(),
+        button: PointerButton::Middle,
+        modifiers: Modifiers::NONE,
+        time_ms: t,
+    };
+    c.handle(Input::PointerDown(p(100.0, 0.0)));
+    c.handle(Input::PointerMove(p(150.0, 16.0)));
+    let png = {
+        let mut p = ferrum_render::Pixmap::new(2, 1);
+        p.data_as_u8_slice_mut().fill(255);
+        p.into_png().unwrap()
+    };
+    for cmd in [
+        Command::Paste {
+            bytes: ByteBuf::from(b"not a ferrum clip".to_vec()),
+        },
+        Command::PasteImage {
+            bytes: ByteBuf::from(png),
+        },
+        Command::TextInput {
+            kind: TextInputKindDto::Paste,
+            data: Some("Из буфера".into()),
+        },
+    ] {
+        c.command(cmd);
+    }
+    let events = c.take_events();
+    assert!(
+        !events.iter().any(|e| matches!(e, CoreEvent::Error { .. })),
+        "{events:?}"
+    );
+    assert_eq!(c.live().steps, steps);
+    assert_eq!(c.editor().scene().len(), nodes);
+    // Жест жив: следующее движение двигает вид дальше.
+    let center = c.editor().camera().center();
+    c.handle(Input::PointerMove(p(200.0, 32.0)));
+    assert_ne!(c.editor().camera().center(), center);
+    c.handle(Input::PointerUp(p(200.0, 48.0)));
+}

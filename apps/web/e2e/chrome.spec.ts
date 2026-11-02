@@ -5,7 +5,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { shortcutLabel } from '../src/ui/shortcuts';
 import type { Platform } from '../src/core/core';
-import { appScreen, drag, live, liveWhen, openApp } from './helpers';
+import { appScreen, drag, live, liveWhen, mainMenu, openApp } from './helpers';
 
 const ui = <T>(page: Page, f: (s: NonNullable<Window['__ferrum']>['ui'] & object) => T) =>
   page.evaluate((src) => new Function('s', `return (${src})(s)`)(window.__ferrum!.ui), f.toString()) as Promise<T>;
@@ -93,7 +93,9 @@ test('подписи сочетаний в интерфейсе совпадаю
       checked++;
     });
   }
-  expect(checked).toBeGreaterThanOrEqual(commands.length);
+  // У команд интерфейса без привычного сочетания (новый файл, открыть…) подписей нет.
+  expect(checked).toBeGreaterThanOrEqual(commands.filter((c) => c.bindings.length > 0).length);
+  expect(checked).toBeGreaterThan(50);
 });
 
 test('зум из шапки и меню масштабов', async ({ page }) => {
@@ -179,6 +181,58 @@ test('меню: Home/End, Enter, Tab; фокус возвращается к я�
   await expect(menu).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(menu).toHaveCount(0);
+});
+
+test('контекстное меню и тулбар: доступность и отметки — из состояния команд ядра', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  const node = await appScreen(page, l, 200, 40);
+  await page.mouse.click(node.x, node.y);
+  await liveWhen(page, 'l.selectionCount === 1');
+  // Один прямоугольник: разгруппировать нечего, булевой операции нужен второй слой.
+  const toolbar = page.getByRole('toolbar', { name: 'Инструменты' });
+  await expect(toolbar.getByRole('button', { name: 'Объединение' })).toHaveAttribute('aria-disabled', 'true');
+  await expect(toolbar.getByRole('button', { name: 'Объединение' })).toHaveAttribute('aria-pressed', 'false');
+  await toolbar.getByRole('button', { name: 'Булевы операции' }).click();
+  const ops = page.getByRole('menu', { name: 'Булевы операции' });
+  await expect(ops.getByRole('menuitemcheckbox', { name: /Вычитание/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(ops.getByRole('menuitem', { name: /Сплющить/ })).not.toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+  await page.mouse.click(node.x, node.y, { button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Действия с выделением' });
+  await expect(menu.getByRole('menuitem', { name: /^Разгруппировать/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(menu.getByRole('menuitem', { name: /^Сгруппировать/ })).not.toHaveAttribute('aria-disabled', 'true');
+  // Сгруппировать из меню — группа выделена: теперь разгруппировать можно.
+  await menu.getByRole('menuitem', { name: /^Сгруппировать/ }).click();
+  await liveWhen(page, `l.steps === ${l.steps + 1}`);
+  await page.mouse.click(node.x, node.y, { button: 'right' });
+  await expect(menu.getByRole('menuitem', { name: /^Разгруппировать/ })).not.toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+});
+
+test('меню: серые пункты доступны стрелками, но не выполняются; переход по первой букве', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  // Пустое место холста: выделения нет — «Копировать» серый.
+  const empty = await appScreen(page, l, 100, 1080);
+  await page.mouse.click(empty.x, empty.y, { button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Действия с выделением' });
+  const copy = menu.getByRole('menuitem', { name: /^Копировать/ }).first();
+  await expect(copy).toHaveAttribute('aria-disabled', 'true');
+  await expect(copy).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(menu).toBeVisible();
+  // Буква «В» (русская раскладка: Playwright набирает её без keydown — событие
+  // отправляется прямо): «Вырезать» (серый), затем «Вставить».
+  const letter = (key: string) =>
+    page.evaluate((k) => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: 'KeyD', bubbles: true })), key);
+  await letter('в');
+  await expect(menu.getByRole('menuitem', { name: /^Вырезать/ })).toBeFocused();
+  await letter('В');
+  await expect(menu.getByRole('menuitem', { name: /^Вставить/ })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
 });
 
 test('стрелки в открытом меню не доходят до холста', async ({ page }) => {
@@ -291,8 +345,7 @@ test('«Новый файл» при правках не спрашивает: �
   await liveWhen(page, `l.steps === ${l.steps + 1}`);
   const total = (await live(page)).nodes;
   const first = page.url();
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Новый файл' }).click();
+  await mainMenu(page, 'Файл', 'Новый файл');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect.poll(() => page.url()).not.toBe(first);
   await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true);
@@ -365,7 +418,7 @@ test('стрелки, Delete и Backspace на кнопках панелей н�
     panel.getByRole('button', { name: 'Скрыть заливку' }).first(),
     panel.getByRole('button', { name: 'Цвет заливки' }).first(),
     panel.getByRole('button', { name: 'Удалить обводку' }),
-    page.getByRole('button', { name: 'Меню файла' }),
+    page.getByRole('button', { name: 'Главное меню' }),
     page.getByRole('button', { name: 'Масштаб', exact: true }),
     page.getByRole('button', { name: 'Страницы', exact: true }),
     page.getByRole('button', { name: 'Добавить страницу' }),
@@ -425,8 +478,7 @@ test('масштаб экспорта — группа переключател�
 });
 
 const fileMenu = async (page: Page, item: string | RegExp) => {
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: item }).click();
+  await mainMenu(page, 'Файл', item);
 };
 
 test('правки вне истории (страница, имя файла) — «изменён» и запись в хранилище; копия на диск признак не снимает', async ({ page }) => {

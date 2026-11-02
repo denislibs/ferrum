@@ -186,6 +186,10 @@ export function installClipboard(ed: Editor): () => void {
   const paste = (e: ClipboardEvent) => {
     if (textTarget(e.target) && !(isTextField(e.target) && !modalOpen())) return;
     e.preventDefault();
+    // «Вставить» недоступна (документ только для чтения) — молчим, как серый пункт
+    // меню: ни чтения буфера (и запроса разрешения), ни уведомлений. Ядро
+    // проверяет то же самое.
+    if (ed.store.state.commands['edit.paste']?.enabled === false) return;
     const sync = fromDataTransfer(e.clipboardData);
     if (sync) void deliver(sync);
     // Свой формат асинхронного API в событии не виден: событие пустое — читаем его.

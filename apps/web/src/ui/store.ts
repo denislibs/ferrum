@@ -8,6 +8,7 @@ import type {
   CoreEvent,
   FontChoice,
   KeymapEntry,
+  MenuItemDto,
   TextStyleDto,
   MissingFontDto,
   LayerRow,
@@ -65,6 +66,16 @@ export interface UiState {
   textStyle: TextStyleDto | null;
   /** Семейства текстов текущей страницы (группа «В документе» выбора шрифта). */
   pageFonts: string[];
+  /** Состояние команд по ключу (доступна, отмечена) — как его прислало ядро. */
+  commands: Record<string, CommandStatus>;
+  /** Дерево главного меню из ядра (ключи команд). */
+  mainMenu: MenuItemDto[];
+}
+
+/** Состояние команды: `checked` есть только у переключателей. */
+export interface CommandStatus {
+  enabled: boolean;
+  checked?: boolean;
 }
 
 const initial: UiState = {
@@ -94,6 +105,8 @@ const initial: UiState = {
   text: { editing: false, draft: false },
   textStyle: null,
   pageFonts: [],
+  commands: {},
+  mainMenu: [],
 };
 
 /** Сколько уведомлений видно одновременно и сколько секунд живёт каждое. */
@@ -195,6 +208,13 @@ export function createUiStore() {
         break;
       case 'pageFonts':
         setState('pageFonts', e.families);
+        break;
+      case 'mainMenu':
+        setState('mainMenu', e.tree);
+        break;
+      case 'commandStates':
+        // Только изменившиеся команды: остальные остаются как были.
+        for (const c of e.changed) setState('commands', c.key, { enabled: c.enabled, checked: c.checked ?? undefined });
         break;
       case 'error':
         // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.

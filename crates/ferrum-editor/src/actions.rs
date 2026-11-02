@@ -37,6 +37,11 @@ enum Arrange {
 impl Editor {
     pub(crate) fn run(&mut self, cmd: CommandId) {
         use CommandId as C;
+        // Недоступная команда ничего не делает: ни шага, ни сообщения (спека
+        // подсистемы 2, раздел 3) — так же, как её пункт в меню.
+        if !self.command_state(cmd).enabled {
+            return;
+        }
         // Команда с зажатой кнопкой: жест отменяется, а не записывается.
         self.cancel_stale_vector_drag();
         // Правка вектора перехватывает свои команды (удаление, сдвиг, Esc…).
@@ -182,10 +187,51 @@ impl Editor {
                     ..Default::default()
                 },
             ),
-            C::ToggleUi => self.out.events.push(EditorEvent::ToggleUi),
+            C::ToggleUi => {
+                self.settings.ui_hidden = !self.settings.ui_hidden;
+                self.out.events.push(EditorEvent::ToggleUi);
+            }
             C::Save => self.out.events.push(EditorEvent::SaveRequested),
+            C::UiMainMenu
+            | C::UiNewFile
+            | C::UiOpen
+            | C::UiOpenDisk
+            | C::UiSaveDisk
+            | C::UiSaveCopy
+            | C::UiExport
+            | C::UiAllFiles
+            | C::UiSettings
+            | C::UiShortcuts
+            | C::UiAbout
+            | C::UiPixelSnap
+            | C::UiThemeDark
+            | C::UiThemeLight
+            | C::UiThemeSystem => self.out.events.push(EditorEvent::UiCommand(cmd)),
             C::FlipHorizontal => self.mirror(Vec2::new(-1.0, 1.0)),
             C::FlipVertical => self.mirror(Vec2::new(1.0, -1.0)),
+            C::PixelGrid => self.settings.pixel_grid = !self.settings.pixel_grid,
+            C::EditObject => self.edit_object(),
+            C::TextBold
+            | C::TextItalic
+            | C::TextUnderline
+            | C::TextStrike
+            | C::TextAlignLeft
+            | C::TextAlignCenter
+            | C::TextAlignRight
+            | C::TextAlignJustify => self.text_command(cmd),
+        }
+    }
+
+    /// «Войти в правку» (как Enter): единственный выделенный текст — правка
+    /// текста, вектор или фигура — правка вектора.
+    fn edit_object(&mut self) {
+        if self.vector_edit.is_some() || self.text_edit.is_some() {
+            return;
+        }
+        if let [id] = self.selection[..] {
+            if !self.start_text_edit(id, crate::text_edit::EnterAt::All) {
+                self.start_vector_edit(id);
+            }
         }
     }
 

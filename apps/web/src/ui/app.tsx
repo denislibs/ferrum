@@ -11,7 +11,8 @@ import { boot, dismissSplash, isTestMode } from './boot';
 import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
 import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
-import { Menu, type MenuItem } from './menu';
+import { Menu, type MenuSearch } from './menu';
+import { buildMainMenu, entriesByKey, searchMenu } from './main-menu';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
@@ -113,7 +114,7 @@ export function App(props: AppProps) {
   // Тема интерфейса и оверлеев ядра одна: смена доходит и до worker'а (цвет холста).
   createEffect(() => {
     document.documentElement.dataset.theme = theme();
-    editor()?.send({ type: 'setTheme', theme: theme() });
+    editor()?.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
   });
   createEffect(() => editor()?.send({ type: 'setSettings', pixelSnap: pixelSnap() }));
   // Запись — не чаще раза в четверть секунды (края панелей тянутся каждый кадр), и
@@ -247,7 +248,7 @@ export function App(props: AppProps) {
       systemFonts: systemFonts((blob) => props.files.fontBytes?.(blob) ?? Promise.reject(new Error('нет хранилища'))),
       // До документа: тема (первый кадр сразу в цвете темы), привязка и сохранённая раскладка.
       beforeDocument: (ed) => {
-        ed.send({ type: 'setTheme', theme: theme() });
+        ed.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
         ed.send({ type: 'setSettings', pixelSnap: pixelSnap() });
         // Нынешняя раскладка: другая вкладка могла сменить её, пока ядро запускалось.
         const km = keymap();
@@ -278,6 +279,7 @@ export function App(props: AppProps) {
           ed.dispose();
           return;
         }
+        ed.uiCommand = uiCommand;
         setEditor(ed);
         canvas.focus();
         const offClipboard = installClipboard(ed);
@@ -304,6 +306,7 @@ export function App(props: AppProps) {
         let opening = true;
         let recovered = false;
         ed.core.on((e) => {
+          if (e.type === 'uiCommand') uiCommand(e.key);
           if (e.type === 'recovered') recovered = true;
           if (opening && e.type === 'opened') {
             opening = false;
@@ -459,18 +462,69 @@ export function App(props: AppProps) {
       store.toast(`Не удалось сохранить копию: ${e instanceof Error ? e.message : String(e)}`, 'error');
     }
   };
-  const disk = (items: MenuItem[]): MenuItem[] => (props.files.disk ? items : []);
-  const fileItems = (ed: Editor): MenuItem[] => [
-    { label: 'Новый файл', onSelect: () => props.navigate({ kind: 'new' }) },
-    { label: 'Открыть…', onSelect: () => void openFromDisk() },
-    ...disk([{ label: 'Открыть с диска…', onSelect: () => void openLinked() }]),
-    { label: 'Сохранить', command: 'file.save', onSelect: () => void saver?.save() },
-    ...disk([{ label: 'Сохранить на диск…', onSelect: () => void saveToDisk() }]),
-    { label: 'Сохранить копию на диск…', onSelect: () => void saveCopy(ed) },
-    { separator: true },
-    { label: 'Все файлы', onSelect: () => props.navigate({ kind: 'files', section: 'recent' }) },
-    { label: 'Настройки…', onSelect: () => setSettingsOpen(true) },
-  ];
+  // Главное меню (спека подсистемы 2, раздел 4): дерево — из ядра, названия — из
+  // таблицы команд. Файла на диске без File System Access нет: его пунктов тоже.
+  const [mainMenu, setMainMenu] = createSignal(false);
+  const hidden = createMemo(() => new Set(props.files.disk ? [] : ['ui.open_disk', 'ui.save_disk']));
+  const entries = createMemo(() => entriesByKey(store.state.keymap.commands));
+  const mainItems = () => buildMainMenu(store.state.mainMenu, entries(), hidden());
+  const search: MenuSearch = {
+    label: 'Поиск по командам',
+    placeholder: 'Найти команду',
+    results: (q) => searchMenu(store.state.mainMenu, entries(), q, hidden()),
+  };
+  // Команды интерфейса (`ui.*`): пункт меню вызывает их сразу, сочетание на холсте —
+  // через ядро (событие `uiCommand`).
+  const uiCommand = (key: string) => {
+    const ed = editor();
+    if (!ed) return;
+    switch (key) {
+      case 'ui.main_menu':
+        setMainMenu(true);
+        break;
+      case 'ui.new_file':
+        props.navigate({ kind: 'new' });
+        break;
+      case 'ui.open':
+        void openFromDisk();
+        break;
+      case 'ui.open_disk':
+        if (props.files.disk) void openLinked();
+        break;
+      case 'ui.save_disk':
+        if (props.files.disk) void saveToDisk();
+        break;
+      case 'ui.save_copy':
+        void saveCopy(ed);
+        break;
+      case 'ui.export':
+        // «Экспорт…»: к кнопке секции экспорта панели свойств (настройки — там же).
+        document.querySelector<HTMLElement>('[data-export-run]')?.focus();
+        break;
+      case 'ui.all_files':
+        props.navigate({ kind: 'files', section: 'recent' });
+        break;
+      case 'ui.settings':
+      case 'ui.shortcuts':
+        setSettingsOpen(true);
+        break;
+      case 'ui.about':
+        store.toast('Ferrum — редактор векторной графики: ядро на Rust и WebAssembly, интерфейс — SolidJS');
+        break;
+      case 'ui.pixel_snap':
+        setPixelSnap((v) => !v);
+        break;
+      case 'ui.theme_dark':
+        setThemeChoice('dark');
+        break;
+      case 'ui.theme_light':
+        setThemeChoice('light');
+        break;
+      case 'ui.theme_system':
+        setThemeChoice('system');
+        break;
+    }
+  };
 
   return (
     <ErrorBoundary
@@ -519,7 +573,13 @@ export function App(props: AppProps) {
         {(ed) => (
           <EditorContext.Provider value={ed()}>
             <aside class="fe-side fe-side--left" aria-label="Страницы и слои">
-              <FileHeader items={() => fileItems(ed())} onBack={() => props.navigate({ kind: 'files', section: 'recent' })} />
+              <FileHeader
+                menu={mainItems}
+                search={search}
+                open={mainMenu()}
+                onOpen={setMainMenu}
+                onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
+              />
               <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} />
               <LayersPanel />
               <ResizeEdge side="left" width={left()} onWidth={setLeft} />
@@ -543,7 +603,7 @@ export function App(props: AppProps) {
               {(at) => (
                 <Menu
                   label="Действия с выделением"
-                  items={canvasMenu(store.state.selectionCount)}
+                  items={canvasMenu()}
                   anchor={at()}
                   onClose={() => setContext(null)}
                 />

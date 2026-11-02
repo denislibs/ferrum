@@ -461,7 +461,11 @@ impl Editor {
             | C::ZoomIn
             | C::ZoomOut
             | C::ToggleUi
+            | C::PixelGrid
+            | C::EditObject
             | C::Save => return false,
+            // Команды интерфейса правку не трогают (меню, настройки, файлы).
+            c if c.is_ui() => return false,
             // Остальное — правки узлов: правка вектора кончается.
             _ => {
                 self.end_vector_edit();

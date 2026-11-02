@@ -175,7 +175,10 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     scheduler,
     platform,
     send: (cmd) => core.send(cmd),
-    run: (command) => core.send({ type: 'execute', command }),
+    run: (command) => {
+      if (command.startsWith('ui.') && editor.uiCommand) editor.uiCommand(command);
+      else core.send({ type: 'execute', command });
+    },
     layout,
     showSystemFonts: () => void fonts.show(),
     // Ядро и защита чтений layout уходят вместе с редактором: экрану файлов они не нужны.

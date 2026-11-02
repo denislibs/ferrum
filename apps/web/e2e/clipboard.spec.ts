@@ -6,7 +6,7 @@
 // из файла.
 
 import { expect, test, type Page } from '@playwright/test';
-import { appScreen, live, liveWhen, openApp } from './helpers';
+import { appScreen, live, liveWhen, mainMenu, openApp } from './helpers';
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
@@ -192,8 +192,7 @@ test('открытый модальный диалог: буфер обмена 
   await selectShape(page);
   const before = await live(page);
   await page.evaluate(() => navigator.clipboard.writeText('исходный текст'));
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(page, 'Настройки', 'Настройки…');
   const dialog = page.getByRole('dialog');
   await expect(dialog).toHaveAttribute('aria-modal', 'true');
   // Сочетания на вкладке диалога: ни копирования, ни вставки в документ.
@@ -409,7 +408,7 @@ test('«Сохранить копию на диск…» и «Открыть…�
     delete (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker;
   });
   await openApp(page, 300);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await mainMenu(page, 'Файл');
   const download = page.waitForEvent('download');
   await page.getByRole('menuitem', { name: 'Сохранить копию на диск…' }).click();
   const file = await download;
@@ -417,7 +416,7 @@ test('«Сохранить копию на диск…» и «Открыть…�
   const bytes = Buffer.concat(await (await file.createReadStream()).toArray());
   // «Открыть…» кладёт файл в хранилище новой записью и открывает её.
   const first = page.url();
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await mainMenu(page, 'Файл');
   const chooser = page.waitForEvent('filechooser');
   await page.getByRole('menuitem', { name: 'Открыть…' }).click();
   await (await chooser).setFiles({ name: 'проект.ferrum', mimeType: 'application/octet-stream', buffer: bytes });
@@ -431,7 +430,7 @@ test('«Сохранить копию на диск…»: имя файла из
   await openApp(page, 10);
   await page.evaluate(() => window.__ferrum!.core!.send({ type: 'setDocumentName', name: 'План: этаж 1/2' }));
   await expect.poll(async () => (await ui(page)).documentName).toBe('План: этаж 1/2');
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await mainMenu(page, 'Файл');
   const download = page.waitForEvent('download');
   await page.getByRole('menuitem', { name: 'Сохранить копию на диск…' }).click();
   expect((await download).suggestedFilename()).toBe('План_ этаж 1_2.ferrum');
@@ -446,9 +445,9 @@ test('«Открыть…» при правках не спрашивает: п�
   await page.keyboard.press('ControlOrMeta+KeyD');
   const edited = await liveWhen(page, 'l.steps === 1');
   const first = page.url();
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await mainMenu(page, 'Файл');
   const chooser = page.waitForEvent('filechooser');
-  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: 'Открыть…' }).click();
+  await page.getByRole('menu', { name: 'Файл', exact: true }).getByRole('menuitem', { name: 'Открыть…' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await (await chooser).setFiles({ name: 'битый.ferrum', mimeType: 'application/octet-stream', buffer: Buffer.from('не ferrum') });
   // Файл не открылся: экран файлов, одно сообщение; запись в хранилище осталась.
@@ -475,7 +474,7 @@ test('«Сохранить копию на диск…» на 100 000 узлах
       for (const e of list.getEntries()) w.__long.push({ start: e.startTime, duration: e.duration });
     }).observe({ type: 'longtask', buffered: false });
   });
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await mainMenu(page, 'Файл');
   const download = page.waitForEvent('download');
   const t0 = await page.evaluate(() => performance.now());
   await page.getByRole('menuitem', { name: 'Сохранить копию на диск…' }).click();
@@ -599,7 +598,7 @@ test('«Открыть…»: файл больше предела отклоня
     w.showOpenFilePicker = async () => [{ getFile: async () => file }];
   });
   await openApp(page, 10);
-  await page.getByRole('button', { name: 'Меню файла' }).click();
+  await mainMenu(page, 'Файл');
   await page.getByRole('menuitem', { name: 'Открыть…' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Не удалось открыть файл: больше 512 МБ' })).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { __read: boolean }).__read)).toBe(false);
@@ -638,9 +637,9 @@ test('копирование и вырезание из палитры и мен
   await expect(page.getByRole('dialog', { name: 'Цвет заливки' })).toBeVisible();
   await cutAt('.fe-picker button');
   await page.keyboard.press('Escape');
-  // Меню файла.
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await expect(page.getByRole('menu', { name: 'Меню файла' })).toBeVisible();
+  // Главное меню.
+  await page.getByRole('button', { name: 'Главное меню' }).click();
+  await expect(page.getByRole('menu', { name: 'Главное меню' })).toBeVisible();
   await cutAt('[role="menu"] [role="menuitem"]');
   await page.keyboard.press('Escape');
 });

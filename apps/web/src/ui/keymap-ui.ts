@@ -1,5 +1,5 @@
 
-// Таблица раскладки для настроек: группы команд по ключу (`tool.*`, `edit.*`…),
+// Таблица раскладки для настроек: группы команд из таблицы ядра (`tool`, `edit`…),
 // поиск по названию и подписи, сочетания, которые перехватывает браузер,
 // конфликты, запись сочетания с клавиатуры.
 
@@ -22,10 +22,14 @@ export const GROUPS: { id: string; title: string }[] = [
   { id: 'tool', title: 'Инструменты' },
   { id: 'edit', title: 'Правка' },
   { id: 'object', title: 'Объект' },
+  { id: 'text', title: 'Текст' },
+  { id: 'vector', title: 'Вектор' },
   { id: 'arrange', title: 'Порядок' },
   { id: 'nudge', title: 'Сдвиг' },
   { id: 'view', title: 'Вид' },
   { id: 'file', title: 'Файл' },
+  { id: 'settings', title: 'Настройки' },
+  { id: 'help', title: 'Справка' },
 ];
 
 export function groupCommands(commands: readonly KeymapEntry[]): KeymapGroup[] {

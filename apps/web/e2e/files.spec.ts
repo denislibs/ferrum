@@ -5,7 +5,7 @@
 // 1000 записях.
 
 import { expect, test, type Page } from '@playwright/test';
-import { appScreen, drag, expectCore, live, liveWhen } from './helpers';
+import { appScreen, drag, expectCore, live, liveWhen, mainMenu } from './helpers';
 
 /** Тестовый режим и учёт worker'ов: какие созданы и какие остановлены. */
 async function setup(page: Page): Promise<void> {
@@ -61,8 +61,7 @@ async function drawRect(page: Page): Promise<void> {
 }
 
 const fileMenu = async (page: Page, item: string) => {
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menu', { name: 'Меню файла' }).getByRole('menuitem', { name: item }).click();
+  await mainMenu(page, 'Файл', item);
 };
 
 const fileId = (page: Page) => /#\/file\/([\w-]+)$/.exec(page.url())?.[1] ?? '';

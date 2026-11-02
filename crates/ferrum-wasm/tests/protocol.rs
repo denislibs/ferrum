@@ -31,6 +31,7 @@ fn commands() -> Vec<Command> {
         },
         Command::SetTheme {
             theme: Theme::Light,
+            system: Some(true),
         },
         Command::Paste { bytes: bytes(&[1]) },
         Command::PlaceImage {
@@ -284,11 +285,44 @@ fn events() -> Vec<CoreEvent> {
             current: "5@6".into(),
             background: None,
         },
+        CoreEvent::UiCommand {
+            key: "ui.main_menu".into(),
+        },
+        CoreEvent::MainMenu {
+            tree: vec![
+                MenuItemDto::Submenu {
+                    title: "Правка".into(),
+                    items: vec![
+                        MenuItemDto::Command {
+                            key: "edit.undo".into(),
+                        },
+                        MenuItemDto::Separator,
+                    ],
+                },
+                MenuItemDto::Separator,
+            ],
+        },
+        CoreEvent::CommandStates {
+            changed: vec![
+                CommandStateDto {
+                    key: "edit.undo".into(),
+                    enabled: false,
+                    checked: None,
+                },
+                CommandStateDto {
+                    key: "view.pixel_grid".into(),
+                    enabled: true,
+                    checked: Some(true),
+                },
+            ],
+        },
         CoreEvent::Keymap {
             commands: vec![KeymapEntry {
                 key: "tool.rect".into(),
                 name: "Прямоугольник".into(),
                 group: "tool".into(),
+                keywords: vec!["квадрат".into(), "rectangle".into()],
+                toggle: false,
                 bindings: vec!["KeyR".into()],
                 labels: vec!["R".into()],
                 defaults: vec!["KeyR".into()],

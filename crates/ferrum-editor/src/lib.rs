@@ -7,6 +7,7 @@
 mod actions;
 mod boolean;
 pub mod clipboard;
+pub mod command_state;
 pub mod commands;
 mod editor;
 mod flatten;
@@ -14,6 +15,7 @@ pub mod geometry;
 pub mod input;
 pub mod keymap;
 pub mod measure;
+pub mod menu;
 mod ops;
 mod outline;
 pub mod pages;
@@ -33,10 +35,12 @@ pub mod vector_ops;
 mod vector_select;
 
 pub use actions::{FIT_PADDING_PX, PRESET_GAP};
-pub use commands::{Command, CommandId, COMMANDS};
-pub use editor::{Editor, EditorEvent, Settings, WHEEL_ZOOM_SPEED};
+pub use command_state::CommandState;
+pub use commands::{Command, CommandGroup, CommandId, COMMANDS};
+pub use editor::{Editor, EditorEvent, Settings, ThemeChoice, WHEEL_ZOOM_SPEED};
 pub use input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 pub use keymap::{browser_reserved, BindError, Conflict, Keymap, KeymapError, Shortcut};
+pub use menu::{main_menu, menu_commands, MenuNode};
 pub use pages::{clean_name, MAX_NAME_CHARS};
 pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,

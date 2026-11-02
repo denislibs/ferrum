@@ -758,6 +758,7 @@ fn main() {
     );
     boolean_child_drag(&mut report);
     scale_selection(&mut report);
+    command_states(&mut report);
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -778,6 +779,64 @@ fn main() {
     if failed {
         std::process::exit(1);
     }
+}
+
+/// Состояние команд (подсистема 2, этап 1): после шага на странице из 100 000
+/// узлов ядро пересчитывает доступность и отметки всех команд и сравнивает с
+/// отправленными. Замер — полный пересчёт с разницей (как после смены
+/// выделения или шага истории), цель — 1 мс; справочно — при 10 000 и при всех
+/// выделенных (проход по выделению — один).
+fn command_states(report: &mut Report) {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let ids: Vec<NodeId> = doc.transact(page, vec![], |p| fill(p, NODES)).unwrap();
+    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    let leaf = ids[1];
+    let measure = |ed: &mut Editor, sel: &[NodeId]| {
+        ed.select(sel);
+        let mut runs = Vec::new();
+        let mut all = true;
+        for _ in 0..COMMIT_RUNS * 4 {
+            // Шаг: сдвиг выделенного (история и сцена меняются).
+            ed.execute(CommandId::NudgeRight);
+            ed.take_events();
+            ed.reset_command_states();
+            let t = Instant::now();
+            let changed = ed.take_command_states();
+            runs.push(t.elapsed());
+            all &= changed.is_some_and(|c| c.len() == ferrum_editor::COMMANDS.len());
+        }
+        (runs, all)
+    };
+    let (one, ok) = measure(&mut ed, &[leaf]);
+    report.gate_median(
+        "Состояния команд после шага, 100 000 узлов, выделен 1",
+        &one,
+        1.0,
+    );
+    report.check(
+        "Состояния команд: посчитаны все команды таблицы",
+        ok,
+        format!("{}", ferrum_editor::COMMANDS.len()),
+        "все",
+    );
+    let many: Vec<NodeId> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 100 != 0)
+        .map(|(_, id)| *id)
+        .take(BIG_SELECTION)
+        .collect();
+    let (big, _) = measure(&mut ed, &many);
+    report.info(
+        "Состояния команд после шага, выделено 10 000 (медиана)",
+        ms(median(big)),
+    );
+    let (whole, _) = measure(&mut ed, &ids);
+    report.info(
+        "Состояния команд после шага, выделено всё — 100 000 (медиана)",
+        ms(median(whole)),
+    );
 }
 
 /// Правка ребёнка большой булевой группы (подсистема 3, этап 4): 1000

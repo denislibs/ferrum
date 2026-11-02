@@ -4,11 +4,10 @@
 // привязка к пикселям, сохранение между запусками.
 
 import { expect, test, type Page } from '@playwright/test';
-import { appScreen, drag, expectPixel, live, liveWhen, openApp } from './helpers';
+import { appScreen, drag, expectPixel, live, liveWhen, mainMenu, openApp } from './helpers';
 
 async function openSettings(page: Page) {
-  await page.getByRole('button', { name: 'Меню файла' }).click();
-  await page.getByRole('menuitem', { name: /Настройки/ }).click();
+  await mainMenu(page, 'Настройки', 'Настройки…');
   return page.getByRole('dialog', { name: 'Настройки' });
 }
 
@@ -68,7 +67,7 @@ test('импорт, экспорт и предупреждение о сочет
   const row = dialog.getByRole('row').filter({ hasText: 'Дублировать' });
   await expect(row).toContainText('Перехватывает браузер');
   const download = page.waitForEvent('download');
-  await dialog.getByRole('button', { name: 'Экспорт' }).click();
+  await dialog.getByRole('button', { name: 'Экспорт', exact: true }).click();
   const file = await download;
   expect(file.suggestedFilename()).toBe('ferrum-keymap.json');
   const text = Buffer.concat(await (await file.createReadStream()).toArray()).toString();
@@ -214,7 +213,7 @@ test('диалог: роли, фокус внутри, Esc закрывает', 
   expect(await dialog.evaluate((d) => d.contains(document.activeElement))).toBe(true);
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Меню файла' })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Главное меню' })).toBeFocused();
 });
 
 /** Выделить «Слой 1» первого фрейма щелчком на холсте (мир (200, 40)). */
@@ -232,7 +231,7 @@ test('диалог модальный: щелчок по пустому мест
   const before = await selectShape(page);
   const dialog = await openSettings(page);
   // Заголовок и поля диалога — не интерактивные: щелчок оставляет фокус на самом диалоге.
-  await dialog.getByRole('heading', { name: 'Настройки' }).click();
+  await dialog.getByRole('heading', { name: 'Настройки', level: 1 }).click();
   await expect(dialog).toBeFocused();
   await dialog.locator('.fe-dialog__body').click({ position: { x: 2, y: 2 } });
   expect(await dialog.evaluate((d) => d.contains(document.activeElement))).toBe(true);
@@ -436,7 +435,7 @@ test('импорт: слишком большой файл, не JSON и чте�
   await expect(dialog.getByRole('row').filter({ hasText: 'Прямоугольник' })).toContainText('R');
   // Экспорт без отличий — всё равно верный файл раскладки.
   const download = page.waitForEvent('download');
-  await dialog.getByRole('button', { name: 'Экспорт' }).click();
+  await dialog.getByRole('button', { name: 'Экспорт', exact: true }).click();
   const text = Buffer.concat(await (await (await download).createReadStream()).toArray()).toString();
   expect(JSON.parse(text)).toMatchObject({ format: 'ferrum-keymap', version: 1 });
 });
@@ -450,7 +449,7 @@ test('экспорт и импорт обратно — раскладка та 
   const keys = () => page.evaluate(() => window.__ferrum!.ui!.keymap.commands.find((c) => c.key === 'tool.rect')!.bindings);
   await expect.poll(keys).toEqual(['KeyR', 'KeyQ']);
   const download = page.waitForEvent('download');
-  await dialog.getByRole('button', { name: 'Экспорт' }).click();
+  await dialog.getByRole('button', { name: 'Экспорт', exact: true }).click();
   const bytes = Buffer.concat(await (await (await download).createReadStream()).toArray());
   await dialog.getByRole('button', { name: 'Сбросить все' }).click();
   await expect.poll(keys).toEqual(['KeyR']);
