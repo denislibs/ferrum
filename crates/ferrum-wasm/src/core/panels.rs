@@ -503,7 +503,11 @@ impl Core {
             Command::RevealLayer { id } => {
                 if let Some(id) = self.node(&id) {
                     // Выделение не из панели: предки раскрываются, панель прокручивается.
-                    if !self.editor.reveal_layer(id) {
+                    // Прежнее выделение события не даёт — раскрываем здесь же.
+                    if self.editor.reveal_layer(id) {
+                        self.reveal = self.layers.reveal(self.editor.scene(), &[id]);
+                        self.ui.layers = true;
+                    } else {
                         self.error("Слой не найден на текущей странице");
                     }
                 }

@@ -25,7 +25,7 @@ export function layoutVariants(query: string): string[] {
 }
 
 /** Сколько первых символов текста участвует в поиске (как `FIND_NAME_CHARS` ядра). */
-export const MAX_TEXT_CHARS = 256;
+export const MAX_TEXT_CHARS = 40;
 
 const MATCH = 1;
 const WORD_START = 8;
@@ -36,7 +36,8 @@ const EXACT = 10;
 
 /** Символы для сравнения: нижний регистр, «ё» как «е», первые `MAX_TEXT_CHARS`. */
 export function fold(s: string): string[] {
-  return [...[...s].slice(0, MAX_TEXT_CHARS).join('').toLowerCase().replaceAll('ё', 'е')];
+  const head = [...s].slice(0, MAX_TEXT_CHARS).join('');
+  return [...head.toLowerCase().replaceAll('ё', 'е')].slice(0, MAX_TEXT_CHARS);
 }
 
 /** Варианты запроса для `scoreFolded`: обе раскладки, без пробелов; пусто — нечего искать. */

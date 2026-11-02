@@ -3,7 +3,7 @@
 // Те же правила — у поиска слоёв в ядре (`crates/ferrum-editor/tests/find_layers.rs`).
 
 import { expect, test } from '@playwright/test';
-import { fuzzyScore, layoutVariants, queryVariants } from '../src/ui/fuzzy';
+import { fuzzyScore, layoutVariants, MAX_TEXT_CHARS, queryVariants } from '../src/ui/fuzzy';
 
 test('буквы запроса — по порядку, не обязательно подряд', () => {
   expect(fuzzyScore('Кнопка отправить', 'кно')).not.toBeNull();
@@ -34,8 +34,25 @@ test('регистр, «ё» и раскладка не важны; пробел
   expect(queryVariants('  ')).toEqual([]);
 });
 
-test('длинный текст участвует первыми 256 символами', () => {
-  const long = 'а'.repeat(300) + 'я';
-  expect(fuzzyScore(long, 'я')).toBeNull();
-  expect(fuzzyScore('а'.repeat(255) + 'я', 'я')).not.toBeNull();
+test('длинный текст участвует первыми 40 символами', () => {
+  expect(MAX_TEXT_CHARS).toBe(40);
+  expect(fuzzyScore('а'.repeat(40) + 'я', 'я')).toBeNull();
+  expect(fuzzyScore('а'.repeat(39) + 'я', 'я')).not.toBeNull();
+});
+
+// Те же значения — в `crates/ferrum-editor/tests/find_layers.rs`: счёт один.
+test('веса совпадают с ядром', () => {
+  const vectors: [string, string, number][] = [
+    ['Кнопка отправить', 'кно', 27],
+    ['Кнопка отправить', 'котп', 33],
+    ['Order summary', 'su', 12],
+    ['Ordersum', 'su', 4],
+    ['Фон', 'фон', 37],
+    ['Слой 5', 'слой 5', 51],
+    ['Слой 59', 'слой 5', 41],
+    ['Вставить поверх', 'вп', 21],
+    ['Шапка сайта', 'шап сай', 45],
+    ['Order', 'щквук', 49],
+  ];
+  for (const [text, query, score] of vectors) expect(fuzzyScore(text, query), `${text} / ${query}`).toBe(score);
 });

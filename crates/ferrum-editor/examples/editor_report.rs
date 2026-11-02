@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use ferrum_doc::fixture::fill;
 use ferrum_doc::{Document, NodeId, PropsPatch, TextContent, TextProps, TextSizing};
 use ferrum_editor::snap::SNAP_THRESHOLD_PX as SNAP_PX;
-use ferrum_editor::{CommandId, Editor, Input, KeyEvent, Modifiers, Platform, PointerEvent};
+use ferrum_editor::{
+    CommandId, Editor, Input, KeyEvent, LayerIndex, Modifiers, Platform, PointerEvent,
+};
 use ferrum_render::Camera;
 use kurbo::{Point, Size};
 
@@ -877,34 +879,10 @@ fn select_similar(report: &mut Report) {
 /// Запросы — короткий (совпадает почти всё: отбор лучших), точное имя, в другой
 /// раскладке и не совпадающий ни с чем. Цель — 30 мс на запрос.
 fn find_layers(report: &mut Report) {
-    let mut doc = Document::new();
-    let page = doc.pages()[0].0;
-    let ids: Vec<NodeId> = doc.transact(page, vec![], |p| fill(p, NODES)).unwrap();
-    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    let (mut ed, ids) = find_fixture(None);
     let queries = ["с", "слой 42", "'rhfy 999", "кнопка отправки"];
-    let (mut cold, mut warm) = (Vec::new(), Vec::new());
-    let mut found = Vec::new();
-    for run in 0..COMMIT_RUNS {
-        // Правка имени — метка состава сцены сдвинулась, имена складываются заново.
-        ed.rename_node(ids[1], &format!("Слой {run}"));
-        ed.take_events();
-        for (i, q) in queries.iter().enumerate() {
-            let t = Instant::now();
-            let items = ed.find_layers(q, 50);
-            if i == 0 {
-                cold.push(t.elapsed())
-            } else {
-                warm.push(t.elapsed())
-            }
-            found.push((*q, items));
-        }
-    }
-    report.gate_median(
-        "Поиск слоёв, 100 000 узлов, первый запрос после правки имён",
-        &cold,
-        30.0,
-    );
-    report.gate_median("Поиск слоёв, 100 000 узлов, следующие запросы", &warm, 30.0);
+    let found = find_gates(report, "обычные имена", &mut ed, &ids, &queries);
+    find_first(report, "обычные имена", &ed, "с");
     let first = |q: &str| {
         found
             .iter()
@@ -918,6 +896,163 @@ fn find_layers(report: &mut Report) {
         format!("{} / {}", first("слой 42"), first("'rhfy 999")),
         "Слой 42 / Экран 999",
     );
+
+    // Все имена подходят: дороже всего, а первые буквы запроса так и ведут себя.
+    let all_match = [
+        "к",
+        "ка",
+        "rf",
+        "кбс",
+        "кнопка большая",
+        "кнп блш сня нглв",
+        "кнопка большая синяя на главном",
+    ];
+    for (label, len) in [("имена 40 символов", 40), ("имена 256 символов", 256)]
+    {
+        let (mut ed, ids) = find_fixture(Some(&|i| long_name(i, len)));
+        let found = find_gates(report, label, &mut ed, &ids, &all_match);
+        report.check(
+            &format!("Поиск слоёв, {label}: подошли все запросы"),
+            found.iter().all(|(_, items)| items.len() == 50),
+            found
+                .iter()
+                .map(|(_, items)| items.len())
+                .min()
+                .unwrap_or_default()
+                .to_string(),
+            "50",
+        );
+        find_first(report, label, &ed, all_match[all_match.len() - 1]);
+    }
+
+    // Худший случай для выравниваний: одна и та же буква.
+    let long_query = "я".repeat(128);
+    let mid_query = "я".repeat(32);
+    let tail_query = format!("{}б", "я".repeat(31));
+    let queries = [long_query.as_str(), mid_query.as_str(), tail_query.as_str()];
+    let (mut ed, ids) = find_fixture(Some(&|i| match i % 2 {
+        0 => "я".repeat(256),
+        _ => format!("{}б", "я".repeat(38)),
+    }));
+    let found = find_gates(report, "256 × «я»", &mut ed, &ids, &queries);
+    let counts: Vec<usize> = found.iter().map(|(_, items)| items.len()).collect();
+    report.check(
+        "Поиск слоёв, 256 × «я»: длинный запрос мимо, остальные нашлись",
+        counts == [0, 50, 50],
+        format!("{counts:?}"),
+        "[0, 50, 50]",
+    );
+}
+
+/// Первый поиск на странице (индекс пуст, векторы выделяются) и память индекса
+/// (B-142, справочно).
+fn find_first(report: &mut Report, label: &str, ed: &Editor, query: &str) {
+    let mut bytes = 0;
+    let runs: Vec<Duration> = (0..COMMIT_RUNS)
+        .map(|_| {
+            let mut index = LayerIndex::default();
+            let t = Instant::now();
+            index.find(ed.scene(), query, 50);
+            let d = t.elapsed();
+            bytes = index.heap_bytes();
+            d
+        })
+        .collect();
+    report.gate(
+        &format!("Поиск слоёв, 100 000 узлов, {label}: самый первый запрос на странице (медиана)"),
+        median(runs),
+        30.0,
+    );
+    report.info(
+        &format!("Поиск слоёв, 100 000 узлов, {label}: память индекса"),
+        format!("{:.1} МБ", bytes as f64 / 1e6),
+    );
+}
+
+/// Имя длиной `len`: слова по кругу и номер в конце; все подходят к одним запросам.
+fn long_name(i: usize, len: usize) -> String {
+    let tail = format!(" {i}");
+    let head: String = "Кнопка большая синяя на главном экране "
+        .chars()
+        .cycle()
+        .take(len - tail.len())
+        .collect();
+    head + &tail
+}
+
+fn find_fixture(name: Option<&dyn Fn(usize) -> String>) -> (Editor, Vec<NodeId>) {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let ids: Vec<NodeId> = doc
+        .transact(page, vec![], |p| {
+            let ids = fill(p, NODES)?;
+            if let Some(name) = name {
+                for (i, id) in ids.iter().enumerate() {
+                    p.set_props(
+                        *id,
+                        &PropsPatch {
+                            name: Some(name(i)),
+                            ..Default::default()
+                        },
+                    )?;
+                }
+            }
+            Ok(ids)
+        })
+        .unwrap();
+    let ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    (ed, ids)
+}
+
+/// Цель — на самый медленный запрос, а не на медиану смеси: дешёвые запросы не
+/// должны прятать дорогой. Холодный — первый после правки имени (индекс собирается
+/// заново), тёплый — следующий такой же.
+fn find_gates<'q>(
+    report: &mut Report,
+    label: &str,
+    ed: &mut Editor,
+    ids: &[NodeId],
+    queries: &[&'q str],
+) -> Vec<(&'q str, Vec<ferrum_editor::FoundLayer>)> {
+    let mut found = Vec::new();
+    let (mut cold, mut warm) = (Vec::new(), Vec::new());
+    let name = ed.scene().node(ids[1]).unwrap().props.name.clone();
+    for q in queries {
+        let (mut c, mut w) = (Vec::new(), Vec::new());
+        let mut items = Vec::new();
+        for run in 0..COMMIT_RUNS {
+            // Правка имени — метка состава сцены сдвинулась, имена складываются заново.
+            let renamed: String = name
+                .chars()
+                .take(name.chars().count() - 1)
+                .chain(char::from_digit(run as u32, 10))
+                .collect();
+            ed.rename_node(ids[1], &renamed);
+            ed.take_events();
+            let t = Instant::now();
+            ed.find_layers(q, 50);
+            c.push(t.elapsed());
+            let t = Instant::now();
+            items = ed.find_layers(q, 50);
+            w.push(t.elapsed());
+        }
+        cold.push(median(c));
+        warm.push(median(w));
+        found.push((*q, items));
+    }
+    report.gate(
+        &format!("Поиск слоёв, 100 000 узлов, {label}: самый медленный запрос, первый после правки имён (медиана)"),
+        worst(&cold),
+        30.0,
+    );
+    report.gate(
+        &format!(
+            "Поиск слоёв, 100 000 узлов, {label}: самый медленный запрос, следующий (медиана)"
+        ),
+        worst(&warm),
+        30.0,
+    );
+    found
 }
 
 /// Правка ребёнка большой булевой группы (подсистема 3, этап 4): 1000

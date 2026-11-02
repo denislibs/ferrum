@@ -135,6 +135,45 @@ fn reveal_selects_expands_ancestors_and_scrolls_the_panel() {
 }
 
 #[test]
+fn reveal_of_an_already_selected_layer_expands_and_scrolls_again() {
+    let mut core = demo(200);
+    let target = found(&mut core, "слой 5", 1).remove(0);
+    core.command(Command::RevealLayer {
+        id: target.id.clone(),
+    });
+    core.take_events();
+    // Панель свёрнута, слой всё ещё выделен: событие выделения не придёт.
+    core.command(Command::ExpandAllLayers { expanded: false });
+    core.take_events();
+    assert_eq!(layer_rows(&mut core).0, 2, "предки свёрнуты");
+    core.command(Command::RevealLayer {
+        id: target.id.clone(),
+    });
+    let ev = core.take_events();
+    assert!(
+        !ev.iter().any(|e| matches!(e, CoreEvent::Selection { .. })),
+        "выделение прежнее"
+    );
+    let (total, rows, reveal) = ev
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            CoreEvent::Layers {
+                total,
+                rows,
+                reveal,
+                ..
+            } => Some((total, rows, reveal)),
+            _ => None,
+        })
+        .expect("строки слоёв после второго перехода");
+    assert_eq!(total, 2 + 99, "предок снова раскрыт");
+    let at = reveal.expect("прокрутка к строке") as usize;
+    assert_eq!(rows[at].id, target.id);
+    assert!(rows[at].selected);
+}
+
+#[test]
 fn reveal_of_a_wrong_or_missing_layer_is_an_error() {
     let mut core = demo(100);
     for id in ["мусор", "999@999"] {
