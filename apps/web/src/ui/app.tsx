@@ -681,7 +681,7 @@ export function App(props: AppProps) {
               />
             </Show>
             <Show when={context()}>
-              {(m) => <Menu label={m().label} items={m().items} anchor={m().at} onClose={() => setContext(null)} />}
+              {(m) => <Menu label={m().label} items={m().items} anchor={m().at} recents onClose={() => setContext(null)} />}
             </Show>
           </EditorContext.Provider>
         )}

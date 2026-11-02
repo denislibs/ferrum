@@ -623,3 +623,24 @@ fn boolean_ops_are_alt_shift_letters_like_figma() {
         assert_eq!(map.lookup(&key("KeyE", false, true, false, false)), None);
     }
 }
+
+#[test]
+fn punctuation_labels_are_signs() {
+    for (code, sign) in [
+        ("Slash", "/"),
+        ("Semicolon", ";"),
+        ("Quote", "'"),
+        ("Comma", ","),
+        ("Period", "."),
+        ("Backquote", "`"),
+        ("Minus", "-"),
+        ("Equal", "="),
+        ("BracketLeft", "["),
+        ("BracketRight", "]"),
+        ("Backslash", "\\"),
+    ] {
+        assert_eq!(sc(code).label(Platform::Windows), sign, "{code}");
+    }
+    assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Mac), "⌃⇧/");
+    assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Linux), "Ctrl+Shift+/");
+}

@@ -17,7 +17,7 @@ async function openByKey(page: Page): Promise<void> {
   await expect(panel(page)).toBeVisible();
 }
 
-test('Ctrl+Shift+? поднимает панель снизу окна; то же сочетание и Esc закрывают', async ({ page }) => {
+test('Ctrl+Shift+? поднимает панель снизу окна; то же сочетание и Esc закрывают @firefox', async ({ page }) => {
   await openApp(page);
   await openByKey(page);
   await panel(page).evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)));
@@ -41,7 +41,7 @@ test('Ctrl+Shift+? поднимает панель снизу окна; то ж�
   expect(await warnings(page)).toEqual([]);
 });
 
-test('панель не модальная: холст работает, сочетание с холста её закрывает', async ({ page }) => {
+test('панель не модальная: холст работает, сочетание с холста её закрывает @firefox', async ({ page }) => {
   await openApp(page);
   await openByKey(page);
   const l = await live(page);
@@ -53,7 +53,7 @@ test('панель не модальная: холст работает, соч�
   await expect(panel(page)).toHaveCount(0);
 });
 
-test('пункт «Справка → Сочетания клавиш» и вкладки: клавиши из действующей раскладки', async ({ page }) => {
+test('пункт «Справка → Сочетания клавиш» и вкладки: клавиши из действующей раскладки @firefox', async ({ page }) => {
   await openApp(page);
   await mainMenu(page, 'Справка', 'Сочетания клавиш');
   await expect(panel(page)).toBeVisible();
@@ -78,7 +78,7 @@ test('пункт «Справка → Сочетания клавиш» и вк�
   await expect(row(page, 'tool.rect').locator('kbd')).toHaveText(['R', 'Q']);
 });
 
-test('использованные недавно отмечены: команда из меню и сочетание на холсте', async ({ page }) => {
+test('использованные недавно отмечены: команда из меню и сочетание на холсте @firefox', async ({ page }) => {
   await openApp(page);
   await mainMenu(page, 'Вид', 'Масштаб 100%');
   await page.locator('canvas').focus();
@@ -93,7 +93,7 @@ test('использованные недавно отмечены: команд
   await expect(row(page, 'view.fit_all')).not.toHaveClass(/fe-keys__row--used/);
 });
 
-test('«Изменить в настройках» открывает настройки на вкладке сочетаний', async ({ page }) => {
+test('«Изменить в настройках» открывает настройки на вкладке сочетаний @firefox', async ({ page }) => {
   await openApp(page);
   await openByKey(page);
   await panel(page).getByRole('button', { name: 'Изменить в настройках' }).click();

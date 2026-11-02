@@ -21,7 +21,7 @@ async function openPalette(page: Page, key = 'ControlOrMeta+KeyK'): Promise<void
 /** Выбранная строка списка (`aria-activedescendant`). */
 const active = (page: Page) => list(page).locator('[role="option"][aria-selected="true"]');
 
-test('Ctrl/Cmd+K и Ctrl/Cmd+/ открывают поле сверху по центру холста; Esc закрывает и возвращает фокус', async ({ page }) => {
+test('Ctrl/Cmd+K и Ctrl/Cmd+/ открывают поле сверху по центру холста; Esc закрывает и возвращает фокус @firefox', async ({ page }) => {
   await openApp(page);
   for (const key of ['ControlOrMeta+KeyK', 'ControlOrMeta+Slash']) {
     await openPalette(page, key);
@@ -48,7 +48,7 @@ test('Ctrl/Cmd+K и Ctrl/Cmd+/ открывают поле сверху по ц�
   expect(await warnings(page)).toEqual([]);
 });
 
-test('Tab закрывает палитру без возврата фокуса на холст', async ({ page }) => {
+test('Tab закрывает палитру без возврата фокуса на холст @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await page.keyboard.press('Tab');
@@ -56,7 +56,7 @@ test('Tab закрывает палитру без возврата фокуса
   await expect(page.locator('canvas')).not.toBeFocused();
 });
 
-test('щелчок мимо закрывает палитру, фокус остаётся там, куда щёлкнули', async ({ page }) => {
+test('щелчок мимо закрывает палитру, фокус остаётся там, куда щёлкнули @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   const box = (await page.getByRole('tree', { name: 'Слои' }).boundingBox())!;
@@ -65,7 +65,7 @@ test('щелчок мимо закрывает палитру, фокус ост
   await expect(page.locator('canvas')).not.toBeFocused();
 });
 
-test('IME: Enter и Esc составления текста не выполняют и не закрывают палитру', async ({ page }) => {
+test('IME: Enter и Esc составления текста не выполняют и не закрывают палитру @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('настройки');
@@ -75,7 +75,7 @@ test('IME: Enter и Esc составления текста не выполня�
   await expect(page.getByRole('dialog', { name: 'Настройки' })).toHaveCount(0);
 });
 
-test('щелчок внутри окна палитры оставляет фокус в поле; Delete не удаляет выделение', async ({ page }) => {
+test('щелчок внутри окна палитры оставляет фокус в поле; Delete не удаляет выделение @firefox', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
   const at = await appScreen(page, l, 200, 40);
@@ -97,7 +97,7 @@ test('щелчок внутри окна палитры оставляет фо�
   await expect(palette(page)).toBeVisible();
 });
 
-test('фокус ушёл из поля: Esc и сочетание палитры всё равно закрывают, клавиши холст не получает', async ({ page }) => {
+test('фокус ушёл из поля: Esc и сочетание палитры всё равно закрывают, клавиши холст не получает @firefox', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
   const at = await appScreen(page, l, 200, 40);
@@ -114,7 +114,7 @@ test('фокус ушёл из поля: Esc и сочетание палитр�
   }
 });
 
-test('удержание Enter выполняет команду один раз; удержание сочетания не мигает окном', async ({ page }) => {
+test('удержание Enter выполняет команду один раз; удержание сочетания не мигает окном @firefox', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
   const at = await appScreen(page, l, 200, 40);
@@ -152,7 +152,7 @@ test('удержание Enter выполняет команду один раз
   await expect(keys).toBeVisible();
 });
 
-test('Ctrl/Cmd+K из поля панели открывает палитру; в модальном диалоге — нет', async ({ page }) => {
+test('Ctrl/Cmd+K из поля панели открывает палитру; в модальном диалоге — нет @firefox', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
   const at = await appScreen(page, l, 200, 40);
@@ -181,7 +181,46 @@ test('Ctrl/Cmd+K из поля панели открывает палитру; �
   await expect(palette(page)).toHaveCount(0);
 });
 
-test('команды: название, группа и сочетание; серая не выполняется; Enter выполняет и закрывает', async ({ page }) => {
+test('привязка окна к одной букве: в полях буква набирается, окно не открывается; на холсте открывает @firefox', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => {
+    window.__ferrum!.core!.send({ type: 'bind', command: 'ui.quick_actions', shortcut: 'KeyJ', replace: false });
+    window.__ferrum!.core!.send({ type: 'bind', command: 'ui.shortcuts', shortcut: 'KeyU', replace: false });
+  });
+  const l = await live(page);
+  const at = await appScreen(page, l, 200, 40);
+  await page.mouse.click(at.x, at.y);
+  await liveWhen(page, 'l.selectionCount === 1');
+  // Поле панели: буква не отменяется и ничего не открывает.
+  const x = page.getByRole('textbox', { name: 'X', exact: true });
+  await x.focus();
+  await page.evaluate(() => {
+    const w = window as unknown as { __prevented: boolean[] };
+    w.__prevented = [];
+    window.addEventListener('keydown', (e) => (e.code === 'KeyJ' || e.code === 'KeyU') && w.__prevented.push(e.defaultPrevented));
+  });
+  await page.keyboard.press('KeyJ');
+  await page.keyboard.press('KeyU');
+  await expect(palette(page)).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Сочетания клавиш' })).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __prevented: boolean[] }).__prevented)).toEqual([false, false]);
+  // Поле самой палитры: буквы набираются, окно не закрывается и панель не открывается.
+  await openPalette(page);
+  await page.keyboard.type('juj');
+  await expect(field(page)).toHaveValue('juj');
+  await expect(palette(page)).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Сочетания клавиш' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  // На холсте та же буква открывает окно.
+  await page.locator('canvas').focus();
+  await page.keyboard.press('KeyJ');
+  await expect(field(page)).toBeFocused();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('KeyU');
+  await expect(page.getByRole('dialog', { name: 'Сочетания клавиш' })).toBeVisible();
+});
+
+test('команды: название, группа и сочетание; серая не выполняется; Enter выполняет и закрывает @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('дубл');
@@ -211,7 +250,7 @@ test('команды: название, группа и сочетание; се
   await liveWhen(page, `l.steps === ${before.steps + 1}`);
 });
 
-test('стрелки ходят по строкам, в том числе по серым и по кругу; команда интерфейса выполняется', async ({ page }) => {
+test('стрелки ходят по строкам, в том числе по серым и по кругу; команда интерфейса выполняется @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('настройки');
@@ -235,7 +274,7 @@ test('стрелки ходят по строкам, в том числе по �
   expect(await warnings(page)).toEqual([]);
 });
 
-test('раскладка не важна: «щквук» находит команды порядка, «ё» и регистр — тоже', async ({ page }) => {
+test('раскладка не важна: «щквук» находит команды порядка, «ё» и регистр — тоже @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('щквук');
@@ -249,7 +288,7 @@ test('раскладка не важна: «щквук» находит кома
   expect(await warnings(page)).toEqual([]);
 });
 
-test('слои: поиск в worker\'е, переход выделяет слой, показывает его и раскрывает предков', async ({ page }) => {
+test('слои: поиск в worker\'е, переход выделяет слой, показывает его и раскрывает предков @firefox', async ({ page }) => {
   await openApp(page);
   const start = await live(page);
   await openPalette(page);
@@ -285,7 +324,7 @@ test('слои: поиск в worker\'е, переход выделяет сло
   expect(await warnings(page)).toEqual([]);
 });
 
-test('ответ worker\'а на прежний запрос не показывается', async ({ page }) => {
+test('ответ worker\'а на прежний запрос не показывается @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('слой 42');
@@ -302,7 +341,7 @@ test('ответ worker\'а на прежний запрос не показыв
   await expect(list(page).getByRole('option', { name: 'Экран 1', exact: true })).toBeVisible();
 });
 
-test('страницы: поиск по имени и переход', async ({ page }) => {
+test('страницы: поиск по имени и переход @firefox', async ({ page }) => {
   await openApp(page);
   await page.getByRole('button', { name: 'Добавить страницу' }).click();
   await page.waitForFunction(() => window.__ferrum!.ui!.pages.list.length === 2);
@@ -317,7 +356,7 @@ test('страницы: поиск по имени и переход', async ({ 
   await page.waitForFunction((id) => window.__ferrum!.ui!.pages.current === id, first.id);
 });
 
-test('недавние: последние команды первыми, переживают перезагрузку; пункт меню тоже попадает', async ({ page }) => {
+test('недавние: последние команды первыми, переживают перезагрузку; пункт меню тоже попадает @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await expect(palette(page).getByText('Недавние', { exact: true })).toHaveCount(0);
@@ -349,7 +388,23 @@ test('недавние: последние команды первыми, пер
   await expect(list(page).getByRole('option').nth(0)).toHaveAttribute('data-command', 'edit.select_all');
 });
 
-test('новый запрос сразу убирает слои прежнего: Enter не переходит к ним', async ({ page }) => {
+test('кнопки панелей (масштаб, тулбар) недавних не пополняют: только палитра и меню @firefox', async ({ page }) => {
+  await openApp(page);
+  await page.getByRole('button', { name: 'Масштаб', exact: true }).click();
+  await page.getByRole('menu', { name: 'Масштаб' }).getByRole('menuitem', { name: /Показать всё/ }).click();
+  await page.getByRole('button', { name: 'Инструменты перемещения' }).click();
+  await page.getByRole('menu', { name: 'Инструменты перемещения' }).getByRole('menuitemcheckbox').last().click();
+  await openPalette(page);
+  await expect(palette(page).getByText('Недавние', { exact: true })).toHaveCount(0);
+  expect((await stored(page)).recentCommands ?? '').toBe('');
+  await page.keyboard.press('Escape');
+  // Главное меню пополняет.
+  await mainMenu(page, 'Вид', 'Масштаб 100%');
+  await openPalette(page);
+  await expect(list(page).getByRole('option').nth(0)).toHaveAttribute('data-command', 'view.zoom_100');
+});
+
+test('новый запрос сразу убирает слои прежнего: Enter не переходит к ним @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('слой 42');
@@ -369,7 +424,7 @@ test('новый запрос сразу убирает слои прежнег�
   await expect(list(page).getByRole('option', { name: 'Экран 1', exact: true })).toBeVisible();
 });
 
-test('поздний ответ на текущий запрос не сбрасывает выбранную стрелками строку', async ({ page }) => {
+test('поздний ответ на текущий запрос не сбрасывает выбранную стрелками строку @firefox', async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('слой');
@@ -392,7 +447,7 @@ test('поздний ответ на текущий запрос не сбрас
   );
 });
 
-test('в поле — обычный ввод: буквы не вызывают инструменты, стрелки не двигают выделение', async ({ page }) => {
+test('в поле — обычный ввод: буквы не вызывают инструменты, стрелки не двигают выделение @firefox', async ({ page }) => {
   await openApp(page);
   const at = await appScreen(page, await live(page), 200, 40);
   await page.mouse.click(at.x, at.y);

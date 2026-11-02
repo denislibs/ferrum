@@ -80,7 +80,7 @@ export function FileHeader(props: {
         )}
       </Show>
       <Show when={props.open}>
-        <Menu label="Главное меню" items={props.menu()} anchor={logo} search={props.search} onClose={() => props.onOpen(false)} />
+        <Menu label="Главное меню" items={props.menu()} anchor={logo} search={props.search} recents onClose={() => props.onOpen(false)} />
       </Show>
     </div>
   );

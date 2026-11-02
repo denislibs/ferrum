@@ -9,7 +9,7 @@ import { Core, detectPlatform } from '../core/core';
 import type { TransportMode } from '../core/transport';
 import type { Editor } from './context';
 import { supportsCustomFormat } from './clipboard';
-import { editableTarget, forwardKey, modalOpen } from './keys';
+import { editableTarget, forwardKey, modalOpen, opensWindow } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
 import { eventShortcut, loadLayoutMap, type LayoutMap } from './shortcuts';
 import { installSystemFonts, NO_SYSTEM_FONTS, type SystemFonts } from './system-fonts';
@@ -138,7 +138,7 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
       // переключает окно туда-сюда; «Быстрые действия» открываются и из поля панели
       // (в Figma так же; сочетание не уходит браузеру), но не из модального диалога.
       const opening = openingShortcut(store, e);
-      if (opening) {
+      if (opening && opensWindow(e)) {
         e.preventDefault();
         if (e.repeat) return false;
         if (opening === 'ui.quick_actions' && editableTarget(e.target) && !modalOpen() && !(e.target as Element).closest('[role="dialog"], [role="menu"]')) {

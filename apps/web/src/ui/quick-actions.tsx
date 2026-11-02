@@ -10,6 +10,7 @@
 import { createEffect, createMemo, createSignal, Index, Match, on, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
 import type { FoundLayerDto, KeymapEntry } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
+import { opensWindow } from './keys';
 import { Icon } from './icons';
 import { GROUPS } from './keymap-ui';
 import { KIND_ICON } from './layers';
@@ -116,7 +117,7 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
 
   const isOwn = (e: KeyboardEvent) => {
     const s = eventShortcut(e);
-    return !!s && !!entries().get('ui.quick_actions')?.bindings.includes(s);
+    return !!s && opensWindow(e) && !!entries().get('ui.quick_actions')?.bindings.includes(s);
   };
 
   const onKey = (e: KeyboardEvent) => {

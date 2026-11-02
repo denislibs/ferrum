@@ -8,6 +8,7 @@
 
 import { createMemo, createSignal, For, onMount, Show, type JSX } from 'solid-js';
 import { useEditor } from './context';
+import { opensWindow } from './keys';
 import { Icon } from './icons';
 import { groupCommands } from './keymap-ui';
 import { eventShortcut, shortcutLabel } from './shortcuts';
@@ -38,7 +39,7 @@ export function ShortcutsPanel(props: ShortcutsPanelProps): JSX.Element {
 
   const onKey = (e: KeyboardEvent) => {
     const s = eventShortcut(e);
-    const own = s && ed.store.state.keymap.commands.find((c) => c.key === 'ui.shortcuts')?.bindings.includes(s);
+    const own = s && opensWindow(e) && ed.store.state.keymap.commands.find((c) => c.key === 'ui.shortcuts')?.bindings.includes(s);
     if (e.key === 'Escape' || own) {
       e.preventDefault();
       e.stopPropagation();
