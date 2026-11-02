@@ -6,8 +6,9 @@
 use ferrum_doc::{Color, Fill, FillKind, NodeId, PageId, ScaleMode, Stroke, StrokeAlign};
 use ferrum_editor::scale::{Anchor, MAX_SCALE_FACTOR, MIN_SCALE_FACTOR};
 use ferrum_editor::{
-    browser_reserved, frame_presets, main_menu, BindError, CommandId, DropTarget, KeymapError,
-    MenuNode, NumField, PanelEdit, Phase, Shortcut, COMMANDS, MAX_NAME_CHARS,
+    browser_reserved, frame_presets, main_menu, BindError, CommandId, ContextTarget, DropTarget,
+    KeymapError, MenuAction, MenuNode, NumField, PanelEdit, Phase, Shortcut, COMMANDS,
+    MAX_NAME_CHARS,
 };
 use ferrum_render::{decode_png, export_area, ExportBudget, ExportError, SvgOptions};
 use ferrum_scene::shape::COORD_LIMIT;
@@ -15,9 +16,10 @@ use serde_bytes::ByteBuf;
 
 use super::Core;
 use crate::protocol::{
-    Align, Command, ConflictInfo, CoreEvent, DropPosition, Edit, EditPhase, ExportFormat, Field,
-    FillDto, KeymapEntry, MenuItemDto, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode,
-    StrokeDto, EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
+    Align, Command, ConflictInfo, ContextTarget as TargetDto, CoreEvent, DropPosition, Edit,
+    EditPhase, ExportFormat, Field, FillDto, KeymapEntry, MenuActionDto, MenuItemDto, PageInfo,
+    PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto, EXPORT_SCALES, MAX_TEXT_BYTES,
+    SELECTION_IDS_MAX,
 };
 use crate::summary::{cap_of, join_of, summarize, MAX_PAINTS};
 
@@ -135,6 +137,37 @@ pub(super) fn copy_svg_message(e: &ExportError) -> String {
         }
         ExportError::Write(why) => format!("Не удалось скопировать: SVG не собран ({why})"),
         e => export_message(e),
+    }
+}
+
+/// Узел меню ядра для протокола: команды — ключами таблицы.
+pub(super) fn menu_dto(n: &MenuNode) -> MenuItemDto {
+    match n {
+        MenuNode::Command(c) => MenuItemDto::Command {
+            key: c.key().to_string(),
+        },
+        MenuNode::Submenu { title, items } => MenuItemDto::Submenu {
+            title: title.to_string(),
+            items: items.iter().map(menu_dto).collect(),
+        },
+        MenuNode::Separator => MenuItemDto::Separator,
+        MenuNode::Node { id, name } => MenuItemDto::Node {
+            id: id.to_string(),
+            name: event_name(name),
+        },
+        MenuNode::Action { action, enabled } => MenuItemDto::Action {
+            action: match action {
+                MenuAction::RenameLayer => MenuActionDto::RenameLayer,
+                MenuAction::ExpandAll => MenuActionDto::ExpandAll,
+                MenuAction::CollapseAll => MenuActionDto::CollapseAll,
+                MenuAction::RenamePage => MenuActionDto::RenamePage,
+                MenuAction::DuplicatePage => MenuActionDto::DuplicatePage,
+                MenuAction::DeletePage => MenuActionDto::DeletePage,
+                MenuAction::CopyPageLink => MenuActionDto::CopyPageLink,
+            },
+            title: action.title().to_string(),
+            enabled: *enabled,
+        },
     }
 }
 
@@ -448,6 +481,20 @@ impl Core {
                     self.error(format!("Неверная правка: {m}"));
                 }
             },
+            Command::ContextMenu { target } => self.context_menu(target),
+            Command::ExpandAllLayers { expanded } => {
+                self.layers.set_all_expanded(self.editor.scene(), expanded);
+                self.ui.layers = true;
+            }
+            Command::DuplicatePage { id } => {
+                if let Some(id) = self.page_id(&id) {
+                    match self.editor.duplicate_page(id) {
+                        Ok(_) => self.touch(),
+                        Err(e) => self.error(e.to_string()),
+                    }
+                }
+                self.ui.pages = true;
+            }
             Command::AddPage => {
                 match self.editor.create_page() {
                     Ok(_) => self.touch(),
@@ -632,6 +679,35 @@ impl Core {
         }
     }
 
+    /// Контекстное меню: выбор на правой кнопке (у строки слоя — как выбор из
+    /// панели: без раскрытия предков и прокрутки) и пункты — событием в конце
+    /// пачки. Неверная цель — ошибка и пустое меню.
+    fn context_menu(&mut self, target: TargetDto) {
+        let target = match target {
+            TargetDto::Canvas { x, y } if x.is_finite() && y.is_finite() => {
+                Some(ContextTarget::Canvas(kurbo::Point::new(x, y)))
+            }
+            TargetDto::Canvas { .. } => {
+                self.error("Неверная точка контекстного меню");
+                None
+            }
+            TargetDto::Layer { id } => self.node(&id).map(ContextTarget::Layer),
+            TargetDto::Page { id } => self.page_id(&id).map(ContextTarget::Page),
+        };
+        let Some(target) = target else {
+            self.context = Some(Vec::new());
+            return;
+        };
+        let layer = matches!(target, ContextTarget::Layer(_));
+        self.from_panel = layer;
+        let items = self.editor.context_menu(target);
+        if layer {
+            self.drain_editor();
+            self.from_panel = false;
+        }
+        self.context = Some(items.iter().map(menu_dto).collect());
+    }
+
     fn select(&mut self, ids: Vec<NodeId>, mode: SelectMode) {
         let next = match mode {
             SelectMode::Replace => {
@@ -754,19 +830,7 @@ impl Core {
 
     /// Главное меню: дерево ядра ключами команд.
     pub(super) fn push_main_menu(&mut self) {
-        fn dto(n: &MenuNode) -> MenuItemDto {
-            match n {
-                MenuNode::Command(c) => MenuItemDto::Command {
-                    key: c.key().to_string(),
-                },
-                MenuNode::Submenu { title, items } => MenuItemDto::Submenu {
-                    title: title.to_string(),
-                    items: items.iter().map(dto).collect(),
-                },
-                MenuNode::Separator => MenuItemDto::Separator,
-            }
-        }
-        let tree = main_menu().iter().map(dto).collect();
+        let tree = main_menu().iter().map(menu_dto).collect();
         self.events.push(CoreEvent::MainMenu { tree });
     }
 

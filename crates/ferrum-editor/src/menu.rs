@@ -1,12 +1,58 @@
-//! Главное меню данными (спека подсистемы 2, разделы 3 и 4): дерево команд по
-//! ключам таблицы, подменю и разделителей. Порядок и состав повторяют главное
+//! Главное и контекстные меню данными (спека подсистемы 2, разделы 3–5): дерево
+//! команд по ключам таблицы, подменю и разделителей. Порядок и состав повторяют главное
 //! меню Figma UI3 без плагинов, виджетов и Dev Mode. В дереве — только команды,
 //! которые уже есть: пункты следующих этапов (вставить поверх, с заменой,
 //! копирование свойств, линейки, выделить подобные) появятся вместе с ними, а не
 //! серыми заглушками. Интерфейс получает дерево один раз и по пункту присылает
 //! `Execute` с ключом команды.
 
+use ferrum_doc::NodeId;
+
 use crate::commands::{CommandGroup, CommandId};
+
+/// Действие контекстного меню над его целью (слой, страница). Это не команда
+/// таблицы: у него нет сочетания и смысла без цели, а выполняет его интерфейс
+/// (поле имени, подтверждение удаления, ссылка в буфер обмена) — ядро только
+/// говорит, доступно ли оно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MenuAction {
+    /// Переименовать слой (поле имени в его строке).
+    RenameLayer,
+    /// Развернуть все слои страницы.
+    ExpandAll,
+    /// Свернуть все слои страницы.
+    CollapseAll,
+    RenamePage,
+    DuplicatePage,
+    DeletePage,
+    /// Ссылка на страницу (`#/file/<id>?page=<pageId>`) — в буфер обмена.
+    CopyPageLink,
+}
+
+impl MenuAction {
+    pub const ALL: [MenuAction; 7] = [
+        MenuAction::RenameLayer,
+        MenuAction::ExpandAll,
+        MenuAction::CollapseAll,
+        MenuAction::RenamePage,
+        MenuAction::DuplicatePage,
+        MenuAction::DeletePage,
+        MenuAction::CopyPageLink,
+    ];
+
+    /// Название пункта.
+    pub fn title(self) -> &'static str {
+        match self {
+            MenuAction::RenameLayer => "Переименовать",
+            MenuAction::ExpandAll => "Развернуть всё",
+            MenuAction::CollapseAll => "Свернуть всё",
+            MenuAction::RenamePage => "Переименовать",
+            MenuAction::DuplicatePage => "Дублировать страницу",
+            MenuAction::DeletePage => "Удалить страницу",
+            MenuAction::CopyPageLink => "Копировать ссылку на страницу",
+        }
+    }
+}
 
 /// Узел меню.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,12 +63,22 @@ pub enum MenuNode {
         items: Vec<MenuNode>,
     },
     Separator,
+    /// Пункт «Выделить слой»: узел под точкой щелчка и его имя.
+    Node {
+        id: NodeId,
+        name: String,
+    },
+    /// Действие над целью контекстного меню и доступно ли оно.
+    Action {
+        action: MenuAction,
+        enabled: bool,
+    },
 }
 
 use CommandId as C;
 use MenuNode::{Command as I, Separator as S};
 
-fn sub(title: &'static str, items: Vec<MenuNode>) -> MenuNode {
+pub(crate) fn sub(title: &'static str, items: Vec<MenuNode>) -> MenuNode {
     MenuNode::Submenu { title, items }
 }
 
@@ -160,7 +216,7 @@ pub fn menu_commands(items: &[MenuNode]) -> Vec<CommandId> {
         match n {
             MenuNode::Command(c) => out.push(*c),
             MenuNode::Submenu { items, .. } => out.extend(menu_commands(items)),
-            MenuNode::Separator => {}
+            MenuNode::Separator | MenuNode::Node { .. } | MenuNode::Action { .. } => {}
         }
     }
     out

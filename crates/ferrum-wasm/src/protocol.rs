@@ -486,6 +486,21 @@ pub enum Edit {
     },
 }
 
+/// По чему щёлкнули правой кнопкой (спека подсистемы 2, раздел 5): точка холста
+/// в CSS-пикселях (как у событий указателя), строка слоя или страница.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ContextTarget {
+    Canvas { x: f64, y: f64 },
+    Layer { id: String },
+    Page { id: String },
+}
+
 /// Команда основного потока worker'у.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(
@@ -621,6 +636,15 @@ pub enum Command {
         /// `selection` на начало жеста; если выделение с тех пор сменилось — правки нет.
         selection_version: Option<f64>,
     },
+    /// Контекстное меню (спека подсистемы 2, раздел 5): выбор на правой кнопке
+    /// и ответ — событие `ContextMenu` с пунктами.
+    ContextMenu {
+        target: ContextTarget,
+    },
+    /// Развернуть (`true`) или свернуть все слои страницы.
+    ExpandAllLayers {
+        expanded: bool,
+    },
     /// Новая страница; она становится текущей.
     AddPage,
     RenamePage {
@@ -628,6 +652,10 @@ pub enum Command {
         name: String,
     },
     DeletePage {
+        id: String,
+    },
+    /// Копия страницы сразу после неё; копия становится текущей.
+    DuplicatePage {
         id: String,
     },
     SetPage {
@@ -796,7 +824,21 @@ pub struct KeymapEntry {
     pub overridden: bool,
 }
 
-/// Пункт меню: команда по ключу таблицы, подменю или разделитель.
+/// Действие контекстного меню над его целью: его выполняет интерфейс.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum MenuActionDto {
+    RenameLayer,
+    ExpandAll,
+    CollapseAll,
+    RenamePage,
+    DuplicatePage,
+    DeletePage,
+    CopyPageLink,
+}
+
+/// Пункт меню: команда по ключу таблицы, подменю, разделитель; в контекстном
+/// меню ещё узел под точкой щелчка («Выделить слой») и действие над целью.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(
     tag = "type",
@@ -812,6 +854,16 @@ pub enum MenuItemDto {
         items: Vec<MenuItemDto>,
     },
     Separator,
+    /// Выделить узел `id` (`Select` с ним одним).
+    Node {
+        id: String,
+        name: String,
+    },
+    Action {
+        action: MenuActionDto,
+        title: String,
+        enabled: bool,
+    },
 }
 
 /// Состояние команды: доступна ли и (у переключателя) отмечена ли.
@@ -967,6 +1019,12 @@ pub enum CoreEvent {
     /// при запуске ядра.
     MainMenu {
         tree: Vec<MenuItemDto>,
+    },
+    /// Контекстное меню (ответ на `ContextMenu`): пункты после выбора на правой
+    /// кнопке — состояния команд уже пришли раньше в той же пачке. Пусто —
+    /// меню не открывать.
+    ContextMenu {
+        items: Vec<MenuItemDto>,
     },
     /// Измерения с Alt в оверлее: значения расстояний по порядку и число
     /// пунктирных направляющих.

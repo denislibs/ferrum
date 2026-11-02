@@ -111,6 +111,9 @@ pub struct Core {
     now_ms: f64,
     /// Часы пределов экспорта SVG и PDF (в worker'е — `performance.now()`).
     export_clock: Option<Box<dyn Clock>>,
+    /// Пункты контекстного меню: уходят последними в пачке событий, после
+    /// выделения и состояний команд, которые изменил выбор на правой кнопке.
+    context: Option<Vec<crate::protocol::MenuItemDto>>,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -200,6 +203,7 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::SetTheme { .. }
             | Command::LayersWindow { .. }
             | Command::ExpandLayer { .. }
+            | Command::ExpandAllLayers { .. }
             | Command::FilterLayers { .. }
             | Command::PrepareSearch
             | Command::HoverLayer { .. }
@@ -269,6 +273,7 @@ impl Core {
             text_state: text::TextState::default(),
             now_ms: 0.0,
             export_clock: ferrum_render::default_clock(),
+            context: None,
         };
         // Таблица команд, их состояния и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -895,6 +900,9 @@ impl Core {
         self.push_text_state(properties);
         self.push_modified();
         self.push_font_requests();
+        if let Some(items) = self.context.take() {
+            self.events.push(CoreEvent::ContextMenu { items });
+        }
     }
 
     /// Часы пределов экспорта (в wasm — `performance.now()`; без них — только

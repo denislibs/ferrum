@@ -56,7 +56,7 @@ export function buildMainMenu(tree: readonly MenuItemDto[], entries: Entries, hi
     else if (n.type === 'submenu') {
       const items = buildMainMenu(n.items, entries, hidden);
       if (items.length) out.push({ label: n.title, submenu: items });
-    } else if (!hidden.has(n.key)) {
+    } else if (n.type === 'command' && !hidden.has(n.key)) {
       const e = entries.get(n.key);
       if (e) out.push({ label: e.name, command: e.key });
     }

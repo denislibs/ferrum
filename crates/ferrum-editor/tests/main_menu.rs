@@ -51,6 +51,8 @@ fn check_level(items: &[MenuNode], path: &str) {
             MenuNode::Command(c) => assert!(seen.insert(*c), "{path}: {c:?} дважды"),
             MenuNode::Submenu { title, items } => check_level(items, &format!("{path} › {title}")),
             MenuNode::Separator => {}
+            // Узлы и действия бывают только в контекстных меню.
+            other => panic!("{path}: {other:?} в главном меню"),
         }
     }
 }
