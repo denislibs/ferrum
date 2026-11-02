@@ -130,6 +130,46 @@ fn node_copy_gives_the_props_of_its_first_node() {
 }
 
 #[test]
+fn node_copy_adds_only_images_of_the_copied_props() {
+    let mut h = H::new();
+    let used = h.ed.add_image(b"first-image".to_vec());
+    let other = h.ed.add_image(b"second-image".to_vec());
+    let a = h.rect(None, 0.0, 0.0, 50.0, 50.0);
+    let b = h.rect(None, 100.0, 0.0, 50.0, 50.0);
+    for (id, hash) in [(a, &used), (b, &other)] {
+        h.set(
+            id,
+            PropsPatch {
+                fills: Some(vec![Fill::image(hash.clone())]),
+                ..Default::default()
+            },
+        );
+    }
+    h.ed.select(&[a, b]);
+    h.ed.take_events();
+    h.ed.execute(CommandId::Copy);
+    let bytes =
+        h.ed.take_events()
+            .into_iter()
+            .find_map(|e| match e {
+                EditorEvent::Clipboard(b) => Some(b),
+                _ => None,
+            })
+            .unwrap();
+    let mut dst = H::new();
+    let r = dst.rect(None, 0.0, 0.0, 10.0, 10.0);
+    dst.ed.select(&[r]);
+    dst.ed.paste_props(Some(&bytes));
+    assert!(errors(&mut dst).is_empty());
+    assert_eq!(dst.props(r).fills, [Fill::image(used.clone())]);
+    assert!(dst.ed.document().images.get(&used).is_some());
+    assert!(
+        dst.ed.document().images.get(&other).is_none(),
+        "чужая картинка копии в документ не попадает"
+    );
+}
+
+#[test]
 fn nothing_copied_or_hostile_data_is_an_error_without_a_step() {
     let mut h = H::new();
     let r = h.rect(None, 0.0, 0.0, 10.0, 10.0);

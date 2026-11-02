@@ -8,6 +8,7 @@ import type { PageInfo } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { ConfirmDialog } from './dialog';
 import { Icon } from './icons';
+import { editableTarget } from './keys';
 import { RenameInput } from './rename-input';
 import { routeUrl } from './router';
 
@@ -29,13 +30,16 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
     if (name.trim() && name !== original) ed.send({ type: 'renamePage', id, name });
   };
   const copyLink = (id: string) => {
-    navigator.clipboard.writeText(pageLink(props.fileId, id)).then(
-      () => ed.store.toast('Ссылка на страницу скопирована'),
-      () => ed.store.toast('Не удалось записать ссылку в буфер обмена: браузер не дал доступа', 'error'),
-    );
+    const fail = () => ed.store.toast('Не удалось записать ссылку в буфер обмена: браузер не дал доступа', 'error');
+    // Небезопасный контекст: `navigator.clipboard` нет — то же уведомление, без исключения.
+    const clip = (globalThis as { navigator?: { clipboard?: Clipboard } }).navigator?.clipboard;
+    if (typeof clip?.writeText !== 'function') return fail();
+    clip.writeText(pageLink(props.fileId, id)).then(() => ed.store.toast('Ссылка на страницу скопирована'), fail);
   };
   /** Контекстное меню строки: пункты и их доступность — из ядра. */
   const openMenu = (p: PageInfo, e: MouseEvent) => {
+    // В поле переименования — родное меню поля (вырезать, вставить).
+    if (editableTarget(e.target)) return;
     e.preventDefault();
     ed.contextMenu?.({ kind: 'page', id: p.id }, { x: e.clientX, y: e.clientY }, 'Действия со страницей', (a) => {
       if (a === 'renamePage') setRenaming(p.id);

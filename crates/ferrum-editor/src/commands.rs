@@ -425,8 +425,8 @@ pub const COMMANDS: &[Command] = &[
         &["на место", "на то же место", "paste over", "paste in place"],
         &["Mod+Shift+KeyV"],
     ),
-    // Как в Figma: Ctrl/Cmd+Shift+R. В браузере сочетание занято перезагрузкой
-    // (настройки предупреждают); команда есть в меню.
+    // Как в Figma: Ctrl/Cmd+Shift+R. Страница перехватывает сочетание до браузера
+    // (перезагрузки нет, проверено в Chromium и Firefox); команда есть и в меню.
     cmd(
         C::PasteReplace,
         "edit.paste_replace",

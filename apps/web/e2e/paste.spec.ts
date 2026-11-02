@@ -102,6 +102,18 @@ test('«Вставить с заменой» и «Вставить поверх�
 
 const summary = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!.summary)));
 
+test('Ctrl/Cmd+Shift+R на холсте не перезагружает страницу (во всех браузерах)', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => ((window as { __marker?: number }).__marker = 7));
+  await pick(page, 60, 40);
+  await liveWhen(page, 'l.selectionCount === 1');
+  await page.keyboard.press('ControlOrMeta+Shift+KeyR');
+  // Вставка без доступа к буферу ничего не делает — важно, что страница та же.
+  await page.waitForTimeout(500);
+  expect(await page.evaluate(() => (window as { __marker?: number }).__marker)).toBe(7);
+  expect(await page.evaluate(() => window.__ferrum?.ui?.ready)).toBe(true);
+});
+
 test('Ctrl/Cmd+Shift+R на холсте — «Вставить с заменой» одним шагом, страница не перезагружается', async ({ page, browserName }) => {
   test.skip(browserName !== 'chromium', 'чтение буфера — разрешение clipboard-read есть только в Chromium');
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);

@@ -227,9 +227,15 @@ impl Editor {
             Err(TextError::Doc(_)) => return,
         }
         if self.out.steps != before {
-            // Изображения заливок — в документ, когда свойства легли.
+            // Изображения заливок — в документ, когда свойства легли. Только те,
+            // на которые ссылаются перенесённые заливки: остальные картинки копии
+            // узлов никому не нужны.
             for (hash, data) in images {
-                if self.doc.images.get(&hash).is_none() {
+                let used = src
+                    .fills
+                    .iter()
+                    .any(|f| f.image_hash.as_ref() == Some(&hash));
+                if used && self.doc.images.get(&hash).is_none() {
                     self.doc.images.add(data);
                 }
             }

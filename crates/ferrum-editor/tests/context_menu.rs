@@ -6,6 +6,7 @@ mod common;
 
 use std::collections::HashSet;
 
+use common::text::*;
 use common::*;
 use ferrum_doc::{Color, NodeKind};
 use ferrum_editor::*;
@@ -274,6 +275,23 @@ fn right_click_in_text_or_vector_edit_keeps_the_edit() {
     canvas(&mut h, 600.0, 600.0);
     assert_eq!(h.ed.vector_edit_node(), Some(r), "правка вектора идёт");
     assert_eq!(h.sel(), [r]);
+}
+
+#[test]
+fn right_click_in_text_edit_keeps_the_edit() {
+    let mut h = text_h();
+    let r = h.rect(None, 400.0, 400.0, 50.0, 50.0);
+    let t = add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    h.ed.select(&[t]);
+    h.key("Enter", Modifiers::NONE);
+    assert!(h.ed.is_editing_text());
+    // Правый щелчок на пустом месте и на другом узле: правка и выделение целы.
+    canvas(&mut h, 900.0, 900.0);
+    assert!(h.ed.is_editing_text(), "правка текста идёт");
+    assert_eq!(h.sel(), [t]);
+    canvas(&mut h, 420.0, 420.0);
+    assert!(h.ed.is_editing_text());
+    assert_eq!(h.sel(), [t], "другой узел не выделен: {r:?}");
 }
 
 #[test]

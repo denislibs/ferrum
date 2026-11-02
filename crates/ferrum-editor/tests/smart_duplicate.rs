@@ -40,7 +40,7 @@ fn nudge_counts_as_a_move_and_other_selection_resets() {
     let mut h = H::new();
     let r = h.rect(None, 100.0, 100.0, 40.0, 40.0);
     h.ed.select(&[r]);
-    let c1 = dup(&mut h);
+    dup(&mut h);
     h.key("ArrowRight", Modifiers::SHIFT);
     let c2 = dup(&mut h);
     assert_eq!(xy(&mut h, c2[0]), (120.0, 100.0));
@@ -50,19 +50,33 @@ fn nudge_counts_as_a_move_and_other_selection_resets() {
     let c3 = dup(&mut h);
     assert_eq!(xy(&mut h, c3[0]), (120.0, 100.0));
     // Отмена и повтор сдвига копии выделения не меняют: шаг — по итогу сдвига.
-    let _ = c1;
     h.key("ArrowDown", Modifiers::SHIFT);
     h.ed.execute(CommandId::Undo);
     h.ed.execute(CommandId::Redo);
     let c4 = dup(&mut h);
     assert_eq!(xy(&mut h, c4[0]), (120.0, 120.0));
-    // Отмена дубликата возвращает прежнее выделение: шаг забыт.
-    h.ed.execute(CommandId::Undo);
-    assert_eq!(h.sel(), c3);
+}
+
+#[test]
+fn undoing_the_duplicate_forgets_the_step() {
+    let mut h = H::new();
+    let r = h.rect(None, 100.0, 100.0, 40.0, 40.0);
     h.ed.select(&[r]);
-    h.ed.select(&c3);
-    let c5 = dup(&mut h);
-    assert_eq!(xy(&mut h, c5[0]), (120.0, 110.0));
+    let c1 = dup(&mut h);
+    h.key("ArrowRight", Modifiers::SHIFT);
+    assert_eq!(xy(&mut h, c1[0]), (110.0, 100.0));
+    let c2 = dup(&mut h);
+    assert_eq!(xy(&mut h, c2[0]), (120.0, 100.0), "шаг повторён");
+    // Отмена дубликата возвращает выделение на прежнюю копию. Выделение вручную
+    // не меняем: следующий Ctrl/Cmd+D не должен повторять сдвиг.
+    h.ed.execute(CommandId::Undo);
+    assert_eq!(h.sel(), c1);
+    let c3 = dup(&mut h);
+    assert_eq!(
+        xy(&mut h, c3[0]),
+        (110.0, 100.0),
+        "копия на месте, без сдвига"
+    );
 }
 
 #[test]

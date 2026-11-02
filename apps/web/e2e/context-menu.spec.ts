@@ -153,22 +153,64 @@ test('страницы: удалить единственную нельзя, «
   await expect(copy).toHaveAttribute('aria-selected', 'true');
   await expect(pages.getByRole('option')).toHaveCount(2);
   await liveWhen(page, 'l.nodes === 1000');
-  // Ссылка на первую страницу (сейчас открыта копия).
-  await first.click({ button: 'right' });
+  // Ссылка на вторую страницу (копию); перед переходом открыта первая — иначе
+  // тест прошёл бы и без обработки `?page=` (файл всегда открывается на первой).
+  const copyId = await page.evaluate(() => window.__ferrum!.ui!.pages.list[1].id);
+  await copy.click({ button: 'right' });
   await menu.getByRole('menuitem', { name: 'Копировать ссылку на страницу' }).click();
   await expect(page.getByText('Ссылка на страницу скопирована')).toBeVisible();
   const firstId = await page.evaluate(() => window.__ferrum!.ui!.pages.list[0].id);
+  expect(copyId).not.toBe(firstId);
   const id = fileId(page);
-  const link = await page.evaluate(([f, p]) => `${location.origin}${location.pathname}${location.search}#/file/${f}?page=${encodeURIComponent(p)}`, [id, firstId]);
+  const link = await page.evaluate(([f, p]) => `${location.origin}${location.pathname}${location.search}#/file/${f}?page=${encodeURIComponent(p)}`, [id, copyId]);
   if (browserName === 'chromium') expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(link);
-  // Переход по ссылке: файл открывается заново (сохранившись) — на этой странице.
+  await first.click();
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.pages.current)).toBe(firstId);
+  // Переход по ссылке: файл открывается заново (сохранившись) — на странице из ссылки.
   await page.evaluate((l) => (location.href = l), link);
   await page.waitForFunction(
     (p) => window.__ferrum?.ui?.ready === true && window.__ferrum.ui.pages.list.length === 2 && window.__ferrum.ui.pages.current === p,
-    firstId,
+    copyId,
     { timeout: 30_000 },
   );
   // В адресе остаётся только файл.
   await expect.poll(() => page.url()).toMatch(new RegExp(`#/file/${id}$`));
   expect(await warnings(page)).toEqual([]);
+});
+
+test('правый щелчок в поле переименования слоя и страницы не открывает меню ядра', async ({ page }) => {
+  await openApp(page);
+  const tree = page.getByRole('tree', { name: 'Слои' });
+  const row = tree.getByRole('treeitem', { name: 'Экран 3', exact: true });
+  await row.click({ button: 'right' });
+  await page.getByRole('menu', { name: 'Действия со слоем' }).getByRole('menuitem', { name: 'Переименовать' }).click();
+  const input = page.getByRole('textbox', { name: 'Имя слоя' });
+  await expect(input).toBeFocused();
+  const sel = await live(page);
+  await input.click({ button: 'right' });
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(input).toBeVisible();
+  expect((await live(page)).selectionCount).toBe(sel.selectionCount);
+  await input.press('Escape');
+  // То же — для страницы.
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  await pages.getByRole('option').first().click({ button: 'right' });
+  await page.getByRole('menu', { name: 'Действия со страницей' }).getByRole('menuitem', { name: 'Переименовать' }).click();
+  const field = pages.getByRole('textbox', { name: 'Имя страницы' });
+  await expect(field).toBeFocused();
+  await field.click({ button: 'right' });
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(field).toBeVisible();
+});
+
+test('«Копировать ссылку на страницу» без буфера обмена — уведомление об ошибке, без исключения', async ({ page }) => {
+  await openApp(page);
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }));
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  await pages.getByRole('option').first().click({ button: 'right' });
+  await page.getByRole('menu', { name: 'Действия со страницей' }).getByRole('menuitem', { name: 'Копировать ссылку на страницу' }).click();
+  await expect(page.getByText('Не удалось записать ссылку в буфер обмена')).toBeVisible();
+  expect(errors).toEqual([]);
 });

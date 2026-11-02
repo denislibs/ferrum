@@ -11,6 +11,7 @@ import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, 
 import type { DropPosition, LayerRow, NodeType } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { Icon, type IconName } from './icons';
+import { editableTarget } from './keys';
 import { RenameInput } from './rename-input';
 
 /** Высота строки — `row-height` дизайн-системы. */
@@ -428,6 +429,8 @@ export function LayersPanel() {
                 onFocus={() => setFocusedSig(row().id)}
                 onDblClick={() => startRename(row())}
                 onContextMenu={(e) => {
+                  // В поле переименования — родное меню поля (вырезать, вставить).
+                  if (editableTarget(e.target)) return;
                   // Меню строки — из ядра: невыделенную строку ядро выделяет.
                   e.preventDefault();
                   const r = row();
