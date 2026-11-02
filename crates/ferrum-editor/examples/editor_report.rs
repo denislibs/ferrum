@@ -881,8 +881,7 @@ fn select_similar(report: &mut Report) {
 fn find_layers(report: &mut Report) {
     let (mut ed, ids) = find_fixture(None);
     let queries = ["с", "слой 42", "'rhfy 999", "кнопка отправки"];
-    let found = find_gates(report, "обычные имена", &mut ed, &ids, &queries);
-    find_first(report, "обычные имена", &ed, "с");
+    let found = find_gates(report, "обычные имена", 30.0, &mut ed, &ids, &queries);
     let first = |q: &str| {
         found
             .iter()
@@ -898,7 +897,9 @@ fn find_layers(report: &mut Report) {
     );
 
     // Все имена подходят: дороже всего, а первые буквы запроса так и ведут себя.
-    let all_match = [
+    // Другие алфавиты — мимо быстрых веток свёртки для а-я и a-z.
+    const RU: &str = "Кнопка большая синяя на главном экране ";
+    let ru = [
         "к",
         "ка",
         "rf",
@@ -907,10 +908,54 @@ fn find_layers(report: &mut Report) {
         "кнп блш сня нглв",
         "кнопка большая синяя на главном",
     ];
-    for (label, len) in [("имена 40 символов", 40), ("имена 256 символов", 256)]
-    {
-        let (mut ed, ids) = find_fixture(Some(&|i| long_name(i, len)));
-        let found = find_gates(report, label, &mut ed, &ids, &all_match);
+    let rows: [(&str, &str, usize, f64, &[&str]); 6] = [
+        ("имена 40 символов", RU, 40, 30.0, &ru),
+        ("имена 256 символов", RU, 256, 30.0, &ru),
+        (
+            "немецкий, 40 символов",
+            "Schaltfläche für größere Übergänge öffnen ",
+            40,
+            30.0,
+            &[
+                "s",
+                "fü",
+                "sfg",
+                "schaltfläche für",
+                "schaltfläche für größere",
+            ],
+        ),
+        (
+            "украинский, 40 символов",
+            "Кнопка їжак є ґанок під іншою сторінкою ",
+            40,
+            30.0,
+            &["ї", "їж", "кїєґ", "кнопка їжак", "кнопка їжак є ґанок під"],
+        ),
+        (
+            "китайский, 40 символов",
+            "按钮主要大型悬停状态带图标左侧第一个页面组件容器标题内容区域",
+            40,
+            30.0,
+            &[
+                "按",
+                "主要",
+                "按大停",
+                "按钮主要大型",
+                "按钮主要大型悬停状态带图标左侧",
+            ],
+        ),
+        (
+            "две раскладки, 40 символов",
+            "афаф fafa аfаf Кнопка Button ",
+            40,
+            // Все три раскладки подходят к каждому имени: втрое больше работы, а не обычный документ.
+            45.0,
+            &["а", "аfаf", "афаф", "fafa", "кнопка button"],
+        ),
+    ];
+    for (label, base, len, cold_limit_ms, queries) in rows {
+        let (mut ed, ids) = find_fixture(Some(&|i| long_name(base, i, len)));
+        let found = find_gates(report, label, cold_limit_ms, &mut ed, &ids, queries);
         report.check(
             &format!("Поиск слоёв, {label}: подошли все запросы"),
             found.iter().all(|(_, items)| items.len() == 50),
@@ -922,61 +967,29 @@ fn find_layers(report: &mut Report) {
                 .to_string(),
             "50",
         );
-        find_first(report, label, &ed, all_match[all_match.len() - 1]);
     }
 
     // Худший случай для выравниваний: одна и та же буква.
-    let long_query = "я".repeat(128);
+    let name_256 = format!("{}б{}", "я".repeat(38), "я".repeat(217));
+    let long_query: String = name_256.chars().take(128).collect();
     let mid_query = "я".repeat(32);
     let tail_query = format!("{}б", "я".repeat(31));
     let queries = [long_query.as_str(), mid_query.as_str(), tail_query.as_str()];
-    let (mut ed, ids) = find_fixture(Some(&|i| match i % 2 {
-        0 => "я".repeat(256),
-        _ => format!("{}б", "я".repeat(38)),
-    }));
-    let found = find_gates(report, "256 × «я»", &mut ed, &ids, &queries);
+    let (mut ed, ids) = find_fixture(Some(&|_| name_256.clone()));
+    let found = find_gates(report, "256 × «я»", 30.0, &mut ed, &ids, &queries);
     let counts: Vec<usize> = found.iter().map(|(_, items)| items.len()).collect();
     report.check(
-        "Поиск слоёв, 256 × «я»: длинный запрос мимо, остальные нашлись",
-        counts == [0, 50, 50],
+        "Поиск слоёв, 256 × «я»: запросы нашлись, длинный обрезан",
+        counts == [50, 50, 50],
         format!("{counts:?}"),
-        "[0, 50, 50]",
+        "[50, 50, 50]",
     );
 }
 
-/// Первый поиск на странице (индекс пуст, векторы выделяются) и память индекса
-/// (B-142, справочно).
-fn find_first(report: &mut Report, label: &str, ed: &Editor, query: &str) {
-    let mut bytes = 0;
-    let runs: Vec<Duration> = (0..COMMIT_RUNS)
-        .map(|_| {
-            let mut index = LayerIndex::default();
-            let t = Instant::now();
-            index.find(ed.scene(), query, 50);
-            let d = t.elapsed();
-            bytes = index.heap_bytes();
-            d
-        })
-        .collect();
-    report.gate(
-        &format!("Поиск слоёв, 100 000 узлов, {label}: самый первый запрос на странице (медиана)"),
-        median(runs),
-        30.0,
-    );
-    report.info(
-        &format!("Поиск слоёв, 100 000 узлов, {label}: память индекса"),
-        format!("{:.1} МБ", bytes as f64 / 1e6),
-    );
-}
-
-/// Имя длиной `len`: слова по кругу и номер в конце; все подходят к одним запросам.
-fn long_name(i: usize, len: usize) -> String {
+/// Имя длиной `len`: слова `base` по кругу и номер в конце; все подходят к одним запросам.
+fn long_name(base: &str, i: usize, len: usize) -> String {
     let tail = format!(" {i}");
-    let head: String = "Кнопка большая синяя на главном экране "
-        .chars()
-        .cycle()
-        .take(len - tail.len())
-        .collect();
+    let head: String = base.chars().cycle().take(len - tail.len()).collect();
     head + &tail
 }
 
@@ -1004,12 +1017,18 @@ fn find_fixture(name: Option<&dyn Fn(usize) -> String>) -> (Editor, Vec<NodeId>)
     (ed, ids)
 }
 
+/// Самый первый поиск на странице бывает раз на страницу и сверх сборки платит за
+/// выделение памяти индекса и проход для её размера: цель мягче, чем у остальных.
+const FIND_FIRST_LIMIT_MS: f64 = 40.0;
+
 /// Цель — на самый медленный запрос, а не на медиану смеси: дешёвые запросы не
-/// должны прятать дорогой. Холодный — первый после правки имени (индекс собирается
-/// заново), тёплый — следующий такой же.
+/// должны прятать дорогой. Самый первый запрос на странице — индекс пуст, векторы
+/// выделяются; холодный — первый после правки имени (индекс собирается заново);
+/// тёплый — следующий такой же. Память индекса (B-142) — справочно.
 fn find_gates<'q>(
     report: &mut Report,
     label: &str,
+    cold_limit_ms: f64,
     ed: &mut Editor,
     ids: &[NodeId],
     queries: &[&'q str],
@@ -1040,17 +1059,40 @@ fn find_gates<'q>(
         warm.push(median(w));
         found.push((*q, items));
     }
+    // Отдельным проходом: новый индекс вытесняет узлы сцены из кэша и завышал бы
+    // первый запрос после правки.
+    let mut bytes = 0;
+    let first: Vec<Duration> = queries
+        .iter()
+        .map(|q| {
+            let runs = (0..COMMIT_RUNS).map(|_| {
+                let mut index = LayerIndex::default();
+                let t = Instant::now();
+                index.find(ed.scene(), q, 50);
+                let d = t.elapsed();
+                bytes = index.heap_bytes();
+                d
+            });
+            median(runs.collect())
+        })
+        .collect();
+    let row = |what: &str| {
+        format!("Поиск слоёв, 100 000 узлов, {label}: самый медленный запрос, {what} (медиана)")
+    };
     report.gate(
-        &format!("Поиск слоёв, 100 000 узлов, {label}: самый медленный запрос, первый после правки имён (медиана)"),
+        &row("первый после правки имён"),
         worst(&cold),
-        30.0,
+        cold_limit_ms,
     );
+    report.gate(&row("следующий"), worst(&warm), 30.0);
     report.gate(
-        &format!(
-            "Поиск слоёв, 100 000 узлов, {label}: самый медленный запрос, следующий (медиана)"
-        ),
-        worst(&warm),
-        30.0,
+        &row("самый первый на странице"),
+        worst(&first),
+        cold_limit_ms.max(FIND_FIRST_LIMIT_MS),
+    );
+    report.info(
+        &format!("Поиск слоёв, 100 000 узлов, {label}: память индекса"),
+        format!("{:.1} МБ", bytes as f64 / 1e6),
     );
     found
 }

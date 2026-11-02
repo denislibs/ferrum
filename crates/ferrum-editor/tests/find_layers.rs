@@ -119,12 +119,27 @@ fn long_names_are_searched_by_their_start_and_returned_whole() {
     assert_eq!(found[0].kind, NodeKind::Rect);
 }
 
+/// Та же строка и тот же вес — в `apps/web/unit/fuzzy.test.ts`.
+const LONG_NAME: &str = "Кнопка большая синяя на главном экране приложения в тёмной теме";
+const LONG_NAME_SCORE: i32 = 235;
+
 #[test]
-fn query_longer_than_the_indexed_name_finds_nothing_quickly() {
+fn query_longer_than_the_limit_is_clipped() {
+    // Вставленное целиком длинное имя находит само себя: пробелы считаются, как в имени.
+    let head: String = LONG_NAME.chars().take(FIND_NAME_CHARS).collect();
+    assert_eq!(fuzzy_score(LONG_NAME, LONG_NAME), Some(LONG_NAME_SCORE));
+    assert_eq!(fuzzy_score(LONG_NAME, &head), Some(LONG_NAME_SCORE));
+    // Сверх предела запрос не сужает: буквы дальше 40-го символа не важны.
+    let (a50, a60) = ("а".repeat(50), "а".repeat(60));
+    assert_eq!(
+        fuzzy_score(&a50, &a60),
+        fuzzy_score(&a50, &"а".repeat(FIND_NAME_CHARS))
+    );
     let mut h = H::new();
-    named(&mut h, None, &"я".repeat(256), 0.0, 0.0);
-    assert_eq!(names(&h, &"я".repeat(32), 5).len(), 1);
-    assert!(names(&h, &"я".repeat(128), 5).is_empty());
+    named(&mut h, None, LONG_NAME, 0.0, 0.0);
+    named(&mut h, None, &"я".repeat(256), 100.0, 0.0);
+    assert_eq!(names(&h, LONG_NAME, 5), [LONG_NAME]);
+    assert_eq!(names(&h, &"я".repeat(128), 5), ["я".repeat(256)]);
 }
 
 #[test]
@@ -152,10 +167,15 @@ fn yo_in_the_other_layout_is_found() {
 /// Счёт по определению (решение 1 плана), без оптимизаций индекса: с ним сверяются
 /// и быстрый счёт, и отсечение кандидатов.
 mod reference {
+    use ferrum_editor::find::layout_variants;
+    use ferrum_editor::FIND_NAME_CHARS;
+
     fn fold(s: &str) -> Vec<char> {
         s.chars()
+            .take(FIND_NAME_CHARS)
             .flat_map(char::to_lowercase)
             .map(|c| if c == 'ё' { 'е' } else { c })
+            .take(FIND_NAME_CHARS)
             .collect()
     }
 
@@ -210,25 +230,22 @@ mod reference {
         Some((i..i + q.len()).collect())
     }
 
-    /// Один вариант запроса: без пробелов, в нижнем регистре, та же раскладка.
-    pub fn score_plain(text: &str, query: &str) -> Option<i32> {
-        let t = fold(text);
-        let q: Vec<char> = fold(query)
-            .into_iter()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        if q.is_empty() {
-            return None;
-        }
-        let greedy = align(&t, &q, false)?;
-        let mut best = score(&t, &greedy);
-        for pos in [align(&t, &q, true), substring(&t, &q)]
-            .into_iter()
-            .flatten()
-        {
-            best = best.max(score(&t, &pos));
+    fn score_variant(t: &[char], q: &[char]) -> Option<i32> {
+        let greedy = align(t, q, false)?;
+        let mut best = score(t, &greedy);
+        for pos in [align(t, q, true), substring(t, q)].into_iter().flatten() {
+            best = best.max(score(t, &pos));
         }
         Some(best)
+    }
+
+    /// Лучший вес по раскладкам запроса.
+    pub fn score_text(text: &str, query: &str) -> Option<i32> {
+        let t = fold(text);
+        layout_variants(query)
+            .iter()
+            .filter_map(|q| score_variant(&t, q))
+            .max()
     }
 }
 
@@ -251,21 +268,55 @@ impl Rng {
     }
 }
 
-// Буквы только кириллицы и знаки вне таблицы раскладок: у запроса один вариант.
-const ALPHABET: [char; 7] = ['а', 'б', 'в', 'А', ' ', '-', '1'];
+// Узкий алфавит — повторы и ничьи; широкий — ё, латиница, буквы без регистра и символы
+// мимо таблицы свёртки («İ», «Ⱥ», грузинская), неразрывный пробел.
+const NARROW: [char; 7] = ['а', 'б', 'в', 'А', ' ', '-', '1'];
+const WIDE: [char; 20] = [
+    'а', 'б', 'ё', 'Ё', 'Я', 'a', 'b', 'B', 'ß', 'ї', 'é', '字', 'か', 'İ', 'Ⱥ', 'ა', ' ',
+    '\u{A0}', '-', '1',
+];
+
+impl Rng {
+    /// Запрос из текста: подстрока, подпоследовательность, начала слов или весь текст,
+    /// иначе случайный.
+    fn query(&mut self, text: &str, alphabet: &[char]) -> String {
+        let t: Vec<char> = text.chars().collect();
+        match self.next(5) {
+            0 if !t.is_empty() => {
+                let at = self.next(t.len());
+                let len = 1 + self.next(t.len() - at);
+                t[at..at + len].iter().collect()
+            }
+            1 => t.iter().filter(|_| self.next(3) == 0).collect(),
+            2 => {
+                let mut out = String::new();
+                for (i, &c) in t.iter().enumerate() {
+                    if i == 0 || !t[i - 1].is_alphanumeric() {
+                        out.push(c);
+                    }
+                }
+                out
+            }
+            3 => text.to_string(),
+            _ => self.text(alphabet, 6),
+        }
+    }
+}
 
 #[test]
 fn fast_scoring_matches_the_definition() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let mut matched = 0;
-    for _ in 0..20_000 {
-        let text = rng.text(&ALPHABET, 24);
-        let query = rng.text(&ALPHABET, 6);
-        let want = reference::score_plain(&text, &query);
-        matched += usize::from(want.is_some());
-        assert_eq!(fuzzy_score(&text, &query), want, "{text:?} / {query:?}");
+    for (alphabet, max) in [(&NARROW[..], 24), (&NARROW[..], 70), (&WIDE[..], 70)] {
+        for _ in 0..30_000 {
+            let text = rng.text(alphabet, max);
+            let query = rng.query(&text, alphabet);
+            let want = reference::score_text(&text, &query);
+            matched += usize::from(want.is_some());
+            assert_eq!(fuzzy_score(&text, &query), want, "{text:?} / {query:?}");
+        }
     }
-    assert!(matched > 3000, "сравнение не вхолостую: {matched}");
+    assert!(matched > 40_000, "сравнение не вхолостую: {matched}");
 }
 
 #[test]
@@ -274,17 +325,24 @@ fn top_results_with_pruning_match_the_full_sort() {
     let mut h = H::new();
     let mut layers = Vec::new();
     for i in 0..400 {
-        let name = format!("а{}", rng.text(&ALPHABET, 16));
+        let alphabet = if i % 2 == 0 { &NARROW[..] } else { &WIDE[..] };
+        let name = format!("а{}", rng.text(alphabet, 60));
         // Вид сверху вниз: новый узел — выше, поэтому порядок панели — от последнего.
         layers.push(name.clone());
         named(&mut h, None, &name, i as f64, 0.0);
     }
     layers.reverse();
-    for query in ["а", "аб", "а б", "ава", "а-1", "б1", "ввв"] {
+    let mut queries: Vec<String> = ["а", "аб", "а б", "ава", "а-1", "б1", "ввв"]
+        .map(String::from)
+        .to_vec();
+    for i in 0..40 {
+        queries.push(rng.query(&layers[i * 10].clone(), &NARROW));
+    }
+    for query in &queries {
         let mut scored: Vec<(i32, usize)> = layers
             .iter()
             .enumerate()
-            .filter_map(|(i, n)| reference::score_plain(n, query).map(|s| (s, i)))
+            .filter_map(|(i, n)| reference::score_text(n, query).map(|s| (s, i)))
             .collect();
         scored.sort_by_key(|&(s, i)| (std::cmp::Reverse(s), i));
         for limit in [1, 5, 50, 200] {

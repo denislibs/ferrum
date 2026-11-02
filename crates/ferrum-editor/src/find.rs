@@ -19,6 +19,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::LazyLock;
 
 use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::{Scene, Slot};
@@ -50,8 +51,7 @@ const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
 const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
 
 /// Символ для сравнения: нижний регистр, «ё» как «е». Обычные буквы складывает
-/// `index_name` без таблиц Unicode (`to_lowercase` на 100 000 имён — основная цена
-/// сборки), сюда доходит остальное.
+/// `index_name` без таблиц Unicode, сюда доходит остальное.
 fn fold(c: char, out: &mut Vec<char>) {
     if c.is_ascii() {
         out.push(c.to_ascii_lowercase());
@@ -64,13 +64,17 @@ fn fold(c: char, out: &mut Vec<char>) {
 
 /// Запрос в обеих раскладках: как набран, ЙЦУКЕН → QWERTY и обратно; без
 /// пробелов, в нижнем регистре, «ё» как «е», без повторов. Пустой запрос — пусто.
+/// От запроса берутся первые `FIND_NAME_CHARS` символов вместе с пробелами, как и от
+/// имени: вставленное целиком длинное имя находит само себя.
 pub fn layout_variants(query: &str) -> Vec<Vec<char>> {
-    let mut base = Vec::new();
-    for c in query.chars().filter(|c| !c.is_whitespace()) {
-        for l in c.to_lowercase() {
-            base.push(l);
-        }
-    }
+    let base: Vec<char> = query
+        .trim()
+        .chars()
+        .take(FIND_NAME_CHARS)
+        .flat_map(char::to_lowercase)
+        .take(FIND_NAME_CHARS)
+        .filter(|c| !c.is_whitespace())
+        .collect();
     if base.is_empty() {
         return Vec::new();
     }
@@ -142,6 +146,46 @@ struct Name<'a> {
     f: NameFacts,
 }
 
+/// Запись таблицы свёртки: сложенный символ (младшие биты) и что о нём известно.
+const FOLDED_BITS: u16 = 0x7FF;
+const ALNUM: u16 = 1 << 11;
+const SPACE: u16 = 1 << 12;
+/// Символ не сворачивается в один из таблицы («İ», «Ⱥ»): считать как обычно.
+const NOT_IN_TABLE: u16 = 1 << 13;
+
+/// Свёртка символов до U+07FF (латиница, греческий, кириллица, армянский, иврит,
+/// арабский). `to_lowercase` и `is_alphanumeric` — поиск по таблицам Unicode, десятки
+/// наносекунд на букву вне ASCII: на 40 символах имени это дольше всего остального.
+/// Таблица заполняется ими же, поэтому отличаться от них не может.
+static FOLD: LazyLock<[u16; FOLDED_BITS as usize + 1]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let c = char::from_u32(i as u32).unwrap_or('\0');
+        let mut out = Vec::new();
+        fold(c, &mut out);
+        match out[..] {
+            [l] if l as u32 <= FOLDED_BITS as u32 => {
+                let alnum = if is_alnum(l) { ALNUM } else { 0 };
+                let space = if l.is_whitespace() { SPACE } else { 0 };
+                l as u16 | alnum | space
+            }
+            _ => NOT_IN_TABLE,
+        }
+    })
+});
+
+/// Буквы без регистра сплошными блоками (китайский, японский, корейский): символ
+/// остаётся собой, поиск по таблицам не нужен. Границы сверяет тест ниже.
+fn is_caseless_letter(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3041}'..='\u{3096}'
+            | '\u{30A1}'..='\u{30FA}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{AC00}'..='\u{D7A3}'
+    )
+}
+
 /// Складывает первые `FIND_NAME_CHARS` символов имени в конец `chars`. Один проход
 /// по локальным переменным: сборка индекса — львиная доля первого запроса после
 /// правки имён.
@@ -149,6 +193,7 @@ fn index_name(name: &str, chars: &mut Vec<char>) -> NameFacts {
     let mut buf = ['\0'; FIND_NAME_CHARS];
     let (mut n, mut starts, mut mask, mut solid) = (0, 0u64, 0u64, 0u8);
     let (mut run, mut longest, mut after_alnum) = (0u8, 0u8, false);
+    let fold_table = &*FOLD;
     let mut slow = Vec::new();
     macro_rules! note {
         ($l:expr, $alnum:expr, $space:expr) => {{
@@ -168,18 +213,17 @@ fn index_name(name: &str, chars: &mut Vec<char>) -> NameFacts {
         if n == FIND_NAME_CHARS {
             break;
         }
-        match c {
-            'а'..='я' | 'a'..='z' | '0'..='9' => note!(c, true, false),
-            ' ' => note!(c, false, true),
-            'А'..='Я' | 'A'..='Z' => {
-                note!(char::from_u32(c as u32 + 32).unwrap_or(c), true, false)
-            }
-            _ => {
-                slow.clear();
-                fold(c, &mut slow);
-                for &l in slow.iter().take(FIND_NAME_CHARS - n) {
-                    note!(l, is_alnum(l), l.is_whitespace());
-                }
+        let entry = fold_table.get(c as usize).copied().unwrap_or(NOT_IN_TABLE);
+        if entry & NOT_IN_TABLE == 0 {
+            let l = char::from_u32((entry & FOLDED_BITS) as u32).unwrap_or(c);
+            note!(l, entry & ALNUM != 0, entry & SPACE != 0);
+        } else if is_caseless_letter(c) {
+            note!(c, true, false);
+        } else {
+            slow.clear();
+            fold(c, &mut slow);
+            for &l in slow.iter().take(FIND_NAME_CHARS - n) {
+                note!(l, is_alnum(l), l.is_whitespace());
             }
         }
     }
@@ -214,7 +258,9 @@ fn score_positions(name: Name, pos: &[usize]) -> i32 {
         Some(&p) => s -= p.min(MAX_GAP) as i32,
         None => {}
     }
-    // Совпали все буквы имени (пробелы запроса не учитываются — и имени тоже).
+    // Совпали все буквы имени (пробелы запроса не учитываются — и имени тоже). Имя
+    // здесь — его первые `FIND_NAME_CHARS` символов: запрос, равный им, тоже считается
+    // именем целиком, даже если само имя длиннее.
     if pos.len() == name.f.solid as usize {
         s += EXACT;
     }
@@ -381,10 +427,9 @@ impl Needle {
         first
     }
 
-    /// Вес имени — лучшее из трёх выравниваний; `None` — запрос не встречается по
-    /// порядку или имя заведомо не наберёт больше `floor`. Выравнивания, которым
-    /// уже нечего добавить, не считаются, поэтому вес не больше `floor` может быть
-    /// занижен: такой результат годится только для отбрасывания.
+    /// Точный вес имени — лучшее из трёх выравниваний; `None` — запрос не встречается
+    /// по порядку или имя заведомо не наберёт больше `floor`. Выравнивание не считается,
+    /// только когда вес уже равен верхней границе.
     fn score(&self, name: Name, floor: i32, pos: &mut Vec<usize>) -> Option<i32> {
         let q = &self.q[..];
         // В запросе нет пробелов: ему нужно столько же символов без пробелов.
@@ -400,12 +445,14 @@ impl Needle {
         let last = pos[q.len() - 1];
         let from = pos[0].max((last + 1).saturating_sub(q.len()));
         let mut best = score_positions(name, pos);
-        if bound > best.max(floor) && align_starts(name, q, pos) {
+        // После первой буквы нет начал слов — выравнивание было бы тем же самым.
+        let later_starts = name.f.starts.checked_shr(pos[0] as u32 + 1).unwrap_or(0) != 0;
+        if bound > best && later_starts && align_starts(name, q, pos) {
             best = best.max(score_positions(name, pos));
         }
         // Одна буква: подстрока — то же, что вхождение в начале слова. Подстрока не
         // переходит через пробел: запрос длиннее участка без пробелов не поместится.
-        if q.len() > 1 && q.len() <= name.f.run as usize && bound > best.max(floor) {
+        if q.len() > 1 && q.len() <= name.f.run as usize && bound > best {
             if let Some(at) = self.substring(name, from, best) {
                 best = best.max(self.substring_score(name, at));
             }
@@ -591,5 +638,30 @@ impl Editor {
         }
         self.emit();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Быстрые пути свёртки обязаны совпадать с определением на каждом символе.
+    #[test]
+    fn fast_fold_paths_match_unicode() {
+        for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+            let mut want = Vec::new();
+            fold(c, &mut want);
+            let entry = FOLD.get(c as usize).copied().unwrap_or(NOT_IN_TABLE);
+            if entry & NOT_IN_TABLE == 0 {
+                let l = char::from_u32((entry & FOLDED_BITS) as u32).unwrap();
+                assert_eq!(want, [l], "{c:?}");
+                assert_eq!(entry & ALNUM != 0, is_alnum(l), "{c:?}");
+                assert_eq!(entry & SPACE != 0, l.is_whitespace(), "{c:?}");
+            }
+            if is_caseless_letter(c) {
+                assert_eq!(want, [c], "{c:?}");
+                assert!(is_alnum(c) && !c.is_whitespace(), "{c:?}");
+            }
+        }
     }
 }

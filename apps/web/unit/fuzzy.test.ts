@@ -40,6 +40,15 @@ test('длинный текст участвует первыми 40 симво�
   expect(fuzzyScore('а'.repeat(39) + 'я', 'я')).not.toBeNull();
 });
 
+test('запрос длиннее предела обрезается: длинное имя находит само себя', () => {
+  const long = 'Кнопка большая синяя на главном экране приложения в тёмной теме';
+  expect(fuzzyScore(long, long)).not.toBeNull();
+  expect(fuzzyScore(long, long)).toBe(fuzzyScore(long, [...long].slice(0, 40).join('')));
+  expect(fuzzyScore(long, long)).toBe(235);
+  // Сверх предела запрос не сужает: буквы дальше 40-го символа не важны.
+  expect(fuzzyScore('а'.repeat(50), 'а'.repeat(60))).toBe(fuzzyScore('а'.repeat(50), 'а'.repeat(40)));
+});
+
 // Те же значения — в `crates/ferrum-editor/tests/find_layers.rs`: счёт один.
 test('веса совпадают с ядром', () => {
   const vectors: [string, string, number][] = [

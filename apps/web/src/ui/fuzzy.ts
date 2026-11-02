@@ -19,7 +19,7 @@ export function normalize(s: string): string {
 
 /** Запрос в обеих раскладках: как набран, ЙЦУКЕН → QWERTY и обратно. */
 export function layoutVariants(query: string): string[] {
-  const q = query.trim().toLowerCase();
+  const q = [...query.trim()].slice(0, MAX_TEXT_CHARS).join('').toLowerCase();
   const swap = (m: Map<string, string>) => [...q].map((c) => m.get(c) ?? c).join('');
   return [...new Set([q, swap(toRu), swap(toEn)].map(normalize))].filter(Boolean);
 }
@@ -44,7 +44,8 @@ export function fold(s: string): string[] {
 export function queryVariants(query: string): string[][] {
   const out: string[][] = [];
   for (const v of layoutVariants(query)) {
-    const q = [...v.replace(/\s+/gu, '')];
+    // Первые символы вместе с пробелами, как у текста: длинный текст находит сам себя.
+    const q = [...v].slice(0, MAX_TEXT_CHARS).filter((c) => !/\s/u.test(c));
     if (q.length && !out.some((o) => o.join('') === q.join(''))) out.push(q);
   }
   return out;
