@@ -13,13 +13,15 @@
 // асинхронное чтение своего формата. Картинки из других приложений (PNG, JPEG,
 // WebP) ставятся узлом-изображением; не-PNG перекодирует worker.
 
-import { FERRUM_TEXT_MARKER, isMarkedText, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from '../core/clipboard-text';
+import { FERRUM_PROPS_MARKER, FERRUM_TEXT_MARKER, isMarkedText, isPropsText, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from '../core/clipboard-text';
 
 export {
   decodeText,
   encodeText,
+  FERRUM_PROPS_MARKER,
   FERRUM_TEXT_MARKER,
   fromBase64,
+  isPropsText,
   MAX_CLIPBOARD_BYTES,
   MAX_CLIPBOARD_TEXT,
   toBase64,
@@ -88,4 +90,26 @@ export function supportsCustomFormat(): boolean {
   } catch {
     return false;
   }
+}
+
+/** Источник «Вставить свойства» в системном буфере: байты копии Ferrum или текст
+ * с меткой свойств или узлов (его разбирает ядро); ничего — внутренний буфер ядра. */
+export type PropsData = { bytes: Uint8Array } | { text: string } | Record<string, never>;
+
+/** Выбор для «Вставить свойства» из элементов асинхронного Clipboard API. Чужой
+ * текст не читается целиком: сначала — только начало (метка). */
+export async function propsFromClipboardItems(items: readonly Pick<ClipboardItem, 'types' | 'getType'>[]): Promise<PropsData> {
+  for (const item of items) {
+    if (item.types.includes(FERRUM_MIME)) {
+      const blob = await item.getType(FERRUM_MIME);
+      if (blob.size > MAX_CLIPBOARD_BYTES) return {};
+      return { bytes: new Uint8Array(await blob.arrayBuffer()) };
+    }
+    if (item.types.includes('text/plain')) {
+      const blob = await item.getType('text/plain');
+      const head = await blob.slice(0, Math.max(FERRUM_PROPS_MARKER.length, FERRUM_TEXT_MARKER.length)).text();
+      if ((isPropsText(head) || isMarkedText(head)) && blob.size <= MAX_CLIPBOARD_TEXT) return { text: await blob.text() };
+    }
+  }
+  return {};
 }

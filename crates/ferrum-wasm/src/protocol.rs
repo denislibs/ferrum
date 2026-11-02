@@ -93,7 +93,8 @@ impl ExportFormat {
 }
 
 /// Способ вставки (спека подсистемы 2, раздел 6): обычная, поверх (на исходные
-/// координаты), с заменой выделенного.
+/// координаты), с заменой выделенного; `props` — «Вставить свойства» (ответ —
+/// команда `PasteProps`, а не `Paste`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
 pub enum PasteModeDto {
@@ -101,6 +102,7 @@ pub enum PasteModeDto {
     Normal,
     Over,
     Replace,
+    Props,
 }
 
 /// Тема оверлеев.
@@ -569,6 +571,17 @@ pub enum Command {
         #[tsify(optional)]
         mode: Option<PasteModeDto>,
     },
+    /// «Вставить свойства» к выделению (спека подсистемы 2, раздел 6): из
+    /// системного буфера — байты копии Ферума (`web application/x-ferrum`) или
+    /// текст с меткой свойств или узлов; без них — из внутреннего буфера ядра.
+    PasteProps {
+        #[serde(default)]
+        #[tsify(type = "Uint8Array | undefined")]
+        bytes: Option<ByteBuf>,
+        #[serde(default)]
+        #[tsify(optional)]
+        text: Option<String>,
+    },
     /// Разместить изображение (PNG): следующий клик ставит его на холст.
     PlaceImage {
         #[tsify(type = "Uint8Array")]
@@ -963,6 +976,10 @@ pub enum CoreEvent {
         #[serde(default)]
         #[tsify(type = "string | undefined")]
         plain: Option<String>,
+    },
+    /// «Копировать свойства»: текст с меткой для `text/plain` системного буфера.
+    ClipboardProps {
+        text: String,
     },
     /// PNG выделения для буфера обмена («Скопировать как PNG»).
     ClipboardPng {

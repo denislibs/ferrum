@@ -22,6 +22,7 @@ mod outline;
 pub mod pages;
 pub mod panel;
 pub mod presets;
+pub mod props_clip;
 pub mod scale;
 pub mod selection;
 pub mod snap;

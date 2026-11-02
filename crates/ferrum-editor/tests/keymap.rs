@@ -60,6 +60,8 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::Paste, &["Mod+KeyV"]),
     (CommandId::PasteOver, &["Mod+Shift+KeyV"]),
     (CommandId::PasteReplace, &["Mod+Shift+KeyR"]),
+    (CommandId::CopyProps, &["Mod+Alt+KeyC"]),
+    (CommandId::PasteProps, &["Mod+Alt+KeyV"]),
     (CommandId::Cut, &["Mod+KeyX"]),
     (CommandId::CopyAsPng, &["Mod+Shift+KeyC"]),
     (CommandId::Undo, &["Mod+KeyZ"]),
@@ -152,7 +154,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 82);
+    assert_eq!(COMMANDS.len(), 84);
 }
 
 #[test]

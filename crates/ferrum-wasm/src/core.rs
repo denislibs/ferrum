@@ -690,6 +690,9 @@ impl Core {
     fn paste_disabled(&self, cmd: &Command) -> bool {
         let paste = match cmd {
             Command::Paste { .. } | Command::PasteImage { .. } => true,
+            Command::PasteProps { .. } => {
+                return !self.editor.command_state(CommandId::PasteProps).enabled;
+            }
             Command::TextInput {
                 kind: TextInputKindDto::Paste,
                 ..
@@ -756,7 +759,8 @@ impl Core {
             Command::Paste { bytes, mode } => {
                 self.editor.take_text_pending();
                 let how = match mode.unwrap_or_default() {
-                    PasteModeDto::Normal => PasteMode::Normal,
+                    // Свойства приходят командой `PasteProps`; здесь — как обычная.
+                    PasteModeDto::Normal | PasteModeDto::Props => PasteMode::Normal,
                     PasteModeDto::Over => PasteMode::Over,
                     PasteModeDto::Replace => PasteMode::Replace,
                 };
@@ -765,6 +769,20 @@ impl Core {
                 // Фрагмент в правку текста ждёт шрифтов: повторить по приходу.
                 if self.editor.take_text_pending() {
                     self.wait(fonts::Waiting::Command(Command::Paste { bytes, mode }));
+                }
+            }
+            Command::PasteProps { bytes, text } => {
+                self.editor.take_text_pending();
+                // Текст из буфера — не доверенный: чужой — внутренний буфер ядра.
+                let clip = match (&bytes, &text) {
+                    (Some(b), _) => Some(b.to_vec()),
+                    (None, Some(t)) => ferrum_editor::props_clip::props_text_bytes(t),
+                    (None, None) => None,
+                };
+                self.editor.paste_props(clip.as_deref());
+                // Шрифт стиля текста грузится: повторить по приходу.
+                if self.editor.take_text_pending() {
+                    self.wait(fonts::Waiting::Command(Command::PasteProps { bytes, text }));
                 }
             }
             Command::PlaceImage { bytes } => self.place_image(bytes.into_vec()),
@@ -872,8 +890,12 @@ impl Core {
                         PasteMode::Normal => PasteModeDto::Normal,
                         PasteMode::Over => PasteModeDto::Over,
                         PasteMode::Replace => PasteModeDto::Replace,
+                        PasteMode::Props => PasteModeDto::Props,
                     },
                 }),
+                EditorEvent::ClipboardProps(text) => {
+                    self.events.push(CoreEvent::ClipboardProps { text })
+                }
                 EditorEvent::ExportPng(ids) => self.copy_png(&ids),
                 EditorEvent::ExportSvg(ids) => self.copy_svg(&ids),
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),

@@ -39,6 +39,9 @@ pub enum PasteMode {
     Over,
     /// «Вставить с заменой» (Ctrl/Cmd+Shift+R): на место каждого выделенного узла.
     Replace,
+    /// «Вставить свойства» (Ctrl/Cmd+Alt+V): интерфейс читает буфер и зовёт
+    /// `paste_props`, а не `paste_with`.
+    Props,
 }
 
 /// Узел, который заменит вставка: родитель, его мировая матрица, место в слоях
@@ -150,6 +153,11 @@ impl Editor {
                 .out
                 .events
                 .push(EditorEvent::PasteRequested(PasteMode::Replace)),
+            C::CopyProps => self.copy_props(),
+            C::PasteProps => self
+                .out
+                .events
+                .push(EditorEvent::PasteRequested(PasteMode::Props)),
             C::CopyAsPng => {
                 let ids = self.ordered_selection();
                 if !ids.is_empty() {

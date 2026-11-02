@@ -166,6 +166,9 @@ impl Editor {
             I(C::PasteOver),
             I(C::PasteReplace),
             sub("Копировать как", vec![I(C::CopyAsPng), I(C::CopyAsSvg)]),
+            S,
+            I(C::CopyProps),
+            I(C::PasteProps),
         ];
         if let Some(under) = under.filter(|u| !u.is_empty()) {
             items.push(S);

@@ -104,6 +104,8 @@ fn submenus_hold_the_commands_of_the_spec() {
         "edit.redo",
         "edit.paste_over",
         "edit.paste_replace",
+        "edit.copy_props",
+        "edit.paste_props",
         "edit.duplicate",
         "edit.select_all",
     ] {

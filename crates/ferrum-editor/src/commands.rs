@@ -49,6 +49,10 @@ pub enum CommandId {
     /// на место каждого выделенного узла.
     PasteReplace,
     CopyAsPng,
+    /// «Копировать свойства» и «Вставить свойства» (Ctrl/Cmd+Alt+C и V, как в
+    /// Figma): заливки, обводки, прозрачность, скругление, стиль текста.
+    CopyProps,
+    PasteProps,
     /// «Копировать как SVG» (подсистема 3, этап 5): без сочетания, как в Figma.
     CopyAsSvg,
     Duplicate,
@@ -435,6 +439,22 @@ pub const COMMANDS: &[Command] = &[
         "Копировать как PNG",
         &["картинка", "растр", "copy as png", "image"],
         &["Mod+Shift+KeyC"],
+    ),
+    cmd(
+        C::CopyProps,
+        "edit.copy_props",
+        G::Edit,
+        "Копировать свойства",
+        &["стиль", "оформление", "copy properties", "style"],
+        &["Mod+Alt+KeyC"],
+    ),
+    cmd(
+        C::PasteProps,
+        "edit.paste_props",
+        G::Edit,
+        "Вставить свойства",
+        &["стиль", "оформление", "paste properties", "style"],
+        &["Mod+Alt+KeyV"],
     ),
     cmd(
         C::CopyAsSvg,

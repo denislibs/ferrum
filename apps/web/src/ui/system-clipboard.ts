@@ -12,9 +12,12 @@ import {
   FERRUM_MIME,
   fromClipboardItems,
   fromDataTransfer,
+  isPropsText,
   MAX_CLIPBOARD_BYTES,
+  propsFromClipboardItems,
   supportsCustomFormat,
   type PasteData,
+  type PropsData,
 } from './clipboard';
 import { asyncWriter, copyPng, copySvg, type ClipboardSink } from './clipboard-write';
 import { fileBytes, IMAGE_FILE, pickFile } from './files';
@@ -153,6 +156,31 @@ export function installClipboard(ed: Editor): () => void {
     }
   };
 
+  /** «Копировать свойства»: текст с меткой — в системный буфер. Отказ браузера не
+   * мешает вставке в этой вкладке (у ядра свой буфер), поэтому без ошибки. */
+  const writeProps = (text: string) => {
+    const done = () => ed.store.toast('Свойства скопированы');
+    const clip = (globalThis as { navigator?: { clipboard?: Clipboard } }).navigator?.clipboard;
+    if (typeof clip?.writeText !== 'function') {
+      execText(text);
+      done();
+      return;
+    }
+    clip.writeText(text).then(done, () => {
+      execText(text);
+      done();
+    });
+  };
+  /** «Вставить свойства»: что лежит в системном буфере. Нет доступа или там не
+   * наше — пусто: ядро возьмёт свойства из своего буфера, без уведомлений. */
+  const readProps = async (): Promise<PropsData> => {
+    try {
+      return await propsFromClipboardItems(await navigator.clipboard.read());
+    } catch {
+      return {};
+    }
+  };
+
   const onCopy = (command: 'edit.copy' | 'edit.cut') => (e: ClipboardEvent) => {
     if (pending && command === 'edit.copy') {
       e.clipboardData?.setData('text/plain', pending);
@@ -195,6 +223,8 @@ export function installClipboard(ed: Editor): () => void {
     // проверяет то же самое.
     if (ed.store.state.commands['edit.paste']?.enabled === false) return;
     const mode: PasteModeDto = plainNext && !isTextField(e.target) ? 'over' : 'normal';
+    // Копия свойств вставляется только «Вставить свойства»: обычной вставкой — ничего.
+    if (isPropsText(e.clipboardData?.getData('text/plain') ?? '')) return;
     const sync = fromDataTransfer(e.clipboardData);
     if (sync) void deliver(sync, mode);
     // Свой формат асинхронного API в событии не виден: событие пустое — читаем его.
@@ -218,6 +248,8 @@ export function installClipboard(ed: Editor): () => void {
     if (e.type === 'clipboard') write(e);
     else if (e.type === 'clipboardPng') void copyPng(e.bytes, sink);
     else if (e.type === 'clipboardSvg') void copySvg(e.bytes, sink);
+    else if (e.type === 'clipboardProps') writeProps(e.text);
+    else if (e.type === 'pasteRequested' && e.mode === 'props') void readProps().then((p) => ed.send({ type: 'pasteProps', ...p }));
     else if (e.type === 'pasteRequested') void readAsync(false).then((d) => deliver(d, e.mode));
     else if (e.type === 'requestImage') {
       pickFile(IMAGE_FILE)

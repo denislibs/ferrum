@@ -7,8 +7,10 @@ import {
   decodeText,
   encodeText,
   FERRUM_MIME,
+  FERRUM_PROPS_MARKER,
   FERRUM_TEXT_MARKER,
   fromClipboardItems,
+  propsFromClipboardItems,
   fromDataTransfer,
   MAX_CLIPBOARD_BYTES,
   MAX_CLIPBOARD_TEXT,
@@ -85,4 +87,18 @@ test('вставка из асинхронного API: размер прове�
     type: 'image/png',
     blob: png,
   });
+});
+
+test('«Вставить свойства» из асинхронного API: байты Ferrum, текст свойств или узлов; чужое — пусто', async () => {
+  const item = (map: Record<string, Blob>) => ({ types: Object.keys(map), getType: async (t: string) => map[t] });
+  expect(await propsFromClipboardItems([item({ [FERRUM_MIME]: new Blob([new Uint8Array([9])]) })])).toEqual({ bytes: new Uint8Array([9]) });
+  const props = `${FERRUM_PROPS_MARKER}AA==`;
+  expect(await propsFromClipboardItems([item({ 'text/plain': new Blob([props]) })])).toEqual({ text: props });
+  const nodes = encodeText(new Uint8Array([5]));
+  expect(await propsFromClipboardItems([item({ 'text/plain': new Blob([nodes]) })])).toEqual({ text: nodes });
+  expect(await propsFromClipboardItems([item({ 'text/plain': new Blob(['просто текст']) })])).toEqual({});
+  expect(await propsFromClipboardItems([])).toEqual({});
+  // Копия свойств обычной вставкой не вставляется ни текстом, ни объектами.
+  const dt = { getData: () => props, files: [] as unknown as FileList };
+  expect(fromDataTransfer(dt)).toBeNull();
 });

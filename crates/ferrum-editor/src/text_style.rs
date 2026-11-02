@@ -643,6 +643,34 @@ impl Editor {
         }
     }
 
+    /// Стиль всего текста узлов `ids` (не тексты пропускаются) и правки `extra`
+    /// других свойств (заливки, обводки…) — одной записью, одним шагом отмены:
+    /// «Вставить свойства» (спека подсистемы 2, раздел 6). Шрифт грузится —
+    /// `Err(Pending)`, документ не тронут.
+    pub(crate) fn restyle_nodes_with(
+        &mut self,
+        ids: &[NodeId],
+        patch: &TextStylePatch,
+        extra: Vec<(NodeId, PropsPatch)>,
+    ) -> Result<(), TextError> {
+        let mut edits = Vec::new();
+        for id in ids {
+            let Some(before) = self.doc_props(*id) else {
+                continue;
+            };
+            let Some(t) = before.text.as_ref() else {
+                continue;
+            };
+            let mut p = t.props.clone();
+            p.style = apply_style(&p.style, patch);
+            let content = restyle(&t.content, 0..t.content.char_len(), patch, &p.style);
+            let mut after = before.clone();
+            after.text = Some(Arc::new(TextData { props: p, content }));
+            edits.push((*id, before, after, None));
+        }
+        self.apply_text_changes_with(edits, Phase::Commit, patch, extra)
+    }
+
     /// Превью или запись правок текстов: свойства, содержимое и размер рамки.
     fn apply_text_changes(
         &mut self,
@@ -650,6 +678,19 @@ impl Editor {
         phase: Phase,
         patch: &TextStylePatch,
     ) -> Result<(), TextError> {
+        self.apply_text_changes_with(edits, phase, patch, Vec::new())
+    }
+
+    /// `apply_text_changes` и правки `extra` других свойств узлов той же записью
+    /// (только при `Commit`; черновику и превью их не передают).
+    fn apply_text_changes_with(
+        &mut self,
+        edits: Vec<(NodeId, Props, Props, Option<Range<usize>>)>,
+        phase: Phase,
+        patch: &TextStylePatch,
+        extra: Vec<(NodeId, PropsPatch)>,
+    ) -> Result<(), TextError> {
+        debug_assert!(extra.is_empty() || phase == Phase::Commit);
         let mut patches: Vec<(NodeId, PropsPatch, Props, Option<Range<usize>>)> = Vec::new();
         let mut pending = false;
         for (id, before, after, range) in edits {
@@ -721,7 +762,7 @@ impl Editor {
                 if pending {
                     return Err(TextError::Pending);
                 }
-                if patches.is_empty() {
+                if patches.is_empty() && extra.is_empty() {
                     self.emit();
                     return Ok(());
                 }
@@ -729,6 +770,9 @@ impl Editor {
                 let style = patch.clone();
                 // Отказ документа `commit` сам отдаёт событием `Error`.
                 self.ctx().commit(|tx, _| {
+                    for (id, p) in &extra {
+                        tx.set_props(*id, p)?;
+                    }
                     for (id, p, before, range) in &patches {
                         let t = before.text.as_ref().expect("текст");
                         match range {

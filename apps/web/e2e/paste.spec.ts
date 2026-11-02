@@ -104,3 +104,46 @@ test('«Вставить с заменой» и «Вставить поверх�
   await dialog.getByRole('searchbox', { name: 'Поиск команд' }).fill('с заменой');
   await expect(dialog.getByRole('row').filter({ hasText: 'Вставить с заменой' })).toContainText('Перехватывает браузер');
 });
+
+const summary = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!.summary)));
+
+test('свойства: Ctrl/Cmd+Alt+C и Ctrl/Cmd+Alt+V — к фрейму одним шагом, что подходит его типу', async ({ page }) => {
+  await openApp(page);
+  // «Слой 1» — прямоугольник: скругление 8, обводка 1 внутри.
+  await pick(page, 200, 40);
+  await liveWhen(page, 'l.selectionCount === 1');
+  const rect = await summary(page);
+  await page.keyboard.press('ControlOrMeta+Alt+KeyC');
+  await expect(page.getByRole('status').filter({ hasText: 'Свойства скопированы' })).toBeVisible();
+  // Фрейм «Экран 0» — щелчком по его названию над левым верхним углом.
+  const corner = await appScreen(page, await live(page), 0, 0);
+  await page.mouse.click(corner.x + 10, corner.y - 6);
+  const l = await liveWhen(page, 'l.selectionCount === 1 && l.selectionW === 1440');
+  await page.locator('canvas').focus();
+  await page.keyboard.press('ControlOrMeta+Alt+KeyV');
+  await liveWhen(page, `l.steps === ${l.steps + 1}`);
+  await expect.poll(async () => (await summary(page)).cornerRadius?.value).toBe(8);
+  const frame = await summary(page);
+  expect(frame.fills).toEqual(rect.fills);
+  expect(frame.strokes).toEqual(rect.strokes);
+  expect([frame.w.value, frame.h.value]).toEqual([1440, 1024]);
+});
+
+test('копия свойств — текстом с меткой в системном буфере; Ctrl+V её не вставляет', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'чтение буфера — разрешение clipboard-read есть только в Chromium');
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await openApp(page);
+  await pick(page, 200, 40);
+  const l = await liveWhen(page, 'l.selectionCount === 1');
+  await page.keyboard.press('ControlOrMeta+Alt+KeyC');
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toMatch(/^ferrum-props:v1:/);
+  await page.keyboard.press('ControlOrMeta+v');
+  await page.waitForTimeout(300);
+  expect((await live(page)).nodes).toBe(l.nodes);
+  // Из меню — свойства из системного буфера (к эллипсу «Слой 0»: скругления у него нет).
+  await pick(page, 60, 40);
+  const e = await liveWhen(page, 'l.selectionCount === 1 && l.selectionX === 0');
+  await mainMenu(page, 'Правка', 'Вставить свойства');
+  await liveWhen(page, `l.steps === ${e.steps + 1}`);
+  await expect.poll(async () => (await summary(page)).kind).toBe('ellipse');
+});

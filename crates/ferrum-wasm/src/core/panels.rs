@@ -657,6 +657,7 @@ impl Core {
             | Command::SetTool { .. }
             | Command::SetTheme { .. }
             | Command::Paste { .. }
+            | Command::PasteProps { .. }
             | Command::PlaceImage { .. }
             | Command::Save
             | Command::Snapshot { .. }

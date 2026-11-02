@@ -72,6 +72,16 @@ export function commandSizeError(cmd: Command): string | null {
     return null;
   }
   if (cmd.type === 'openWithJournal') return journalCommandError(cmd);
+  if (cmd.type === 'pasteProps') {
+    // Текст из буфера: предел — до отправки (его разбирает ядро); байты — как у вставки.
+    const { bytes, text } = cmd as { bytes?: unknown; text?: unknown };
+    if (text !== undefined && (typeof text !== 'string' || text.length > MAX_CLIPBOARD_TEXT)) return tooLarge(MAX_CLIPBOARD_BYTES);
+    if (bytes === undefined) return null;
+    const kind = bytesKindError(bytes);
+    if (kind) return kind;
+    const size = (bytes as Uint8Array).byteLength;
+    return size > MAX_COMMAND_BYTES.paste ? tooLarge(MAX_COMMAND_BYTES.paste, size) : null;
+  }
   if (cmd.type === 'loadFont' && (cmd as { bytes?: unknown }).bytes === undefined) return null;
   if (
     cmd.type !== 'open' &&

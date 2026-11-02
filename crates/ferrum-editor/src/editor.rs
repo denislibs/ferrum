@@ -97,6 +97,8 @@ pub enum EditorEvent {
         bytes: Vec<u8>,
         plain: String,
     },
+    /// «Копировать свойства»: текст с меткой для `text/plain` системного буфера.
+    ClipboardProps(String),
     /// Интерфейсу пора прочитать системный буфер и вызвать `paste_with` с этим
     /// способом вставки.
     PasteRequested(crate::actions::PasteMode),
@@ -216,6 +218,8 @@ pub struct Editor {
     /// Прошлая вставка: хэш содержимого и сдвиг — следующая вставка того же
     /// содержимого встаёт на +10, +10 от неё (спека подсистемы 2, раздел 6).
     pub(crate) last_paste: Option<([u8; 32], Vec2)>,
+    /// Внутренний буфер «Копировать свойства».
+    pub(crate) props_clip: Option<ferrum_doc::Props>,
 }
 
 /// Ставит сцене источник контуров глифов для текста в булевых группах — реестр
@@ -310,6 +314,7 @@ impl Editor {
             outlines_missed,
             states: StatesCache::default(),
             last_paste: None,
+            props_clip: None,
         })
     }
 

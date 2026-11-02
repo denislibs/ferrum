@@ -45,6 +45,14 @@ fn commands() -> Vec<Command> {
             bytes: bytes(&[0x89, b'P']),
         },
         Command::Save,
+        Command::PasteProps {
+            bytes: None,
+            text: Some("ferrum-props:v1:AA==".into()),
+        },
+        Command::PasteProps {
+            bytes: Some(bytes(&[1])),
+            text: None,
+        },
         Command::ContextMenu {
             target: ContextTarget::Canvas { x: 1.5, y: 2.0 },
         },
@@ -217,6 +225,9 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::ClipboardPng { bytes: bytes(b"p") },
         CoreEvent::PasteRequested {
             mode: PasteModeDto::Over,
+        },
+        CoreEvent::ClipboardProps {
+            text: "ferrum-props:v1:AA==".into(),
         },
         CoreEvent::ContextMenu {
             items: vec![

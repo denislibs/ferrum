@@ -40,6 +40,14 @@ export function encodeText(bytes: Uint8Array): string {
   return FERRUM_TEXT_MARKER + toBase64(bytes);
 }
 
+/** Метка копии свойств в `text/plain` («Копировать свойства»; текст готовит ядро).
+ * Обычной вставкой такой текст не вставляется. */
+export const FERRUM_PROPS_MARKER = 'ferrum-props:v1:';
+
+export function isPropsText(text: string): boolean {
+  return text.startsWith(FERRUM_PROPS_MARKER);
+}
+
 /** Текст с меткой (не декодируя). */
 export function isMarkedText(text: string): boolean {
   return text.startsWith(FERRUM_TEXT_MARKER);

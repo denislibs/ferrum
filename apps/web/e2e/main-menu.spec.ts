@@ -201,7 +201,8 @@ test('поиск с десятками результатов: корневое 
   // End — последний пункт виден внутри окна.
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('End');
-  const last = menu.getByRole('menuitem').last();
+  // Последний результат — любой пункт (и переключатель — menuitemcheckbox).
+  const last = menu.locator('[role^="menuitem"]').last();
   await expect(last).toBeFocused();
   const lb = (await last.boundingBox())!;
   expect(lb.y + lb.height).toBeLessThanOrEqual(420 - 8 + 0.5);

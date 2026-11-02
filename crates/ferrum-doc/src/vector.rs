@@ -398,7 +398,8 @@ impl VectorNetwork {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn base64_encode(bytes: &[u8]) -> String {
+/// base64 (стандартный алфавит, с `=`) — для текста в буфере обмена.
+pub fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -418,7 +419,8 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+/// Обратно из base64; `None` — не base64 (длина не кратна 4, чужой знак).
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let s = s.as_bytes();
     if !s.len().is_multiple_of(4) {
         return None;

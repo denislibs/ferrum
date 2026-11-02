@@ -102,6 +102,8 @@ fn canvas_menu_follows_figma_block_order() {
             "edit.paste",
             "edit.paste_over",
             "edit.paste_replace",
+            "edit.copy_props",
+            "edit.paste_props",
             "arrange.forward",
             "arrange.backward",
             "arrange.front",

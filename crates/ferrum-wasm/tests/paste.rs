@@ -73,3 +73,58 @@ fn paste_commands_ask_with_mode_and_replace_swaps_the_selection() {
     assert_eq!(core.live().nodes, nodes);
     assert_eq!(x(&core), before, "на место заменённого");
 }
+
+#[test]
+fn props_go_through_text_with_a_marker_or_the_internal_buffer() {
+    let mut core = Core::new(Platform::Windows, VIEW, 1.0, Backend::Cpu);
+    core.command(Command::Demo { nodes: 100 });
+    // «Слой 1» — прямоугольник со скруглением 8: копия его свойств.
+    click(&mut core, 140.0, 64.0, 1000.0);
+    let ev = execute(&mut core, "edit.copy_props");
+    let text = ev
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::ClipboardProps { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("текст свойств");
+    assert!(text.starts_with("ferrum-props:v1:"));
+    let ev = execute(&mut core, "edit.paste_props");
+    assert!(ev.contains(&CoreEvent::PasteRequested {
+        mode: PasteModeDto::Props
+    }));
+    // Фрейм «Экран 0» — из панели слоёв: свойства из текста.
+    let frame = {
+        let scene = core.editor().scene();
+        scene.at(scene.roots()[0]).id
+    };
+    core.command(Command::Select {
+        ids: vec![frame.to_string()],
+        mode: SelectMode::Replace,
+    });
+    let steps = core.live().steps;
+    core.command(Command::PasteProps {
+        bytes: None,
+        text: Some(text),
+    });
+    let radius = |core: &Core| {
+        core.editor()
+            .scene()
+            .node(frame)
+            .unwrap()
+            .props
+            .corner_radius
+    };
+    assert_eq!(radius(&core), 8.0);
+    assert_eq!(core.live().steps, steps + 1.0);
+    // Чужой текст — внутренний буфер ядра (та же копия): шаг без изменений не пишется.
+    core.command(Command::PasteProps {
+        bytes: None,
+        text: Some("просто текст".into()),
+    });
+    assert_eq!(radius(&core), 8.0);
+    assert!(!core
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Error { .. })));
+}
