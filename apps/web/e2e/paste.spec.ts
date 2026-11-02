@@ -77,7 +77,7 @@ test('повтор вставки — +10, +10; Ctrl/Cmd+Shift+V — повер�
   expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);
 });
 
-test('«Вставить с заменой» и «Вставить поверх» из меню читают буфер; Ctrl+Shift+R — с предупреждением', async ({ page, browserName }) => {
+test('«Вставить с заменой» и «Вставить поверх» из меню читают буфер', async ({ page, browserName }) => {
   test.skip(browserName !== 'chromium', 'чтение буфера из меню — разрешение clipboard-read есть только в Chromium');
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await openApp(page);
@@ -98,14 +98,27 @@ test('«Вставить с заменой» и «Вставить поверх�
   await page.mouse.click(at.x, at.y, { button: 'right' });
   await page.getByRole('menu', { name: 'Действия с выделением' }).getByRole('menuitem', { name: /^Вставить поверх/ }).click();
   await liveWhen(page, `l.nodes === ${l.nodes + 1} && l.selectionX === 0 && l.selectionY === 0`);
-  // Сочетание «Вставить с заменой» занято браузером: настройки предупреждают.
-  await mainMenu(page, 'Настройки', 'Настройки…');
-  const dialog = page.getByRole('dialog', { name: 'Настройки' });
-  await dialog.getByRole('searchbox', { name: 'Поиск команд' }).fill('с заменой');
-  await expect(dialog.getByRole('row').filter({ hasText: 'Вставить с заменой' })).toContainText('Перехватывает браузер');
 });
 
 const summary = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!.summary)));
+
+test('Ctrl/Cmd+Shift+R на холсте — «Вставить с заменой» одним шагом, страница не перезагружается', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'чтение буфера — разрешение clipboard-read есть только в Chromium');
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await openApp(page);
+  await page.evaluate(() => ((window as { __marker?: number }).__marker = 7));
+  await pick(page, 60, 40);
+  await liveWhen(page, 'l.selectionCount === 1');
+  await page.keyboard.press('ControlOrMeta+c');
+  await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.read())[0]?.types ?? [])).toContain('web application/x-ferrum');
+  await pick(page, 200, 40);
+  const l = await liveWhen(page, 'l.selectionCount === 1 && l.selectionX === 140');
+  await page.keyboard.press('ControlOrMeta+Shift+KeyR');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.summary?.kind)).toBe('ellipse');
+  const r = await liveWhen(page, `l.steps === ${l.steps + 1}`);
+  expect([r.nodes, r.selectionX, r.selectionY]).toEqual([l.nodes, 140, 0]);
+  expect(await page.evaluate(() => (window as { __marker?: number }).__marker)).toBe(7);
+});
 
 test('свойства: Ctrl/Cmd+Alt+C и Ctrl/Cmd+Alt+V — к фрейму одним шагом, что подходит его типу', async ({ page }) => {
   await openApp(page);

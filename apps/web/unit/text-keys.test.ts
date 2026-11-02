@@ -74,3 +74,10 @@ test('Ctrl/Cmd+Shift+V — вставка обычным текстом, бра�
   expect(textKeyAction(key('KeyV', { ctrlKey: true, shiftKey: true }), 'windows')).toBe('browser');
   expect(textKeyAction(key('KeyV', { metaKey: true, shiftKey: true }), 'mac')).toBe('browser');
 });
+
+test('Ctrl/Cmd+R — браузеру (перезагрузка); Ctrl/Cmd+Shift+R — «Вставить с заменой», не браузеру', () => {
+  expect(textKeyAction(key('KeyR', { ctrlKey: true }), 'windows')).toBe('browser');
+  expect(textKeyAction(key('KeyR', { metaKey: true }), 'mac')).toBe('browser');
+  expect(textKeyAction(key('KeyR', { ctrlKey: true, shiftKey: true }), 'windows')).not.toBe('browser');
+  expect(textKeyAction(key('KeyR', { metaKey: true, shiftKey: true }), 'mac')).not.toBe('browser');
+});

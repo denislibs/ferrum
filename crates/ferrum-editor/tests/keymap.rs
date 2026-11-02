@@ -132,14 +132,9 @@ fn defaults_match_figma_on_both_platforms() {
             );
         }
         assert!(map.conflicts().is_empty(), "{:?}", map.conflicts());
-        // Умолчания не задевают сочетаний браузера, кроме «Вставить с заменой»:
-        // Ctrl/Cmd+Shift+R — как в Figma, настройки предупреждают о перезагрузке.
-        assert_eq!(
-            map.browser_conflicts(),
-            [(
-                CommandId::PasteReplace,
-                sc(&format!("{primary}+Shift+KeyR"))
-            )]
+        assert!(
+            map.browser_conflicts().is_empty(),
+            "умолчания не задевают сочетаний браузера"
         );
     }
     // Каждая команда таблицы — с названием, ключом и сочетанием.
@@ -313,21 +308,18 @@ fn browser_reserved_combos_are_reported() {
     assert!(reserved.contains(&sc("Ctrl+KeyW")));
     assert!(reserved.contains(&sc("Ctrl+KeyT")));
     assert!(reserved.contains(&sc("Ctrl+KeyN")));
-    assert!(
-        reserved.contains(&sc("Ctrl+Shift+KeyR")),
-        "перезагрузка без кэша"
-    );
-    assert!(browser_reserved(Platform::Mac).contains(&sc("Meta+Shift+KeyR")));
+    assert!(reserved.contains(&sc("Ctrl+KeyR")), "перезагрузка");
+    // Ctrl/Cmd+Shift+R страница может перехватить: «Вставить с заменой», как в Figma.
+    assert!(!reserved.contains(&sc("Ctrl+Shift+KeyR")));
+    assert!(browser_reserved(Platform::Mac).contains(&sc("Meta+KeyR")));
+    assert!(!browser_reserved(Platform::Mac).contains(&sc("Meta+Shift+KeyR")));
     assert!(browser_reserved(Platform::Mac).contains(&sc("Meta+KeyW")));
     let mut map = Keymap::new(Platform::Windows);
     map.bind(CommandId::Duplicate, sc("Ctrl+KeyW"), false)
         .unwrap();
     assert_eq!(
         map.browser_conflicts(),
-        vec![
-            (CommandId::PasteReplace, sc("Ctrl+Shift+KeyR")),
-            (CommandId::Duplicate, sc("Ctrl+KeyW"))
-        ]
+        vec![(CommandId::Duplicate, sc("Ctrl+KeyW"))]
     );
 }
 

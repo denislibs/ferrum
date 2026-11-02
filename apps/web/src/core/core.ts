@@ -63,7 +63,9 @@ export function detectPlatform(): Platform {
 function browserKey(e: KeyboardEvent): boolean {
   if (/^F\d+$/.test(e.key)) return true;
   const mod = e.metaKey || e.ctrlKey;
-  return mod && (e.code === 'KeyR' || e.code === 'KeyW' || e.code === 'KeyT' || (e.shiftKey && e.code === 'KeyI'));
+  // Ctrl/Cmd+Shift+R — «Вставить с заменой» (как в Figma): страница может перехватить
+  // его, перезагрузка остаётся за Ctrl/Cmd+R.
+  return mod && ((!e.shiftKey && e.code === 'KeyR') || e.code === 'KeyW' || e.code === 'KeyT' || (e.shiftKey && e.code === 'KeyI'));
 }
 
 /** CSS-курсор по курсору редактора (угол ресайза — к ближайшей стрелке). */
