@@ -36,7 +36,7 @@ export function entriesByKey(commands: readonly KeymapEntry[]): Map<string, Keym
 }
 
 /** Убирает разделители в начале, в конце и подряд (после пропуска пунктов). */
-function tidy(items: MenuItem[]): MenuItem[] {
+export function tidy(items: MenuItem[]): MenuItem[] {
   const out: MenuItem[] = [];
   for (const it of items) {
     if ('separator' in it && (out.length === 0 || 'separator' in out[out.length - 1])) continue;

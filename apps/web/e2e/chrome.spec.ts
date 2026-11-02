@@ -138,8 +138,8 @@ test('контекстное меню холста выполняет коман
   await liveWhen(page, 'l.selectionCount === 1');
   await page.mouse.click(node.x, node.y, { button: 'right' });
   const menu = page.getByRole('menu', { name: 'Действия с выделением' });
-  await expect(menu.getByRole('menuitem', { name: /Дублировать/ })).toContainText(/D$/);
-  await menu.getByRole('menuitem', { name: /Дублировать/ }).click();
+  await expect(menu.getByRole('menuitem', { name: /^Сгруппировать/ })).toContainText(/G$/);
+  await menu.getByRole('menuitem', { name: /^Сгруппировать/ }).click();
   await liveWhen(page, `l.steps === ${l.steps + 1}`);
   await expect(menu).toHaveCount(0);
 });
@@ -213,23 +213,28 @@ test('контекстное меню и тулбар: доступность и
 test('меню: серые пункты доступны стрелками, но не выполняются; переход по первой букве', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
-  // Пустое место холста: выделения нет — «Копировать» серый.
-  const empty = await appScreen(page, l, 100, 1080);
-  await page.mouse.click(empty.x, empty.y, { button: 'right' });
+  // Один прямоугольник: «Разгруппировать» серый.
+  const node = await appScreen(page, l, 200, 40);
+  await page.mouse.click(node.x, node.y, { button: 'right' });
   const menu = page.getByRole('menu', { name: 'Действия с выделением' });
-  const copy = menu.getByRole('menuitem', { name: /^Копировать/ }).first();
-  await expect(copy).toHaveAttribute('aria-disabled', 'true');
-  await expect(copy).toBeFocused();
-  await page.keyboard.press('Enter');
-  await expect(menu).toBeVisible();
-  // Буква «В» (русская раскладка: Playwright набирает её без keydown — событие
-  // отправляется прямо): «Вырезать» (серый), затем «Вставить».
+  await expect(menu.getByRole('menuitem', { name: /^Копировать/ }).first()).toBeFocused();
+  // Буквы — русские (Playwright набирает их без keydown — событие отправляется
+  // прямо): «Р» — «Разгруппировать» (серый), Enter его не выполняет.
   const letter = (key: string) =>
     page.evaluate((k) => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: 'KeyD', bubbles: true })), key);
+  await letter('р');
+  const ungroup = menu.getByRole('menuitem', { name: /^Разгруппировать/ });
+  await expect(ungroup).toHaveAttribute('aria-disabled', 'true');
+  await expect(ungroup).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(menu).toBeVisible();
+  // «В» — по кругу после серого пункта: «Войти в правку», «Вставить», «Выделить слой».
   await letter('в');
-  await expect(menu.getByRole('menuitem', { name: /^Вырезать/ })).toBeFocused();
-  await letter('В');
+  await expect(menu.getByRole('menuitem', { name: /^Войти в правку/ })).toBeFocused();
+  await letter('в');
   await expect(menu.getByRole('menuitem', { name: /^Вставить/ })).toBeFocused();
+  await letter('В');
+  await expect(menu.getByRole('menuitem', { name: /^Выделить слой/ })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(menu).toHaveCount(0);
   expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);

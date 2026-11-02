@@ -1,5 +1,5 @@
 // Шапки панелей (PanelHeader), главное меню, зум, «Поделиться», вкладки, края
-// панелей для изменения ширины и контекстное меню холста.
+// панелей для изменения ширины.
 
 import { createSignal, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { useEditor } from './context';
@@ -198,38 +198,6 @@ export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWid
       }}
     />
   );
-}
-
-/** Контекстное меню холста: команды редактора; доступность — из состояния
- * команд ядра (основной поток о выделении ничего не вычисляет). */
-export function canvasMenu(): MenuItem[] {
-  const item = (label: string, command: string): MenuItem => ({ label, command });
-  return [
-    item('Копировать', 'edit.copy'),
-    item('Вырезать', 'edit.cut'),
-    item('Вставить', 'edit.paste'),
-    item('Дублировать', 'edit.duplicate'),
-    item('Удалить', 'edit.delete'),
-    { separator: true },
-    item('Сгруппировать', 'object.group'),
-    item('Разгруппировать', 'object.ungroup'),
-    item('Обернуть во фрейм', 'object.frame_selection'),
-    { separator: true },
-    item('На передний план', 'arrange.front'),
-    item('Переместить вперёд', 'arrange.forward'),
-    item('Переместить назад', 'arrange.backward'),
-    item('На задний план', 'arrange.back'),
-    { separator: true },
-    item('Отразить по горизонтали', 'object.flip_horizontal'),
-    item('Отразить по вертикали', 'object.flip_vertical'),
-    item('Скрыть или показать', 'object.toggle_visible'),
-    item('Заблокировать или разблокировать', 'object.toggle_lock'),
-    { separator: true },
-    item('Копировать как PNG', 'edit.copy_png'),
-    item('Копировать как SVG', 'edit.copy_svg'),
-    item('Выделить всё', 'edit.select_all'),
-    item('Показать всё', 'view.fit_all'),
-  ];
 }
 
 export function Section(props: { title: string; children: JSX.Element; actions?: JSX.Element; muted?: boolean }) {
