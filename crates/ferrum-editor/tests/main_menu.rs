@@ -108,6 +108,7 @@ fn submenus_hold_the_commands_of_the_spec() {
         "edit.paste_props",
         "edit.duplicate",
         "edit.select_all",
+        "edit.select_similar",
     ] {
         assert!(keys(edit).contains(&k), "{k}");
     }

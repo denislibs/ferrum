@@ -759,6 +759,7 @@ fn main() {
     boolean_child_drag(&mut report);
     scale_selection(&mut report);
     command_states(&mut report);
+    select_similar(&mut report);
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -836,6 +837,36 @@ fn command_states(report: &mut Report) {
     report.info(
         "Состояния команд после шага, выделено всё — 100 000 (медиана)",
         ms(median(whole)),
+    );
+}
+
+/// «Выделить подобные» (подсистема 2, этап 2): на странице из 100 000 узлов
+/// выделен один прямоугольник — совпадают его двойники в каждом фрейме (тот же
+/// тип, заливка и обводка: 1000 узлов). Цель — 100 мс на весь обход страницы.
+fn select_similar(report: &mut Report) {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let ids: Vec<NodeId> = doc.transact(page, vec![], |p| fill(p, NODES)).unwrap();
+    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    // «Слой 1» первого фрейма — прямоугольник (каждый третий — эллипс).
+    let sample = ids[2];
+    let mut runs = Vec::new();
+    let mut found = 0;
+    for _ in 0..COMMIT_RUNS * 2 {
+        ed.select(&[sample]);
+        ed.take_events();
+        let t = Instant::now();
+        ed.execute(CommandId::SelectSimilar);
+        runs.push(t.elapsed());
+        found = ed.selection().len();
+        ed.take_events();
+    }
+    report.gate_median("«Выделить подобные», 100 000 узлов", &runs, 100.0);
+    report.check(
+        "«Выделить подобные»: двойник в каждом фрейме",
+        found == NODES / 100,
+        format!("{found}"),
+        &format!("{}", NODES / 100),
     );
 }
 

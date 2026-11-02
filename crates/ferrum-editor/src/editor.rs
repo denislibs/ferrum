@@ -218,6 +218,8 @@ pub struct Editor {
     /// Прошлая вставка: хэш содержимого и сдвиг — следующая вставка того же
     /// содержимого встаёт на +10, +10 от неё (спека подсистемы 2, раздел 6).
     pub(crate) last_paste: Option<([u8; 32], Vec2)>,
+    /// Прошлый Ctrl/Cmd+D: для «умного дубликата».
+    pub(crate) last_duplicate: Option<crate::actions::Duplicated>,
     /// Внутренний буфер «Копировать свойства».
     pub(crate) props_clip: Option<ferrum_doc::Props>,
 }
@@ -315,6 +317,7 @@ impl Editor {
             states: StatesCache::default(),
             last_paste: None,
             props_clip: None,
+            last_duplicate: None,
         })
     }
 

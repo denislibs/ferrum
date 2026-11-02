@@ -67,6 +67,7 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::Undo, &["Mod+KeyZ"]),
     (CommandId::Redo, &["Mod+Shift+KeyZ"]),
     (CommandId::SelectAll, &["Mod+KeyA"]),
+    (CommandId::SelectSimilar, &["Mod+Alt+KeyA"]),
     (CommandId::Escape, &["Escape"]),
     // Подсистема 2: главное меню — Alt+/ (в Figma поиск в меню — по логотипу);
     // «Экспорт…» и «Привязка к пикселям» — как в справке Figma.
@@ -149,7 +150,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 84);
+    assert_eq!(COMMANDS.len(), 85);
 }
 
 #[test]

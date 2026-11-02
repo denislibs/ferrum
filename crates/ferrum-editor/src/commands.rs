@@ -58,6 +58,9 @@ pub enum CommandId {
     Duplicate,
     Delete,
     SelectAll,
+    /// «Выделить подобные»: узлы страницы того же типа с теми же заливками и
+    /// обводками (как «Select matching layers» в Figma).
+    SelectSimilar,
     /// Отменить жест, вернуться к «Перемещению», снять выделение — по очереди.
     Escape,
     Group,
@@ -487,6 +490,15 @@ pub const COMMANDS: &[Command] = &[
         "Выделить всё",
         &["все слои", "select all"],
         &["Mod+KeyA"],
+    ),
+    // Как «Select matching layers» в Figma: Ctrl/Cmd+Alt+A.
+    cmd(
+        C::SelectSimilar,
+        "edit.select_similar",
+        G::Edit,
+        "Выделить подобные",
+        &["такие же", "одинаковые", "select matching", "similar"],
+        &["Mod+Alt+KeyA"],
     ),
     cmd(
         C::Escape,

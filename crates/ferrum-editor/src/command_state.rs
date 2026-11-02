@@ -160,7 +160,9 @@ impl Editor {
             C::Paste | C::PasteOver => (edit, None),
             // Заменять нечего без выделения.
             C::PasteReplace => (edit && sel, None),
-            C::CopyAsPng | C::CopyAsSvg | C::ZoomToSelection | C::CopyProps => (sel, None),
+            C::CopyAsPng | C::CopyAsSvg | C::ZoomToSelection | C::CopyProps | C::SelectSimilar => {
+                (sel, None)
+            }
             // В правке текста сочетания — у текста; свойства — к узлам вне неё.
             C::PasteProps => (edit && sel && !text, None),
             // В правке вектора удаление и сдвиг — у точек.

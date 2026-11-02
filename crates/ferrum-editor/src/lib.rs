@@ -36,7 +36,7 @@ pub mod vector_edit;
 pub mod vector_ops;
 mod vector_select;
 
-pub use actions::{PasteMode, FIT_PADDING_PX, PASTE_STEP, PRESET_GAP};
+pub use actions::{PasteMode, FIT_PADDING_PX, MAX_SIMILAR_SAMPLES, PASTE_STEP, PRESET_GAP};
 pub use command_state::CommandState;
 pub use commands::{Command, CommandGroup, CommandId, COMMANDS};
 pub use context_menu::{ContextTarget, MAX_SELECT_LAYER_ITEMS};

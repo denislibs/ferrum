@@ -27,6 +27,18 @@ pub const PRESET_GAP: f64 = 100.0;
 /// раздел 6).
 pub const PASTE_STEP: f64 = 10.0;
 
+/// Сколько разных образцов (тип, заливки, обводки) берёт «Выделить подобные».
+pub const MAX_SIMILAR_SAMPLES: usize = 64;
+
+/// Прошлый дубликат: оригиналы и копии по порядку слоёв и версия выделения после
+/// него — пока она та же, следующий Ctrl/Cmd+D повторяет сдвиг копий.
+#[derive(Debug, Clone)]
+pub(crate) struct Duplicated {
+    sources: Vec<NodeId>,
+    copies: Vec<NodeId>,
+    version: u64,
+}
+
 /// Способ вставки из буфера обмена (спека подсистемы 2, раздел 6).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PasteMode {
@@ -170,15 +182,10 @@ impl Editor {
                     self.out.events.push(EditorEvent::ExportSvg(ids));
                 }
             }
-            C::Duplicate => {
-                let ids = top_level(&self.scene, &self.selection);
-                if !ids.is_empty() {
-                    self.ctx()
-                        .commit(|tx, scene| duplicate(tx, scene, &ids, Vec2::ZERO));
-                }
-            }
+            C::Duplicate => self.smart_duplicate(),
             C::Delete => self.delete_selection(),
             C::SelectAll => self.select_all(),
+            C::SelectSimilar => self.select_similar(),
             C::Escape => {
                 if self.tool.kind() != ToolKind::Move {
                     self.set_tool(ToolKind::Move);
@@ -328,6 +335,80 @@ impl Editor {
             .filter(|id| !self.scene.is_draft(*id))
             .collect();
         self.selection.set(all);
+    }
+
+    /// Ctrl/Cmd+D, «умный дубликат» (спека подсистемы 2, раздел 6): копии встают на
+    /// место оригиналов, а если выделены копии прошлого дубликата (выделение с тех
+    /// пор не менялось — их только двигали), то со сдвигом этих копий от их
+    /// оригиналов: каждый следующий Ctrl/Cmd+D повторяет тот же шаг.
+    fn smart_duplicate(&mut self) {
+        let ids = self.ordered_selection();
+        if ids.is_empty() {
+            return;
+        }
+        let offset = match &self.last_duplicate {
+            Some(d) if d.version == self.selection.version() && d.copies == self.selection[..] => {
+                let at = |id: NodeId| self.scene.node(id).map(|n| n.world.translation());
+                match (d.copies.first().copied(), d.sources.first().copied()) {
+                    (Some(c), Some(s)) => match (at(c), at(s)) {
+                        (Some(c), Some(s)) => c - s,
+                        _ => Vec2::ZERO,
+                    },
+                    _ => Vec2::ZERO,
+                }
+            }
+            _ => Vec2::ZERO,
+        };
+        let ok = self
+            .ctx()
+            .commit(|tx, scene| duplicate(tx, scene, &ids, offset));
+        // Копии — по порядку слоёв, как и оригиналы: пары по номеру.
+        self.last_duplicate = ok.then(|| Duplicated {
+            sources: ids,
+            copies: self.selection.to_vec(),
+            version: self.selection.version(),
+        });
+    }
+
+    /// «Выделить подобные»: видимые и не заблокированные узлы страницы того же
+    /// типа с теми же заливками и обводками, что у кого-то из выделенных (образцов
+    /// — не больше `MAX_SIMILAR_SAMPLES` разных). Совпавший узел выделяется без
+    /// потомков. Обход — один, без рекурсии.
+    fn select_similar(&mut self) {
+        let mut samples: Vec<(NodeKind, &[Fill], &[ferrum_doc::Stroke])> = Vec::new();
+        for id in self.selection.iter() {
+            let Some(n) = self.scene.node(*id) else {
+                continue;
+            };
+            let key = (n.props.kind, &n.props.fills[..], &n.props.strokes[..]);
+            if !samples.contains(&key) {
+                samples.push(key);
+                if samples.len() == MAX_SIMILAR_SAMPLES {
+                    break;
+                }
+            }
+        }
+        let mut found = Vec::new();
+        let mut stack: Vec<ferrum_scene::Slot> = self.scene.roots().iter().rev().copied().collect();
+        while let Some(s) = stack.pop() {
+            if self.scene.is_draft_slot(s) {
+                continue;
+            }
+            let n = self.scene.at(s);
+            if !n.props.visible || n.props.locked {
+                continue;
+            }
+            let p = &n.props;
+            if samples
+                .iter()
+                .any(|(k, f, st)| *k == p.kind && *f == &p.fills[..] && *st == &p.strokes[..])
+            {
+                found.push(n.id);
+            } else {
+                stack.extend(n.children.iter().rev());
+            }
+        }
+        self.selection.set(found);
     }
 
     /// Ctrl+G и Ctrl+Alt+G: оборачивает выделение в группу или фрейм. Контейнер

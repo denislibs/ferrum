@@ -125,6 +125,7 @@ pub fn main_menu() -> Vec<MenuNode> {
                 I(C::Delete),
                 S,
                 I(C::SelectAll),
+                I(C::SelectSimilar),
             ],
         ),
         group(
