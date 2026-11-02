@@ -5,6 +5,7 @@
 
 import { tooLarge } from '../core/limits';
 import type { ClipboardExtra } from '../core/messages';
+import type { PasteModeDto } from '../wasm/ferrum_wasm';
 import type { Editor } from './context';
 import {
   eventIsEmpty,
@@ -123,14 +124,16 @@ export function installClipboard(ed: Editor): () => void {
     }
   };
 
-  const deliver = async (data: PasteData) => {
+  /** Вставка прочитанного: объекты Ferrum — способом `mode` (поверх, с заменой);
+   * картинка из другого приложения — всегда обычной вставкой. */
+  const deliver = async (data: PasteData, mode: PasteModeDto = 'normal') => {
     if (!data) return;
     switch (data.kind) {
       case 'ferrum':
-        ed.send({ type: 'paste', bytes: data.bytes });
+        ed.send({ type: 'paste', bytes: data.bytes, mode });
         return;
       case 'text':
-        ed.core.pasteText(data.text);
+        ed.core.pasteText(data.text, mode);
         return;
       case 'tooBig':
         toast(tooLarge(MAX_CLIPBOARD_BYTES));
@@ -178,7 +181,8 @@ export function installClipboard(ed: Editor): () => void {
     }
     ed.send({ type: 'textInput', kind: 'paste', data: text });
   };
-  /** Вставка с Shift: обычным текстом, в стиле у курсора. */
+  /** Вставка с Shift: в правке текста — обычным текстом, в стиле у курсора; на
+   * холсте — «Вставить поверх». */
   let plainNext = false;
   const onKeyDown = (e: KeyboardEvent) => {
     plainNext = (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyV';
@@ -190,10 +194,11 @@ export function installClipboard(ed: Editor): () => void {
     // меню: ни чтения буфера (и запроса разрешения), ни уведомлений. Ядро
     // проверяет то же самое.
     if (ed.store.state.commands['edit.paste']?.enabled === false) return;
+    const mode: PasteModeDto = plainNext && !isTextField(e.target) ? 'over' : 'normal';
     const sync = fromDataTransfer(e.clipboardData);
-    if (sync) void deliver(sync);
+    if (sync) void deliver(sync, mode);
     // Свой формат асинхронного API в событии не виден: событие пустое — читаем его.
-    else if (eventIsEmpty(e.clipboardData)) void readAsync(true).then(deliver);
+    else if (eventIsEmpty(e.clipboardData)) void readAsync(true).then((d) => deliver(d, mode));
     else {
       const text = e.clipboardData?.getData('text/plain') ?? '';
       if (text === '') return;
@@ -213,7 +218,7 @@ export function installClipboard(ed: Editor): () => void {
     if (e.type === 'clipboard') write(e);
     else if (e.type === 'clipboardPng') void copyPng(e.bytes, sink);
     else if (e.type === 'clipboardSvg') void copySvg(e.bytes, sink);
-    else if (e.type === 'pasteRequested') void readAsync(false).then(deliver);
+    else if (e.type === 'pasteRequested') void readAsync(false).then((d) => deliver(d, e.mode));
     else if (e.type === 'requestImage') {
       pickFile(IMAGE_FILE)
         .then(async (f) => {

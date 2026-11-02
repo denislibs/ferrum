@@ -58,6 +58,8 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::ToggleUi, &["Mod+Backslash"]),
     (CommandId::Copy, &["Mod+KeyC"]),
     (CommandId::Paste, &["Mod+KeyV"]),
+    (CommandId::PasteOver, &["Mod+Shift+KeyV"]),
+    (CommandId::PasteReplace, &["Mod+Shift+KeyR"]),
     (CommandId::Cut, &["Mod+KeyX"]),
     (CommandId::CopyAsPng, &["Mod+Shift+KeyC"]),
     (CommandId::Undo, &["Mod+KeyZ"]),
@@ -128,9 +130,14 @@ fn defaults_match_figma_on_both_platforms() {
             );
         }
         assert!(map.conflicts().is_empty(), "{:?}", map.conflicts());
-        assert!(
-            map.browser_conflicts().is_empty(),
-            "умолчания не задевают сочетаний браузера"
+        // Умолчания не задевают сочетаний браузера, кроме «Вставить с заменой»:
+        // Ctrl/Cmd+Shift+R — как в Figma, настройки предупреждают о перезагрузке.
+        assert_eq!(
+            map.browser_conflicts(),
+            [(
+                CommandId::PasteReplace,
+                sc(&format!("{primary}+Shift+KeyR"))
+            )]
         );
     }
     // Каждая команда таблицы — с названием, ключом и сочетанием.
@@ -145,7 +152,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 80);
+    assert_eq!(COMMANDS.len(), 82);
 }
 
 #[test]
@@ -304,13 +311,21 @@ fn browser_reserved_combos_are_reported() {
     assert!(reserved.contains(&sc("Ctrl+KeyW")));
     assert!(reserved.contains(&sc("Ctrl+KeyT")));
     assert!(reserved.contains(&sc("Ctrl+KeyN")));
+    assert!(
+        reserved.contains(&sc("Ctrl+Shift+KeyR")),
+        "перезагрузка без кэша"
+    );
+    assert!(browser_reserved(Platform::Mac).contains(&sc("Meta+Shift+KeyR")));
     assert!(browser_reserved(Platform::Mac).contains(&sc("Meta+KeyW")));
     let mut map = Keymap::new(Platform::Windows);
     map.bind(CommandId::Duplicate, sc("Ctrl+KeyW"), false)
         .unwrap();
     assert_eq!(
         map.browser_conflicts(),
-        vec![(CommandId::Duplicate, sc("Ctrl+KeyW"))]
+        vec![
+            (CommandId::PasteReplace, sc("Ctrl+Shift+KeyR")),
+            (CommandId::Duplicate, sc("Ctrl+KeyW"))
+        ]
     );
 }
 

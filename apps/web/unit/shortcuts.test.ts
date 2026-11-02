@@ -74,4 +74,8 @@ test('сочетания буфера обмена по платформе', () 
   expect(clipboardAction('Ctrl+KeyX', 'windows')).toBe('cut');
   expect(clipboardAction('Ctrl+KeyV', 'linux')).toBe('paste');
   expect(clipboardAction('Ctrl+Shift+KeyC', 'linux')).toBeNull();
+  // Ctrl/Cmd+Shift+V — тоже событие `paste`: «Вставить поверх».
+  expect(clipboardAction('Ctrl+Shift+KeyV', 'windows')).toBe('pasteOver');
+  expect(clipboardAction('Shift+Meta+KeyV', 'mac')).toBe('pasteOver');
+  expect(clipboardAction('Ctrl+Shift+KeyV', 'mac')).toBeNull();
 });

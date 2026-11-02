@@ -152,11 +152,19 @@ impl Editor {
     fn node_menu(&self, under: Option<Vec<(NodeId, String)>>, layer: bool) -> Vec<MenuNode> {
         if self.selection.is_empty() {
             // Пустое место холста.
-            return vec![I(C::Paste), S, I(C::SelectAll), I(C::ZoomToFit)];
+            return vec![
+                I(C::Paste),
+                I(C::PasteOver),
+                S,
+                I(C::SelectAll),
+                I(C::ZoomToFit),
+            ];
         }
         let mut items = vec![
             I(C::Copy),
             I(C::Paste),
+            I(C::PasteOver),
+            I(C::PasteReplace),
             sub("Копировать как", vec![I(C::CopyAsPng), I(C::CopyAsSvg)]),
         ];
         if let Some(under) = under.filter(|u| !u.is_empty()) {

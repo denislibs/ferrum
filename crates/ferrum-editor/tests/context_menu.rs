@@ -80,7 +80,12 @@ fn right_click_selects_an_unselected_node_and_keeps_a_selected_one() {
     assert!(h.sel().is_empty());
     assert_eq!(
         keys(&empty),
-        ["edit.paste", "edit.select_all", "view.fit_all"]
+        [
+            "edit.paste",
+            "edit.paste_over",
+            "edit.select_all",
+            "view.fit_all"
+        ]
     );
     check_level(&empty);
 }
@@ -95,6 +100,8 @@ fn canvas_menu_follows_figma_block_order() {
         [
             "edit.copy",
             "edit.paste",
+            "edit.paste_over",
+            "edit.paste_replace",
             "arrange.forward",
             "arrange.backward",
             "arrange.front",

@@ -42,6 +42,12 @@ pub enum CommandId {
     Copy,
     Cut,
     Paste,
+    /// «Вставить поверх» (Ctrl/Cmd+Shift+V): на исходные координаты, без сдвига
+    /// к центру вида (спека подсистемы 2, раздел 6).
+    PasteOver,
+    /// «Вставить с заменой» (Ctrl/Cmd+Shift+R, как в Figma): содержимое буфера —
+    /// на место каждого выделенного узла.
+    PasteReplace,
     CopyAsPng,
     /// «Копировать как SVG» (подсистема 3, этап 5): без сочетания, как в Figma.
     CopyAsSvg,
@@ -401,6 +407,26 @@ pub const COMMANDS: &[Command] = &[
         "Вставить",
         &["буфер", "paste"],
         &["Mod+KeyV"],
+    ),
+    // Как в Figma: Ctrl/Cmd+Shift+V. В правке текста то же сочетание по-прежнему
+    // вставляет обычный текст (его решает интерфейс по событию `paste`).
+    cmd(
+        C::PasteOver,
+        "edit.paste_over",
+        G::Edit,
+        "Вставить поверх",
+        &["на место", "на то же место", "paste over", "paste in place"],
+        &["Mod+Shift+KeyV"],
+    ),
+    // Как в Figma: Ctrl/Cmd+Shift+R. В браузере сочетание занято перезагрузкой
+    // (настройки предупреждают); команда есть в меню.
+    cmd(
+        C::PasteReplace,
+        "edit.paste_replace",
+        G::Edit,
+        "Вставить с заменой",
+        &["заменить", "подменить", "paste to replace", "replace"],
+        &["Mod+Shift+KeyR"],
     ),
     cmd(
         C::CopyAsPng,

@@ -270,13 +270,14 @@ export function App(props: AppProps) {
           ed.send({ type: 'importKeymap', json: km });
         }
       },
-      // Ctrl/Cmd+C, X, V, пока они вызывают копирование, вырезание и вставку, идут
+      // Ctrl/Cmd+C, X, V (и Shift+V — «Вставить поверх»), пока они вызывают
+      // копирование, вырезание и вставку, идут
       // событиями буфера обмена (системный буфер), а не клавишами в ядро.
       isClipboardKey: (e) => {
         const s = eventShortcut(e);
         const action = s && clipboardAction(s, platform);
         if (!s || !action) return false;
-        const key = { copy: 'edit.copy', cut: 'edit.cut', paste: 'edit.paste' }[action];
+        const key = { copy: 'edit.copy', cut: 'edit.cut', paste: 'edit.paste', pasteOver: 'edit.paste_over' }[action];
         return !!store.state.keymap.commands.find((c) => c.key === key)?.bindings.includes(s);
       },
     })

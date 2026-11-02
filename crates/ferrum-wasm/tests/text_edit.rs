@@ -853,6 +853,7 @@ fn native_paste_in_a_read_only_document_does_nothing() {
     for cmd in [
         Command::Paste {
             bytes: ByteBuf::from(b"not a ferrum clip".to_vec()),
+            mode: None,
         },
         Command::PasteImage {
             bytes: ByteBuf::from(png),

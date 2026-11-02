@@ -97,8 +97,9 @@ pub enum EditorEvent {
         bytes: Vec<u8>,
         plain: String,
     },
-    /// Интерфейсу пора прочитать системный буфер и вызвать `paste`.
-    PasteRequested,
+    /// Интерфейсу пора прочитать системный буфер и вызвать `paste_with` с этим
+    /// способом вставки.
+    PasteRequested(crate::actions::PasteMode),
     /// Скопировать как PNG: интерфейс экспортирует узлы и кладёт картинку в буфер.
     ExportPng(Vec<NodeId>),
     /// Скопировать как SVG: тот же писатель, что у экспорта SVG, — в буфер текстом.
@@ -212,6 +213,9 @@ pub struct Editor {
     pub(crate) outlines_missed: Rc<Cell<bool>>,
     /// Состояния команд, отправленные интерфейсу, и их ключ.
     pub(crate) states: StatesCache,
+    /// Прошлая вставка: хэш содержимого и сдвиг — следующая вставка того же
+    /// содержимого встаёт на +10, +10 от неё (спека подсистемы 2, раздел 6).
+    pub(crate) last_paste: Option<([u8; 32], Vec2)>,
 }
 
 /// Ставит сцене источник контуров глифов для текста в булевых группах — реестр
@@ -305,6 +309,7 @@ impl Editor {
             outlines_generation: 0,
             outlines_missed,
             states: StatesCache::default(),
+            last_paste: None,
         })
     }
 

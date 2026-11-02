@@ -32,6 +32,8 @@ test('холст: правый щелчок выделяет узел, меню 
   expect(await labels(page, 'Действия с выделением')).toEqual([
     'Копировать',
     'Вставить',
+    'Вставить поверх',
+    'Вставить с заменой',
     'Копировать как',
     'Выделить слой',
     'Переместить вперёд',
@@ -79,7 +81,7 @@ test('холст: правый щелчок по выделенному сохр
   expect(after.selectionW).toBe(260);
 });
 
-test('пустое место холста: выделение снимается, меню — вставить, выделить всё, показать всё', async ({ page }) => {
+test('пустое место холста: выделение снимается, меню — вставить, вставить поверх, выделить всё, показать всё', async ({ page }) => {
   await openApp(page);
   const l = await live(page);
   const node = await appScreen(page, l, 200, 40);
@@ -95,7 +97,7 @@ test('пустое место холста: выделение снимаетс�
   const box = (await menu.boundingBox())!;
   expect(Math.abs(box.x - empty.x)).toBeLessThanOrEqual(1);
   expect(Math.min(Math.abs(box.y - (empty.y + 4)), Math.abs(box.y + box.height - (empty.y - 4)))).toBeLessThanOrEqual(2);
-  expect(await labels(page, 'Действия с выделением')).toEqual(['Вставить', 'Выделить всё', 'Показать всё']);
+  expect(await labels(page, 'Действия с выделением')).toEqual(['Вставить', 'Вставить поверх', 'Выделить всё', 'Показать всё']);
   await menu.getByRole('menuitem', { name: /^Выделить всё/ }).click();
   await liveWhen(page, 'l.selectionCount === 10');
   expect(await warnings(page)).toEqual([]);

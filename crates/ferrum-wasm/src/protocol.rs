@@ -92,6 +92,17 @@ impl ExportFormat {
     }
 }
 
+/// Способ вставки (спека подсистемы 2, раздел 6): обычная, поверх (на исходные
+/// координаты), с заменой выделенного.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum PasteModeDto {
+    #[default]
+    Normal,
+    Over,
+    Replace,
+}
+
 /// Тема оверлеев.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -549,10 +560,14 @@ pub enum Command {
         #[serde(default)]
         system: Option<bool>,
     },
-    /// Вставить содержимое буфера обмена (формат `web application/x-ferrum`).
+    /// Вставить содержимое буфера обмена (формат `web application/x-ferrum`)
+    /// способом `mode` (без него — обычная вставка).
     Paste {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
+        #[serde(default)]
+        #[tsify(optional)]
+        mode: Option<PasteModeDto>,
     },
     /// Разместить изображение (PNG): следующий клик ставит его на холст.
     PlaceImage {
@@ -962,8 +977,10 @@ pub enum CoreEvent {
         #[tsify(type = "Uint8Array")]
         bytes: ByteBuf,
     },
-    /// Пора прочитать системный буфер и прислать `Paste`.
-    PasteRequested,
+    /// Пора прочитать системный буфер и прислать `Paste` с этим способом.
+    PasteRequested {
+        mode: PasteModeDto,
+    },
     /// Выбрать файл изображения и прислать `PlaceImage`.
     RequestImage,
     ToggleUi,

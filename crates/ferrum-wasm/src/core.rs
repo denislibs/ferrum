@@ -18,7 +18,8 @@ use std::collections::{HashSet, VecDeque};
 use ferrum_doc::{container, fixture, DocResult, Document, NodeId, Tx};
 use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{
-    CommandId, CommandState, Cursor, Editor, EditorEvent, Input, Platform, ThemeChoice, ToolKind,
+    CommandId, CommandState, Cursor, Editor, EditorEvent, Input, PasteMode, Platform, ThemeChoice,
+    ToolKind,
 };
 use ferrum_render::{
     decode_png, Clock, ExportBudget, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba,
@@ -34,9 +35,9 @@ use crate::input::{decode_all, Record};
 use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
-    Backend, Command, CommandStateDto, CoreEvent, CursorKind, TextInputKindDto, Theme, Tool,
-    MAX_DEMO_NODES, MAX_DEMO_TEXTS, MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT,
-    THUMB_WIDTH,
+    Backend, Command, CommandStateDto, CoreEvent, CursorKind, PasteModeDto, TextInputKindDto,
+    Theme, Tool, MAX_DEMO_NODES, MAX_DEMO_TEXTS, MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX,
+    THUMB_HEIGHT, THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -752,13 +753,18 @@ impl Core {
                 };
                 self.editor.set_settings(s);
             }
-            Command::Paste { bytes } => {
+            Command::Paste { bytes, mode } => {
                 self.editor.take_text_pending();
+                let how = match mode.unwrap_or_default() {
+                    PasteModeDto::Normal => PasteMode::Normal,
+                    PasteModeDto::Over => PasteMode::Over,
+                    PasteModeDto::Replace => PasteMode::Replace,
+                };
                 // Ошибку вставки редактор сам отдаёт событием `Error`.
-                let _ = self.editor.paste(&bytes);
+                let _ = self.editor.paste_with(&bytes, how);
                 // Фрагмент в правку текста ждёт шрифтов: повторить по приходу.
                 if self.editor.take_text_pending() {
-                    self.wait(fonts::Waiting::Command(Command::Paste { bytes }));
+                    self.wait(fonts::Waiting::Command(Command::Paste { bytes, mode }));
                 }
             }
             Command::PlaceImage { bytes } => self.place_image(bytes.into_vec()),
@@ -861,7 +867,13 @@ impl Core {
                         plain: Some(plain),
                     })
                 }
-                EditorEvent::PasteRequested => self.events.push(CoreEvent::PasteRequested),
+                EditorEvent::PasteRequested(m) => self.events.push(CoreEvent::PasteRequested {
+                    mode: match m {
+                        PasteMode::Normal => PasteModeDto::Normal,
+                        PasteMode::Over => PasteModeDto::Over,
+                        PasteMode::Replace => PasteModeDto::Replace,
+                    },
+                }),
                 EditorEvent::ExportPng(ids) => self.copy_png(&ids),
                 EditorEvent::ExportSvg(ids) => self.copy_svg(&ids),
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),

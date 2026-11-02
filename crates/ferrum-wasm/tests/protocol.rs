@@ -33,11 +33,29 @@ fn commands() -> Vec<Command> {
             theme: Theme::Light,
             system: Some(true),
         },
-        Command::Paste { bytes: bytes(&[1]) },
+        Command::Paste {
+            bytes: bytes(&[1]),
+            mode: None,
+        },
+        Command::Paste {
+            bytes: bytes(&[1]),
+            mode: Some(PasteModeDto::Replace),
+        },
         Command::PlaceImage {
             bytes: bytes(&[0x89, b'P']),
         },
         Command::Save,
+        Command::ContextMenu {
+            target: ContextTarget::Canvas { x: 1.5, y: 2.0 },
+        },
+        Command::ContextMenu {
+            target: ContextTarget::Layer { id: "1@2".into() },
+        },
+        Command::ContextMenu {
+            target: ContextTarget::Page { id: "3@4".into() },
+        },
+        Command::ExpandAllLayers { expanded: true },
+        Command::DuplicatePage { id: "3@4".into() },
         Command::Snapshot { thumbnail: true },
         Command::MarkSaved { revision: 3.0 },
         Command::ReadPixels { reference: true },
@@ -197,7 +215,29 @@ fn events() -> Vec<CoreEvent> {
             plain: Some("Привет".into()),
         },
         CoreEvent::ClipboardPng { bytes: bytes(b"p") },
-        CoreEvent::PasteRequested,
+        CoreEvent::PasteRequested {
+            mode: PasteModeDto::Over,
+        },
+        CoreEvent::ContextMenu {
+            items: vec![
+                MenuItemDto::Command {
+                    key: "edit.copy".into(),
+                },
+                MenuItemDto::Submenu {
+                    title: "Выделить слой".into(),
+                    items: vec![MenuItemDto::Node {
+                        id: "1@2".into(),
+                        name: "Прямоугольник".into(),
+                    }],
+                },
+                MenuItemDto::Separator,
+                MenuItemDto::Action {
+                    action: MenuActionDto::DuplicatePage,
+                    title: "Дублировать страницу".into(),
+                    enabled: true,
+                },
+            ],
+        },
         CoreEvent::RequestImage,
         CoreEvent::ToggleUi,
         CoreEvent::Saved { bytes: bytes(b"s") },
@@ -374,6 +414,45 @@ fn every_message_round_trips() {
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(serde_json::from_value::<CoreEvent>(v).unwrap(), e);
     }
+}
+
+#[test]
+fn context_menu_and_paste_mode_field_names() {
+    assert_eq!(
+        serde_json::to_value(Command::ContextMenu {
+            target: ContextTarget::Canvas { x: 1.0, y: 2.0 }
+        })
+        .unwrap(),
+        json!({"type": "contextMenu", "target": {"kind": "canvas", "x": 1.0, "y": 2.0}})
+    );
+    assert_eq!(
+        serde_json::to_value(MenuItemDto::Action {
+            action: MenuActionDto::CopyPageLink,
+            title: "Ссылка".into(),
+            enabled: false
+        })
+        .unwrap(),
+        json!({"type": "action", "action": "copyPageLink", "title": "Ссылка", "enabled": false})
+    );
+    // Без способа — обычная вставка (прежний вид команды).
+    let old: Command = serde_json::from_value(json!({"type": "paste", "bytes": [1]})).unwrap();
+    assert!(matches!(old, Command::Paste { mode: None, .. }));
+    assert_eq!(
+        serde_json::to_value(CoreEvent::PasteRequested {
+            mode: PasteModeDto::Replace
+        })
+        .unwrap(),
+        json!({"type": "pasteRequested", "mode": "replace"})
+    );
+    // Цель меню — только известных видов и полей.
+    assert!(serde_json::from_value::<Command>(
+        json!({"type": "contextMenu", "target": {"kind": "canvas", "x": 1, "y": 2, "z": 3}})
+    )
+    .is_err());
+    assert!(serde_json::from_value::<Command>(
+        json!({"type": "contextMenu", "target": {"kind": "ruler"}})
+    )
+    .is_err());
 }
 
 #[test]

@@ -264,6 +264,9 @@ pub fn browser_reserved(platform: Platform) -> Vec<Shortcut> {
         "KeyW",
         "KeyT",
         "KeyN",
+        // Перезагрузка и перезагрузка без кэша.
+        "KeyR",
+        "Shift+KeyR",
         "Shift+KeyW",
         "Shift+KeyT",
         "Shift+KeyN",

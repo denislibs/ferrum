@@ -228,13 +228,15 @@ test('меню: серые пункты доступны стрелками, н�
   await expect(ungroup).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(menu).toBeVisible();
-  // «В» — по кругу после серого пункта: «Войти в правку», «Вставить», «Выделить слой».
-  await letter('в');
-  await expect(menu.getByRole('menuitem', { name: /^Войти в правку/ })).toBeFocused();
-  await letter('в');
-  await expect(menu.getByRole('menuitem', { name: /^Вставить/ })).toBeFocused();
+  // «В» — по кругу после серого пункта: «Войти в правку», затем пункты вставки
+  // и «Выделить слой».
+  const item = (label: string) => menu.locator(`[data-label="${label}"]`);
+  for (const label of ['Войти в правку', 'Вставить', 'Вставить поверх', 'Вставить с заменой']) {
+    await letter('в');
+    await expect(item(label)).toBeFocused();
+  }
   await letter('В');
-  await expect(menu.getByRole('menuitem', { name: /^Выделить слой/ })).toBeFocused();
+  await expect(item('Выделить слой')).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(menu).toHaveCount(0);
   expect(await page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? [])).toEqual([]);

@@ -130,7 +130,7 @@ fn boolean_and_outline_commands_are_in_the_keymap() {
             _ => None,
         })
         .expect("раскладка");
-    assert_eq!(commands.len(), 80);
+    assert_eq!(commands.len(), 82);
     for (key, binding) in [
         ("object.boolean_union", "Alt+Shift+KeyU"),
         ("object.boolean_subtract", "Alt+Shift+KeyS"),

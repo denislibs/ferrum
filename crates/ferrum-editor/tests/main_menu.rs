@@ -102,6 +102,8 @@ fn submenus_hold_the_commands_of_the_spec() {
     for k in [
         "edit.undo",
         "edit.redo",
+        "edit.paste_over",
+        "edit.paste_replace",
         "edit.duplicate",
         "edit.select_all",
     ] {

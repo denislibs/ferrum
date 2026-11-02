@@ -2,7 +2,7 @@
 // события ядра (`Command`, `CoreEvent`) описаны в Rust и сгенерированы tsify,
 // здесь — только конверт.
 
-import type { Command, CoreEvent } from '../wasm/ferrum_wasm';
+import type { Command, CoreEvent, PasteModeDto } from '../wasm/ferrum_wasm';
 import { MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from './clipboard-text';
 import { MAX_DATA_BYTES, MAX_FONT_BYTES, MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, mb, tooLarge } from './limits';
 import { MAX_TEXT_INPUT_BYTES, utf8Length } from './text-keys';
@@ -31,7 +31,7 @@ export type ToWorker =
   | { t: 'cmd'; cmd: Command }
   /** Вставка текста с меткой из буфера обмена: base64 декодирует worker (основной
    * поток только переносит текст), затем — команда `paste`. */
-  | { t: 'pasteText'; text: string }
+  | { t: 'pasteText'; text: string; mode?: PasteModeDto }
   /** Текст с меткой для байтов буфера обмена (браузер отказал асинхронному API):
    * ответ — `clipboardText`. */
   | { t: 'encodeClipboard'; bytes: Uint8Array }

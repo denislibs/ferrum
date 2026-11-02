@@ -3,7 +3,7 @@
 // кладёт события ввода в буфер, раз в кадр будит worker и читает готовые значения.
 // Интерфейс (этап 5) работает с ядром только через этот класс.
 
-import type { Backend, Command, CoreEvent, CursorKind } from '../wasm/ferrum_wasm';
+import type { Backend, Command, CoreEvent, CursorKind, PasteModeDto } from '../wasm/ferrum_wasm';
 import * as enc from './input';
 import { BACKENDS, Kind, LIVE_NAMES } from './layout.gen';
 import { isTextCommand, prepareCommand, type FromWorker } from './messages';
@@ -232,15 +232,16 @@ export class Core {
   }
 
   /** Вставка текста с меткой из буфера обмена: текст уходит worker'у как есть, base64
-   * декодирует он (предел длины — до отправки и ещё раз в worker'е). */
-  pasteText(text: string): void {
+   * декодирует он (предел длины — до отправки и ещё раз в worker'е). `mode` —
+   * способ вставки (поверх, с заменой). */
+  pasteText(text: string, mode?: PasteModeDto): void {
     if (this.stopped) {
       this.emit({ type: 'error', message: 'Ядро остановлено, команда не выполнена' });
       return;
     }
     // Как у остальных вставок: набранное до вставки — раньше неё.
     this.transport.flush();
-    const error = this.transport.post({ t: 'pasteText', text });
+    const error = this.transport.post({ t: 'pasteText', text, mode });
     if (error) this.emit({ type: 'error', message: error });
   }
 
