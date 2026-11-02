@@ -206,3 +206,75 @@ fn copy_and_paste_props_follow_state() {
     );
     assert!(!h.ed.command_state(CommandId::PasteProps).enabled);
 }
+
+/// Текст с двумя участками разных цветов (красный, зелёный).
+fn two_colour_text(h: &mut H, x: f64, y: f64) -> NodeId {
+    let run = |s: &str, c: Color| TextRun {
+        text: s.to_string(),
+        attrs: TextAttrs {
+            fill: Some(Fill::solid(c)),
+            ..Default::default()
+        },
+    };
+    let content = TextContent {
+        runs: vec![
+            run("Кра", Color::rgba(255, 0, 0, 255)),
+            run("зел\n", Color::rgba(0, 255, 0, 255)),
+        ],
+    };
+    h.ed.create_text(
+        kurbo::Point::new(x, y),
+        &content,
+        &TextProps::default(),
+        0.0,
+        0.0,
+    )
+    .unwrap()
+}
+
+#[test]
+fn copy_from_text_takes_the_visible_colour_of_its_first_run() {
+    let mut h = text_h();
+    let t = two_colour_text(&mut h, 100.0, 100.0);
+    h.set(
+        t,
+        PropsPatch {
+            fills: Some(vec![Fill::solid(Color::rgba(0, 0, 0, 255))]),
+            ..Default::default()
+        },
+    );
+    let r = h.rect(None, 400.0, 400.0, 30.0, 30.0);
+    copy_props(&mut h, &[t]);
+    h.ed.select(&[r]);
+    h.ed.paste_props(None);
+    assert_eq!(
+        h.props(r).fills,
+        vec![Fill::solid(Color::rgba(255, 0, 0, 255))]
+    );
+}
+
+#[test]
+fn pasted_fill_recolours_every_run_of_a_text_in_one_step() {
+    let mut h = text_h();
+    let t = two_colour_text(&mut h, 100.0, 100.0);
+    let src = h.rect(None, 400.0, 400.0, 30.0, 30.0);
+    let blue = vec![Fill::solid(Color::rgba(0, 0, 255, 255))];
+    h.set(
+        src,
+        PropsPatch {
+            fills: Some(blue.clone()),
+            ..Default::default()
+        },
+    );
+    copy_props(&mut h, &[src]);
+    h.ed.select(&[t]);
+    let steps = h.ed.step_count();
+    let before = h.state();
+    h.ed.paste_props(None);
+    let p = h.props(t);
+    assert_eq!(p.fills, blue);
+    let content = &p.text.as_ref().unwrap().content;
+    assert!(content.runs.iter().all(|r| r.attrs.fill.is_none()));
+    assert_eq!(text_of(&mut h, t), "Кразел\n");
+    h.assert_one_step(steps, &before);
+}

@@ -51,6 +51,10 @@ fn strip(p: &Props) -> Props {
             props.style.letter_spacing = a.letter_spacing.unwrap_or(d.letter_spacing);
             props.style.decoration = a.decoration.unwrap_or(d.decoration);
             props.style.case = a.case.unwrap_or(d.case);
+            // Видимый цвет — у участка: он и копируется (как в Figma).
+            if let Some(fill) = &a.fill {
+                out.fills = vec![fill.clone()];
+            }
         }
         out.text = Some(Arc::new(TextData {
             props,
@@ -201,18 +205,16 @@ impl Editor {
             .iter()
             .filter_map(|id| Some((*id, props_patch(&src, self.scene.node(*id)?.props.kind))))
             .collect();
-        let texts: Vec<NodeId> = match text_patch(&src) {
-            Some(_) => ids
-                .iter()
-                .copied()
-                .filter(|id| {
-                    self.scene
-                        .node(*id)
-                        .is_some_and(|n| n.props.kind == NodeKind::Text)
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+        // Все тексты цели: стиль — если источник текст, цвета участков — всегда.
+        let texts: Vec<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.scene
+                    .node(*id)
+                    .is_some_and(|n| n.props.kind == NodeKind::Text)
+            })
+            .collect();
         let before = self.out.steps;
         let patch = text_patch(&src).unwrap_or_default();
         match self.restyle_nodes_with(&texts, &patch, extra) {

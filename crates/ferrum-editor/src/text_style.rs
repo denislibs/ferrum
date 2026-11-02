@@ -663,7 +663,19 @@ impl Editor {
             };
             let mut p = t.props.clone();
             p.style = apply_style(&p.style, patch);
-            let content = restyle(&t.content, 0..t.content.char_len(), patch, &p.style);
+            let mut content = restyle(&t.content, 0..t.content.char_len(), patch, &p.style);
+            // Новые заливки перекрашивают весь текст: свои цвета участков снимаются.
+            if extra.iter().any(|(e, x)| e == id && x.fills.is_some()) {
+                let runs: Vec<_> = content
+                    .slice(0..content.char_len())
+                    .into_iter()
+                    .map(|mut r| {
+                        r.attrs.fill = None;
+                        r
+                    })
+                    .collect();
+                content = splice(&content, 0..content.char_len(), &runs);
+            }
             let mut after = before.clone();
             after.text = Some(Arc::new(TextData { props: p, content }));
             edits.push((*id, before, after, None));
@@ -807,7 +819,16 @@ impl Editor {
                                         ..p.clone()
                                     },
                                 )?;
-                                restyle_ops(tx, *id, &t.content, all, &style, d)?;
+                                restyle_ops(tx, *id, &t.content, all.clone(), &style, d)?;
+                                // Новые заливки перекрашивают весь текст (см. `restyle_nodes_with`).
+                                if extra.iter().any(|(e, x)| e == id && x.fills.is_some()) {
+                                    tx.format_text(
+                                        *id,
+                                        all,
+                                        &TextAttrs::default(),
+                                        &[AttrKey::Fill],
+                                    )?;
+                                }
                             }
                             None => tx.set_props(*id, p)?,
                         }
