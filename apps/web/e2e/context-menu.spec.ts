@@ -25,10 +25,12 @@ test('холст: правый щелчок выделяет узел, меню 
   await expect(menu).toBeVisible();
   await liveWhen(page, 'l.selectionCount === 1 && l.selectionW === 120');
   // Меню — у точки щелчка; длинное поднимается, чтобы целиком влезть в окно.
+  // Рамку меряем после анимации появления: она сдвигает меню на 2 px.
+  await menu.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)));
   const box = (await menu.boundingBox())!;
   expect(Math.abs(box.x - node.x)).toBeLessThanOrEqual(1);
   expect(box.y).toBeGreaterThanOrEqual(8);
-  expect(box.y + box.height).toBeLessThanOrEqual(720 - 8 + 1);
+  expect(box.y + box.height).toBeLessThanOrEqual(720 - 8);
   expect(await labels(page, 'Действия с выделением')).toEqual([
     'Копировать',
     'Вставить',
