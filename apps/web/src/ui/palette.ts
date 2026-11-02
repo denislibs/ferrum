@@ -55,6 +55,16 @@ export function pushRecent(recent: readonly string[], key: string): string[] {
   return [key, ...recent.filter((k) => k !== key)].slice(0, RECENT_MAX);
 }
 
+/** Сочетание → ключ команды (первая в таблице, если занято двумя): для отметки
+ * использованных сочетаний панелью сочетаний. */
+export function bindingsToCommands(commands: readonly KeymapEntry[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const c of commands) {
+    for (const b of c.bindings) if (!out.has(b)) out.set(b, c.key);
+  }
+  return out;
+}
+
 /** Вес команды по запросу: лучшее из названия и синонимов (синоним — с вычетом),
  * плюс недавность; `null` — не совпала. */
 export function scoreCommand(e: KeymapEntry, variants: readonly string[][], recent: readonly string[] = []): number | null {

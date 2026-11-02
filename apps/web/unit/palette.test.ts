@@ -4,6 +4,7 @@
 import { expect, test } from '@playwright/test';
 import type { FoundLayerDto, KeymapEntry } from '../src/wasm/ferrum_wasm';
 import {
+  bindingsToCommands,
   clipQuery,
   COMMANDS_MAX,
   MAX_QUERY_BYTES,
@@ -115,4 +116,16 @@ test('запрос к worker\'у — не длиннее 256 байт, по гр
   const clipped = clipQuery(long);
   expect(new TextEncoder().encode(clipped).length).toBeLessThanOrEqual(MAX_QUERY_BYTES);
   expect(clipped).toBe('я'.repeat(128));
+});
+
+test('сочетание → команда: первая в таблице, если занято двумя', () => {
+  const list = [
+    { ...entry('edit.undo', 'Отменить'), bindings: ['Ctrl+KeyZ'] },
+    { ...entry('edit.redo', 'Повторить'), bindings: ['Ctrl+Shift+KeyZ', 'Ctrl+KeyY'] },
+    { ...entry('x.same', 'Другая'), bindings: ['Ctrl+KeyZ'] },
+  ];
+  const m = bindingsToCommands(list);
+  expect(m.get('Ctrl+KeyZ')).toBe('edit.undo');
+  expect(m.get('Ctrl+KeyY')).toBe('edit.redo');
+  expect(m.get('KeyQ')).toBeUndefined();
 });

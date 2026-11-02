@@ -14,7 +14,7 @@ import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
 import { Menu, type MenuItem, type MenuSearch } from './menu';
 import { buildMainMenu, entriesByKey, searchMenu } from './main-menu';
-import { parseRecent, pushRecent } from './palette';
+import { bindingsToCommands, parseRecent, pushRecent } from './palette';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
@@ -22,6 +22,7 @@ import { QuickActions } from './quick-actions';
 import { diffSettings, resolveTheme, type Settings, type ThemeChoice } from './settings';
 import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
+import { ShortcutsPanel } from './shortcuts-panel';
 import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import { systemFonts } from './system-fonts';
@@ -287,7 +288,15 @@ export function App(props: AppProps) {
         const action = s && clipboardAction(s, platform);
         if (!s || !action) return false;
         const key = { copy: 'edit.copy', cut: 'edit.cut', paste: 'edit.paste', pasteOver: 'edit.paste_over' }[action];
-        return !!store.state.keymap.commands.find((c) => c.key === key)?.bindings.includes(s);
+        const bound = !!store.state.keymap.commands.find((c) => c.key === key)?.bindings.includes(s);
+        if (bound) noteKeyUsed(key);
+        return bound;
+      },
+      onForwardedKey: (e) => {
+        if (e.repeat) return;
+        const s = eventShortcut(e);
+        const key = s && bindingIndex().get(s);
+        if (key) noteKeyUsed(key);
       },
     })
       .then((ed) => {
@@ -513,6 +522,17 @@ export function App(props: AppProps) {
   const [mainMenu, setMainMenu] = createSignal(false);
   /** Открыты ли «Быстрые действия» (спека подсистемы 2, раздел 7). */
   const [palette, setPalette] = createSignal(false);
+  /** Открыта ли панель сочетаний (раздел 8). */
+  const [shortcuts, setShortcuts] = createSignal(false);
+  /** Команды, вызванные сочетанием за этот сеанс (в настройки не пишутся): отмечены в
+   * панели вместе с недавними. Клавиша сопоставляется по действующей раскладке; что
+   * сделало ядро (например, ввод в правке текста), панели не важно. */
+  const [keysUsed, setKeysUsed] = createSignal<ReadonlySet<string>>(new Set());
+  const noteKeyUsed = (key: string) => {
+    if (!keysUsed().has(key)) setKeysUsed(new Set([...keysUsed(), key]));
+  };
+  const bindingIndex = createMemo(() => bindingsToCommands(store.state.keymap.commands));
+  const usedCommands = createMemo(() => new Set([...recent(), ...keysUsed()]));
   const hidden = createMemo(() => new Set(props.files.disk ? [] : ['ui.open_disk', 'ui.save_disk']));
   const entries = createMemo(() => entriesByKey(store.state.keymap.commands));
   const mainItems = () => buildMainMenu(store.state.mainMenu, entries(), hidden());
@@ -556,8 +576,11 @@ export function App(props: AppProps) {
         props.navigate({ kind: 'files', section: 'recent' });
         break;
       case 'ui.settings':
-      case 'ui.shortcuts':
         setSettingsOpen(true);
+        break;
+      case 'ui.shortcuts':
+        // Как в Figma: то же сочетание закрывает панель.
+        setShortcuts((v) => !v);
         break;
       case 'ui.about':
         store.toast('Ferrum — редактор векторной графики: ядро на Rust и WebAssembly, интерфейс — SolidJS');
@@ -645,6 +668,9 @@ export function App(props: AppProps) {
               <ResizeEdge side="right" width={right()} onWidth={setRight} />
             </aside>
             <TooltipLayer />
+            <Show when={shortcuts()}>
+              <ShortcutsPanel used={usedCommands()} onSettings={() => setSettingsOpen(true)} onClose={() => setShortcuts(false)} />
+            </Show>
             <Show when={settingsOpen()}>
               <SettingsDialog
                 theme={themeChoice()}

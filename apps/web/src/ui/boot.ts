@@ -81,6 +81,8 @@ function choice<T extends string>(params: URLSearchParams, name: string, allowed
 export interface BootOptions {
   /** Клавиша — сочетание буфера обмена, которое ведут события copy/cut/paste. */
   isClipboardKey?: (e: KeyboardEvent) => boolean;
+  /** Клавиша ушла ядру (не полю и не меню): панель сочетаний отмечает использованные. */
+  onForwardedKey?: (e: KeyboardEvent) => void;
   /** Перед документом: настройки пользователя (тема, раскладка, привязка) — до первого кадра. */
   beforeDocument?: (editor: Editor) => void;
   /** Бэкенд рендера (после потери GPU — запасной); без него — из адреса или автовыбор. */
@@ -122,7 +124,11 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     backend: opts.backend ?? choice<Backend>(params, 'backend', ['webgpu', 'webgl', 'cpu']),
     test,
     transport: choice<TransportMode>(params, 'transport', ['sab', 'message']),
-    keyFilter: (e) => forwardKey(e, isClipboardKey),
+    keyFilter: (e) => {
+      const forward = forwardKey(e, isClipboardKey);
+      if (forward) opts.onForwardedKey?.(e);
+      return forward;
+    },
     // Свой формат не поддерживается: текст с меткой для буфера готовит worker.
     clipboardText: !supportsCustomFormat(),
     // Чтения layout самого Core — в фазе measure планировщика.
