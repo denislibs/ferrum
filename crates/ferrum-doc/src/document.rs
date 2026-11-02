@@ -228,8 +228,10 @@ impl Document {
     /// (с новыми идентификаторами) и фон. Как и остальные операции со страницами,
     /// в историю отмены не попадает; копия целиком уйдёт в следующую пачку журнала.
     pub fn duplicate_page(&mut self, id: PageId, name: &str) -> DocResult<PageId> {
-        self.writable()?;
+        // Сначала загрузка: страница с неизвестными узлами делает документ
+        // доступным только для чтения, а копия их потеряла бы.
         self.page(id)?;
+        self.writable()?;
         let at = self
             .pages()
             .iter()
@@ -752,6 +754,38 @@ mod tests {
             Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
         });
         assert!(matches!(err, Err(DocError::ReadOnly)));
+    }
+
+    #[test]
+    fn duplicating_an_unopened_page_with_unknown_nodes_is_refused() {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let star = doc
+            .transact(page, vec![], |p| {
+                p.create_node(None, None, NodeKind::Rect)?;
+                Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+            })
+            .unwrap()[0];
+        doc.page(page)
+            .unwrap()
+            .force_raw_kind_for_tests(star, Some("star"));
+        let root = doc.root_snapshot().unwrap();
+        let payload = doc.page_payload(page).unwrap();
+        let mut unloaded = HashMap::new();
+        unloaded.insert(
+            page,
+            UnloadedPage {
+                snapshot: payload.snapshot,
+                image_refs: payload.image_refs,
+                scene: None,
+            },
+        );
+        let (mut d2, _) = Document::from_parts(&root, unloaded, ImageStore::default()).unwrap();
+        assert!(!d2.is_page_loaded(page));
+        let before = d2.pages();
+        let err = d2.duplicate_page(page, "Копия");
+        assert!(matches!(err, Err(DocError::ReadOnly)), "{err:?}");
+        assert_eq!(d2.pages(), before, "копии нет");
     }
 
     /// Документ, где изображение используется только узлом внутри скрытого
