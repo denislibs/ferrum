@@ -170,7 +170,10 @@ function Level(props: LevelProps): JSX.Element {
     if (disabled(it)) return;
     props.closeAll(true);
     if (it.onSelect) it.onSelect();
-    else if (it.command) ed?.run(it.command);
+    else if (it.command) {
+      ed?.noteRecent?.(it.command);
+      ed?.run(it.command);
+    }
   };
 
   const onKey = (e: KeyboardEvent) => {

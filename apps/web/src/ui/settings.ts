@@ -1,6 +1,7 @@
 
 // Настройки пользователя: тема, привязка к пикселям, отличия раскладки клавиш,
-// ширина панелей, вид экрана файлов (сетка или список). С этапа 6 хранятся в
+// ширина панелей, вид экрана файлов (сетка или список), недавние команды
+// «Быстрых действий». С этапа 6 хранятся в
 // IndexedDB по полю (`settings-store.ts`); здесь — поля, их разбор (значения из
 // хранилища не доверенные: неверное поле — умолчание) и прежняя запись
 // `localStorage`, из которой настройки переносятся при первом запуске.
@@ -18,11 +19,15 @@ export interface Settings {
   /** Экран файлов: карточки сеткой или строки списком (поле появилось в этапе 6;
    * в старых записях его нет — тогда сетка). */
   filesView: FilesView;
+  /** Недавние команды «Быстрых действий»: ключи через пробел, новые первыми (поле
+   * появилось в подсистеме 2; в старых записях его нет — тогда пусто). */
+  recentCommands: string;
 }
 
 export type FilesView = 'grid' | 'list';
 
 import { MAX_KEYMAP_BYTES, MAX_SETTINGS_BYTES } from '../core/limits';
+import { parseRecent } from './palette';
 
 /** Прежняя запись настроек в `localStorage` (до этапа 6): переносится и удаляется. */
 export const SETTINGS_KEY = 'ferrum.settings.v1';
@@ -48,6 +53,7 @@ export const DEFAULT_SETTINGS: Settings = {
   rightWidth: 248,
   pagesOpen: true,
   filesView: 'grid',
+  recentCommands: '',
 };
 
 /** Хранилище: `localStorage`, если доступ к нему не бросает. */
@@ -73,6 +79,8 @@ const FIELDS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined }
   rightWidth: (v) => (isNumber(v) ? clampPanel(v) : undefined),
   pagesOpen: (v) => (typeof v === 'boolean' ? v : undefined),
   filesView: (v) => (v === 'list' || v === 'grid' ? v : undefined),
+  // Только верные ключи, не больше восьми; строка длиннее не бывает (предел — на разбор).
+  recentCommands: (v) => (typeof v === 'string' && v.length <= 1024 ? parseRecent(v).join(' ') : undefined),
 };
 
 /** Только верные известные поля (чужое изменение из другой вкладки, запись базы). */

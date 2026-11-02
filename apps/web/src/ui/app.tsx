@@ -14,6 +14,7 @@ import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
 import { Menu, type MenuItem, type MenuSearch } from './menu';
 import { buildMainMenu, entriesByKey, searchMenu } from './main-menu';
+import { parseRecent, pushRecent } from './palette';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
@@ -83,6 +84,8 @@ export function App(props: AppProps) {
   const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(saved.theme);
   const [pixelSnap, setPixelSnap] = createSignal(saved.pixelSnap);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  /** Недавние команды «Быстрых действий»: новые первыми, общие для вкладок. */
+  const [recent, setRecent] = createSignal(parseRecent(saved.recentCommands));
   /** Открытое контекстное меню: пункты из ядра, точка окна и название. */
   const [context, setContext] = createSignal<{ items: MenuItem[]; at: { x: number; y: number }; label: string } | null>(null);
   /** Запрошенное у ядра меню: куда его поставить и кто выполняет действия цели. */
@@ -152,6 +155,10 @@ export function App(props: AppProps) {
       written = { ...written, pixelSnap: p.pixelSnap };
       setPixelSnap(p.pixelSnap);
     }
+    if (p.recentCommands !== undefined) {
+      written = { ...written, recentCommands: p.recentCommands };
+      setRecent(parseRecent(p.recentCommands));
+    }
     if (p.keymap !== undefined && p.keymap !== keymap()) {
       const prev = keymap();
       const next = p.keymap;
@@ -184,6 +191,7 @@ export function App(props: AppProps) {
       leftWidth: left(),
       rightWidth: right(),
       pagesOpen: pagesOpen(),
+      recentCommands: recent().join(' '),
     };
     clearTimeout(writeTimer);
     writeTimer = window.setTimeout(flush, 250);
@@ -287,6 +295,7 @@ export function App(props: AppProps) {
           return;
         }
         ed.uiCommand = uiCommand;
+        ed.noteRecent = (key) => setRecent((r) => pushRecent(r, key));
         ed.contextMenu = (target: ContextTarget, at, label, onAction) => {
           setContext(null);
           pendingContext = { at, label, onAction };
