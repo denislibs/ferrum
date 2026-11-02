@@ -3,15 +3,16 @@
 // раскладку вне фазы measure (`__ferrumWarnings` пуст).
 
 import { expect, test, type Page } from '@playwright/test';
-import { appScreen, live, liveWhen, openApp } from './helpers';
+import { appScreen, fileId, live, liveWhen, openApp } from './helpers';
 
 const warnings = (page: Page) => page.evaluate(() => (window as { __ferrumWarnings?: string[] }).__ferrumWarnings ?? []);
 
-const labels = (page: Page, name: string) =>
-  page
-    .getByRole('menu', { name, exact: true })
-    .locator(':scope > [role^="menuitem"]')
-    .evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.label));
+/** Названия пунктов открытого меню (сначала ждём, пока оно встанет на место). */
+async function labels(page: Page, name: string): Promise<(string | undefined)[]> {
+  const items = page.getByRole('menu', { name, exact: true }).locator(':scope > [role^="menuitem"]');
+  await expect(items.first()).toBeVisible();
+  return items.evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.label));
+}
 
 test('холст: правый щелчок выделяет узел, меню у точки, «Выделить слой» — узлы под точкой', async ({ page }) => {
   await openApp(page);
@@ -97,5 +98,73 @@ test('пустое место холста: выделение снимаетс�
   expect(await labels(page, 'Действия с выделением')).toEqual(['Вставить', 'Выделить всё', 'Показать всё']);
   await menu.getByRole('menuitem', { name: /^Выделить всё/ }).click();
   await liveWhen(page, 'l.selectionCount === 10');
+  expect(await warnings(page)).toEqual([]);
+});
+
+test('слои: правый щелчок выделяет строку; «Развернуть всё», «Свернуть всё», «Переименовать»', async ({ page }) => {
+  await openApp(page);
+  const tree = page.getByRole('tree', { name: 'Слои' });
+  const row = tree.getByRole('treeitem', { name: 'Экран 3', exact: true });
+  await row.click({ button: 'right' });
+  await liveWhen(page, 'l.selectionCount === 1 && l.selectionW === 1440');
+  await expect(row).toHaveAttribute('aria-selected', 'true');
+  const menu = page.getByRole('menu', { name: 'Действия со слоем' });
+  await expect(menu).toBeVisible();
+  const items = await labels(page, 'Действия со слоем');
+  expect(items.slice(-4)).toEqual(['Переименовать', 'Развернуть всё', 'Свернуть всё', 'Удалить']);
+  expect(items).not.toContain('Выделить слой');
+  await menu.getByRole('menuitem', { name: 'Развернуть всё' }).click();
+  // Все 10 фреймов раскрыты: 10 + 990 строк.
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.layers.total)).toBe(1000);
+  await tree.getByRole('treeitem').first().click({ button: 'right' });
+  await menu.getByRole('menuitem', { name: 'Свернуть всё' }).click();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.layers.total)).toBe(10);
+  await row.click({ button: 'right' });
+  await menu.getByRole('menuitem', { name: 'Переименовать' }).click();
+  const input = page.getByRole('textbox', { name: 'Имя слоя' });
+  await expect(input).toBeFocused();
+  await input.fill('Главный');
+  await input.press('Enter');
+  await expect(tree.getByRole('treeitem', { name: 'Главный', exact: true })).toBeVisible();
+  expect(await warnings(page)).toEqual([]);
+});
+
+test('страницы: удалить единственную нельзя, «Дублировать», ссылка на страницу открывает её', async ({ page, browserName }) => {
+  if (browserName === 'chromium') await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await openApp(page);
+  const pages = page.getByRole('listbox', { name: 'Страницы' });
+  const first = pages.getByRole('option').first();
+  await first.click({ button: 'right' });
+  const menu = page.getByRole('menu', { name: 'Действия со страницей' });
+  expect(await labels(page, 'Действия со страницей')).toEqual([
+    'Переименовать',
+    'Дублировать страницу',
+    'Удалить страницу',
+    'Копировать ссылку на страницу',
+  ]);
+  await expect(menu.getByRole('menuitem', { name: 'Удалить страницу' })).toHaveAttribute('aria-disabled', 'true');
+  await menu.getByRole('menuitem', { name: 'Дублировать страницу' }).click();
+  const copy = pages.getByRole('option', { name: /Страница 1 \(копия\)/ });
+  await expect(copy).toHaveAttribute('aria-selected', 'true');
+  await expect(pages.getByRole('option')).toHaveCount(2);
+  await liveWhen(page, 'l.nodes === 1000');
+  // Ссылка на первую страницу (сейчас открыта копия).
+  await first.click({ button: 'right' });
+  await menu.getByRole('menuitem', { name: 'Копировать ссылку на страницу' }).click();
+  await expect(page.getByText('Ссылка на страницу скопирована')).toBeVisible();
+  const firstId = await page.evaluate(() => window.__ferrum!.ui!.pages.list[0].id);
+  const id = fileId(page);
+  const link = await page.evaluate(([f, p]) => `${location.origin}${location.pathname}${location.search}#/file/${f}?page=${encodeURIComponent(p)}`, [id, firstId]);
+  if (browserName === 'chromium') expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(link);
+  // Переход по ссылке: файл открывается заново (сохранившись) — на этой странице.
+  await page.evaluate((l) => (location.href = l), link);
+  await page.waitForFunction(
+    (p) => window.__ferrum?.ui?.ready === true && window.__ferrum.ui.pages.list.length === 2 && window.__ferrum.ui.pages.current === p,
+    firstId,
+    { timeout: 30_000 },
+  );
+  // В адресе остаётся только файл.
+  await expect.poll(() => page.url()).toMatch(new RegExp(`#/file/${id}$`));
   expect(await warnings(page)).toEqual([]);
 });

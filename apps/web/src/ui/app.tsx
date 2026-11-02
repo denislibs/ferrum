@@ -53,6 +53,8 @@ export interface AppProps {
    * `false` — перезапусков слишком много, остаётся плашка остановки. */
   onRestart: (r: Restart) => boolean;
   navigate: (r: Route) => void;
+  /** Страница из ссылки (`?page=`): открыть её, если она есть в файле. */
+  page?: string;
 }
 
 /** Тестовый режим: интервалы журнала и полного файла из адреса (`?journal=`, `?fullSave=`). */
@@ -330,8 +332,16 @@ export function App(props: AppProps) {
         // до `opened` — файл испорчен; запись остаётся, пользователь — на экране файлов.
         let opening = true;
         let recovered = false;
+        // Страница из ссылки — по первому списку страниц после открытия; её нет в
+        // файле (удалили) — файл остаётся на первой странице, без ошибки.
+        let linkedPage = props.page;
         ed.core.on((e) => {
           if (e.type === 'uiCommand') uiCommand(e.key);
+          if (!opening && linkedPage && e.type === 'pages') {
+            const want = linkedPage;
+            linkedPage = undefined;
+            if (want !== e.current && e.pages.some((p) => p.id === want)) ed.send({ type: 'setPage', id: want });
+          }
           if (e.type === 'recovered') recovered = true;
           if (opening && e.type === 'opened') {
             opening = false;
@@ -606,7 +616,7 @@ export function App(props: AppProps) {
                 onOpen={setMainMenu}
                 onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
               />
-              <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} />
+              <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
               <LayersPanel />
               <ResizeEdge side="left" width={left()} onWidth={setLeft} />
             </aside>

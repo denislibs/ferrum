@@ -3,7 +3,9 @@
 // рисует только их; высота прокрутки — по общему числу строк. Раскрытие, поиск,
 // диапазон для Shift считает worker. Переименование на месте, перетаскивание для
 // порядка и вложенности, кнопки «скрыть» и «заблокировать», наведение
-// подсвечивает узел на холсте, выделение синхронно в обе стороны.
+// подсвечивает узел на холсте, выделение синхронно в обе стороны. Контекстное
+// меню строки — из ядра: команды выделения, «Переименовать», «Развернуть всё» и
+// «Свернуть всё».
 
 import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import type { DropPosition, LayerRow, NodeType } from '../wasm/ferrum_wasm';
@@ -425,6 +427,15 @@ export function LayersPanel() {
                 onLostPointerCapture={endDrag}
                 onFocus={() => setFocusedSig(row().id)}
                 onDblClick={() => startRename(row())}
+                onContextMenu={(e) => {
+                  // Меню строки — из ядра: невыделенную строку ядро выделяет.
+                  e.preventDefault();
+                  const r = row();
+                  ed.contextMenu?.({ kind: 'layer', id: r.id }, { x: e.clientX, y: e.clientY }, 'Действия со слоем', (a) => {
+                    if (a === 'renameLayer') startRename(r);
+                    else if (a === 'expandAll' || a === 'collapseAll') ed.send({ type: 'expandAllLayers', expanded: a === 'expandAll' });
+                  });
+                }}
                 onKeyDown={(e) => onKey(row(), index(), e)}
               >
                 <span class="fe-layer__caret">
