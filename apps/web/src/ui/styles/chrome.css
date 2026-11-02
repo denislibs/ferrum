@@ -523,6 +523,107 @@
 .fe-menu__empty {
   padding-bottom: var(--space-1);
 }
+/* «Быстрые действия»: поле сверху по центру холста, список под ним. */
+.fe-palette {
+  position: absolute;
+  z-index: 40;
+  top: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  padding: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 20px;
+}
+.fe-palette__field {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-muted);
+}
+.fe-palette__field:focus-within {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.fe-palette__field input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+}
+.fe-palette__list {
+  position: relative;
+  overflow: auto;
+  min-height: 0;
+  max-height: 420px;
+  margin-top: var(--space-1);
+}
+.fe-palette__heading {
+  padding: var(--space-1) var(--space-2) 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.fe-palette__empty {
+  padding: var(--space-2);
+  color: var(--ink-muted);
+}
+.fe-palette__row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--row-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: default;
+  white-space: nowrap;
+}
+.fe-palette__row--active {
+  background: var(--surface-hover);
+}
+.fe-palette__row[aria-disabled='true'] {
+  color: var(--ink-faint);
+}
+.fe-palette__icon {
+  display: flex;
+  align-items: center;
+  color: var(--ink-muted);
+}
+.fe-palette__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fe-palette__group,
+.fe-palette__key {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+.fe-palette__key {
+  min-width: 48px;
+  text-align: right;
+}
+.fe-palette__row[aria-disabled='true'] .fe-palette__group,
+.fe-palette__row[aria-disabled='true'] .fe-palette__key,
+.fe-palette__row[aria-disabled='true'] .fe-palette__icon {
+  color: var(--ink-faint);
+}
 /* Кнопка с логотипом: главное меню (как в Figma UI3). */
 .fe-logo {
   display: flex;

@@ -18,6 +18,7 @@ import { parseRecent, pushRecent } from './palette';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
+import { QuickActions } from './quick-actions';
 import { diffSettings, resolveTheme, type Settings, type ThemeChoice } from './settings';
 import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
@@ -510,6 +511,8 @@ export function App(props: AppProps) {
   // Главное меню (спека подсистемы 2, раздел 4): дерево — из ядра, названия — из
   // таблицы команд. Файла на диске без File System Access нет: его пунктов тоже.
   const [mainMenu, setMainMenu] = createSignal(false);
+  /** Открыты ли «Быстрые действия» (спека подсистемы 2, раздел 7). */
+  const [palette, setPalette] = createSignal(false);
   const hidden = createMemo(() => new Set(props.files.disk ? [] : ['ui.open_disk', 'ui.save_disk']));
   const entries = createMemo(() => entriesByKey(store.state.keymap.commands));
   const mainItems = () => buildMainMenu(store.state.mainMenu, entries(), hidden());
@@ -526,6 +529,9 @@ export function App(props: AppProps) {
     switch (key) {
       case 'ui.main_menu':
         setMainMenu(true);
+        break;
+      case 'ui.quick_actions':
+        setPalette(true);
         break;
       case 'ui.new_file':
         props.navigate({ kind: 'new' });
@@ -611,6 +617,9 @@ export function App(props: AppProps) {
           {(ed) => (
             <EditorContext.Provider value={ed()}>
               <Toolbar />
+              <Show when={palette()}>
+                <QuickActions hidden={hidden()} recent={recent()} onClose={() => setPalette(false)} />
+              </Show>
             </EditorContext.Provider>
           )}
         </Show>
