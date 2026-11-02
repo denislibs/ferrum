@@ -2,7 +2,7 @@
 // события ядра (`Command`, `CoreEvent`) описаны в Rust и сгенерированы tsify,
 // здесь — только конверт.
 
-import type { Command, CoreEvent } from '../wasm/ferrum_wasm';
+import type { Command, CoreEvent, PasteModeDto } from '../wasm/ferrum_wasm';
 import { MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from './clipboard-text';
 import { MAX_DATA_BYTES, MAX_FONT_BYTES, MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, mb, tooLarge } from './limits';
 import { MAX_TEXT_INPUT_BYTES, utf8Length } from './text-keys';
@@ -31,7 +31,7 @@ export type ToWorker =
   | { t: 'cmd'; cmd: Command }
   /** Вставка текста с меткой из буфера обмена: base64 декодирует worker (основной
    * поток только переносит текст), затем — команда `paste`. */
-  | { t: 'pasteText'; text: string }
+  | { t: 'pasteText'; text: string; mode?: PasteModeDto }
   /** Текст с меткой для байтов буфера обмена (браузер отказал асинхронному API):
    * ответ — `clipboardText`. */
   | { t: 'encodeClipboard'; bytes: Uint8Array }
@@ -72,6 +72,16 @@ export function commandSizeError(cmd: Command): string | null {
     return null;
   }
   if (cmd.type === 'openWithJournal') return journalCommandError(cmd);
+  if (cmd.type === 'pasteProps') {
+    // Текст из буфера: предел — до отправки (его разбирает ядро); байты — как у вставки.
+    const { bytes, text } = cmd as { bytes?: unknown; text?: unknown };
+    if (text !== undefined && (typeof text !== 'string' || text.length > MAX_CLIPBOARD_TEXT)) return tooLarge(MAX_CLIPBOARD_BYTES);
+    if (bytes === undefined) return null;
+    const kind = bytesKindError(bytes);
+    if (kind) return kind;
+    const size = (bytes as Uint8Array).byteLength;
+    return size > MAX_COMMAND_BYTES.paste ? tooLarge(MAX_COMMAND_BYTES.paste, size) : null;
+  }
   if (cmd.type === 'loadFont' && (cmd as { bytes?: unknown }).bytes === undefined) return null;
   if (
     cmd.type !== 'open' &&

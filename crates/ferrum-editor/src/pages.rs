@@ -1,4 +1,4 @@
-//! Страницы из панели «Страницы» (этап 5): создать, переименовать, удалить,
+//! Страницы из панели «Страницы» (этап 5): создать, дублировать, переименовать, удалить,
 //! цвет фона. Как и в `ferrum-doc`, операции со страницами не попадают в историю
 //! отмены. Имена из интерфейса не доверенные: `clean_name` убирает управляющие
 //! символы и ограничивает длину.
@@ -35,6 +35,27 @@ impl Editor {
         let id = self.doc.add_page(&format!("Страница {n}"))?;
         self.set_page(id)?;
         Ok(id)
+    }
+
+    /// «Дублировать страницу»: копия встаёт сразу после страницы с именем
+    /// «<имя> (копия)» и становится текущей, как новая страница (в историю
+    /// отмены не попадает, как и остальные операции со страницами).
+    pub fn duplicate_page(&mut self, id: PageId) -> DocResult<PageId> {
+        let Some((_, name)) = self.doc.pages().into_iter().find(|(p, _)| *p == id) else {
+            return Err(ferrum_doc::DocError::PageNotFound(id.to_string()));
+        };
+        self.finish_pen_path();
+        // Имя копии — не длиннее предела, с пометкой в конце.
+        const MARK: &str = " (копия)";
+        let base: String = name
+            .chars()
+            .take(MAX_NAME_CHARS - MARK.chars().count())
+            .collect();
+        let copy = self
+            .doc
+            .duplicate_page(id, &format!("{}{MARK}", base.trim_end()))?;
+        self.set_page(copy)?;
+        Ok(copy)
     }
 
     /// Переименование; пустое имя ничего не меняет.

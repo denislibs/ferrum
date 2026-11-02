@@ -51,6 +51,8 @@ fn check_level(items: &[MenuNode], path: &str) {
             MenuNode::Command(c) => assert!(seen.insert(*c), "{path}: {c:?} дважды"),
             MenuNode::Submenu { title, items } => check_level(items, &format!("{path} › {title}")),
             MenuNode::Separator => {}
+            // Узлы и действия бывают только в контекстных меню.
+            other => panic!("{path}: {other:?} в главном меню"),
         }
     }
 }
@@ -100,8 +102,13 @@ fn submenus_hold_the_commands_of_the_spec() {
     for k in [
         "edit.undo",
         "edit.redo",
+        "edit.paste_over",
+        "edit.paste_replace",
+        "edit.copy_props",
+        "edit.paste_props",
         "edit.duplicate",
         "edit.select_all",
+        "edit.select_similar",
     ] {
         assert!(keys(edit).contains(&k), "{k}");
     }

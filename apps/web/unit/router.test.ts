@@ -33,3 +33,13 @@ test('идентификатор файла из адреса не довере�
   expect(parseRoute('#/file/<script>')).toEqual({ kind: 'file', id: '' });
   expect(parseRoute('#/file/a'.padEnd(72, 'a'))).toEqual({ kind: 'file', id: '' });
 });
+
+test('ссылка на страницу: `?page=` разбирается, неверная страница отбрасывается', () => {
+  expect(parseRoute('#/file/abc?page=12@345')).toEqual({ kind: 'file', id: 'abc', page: '12@345' });
+  expect(parseRoute(routeHash({ kind: 'file', id: 'abc', page: '1@2' }))).toEqual({ kind: 'file', id: 'abc', page: '1@2' });
+  expect(routeHash({ kind: 'file', id: 'abc', page: '1@2' })).toBe('#/file/abc?page=1%402');
+  for (const bad of ['<script>', '1@', '@2', '1@2@3', '1'.repeat(70) + '@2', '']) {
+    expect(parseRoute(`#/file/abc?page=${encodeURIComponent(bad)}`)).toEqual({ kind: 'file', id: 'abc' });
+  }
+  expect(parseRoute('#/file/abc?other=1')).toEqual({ kind: 'file', id: 'abc' });
+});

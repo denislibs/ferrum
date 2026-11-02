@@ -8,10 +8,11 @@ import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMou
 import { detectPlatform } from '../core/core';
 import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
 import { boot, dismissSplash, isTestMode } from './boot';
-import { canvasMenu, DesignHeader, FileHeader, ResizeEdge } from './chrome';
+import { DesignHeader, FileHeader, ResizeEdge } from './chrome';
+import { buildContextMenu, type ContextTarget } from './context-menu';
 import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
-import { Menu, type MenuSearch } from './menu';
+import { Menu, type MenuItem, type MenuSearch } from './menu';
 import { buildMainMenu, entriesByKey, searchMenu } from './main-menu';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
@@ -23,7 +24,7 @@ import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import { systemFonts } from './system-fonts';
 import { isTauri, saveExport } from './tauri';
-import type { Backend } from '../wasm/ferrum_wasm';
+import type { Backend, MenuActionDto } from '../wasm/ferrum_wasm';
 import { restartText, type Restart } from './restart';
 import type { Route } from './router';
 import { createSaver, SETTLE_MS, withTimeout, type Saver, type SaverOptions } from './saver';
@@ -52,6 +53,8 @@ export interface AppProps {
    * `false` — перезапусков слишком много, остаётся плашка остановки. */
   onRestart: (r: Restart) => boolean;
   navigate: (r: Route) => void;
+  /** Страница из ссылки (`?page=`): открыть её, если она есть в файле. */
+  page?: string;
 }
 
 /** Тестовый режим: интервалы журнала и полного файла из адреса (`?journal=`, `?fullSave=`). */
@@ -80,7 +83,10 @@ export function App(props: AppProps) {
   const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(saved.theme);
   const [pixelSnap, setPixelSnap] = createSignal(saved.pixelSnap);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
-  const [context, setContext] = createSignal<{ x: number; y: number } | null>(null);
+  /** Открытое контекстное меню: пункты из ядра, точка окна и название. */
+  const [context, setContext] = createSignal<{ items: MenuItem[]; at: { x: number; y: number }; label: string } | null>(null);
+  /** Запрошенное у ядра меню: куда его поставить и кто выполняет действия цели. */
+  let pendingContext: { at: { x: number; y: number }; label: string; onAction?: (a: MenuActionDto) => void } | null = null;
   // «Как в системе» следует за prefers-color-scheme на лету.
   const media = matchMedia('(prefers-color-scheme: dark)');
   const [prefersDark, setPrefersDark] = createSignal(media.matches);
@@ -264,13 +270,14 @@ export function App(props: AppProps) {
           ed.send({ type: 'importKeymap', json: km });
         }
       },
-      // Ctrl/Cmd+C, X, V, пока они вызывают копирование, вырезание и вставку, идут
+      // Ctrl/Cmd+C, X, V (и Shift+V — «Вставить поверх»), пока они вызывают
+      // копирование, вырезание и вставку, идут
       // событиями буфера обмена (системный буфер), а не клавишами в ядро.
       isClipboardKey: (e) => {
         const s = eventShortcut(e);
         const action = s && clipboardAction(s, platform);
         if (!s || !action) return false;
-        const key = { copy: 'edit.copy', cut: 'edit.cut', paste: 'edit.paste' }[action];
+        const key = { copy: 'edit.copy', cut: 'edit.cut', paste: 'edit.paste', pasteOver: 'edit.paste_over' }[action];
         return !!store.state.keymap.commands.find((c) => c.key === key)?.bindings.includes(s);
       },
     })
@@ -280,12 +287,33 @@ export function App(props: AppProps) {
           return;
         }
         ed.uiCommand = uiCommand;
+        ed.contextMenu = (target: ContextTarget, at, label, onAction) => {
+          setContext(null);
+          pendingContext = { at, label, onAction };
+          ed.send({ type: 'contextMenu', target });
+        };
+        // Пункты — в той же пачке после выделения и состояний команд (ядро шлёт
+        // меню последним): через очередь планировщика, вслед за ними.
+        const offContext = ed.core.on((e) => {
+          if (e.type !== 'contextMenu') return;
+          ed.scheduler.enqueue(() => {
+            const p = pendingContext;
+            pendingContext = null;
+            if (!p || e.items.length === 0) return;
+            const items = buildContextMenu(e.items, entries(), {
+              select: (id) => ed.send({ type: 'select', ids: [id], mode: 'replace' }),
+              action: (a) => p.onAction?.(a),
+            });
+            setContext({ items, at: p.at, label: p.label });
+          });
+        });
         setEditor(ed);
         canvas.focus();
         const offClipboard = installClipboard(ed);
         // Поле правки текста — в сцене холста (под курсором текста).
         const offText = installTextInput(ed, canvas.parentElement ?? document.body, canvas);
         uninstall = () => {
+          offContext();
           offText();
           offClipboard();
         };
@@ -305,8 +333,16 @@ export function App(props: AppProps) {
         // до `opened` — файл испорчен; запись остаётся, пользователь — на экране файлов.
         let opening = true;
         let recovered = false;
+        // Страница из ссылки — по первому списку страниц после открытия; её нет в
+        // файле (удалили) — файл остаётся на первой странице, без ошибки.
+        let linkedPage = props.page;
         ed.core.on((e) => {
           if (e.type === 'uiCommand') uiCommand(e.key);
+          if (!opening && linkedPage && e.type === 'pages') {
+            const want = linkedPage;
+            linkedPage = undefined;
+            if (want !== e.current && e.pages.some((p) => p.id === want)) ed.send({ type: 'setPage', id: want });
+          }
           if (e.type === 'recovered') recovered = true;
           if (opening && e.type === 'opened') {
             opening = false;
@@ -546,7 +582,8 @@ export function App(props: AppProps) {
           tabindex="0"
           aria-label="Холст"
           onContextMenu={(e) => {
-            if (editor()) setContext({ x: e.clientX, y: e.clientY });
+            // Точка холста — `offset*` (не чтение layout); окна — для меню.
+            editor()?.contextMenu?.({ kind: 'canvas', x: e.offsetX, y: e.offsetY }, { x: e.clientX, y: e.clientY }, 'Действия с выделением');
           }}
         />
         <Show when={!store.state.ready && failure()}>
@@ -580,7 +617,7 @@ export function App(props: AppProps) {
                 onOpen={setMainMenu}
                 onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
               />
-              <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} />
+              <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
               <LayersPanel />
               <ResizeEdge side="left" width={left()} onWidth={setLeft} />
             </aside>
@@ -600,14 +637,7 @@ export function App(props: AppProps) {
               />
             </Show>
             <Show when={context()}>
-              {(at) => (
-                <Menu
-                  label="Действия с выделением"
-                  items={canvasMenu()}
-                  anchor={at()}
-                  onClose={() => setContext(null)}
-                />
-              )}
+              {(m) => <Menu label={m().label} items={m().items} anchor={m().at} onClose={() => setContext(null)} />}
             </Show>
           </EditorContext.Provider>
         )}

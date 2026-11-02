@@ -157,8 +157,14 @@ impl Editor {
             C::Redo => (self.doc.can_redo(), None),
             C::Copy => (sel || text, None),
             C::Cut => (edit && (sel || text), None),
-            C::Paste => (edit, None),
-            C::CopyAsPng | C::CopyAsSvg | C::ZoomToSelection => (sel, None),
+            C::Paste | C::PasteOver => (edit, None),
+            // Заменять нечего без выделения.
+            C::PasteReplace => (edit && sel, None),
+            C::CopyAsPng | C::CopyAsSvg | C::ZoomToSelection | C::CopyProps | C::SelectSimilar => {
+                (sel, None)
+            }
+            // В правке текста сочетания — у текста; свойства — к узлам вне неё.
+            C::PasteProps => (edit && sel && !text, None),
             // В правке вектора удаление и сдвиг — у точек.
             C::Delete
             | C::NudgeLeft

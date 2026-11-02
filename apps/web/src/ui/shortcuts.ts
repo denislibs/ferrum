@@ -103,8 +103,10 @@ export function eventShortcut(e: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKe
   return formatShortcut({ code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
 }
 
-/** Сочетание, которое браузер превращает в событие буфера обмена. */
-export function clipboardAction(s: string, platform: Platform): 'copy' | 'cut' | 'paste' | null {
+/** Сочетание, которое браузер превращает в событие буфера обмена. Ctrl/Cmd+Shift+V
+ * — тоже `paste` (в браузере — «вставить обычным текстом»): на холсте это
+ * «Вставить поверх», в правке текста — обычный текст. */
+export function clipboardAction(s: string, platform: Platform): 'copy' | 'cut' | 'paste' | 'pasteOver' | null {
   const mod = platform === 'mac' ? 'Meta' : 'Ctrl';
   switch (s) {
     case `${mod}+KeyC`:
@@ -113,6 +115,9 @@ export function clipboardAction(s: string, platform: Platform): 'copy' | 'cut' |
       return 'cut';
     case `${mod}+KeyV`:
       return 'paste';
+    // Каноническая запись: Shift раньше Meta, но после Ctrl.
+    case mod === 'Meta' ? 'Shift+Meta+KeyV' : 'Ctrl+Shift+KeyV':
+      return 'pasteOver';
     default:
       return null;
   }

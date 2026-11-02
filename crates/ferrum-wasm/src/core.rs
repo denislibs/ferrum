@@ -18,7 +18,8 @@ use std::collections::{HashSet, VecDeque};
 use ferrum_doc::{container, fixture, DocResult, Document, NodeId, Tx};
 use ferrum_editor::geometry::SelectionBox;
 use ferrum_editor::{
-    CommandId, CommandState, Cursor, Editor, EditorEvent, Input, Platform, ThemeChoice, ToolKind,
+    CommandId, CommandState, Cursor, Editor, EditorEvent, Input, PasteMode, Platform, ThemeChoice,
+    ToolKind,
 };
 use ferrum_render::{
     decode_png, Clock, ExportBudget, FrameStats, OverlayTheme, RenderBackend, Renderer, Rgba,
@@ -34,9 +35,9 @@ use crate::input::{decode_all, Record};
 use crate::layers::Layers;
 use crate::live::LiveState;
 use crate::protocol::{
-    Backend, Command, CommandStateDto, CoreEvent, CursorKind, TextInputKindDto, Theme, Tool,
-    MAX_DEMO_NODES, MAX_DEMO_TEXTS, MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX, THUMB_HEIGHT,
-    THUMB_WIDTH,
+    Backend, Command, CommandStateDto, CoreEvent, CursorKind, PasteModeDto, TextInputKindDto,
+    Theme, Tool, MAX_DEMO_NODES, MAX_DEMO_TEXTS, MAX_JOURNAL_BATCHES, SELECTION_IDS_MAX,
+    THUMB_HEIGHT, THUMB_WIDTH,
 };
 use crate::summary::Summary;
 
@@ -111,6 +112,9 @@ pub struct Core {
     now_ms: f64,
     /// Часы пределов экспорта SVG и PDF (в worker'е — `performance.now()`).
     export_clock: Option<Box<dyn Clock>>,
+    /// Пункты контекстного меню: уходят последними в пачке событий, после
+    /// выделения и состояний команд, которые изменил выбор на правой кнопке.
+    context: Option<Vec<crate::protocol::MenuItemDto>>,
 }
 
 /// Что из панелей пересчитать после пачки событий редактора.
@@ -200,6 +204,7 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::SetTheme { .. }
             | Command::LayersWindow { .. }
             | Command::ExpandLayer { .. }
+            | Command::ExpandAllLayers { .. }
             | Command::FilterLayers { .. }
             | Command::PrepareSearch
             | Command::HoverLayer { .. }
@@ -269,6 +274,7 @@ impl Core {
             text_state: text::TextState::default(),
             now_ms: 0.0,
             export_clock: ferrum_render::default_clock(),
+            context: None,
         };
         // Таблица команд, их состояния и пресеты нужны интерфейсу сразу, до документа.
         core.push_keymap();
@@ -684,6 +690,9 @@ impl Core {
     fn paste_disabled(&self, cmd: &Command) -> bool {
         let paste = match cmd {
             Command::Paste { .. } | Command::PasteImage { .. } => true,
+            Command::PasteProps { .. } => {
+                return !self.editor.command_state(CommandId::PasteProps).enabled;
+            }
             Command::TextInput {
                 kind: TextInputKindDto::Paste,
                 ..
@@ -747,13 +756,33 @@ impl Core {
                 };
                 self.editor.set_settings(s);
             }
-            Command::Paste { bytes } => {
+            Command::Paste { bytes, mode } => {
                 self.editor.take_text_pending();
+                let how = match mode.unwrap_or_default() {
+                    // Свойства приходят командой `PasteProps`; здесь — как обычная.
+                    PasteModeDto::Normal | PasteModeDto::Props => PasteMode::Normal,
+                    PasteModeDto::Over => PasteMode::Over,
+                    PasteModeDto::Replace => PasteMode::Replace,
+                };
                 // Ошибку вставки редактор сам отдаёт событием `Error`.
-                let _ = self.editor.paste(&bytes);
+                let _ = self.editor.paste_with(&bytes, how);
                 // Фрагмент в правку текста ждёт шрифтов: повторить по приходу.
                 if self.editor.take_text_pending() {
-                    self.wait(fonts::Waiting::Command(Command::Paste { bytes }));
+                    self.wait(fonts::Waiting::Command(Command::Paste { bytes, mode }));
+                }
+            }
+            Command::PasteProps { bytes, text } => {
+                self.editor.take_text_pending();
+                // Текст из буфера — не доверенный: чужой — внутренний буфер ядра.
+                let clip = match (&bytes, &text) {
+                    (Some(b), _) => Some(b.to_vec()),
+                    (None, Some(t)) => ferrum_editor::props_clip::props_text_bytes(t),
+                    (None, None) => None,
+                };
+                self.editor.paste_props(clip.as_deref());
+                // Шрифт стиля текста грузится: повторить по приходу.
+                if self.editor.take_text_pending() {
+                    self.wait(fonts::Waiting::Command(Command::PasteProps { bytes, text }));
                 }
             }
             Command::PlaceImage { bytes } => self.place_image(bytes.into_vec()),
@@ -856,7 +885,17 @@ impl Core {
                         plain: Some(plain),
                     })
                 }
-                EditorEvent::PasteRequested => self.events.push(CoreEvent::PasteRequested),
+                EditorEvent::PasteRequested(m) => self.events.push(CoreEvent::PasteRequested {
+                    mode: match m {
+                        PasteMode::Normal => PasteModeDto::Normal,
+                        PasteMode::Over => PasteModeDto::Over,
+                        PasteMode::Replace => PasteModeDto::Replace,
+                        PasteMode::Props => PasteModeDto::Props,
+                    },
+                }),
+                EditorEvent::ClipboardProps(text) => {
+                    self.events.push(CoreEvent::ClipboardProps { text })
+                }
                 EditorEvent::ExportPng(ids) => self.copy_png(&ids),
                 EditorEvent::ExportSvg(ids) => self.copy_svg(&ids),
                 EditorEvent::RequestImage => self.events.push(CoreEvent::RequestImage),
@@ -895,6 +934,9 @@ impl Core {
         self.push_text_state(properties);
         self.push_modified();
         self.push_font_requests();
+        if let Some(items) = self.context.take() {
+            self.events.push(CoreEvent::ContextMenu { items });
+        }
     }
 
     /// Часы пределов экспорта (в wasm — `performance.now()`; без них — только

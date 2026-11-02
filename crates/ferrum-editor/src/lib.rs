@@ -9,6 +9,7 @@ mod boolean;
 pub mod clipboard;
 pub mod command_state;
 pub mod commands;
+pub mod context_menu;
 mod editor;
 mod flatten;
 pub mod geometry;
@@ -21,6 +22,7 @@ mod outline;
 pub mod pages;
 pub mod panel;
 pub mod presets;
+pub mod props_clip;
 pub mod scale;
 pub mod selection;
 pub mod snap;
@@ -34,13 +36,14 @@ pub mod vector_edit;
 pub mod vector_ops;
 mod vector_select;
 
-pub use actions::{FIT_PADDING_PX, PRESET_GAP};
+pub use actions::{PasteMode, FIT_PADDING_PX, MAX_SIMILAR_SAMPLES, PASTE_STEP, PRESET_GAP};
 pub use command_state::CommandState;
 pub use commands::{Command, CommandGroup, CommandId, COMMANDS};
+pub use context_menu::{ContextTarget, MAX_SELECT_LAYER_ITEMS};
 pub use editor::{Editor, EditorEvent, Settings, ThemeChoice, WHEEL_ZOOM_SPEED};
 pub use input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 pub use keymap::{browser_reserved, BindError, Conflict, Keymap, KeymapError, Shortcut};
-pub use menu::{main_menu, menu_commands, MenuNode};
+pub use menu::{main_menu, menu_commands, MenuAction, MenuNode};
 pub use pages::{clean_name, MAX_NAME_CHARS};
 pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,

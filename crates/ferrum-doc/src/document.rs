@@ -224,6 +224,48 @@ impl Document {
         Ok(id)
     }
 
+    /// Копия страницы `id` с именем `name` сразу после неё в списке: те же узлы
+    /// (с новыми идентификаторами) и фон. Как и остальные операции со страницами,
+    /// в историю отмены не попадает; копия целиком уйдёт в следующую пачку журнала.
+    pub fn duplicate_page(&mut self, id: PageId, name: &str) -> DocResult<PageId> {
+        // Сначала загрузка: страница с неизвестными узлами делает документ
+        // доступным только для чтения, а копия их потеряла бы.
+        self.page(id)?;
+        self.writable()?;
+        let at = self
+            .pages()
+            .iter()
+            .position(|(p, _)| *p == id)
+            .map_or(0, |i| i + 1);
+        let background = self.page_background(id);
+        // Узлы копируются до создания страницы: отказ не оставляет пустой копии.
+        let copy = PageDoc::new();
+        {
+            let src = self.loaded.get(&id).expect("страница загружена выше");
+            let tx = Tx::new(&copy);
+            // Обход без рекурсии: глубина не ограничена.
+            let mut stack: Vec<(Option<NodeId>, Option<NodeId>)> = vec![(None, None)];
+            while let Some((from, to)) = stack.pop() {
+                for child in src.children(from) {
+                    let made = tx.create_with_props(to, None, &src.props(child)?)?;
+                    stack.push((Some(child), Some(made)));
+                }
+            }
+        }
+        copy.commit();
+        let t = self.pages_tree.create_at(TreeParentId::Root, at)?;
+        let meta = self.pages_tree.get_meta(t)?;
+        meta.insert(KEY_NAME, name)?;
+        if let Some(c) = background {
+            meta.insert(KEY_BACKGROUND, c.to_hex())?;
+        }
+        self.root.commit();
+        let new = PageId(t);
+        self.loaded.insert(new, copy);
+        self.journaled_pages.insert(new, VersionVector::default());
+        Ok(new)
+    }
+
     pub fn rename_page(&mut self, id: PageId, name: &str) -> DocResult<()> {
         self.writable()?;
         self.ensure_page(id)?;
@@ -712,6 +754,38 @@ mod tests {
             Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
         });
         assert!(matches!(err, Err(DocError::ReadOnly)));
+    }
+
+    #[test]
+    fn duplicating_an_unopened_page_with_unknown_nodes_is_refused() {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let star = doc
+            .transact(page, vec![], |p| {
+                p.create_node(None, None, NodeKind::Rect)?;
+                Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+            })
+            .unwrap()[0];
+        doc.page(page)
+            .unwrap()
+            .force_raw_kind_for_tests(star, Some("star"));
+        let root = doc.root_snapshot().unwrap();
+        let payload = doc.page_payload(page).unwrap();
+        let mut unloaded = HashMap::new();
+        unloaded.insert(
+            page,
+            UnloadedPage {
+                snapshot: payload.snapshot,
+                image_refs: payload.image_refs,
+                scene: None,
+            },
+        );
+        let (mut d2, _) = Document::from_parts(&root, unloaded, ImageStore::default()).unwrap();
+        assert!(!d2.is_page_loaded(page));
+        let before = d2.pages();
+        let err = d2.duplicate_page(page, "Копия");
+        assert!(matches!(err, Err(DocError::ReadOnly)), "{err:?}");
+        assert_eq!(d2.pages(), before, "копии нет");
     }
 
     /// Документ, где изображение используется только узлом внутри скрытого

@@ -85,3 +85,11 @@ test('openWithJournal: файл и журнал вместе — не больш
   expect(cmd.journal[2].byteLength).toBe(8);
   expect(cmd.journal[2].buffer.byteLength).toBe(8);
 });
+
+test('pasteProps: текст — не длиннее предела, байты — как у вставки', () => {
+  expect(commandSizeError({ type: 'pasteProps', text: `${FERRUM_TEXT_MARKER}AQI=` })).toBeNull();
+  expect(commandSizeError({ type: 'pasteProps' })).toBeNull();
+  expect(commandSizeError({ type: 'pasteProps', text: 'A'.repeat(MAX_CLIPBOARD_TEXT + 1) })).toBe('Слишком большой объём данных: предел — 64 МБ');
+  expect(commandSizeError({ type: 'pasteProps', bytes: new Uint8Array(4) })).toBeNull();
+  expect(commandSizeError({ type: 'pasteProps', bytes: [1] as unknown as Uint8Array })).toBe('Неверная команда: данные не в виде байтов');
+});

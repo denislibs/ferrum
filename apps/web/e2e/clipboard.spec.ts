@@ -138,7 +138,9 @@ test('копировать как SVG: текст и image/svg+xml из меню
   await selectShape(page);
   const at = await appScreen(page, await live(page), 200, 40);
   await page.mouse.click(at.x, at.y, { button: 'right' });
-  await page.getByRole('menu').getByRole('menuitem', { name: /Копировать как SVG/ }).click();
+  // Как в Figma: «Копировать как ▸ SVG» — подменю контекстного меню.
+  await page.getByRole('menu', { name: 'Действия с выделением' }).getByRole('menuitem', { name: 'Копировать как', exact: true }).click();
+  await page.getByRole('menu', { name: 'Копировать как' }).getByRole('menuitem', { name: /Копировать как SVG/ }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Скопировано как SVG' })).toBeVisible();
   const got = await page.evaluate(async () => {
     const item = (await navigator.clipboard.read())[0];
@@ -562,7 +564,7 @@ test.describe('без доступа на чтение буфера', () => {
     // «Вставить» из меню читает только асинхронно: без доступа — одно уведомление.
     const at = await appScreen(page, await live(page), 0, 0);
     await page.mouse.click(at.x, at.y, { button: 'right' });
-    await page.getByRole('menuitem', { name: /Вставить/ }).click();
+    await page.getByRole('menuitem', { name: /^Вставить/ }).first().click();
     await expect(page.getByRole('status').filter({ hasText: 'Нет доступа к буферу обмена' })).toHaveCount(1);
   });
 });

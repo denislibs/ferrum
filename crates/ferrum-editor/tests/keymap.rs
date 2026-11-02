@@ -58,11 +58,16 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::ToggleUi, &["Mod+Backslash"]),
     (CommandId::Copy, &["Mod+KeyC"]),
     (CommandId::Paste, &["Mod+KeyV"]),
+    (CommandId::PasteOver, &["Mod+Shift+KeyV"]),
+    (CommandId::PasteReplace, &["Mod+Shift+KeyR"]),
+    (CommandId::CopyProps, &["Mod+Alt+KeyC"]),
+    (CommandId::PasteProps, &["Mod+Alt+KeyV"]),
     (CommandId::Cut, &["Mod+KeyX"]),
     (CommandId::CopyAsPng, &["Mod+Shift+KeyC"]),
     (CommandId::Undo, &["Mod+KeyZ"]),
     (CommandId::Redo, &["Mod+Shift+KeyZ"]),
     (CommandId::SelectAll, &["Mod+KeyA"]),
+    (CommandId::SelectSimilar, &["Mod+Alt+KeyA"]),
     (CommandId::Escape, &["Escape"]),
     // Подсистема 2: главное меню — Alt+/ (в Figma поиск в меню — по логотипу);
     // «Экспорт…» и «Привязка к пикселям» — как в справке Figma.
@@ -145,7 +150,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 80);
+    assert_eq!(COMMANDS.len(), 85);
 }
 
 #[test]
@@ -304,6 +309,11 @@ fn browser_reserved_combos_are_reported() {
     assert!(reserved.contains(&sc("Ctrl+KeyW")));
     assert!(reserved.contains(&sc("Ctrl+KeyT")));
     assert!(reserved.contains(&sc("Ctrl+KeyN")));
+    assert!(reserved.contains(&sc("Ctrl+KeyR")), "перезагрузка");
+    // Ctrl/Cmd+Shift+R страница может перехватить: «Вставить с заменой», как в Figma.
+    assert!(!reserved.contains(&sc("Ctrl+Shift+KeyR")));
+    assert!(browser_reserved(Platform::Mac).contains(&sc("Meta+KeyR")));
+    assert!(!browser_reserved(Platform::Mac).contains(&sc("Meta+Shift+KeyR")));
     assert!(browser_reserved(Platform::Mac).contains(&sc("Meta+KeyW")));
     let mut map = Keymap::new(Platform::Windows);
     map.bind(CommandId::Duplicate, sc("Ctrl+KeyW"), false)

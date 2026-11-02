@@ -5,15 +5,19 @@
 
 import { tooLarge } from '../core/limits';
 import type { ClipboardExtra } from '../core/messages';
+import type { PasteModeDto } from '../wasm/ferrum_wasm';
 import type { Editor } from './context';
 import {
   eventIsEmpty,
   FERRUM_MIME,
   fromClipboardItems,
   fromDataTransfer,
+  isPropsText,
   MAX_CLIPBOARD_BYTES,
+  propsFromClipboardItems,
   supportsCustomFormat,
   type PasteData,
+  type PropsData,
 } from './clipboard';
 import { asyncWriter, copyPng, copySvg, type ClipboardSink } from './clipboard-write';
 import { fileBytes, IMAGE_FILE, pickFile } from './files';
@@ -123,14 +127,16 @@ export function installClipboard(ed: Editor): () => void {
     }
   };
 
-  const deliver = async (data: PasteData) => {
+  /** Вставка прочитанного: объекты Ferrum — способом `mode` (поверх, с заменой);
+   * картинка из другого приложения — всегда обычной вставкой. */
+  const deliver = async (data: PasteData, mode: PasteModeDto = 'normal') => {
     if (!data) return;
     switch (data.kind) {
       case 'ferrum':
-        ed.send({ type: 'paste', bytes: data.bytes });
+        ed.send({ type: 'paste', bytes: data.bytes, mode });
         return;
       case 'text':
-        ed.core.pasteText(data.text);
+        ed.core.pasteText(data.text, mode);
         return;
       case 'tooBig':
         toast(tooLarge(MAX_CLIPBOARD_BYTES));
@@ -147,6 +153,31 @@ export function installClipboard(ed: Editor): () => void {
       ed.send({ type: 'pasteImage', bytes: await fileBytes(data.blob) });
     } catch {
       toast('Не удалось прочитать изображение из буфера обмена');
+    }
+  };
+
+  /** «Копировать свойства»: текст с меткой — в системный буфер. Отказ браузера не
+   * мешает вставке в этой вкладке (у ядра свой буфер), поэтому без ошибки. */
+  const writeProps = (text: string) => {
+    const done = () => ed.store.toast('Свойства скопированы');
+    const clip = (globalThis as { navigator?: { clipboard?: Clipboard } }).navigator?.clipboard;
+    if (typeof clip?.writeText !== 'function') {
+      execText(text);
+      done();
+      return;
+    }
+    clip.writeText(text).then(done, () => {
+      execText(text);
+      done();
+    });
+  };
+  /** «Вставить свойства»: что лежит в системном буфере. Нет доступа или там не
+   * наше — пусто: ядро возьмёт свойства из своего буфера, без уведомлений. */
+  const readProps = async (): Promise<PropsData> => {
+    try {
+      return await propsFromClipboardItems(await navigator.clipboard.read());
+    } catch {
+      return {};
     }
   };
 
@@ -178,7 +209,8 @@ export function installClipboard(ed: Editor): () => void {
     }
     ed.send({ type: 'textInput', kind: 'paste', data: text });
   };
-  /** Вставка с Shift: обычным текстом, в стиле у курсора. */
+  /** Вставка с Shift: в правке текста — обычным текстом, в стиле у курсора; на
+   * холсте — «Вставить поверх». */
   let plainNext = false;
   const onKeyDown = (e: KeyboardEvent) => {
     plainNext = (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyV';
@@ -190,10 +222,13 @@ export function installClipboard(ed: Editor): () => void {
     // меню: ни чтения буфера (и запроса разрешения), ни уведомлений. Ядро
     // проверяет то же самое.
     if (ed.store.state.commands['edit.paste']?.enabled === false) return;
+    const mode: PasteModeDto = plainNext && !isTextField(e.target) ? 'over' : 'normal';
+    // Копия свойств вставляется только «Вставить свойства»: обычной вставкой — ничего.
+    if (isPropsText(e.clipboardData?.getData('text/plain') ?? '')) return;
     const sync = fromDataTransfer(e.clipboardData);
-    if (sync) void deliver(sync);
+    if (sync) void deliver(sync, mode);
     // Свой формат асинхронного API в событии не виден: событие пустое — читаем его.
-    else if (eventIsEmpty(e.clipboardData)) void readAsync(true).then(deliver);
+    else if (eventIsEmpty(e.clipboardData)) void readAsync(true).then((d) => deliver(d, mode));
     else {
       const text = e.clipboardData?.getData('text/plain') ?? '';
       if (text === '') return;
@@ -213,7 +248,9 @@ export function installClipboard(ed: Editor): () => void {
     if (e.type === 'clipboard') write(e);
     else if (e.type === 'clipboardPng') void copyPng(e.bytes, sink);
     else if (e.type === 'clipboardSvg') void copySvg(e.bytes, sink);
-    else if (e.type === 'pasteRequested') void readAsync(false).then(deliver);
+    else if (e.type === 'clipboardProps') writeProps(e.text);
+    else if (e.type === 'pasteRequested' && e.mode === 'props') void readProps().then((p) => ed.send({ type: 'pasteProps', ...p }));
+    else if (e.type === 'pasteRequested') void readAsync(false).then((d) => deliver(d, e.mode));
     else if (e.type === 'requestImage') {
       pickFile(IMAGE_FILE)
         .then(async (f) => {

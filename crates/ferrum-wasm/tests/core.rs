@@ -192,6 +192,7 @@ fn bad_commands_report_errors_and_keep_the_document() {
     core.command(Command::Demo { nodes: 10_000_000 });
     core.command(Command::Paste {
         bytes: ByteBuf::from(vec![1, 2, 3]),
+        mode: None,
     });
     core.command(Command::PlaceImage {
         bytes: ByteBuf::from(vec![0; 10]),

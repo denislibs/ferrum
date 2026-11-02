@@ -202,6 +202,24 @@ impl Layers {
         self.stale |= changed;
     }
 
+    /// Развернуть все узлы страницы с детьми или свернуть все.
+    pub fn set_all_expanded(&mut self, scene: &Scene, expanded: bool) {
+        let before = self.expanded.len();
+        if expanded {
+            let mut stack: Vec<Slot> = scene.roots().to_vec();
+            while let Some(s) = stack.pop() {
+                let n = scene.at(s);
+                if !n.children.is_empty() && !scene.is_draft_slot(s) {
+                    self.expanded.insert(n.id);
+                    stack.extend(n.children.iter().copied());
+                }
+            }
+        } else {
+            self.expanded.clear();
+        }
+        self.stale |= self.expanded.len() != before;
+    }
+
     /// Поиск по имени (без учёта регистра): показываются совпавшие узлы и их
     /// предки, всё раскрыто. Запрос сначала обрезается, потом очищается от пробелов.
     pub fn set_filter(&mut self, query: &str) {

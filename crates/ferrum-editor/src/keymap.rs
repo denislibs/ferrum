@@ -264,6 +264,10 @@ pub fn browser_reserved(platform: Platform) -> Vec<Shortcut> {
         "KeyW",
         "KeyT",
         "KeyN",
+        // Перезагрузка. Простое Ctrl/Cmd+R занято браузером; Ctrl/Cmd+Shift+R
+        // страница перехватывает (Chromium, Firefox; Safari не проверен) — это
+        // «Вставить с заменой», как в Figma.
+        "KeyR",
         "Shift+KeyW",
         "Shift+KeyT",
         "Shift+KeyN",

@@ -1,13 +1,14 @@
 // Маршруты приложения в адресе после `#` (назад и вперёд браузера работают):
 // - `#/` (и пустой) — экран файлов, «Недавние»; `#/drafts`, `#/trash` — другие разделы;
-// - `#/file/<id>` — редактор с файлом из хранилища;
+// - `#/file/<id>` — редактор с файлом из хранилища; `#/file/<id>?page=<pageId>` —
+//   с этой страницей («Копировать ссылку на страницу»);
 // - `#/new` — создать файл в хранилище и открыть его (адрес заменяется на `#/file/<id>`).
 // Параметры поиска (`?nodes=`, `?backend=` — тесты) маршрутизатор не трогает.
 
 import type { Section } from '../core/file-list';
 import { MAX_ID_BYTES } from '../core/file-list';
 
-export type Route = { kind: 'files'; section: Section } | { kind: 'file'; id: string } | { kind: 'new' };
+export type Route = { kind: 'files'; section: Section } | { kind: 'file'; id: string; page?: string } | { kind: 'new' };
 
 const SECTION_PATH: Record<Section, string> = { recent: '', drafts: 'drafts', trash: 'trash' };
 
@@ -16,9 +17,15 @@ function validId(id: string): boolean {
   return id.length > 0 && new TextEncoder().encode(id).length <= MAX_ID_BYTES && /^[A-Za-z0-9_-]+$/.test(id);
 }
 
+/** Идентификатор страницы из адреса — не доверенный: `счётчик@узел` Loro, не длиннее 64. */
+function validPage(id: string): boolean {
+  return id.length <= 64 && /^\d+@\d+$/.test(id);
+}
+
 /** Маршрут по части адреса после `#` (с решёткой или без); неизвестное — экран файлов. */
 export function parseRoute(hash: string): Route {
-  const path = hash.replace(/^#/, '').replace(/^\/+/, '').replace(/\/+$/, '');
+  const [rawPath, query = ''] = hash.replace(/^#/, '').split('?', 2);
+  const path = rawPath.replace(/^\/+/, '').replace(/\/+$/, '');
   if (path === 'new') return { kind: 'new' };
   if (path === 'drafts') return { kind: 'files', section: 'drafts' };
   if (path === 'trash') return { kind: 'files', section: 'trash' };
@@ -31,7 +38,11 @@ export function parseRoute(hash: string): Route {
       id = '';
     }
     // Неверный id — тот же путь, что и неизвестный: редактор сообщит «Файл не найден».
-    return { kind: 'file', id: validId(id) ? id : '' };
+    const route: Route = { kind: 'file', id: validId(id) ? id : '' };
+    // Неверная страница отбрасывается: файл откроется на первой.
+    const page = new URLSearchParams(query).get('page');
+    if (page !== null && validPage(page)) route.page = page;
+    return route;
   }
   return { kind: 'files', section: 'recent' };
 }
@@ -41,7 +52,7 @@ export function routeHash(r: Route): string {
     case 'new':
       return '#/new';
     case 'file':
-      return `#/file/${encodeURIComponent(r.id)}`;
+      return `#/file/${encodeURIComponent(r.id)}${r.page ? `?page=${encodeURIComponent(r.page)}` : ''}`;
     case 'files':
       return `#/${SECTION_PATH[r.section]}`;
   }

@@ -1,7 +1,7 @@
 // Общее для компонентов редактора: ядро, состояние, планировщик, платформа.
 
 import { createContext, useContext } from 'solid-js';
-import type { Command } from '../wasm/ferrum_wasm';
+import type { Command, ContextTarget, MenuActionDto } from '../wasm/ferrum_wasm';
 import type { Core, Platform } from '../core/core';
 import type { Scheduler } from './scheduler';
 import type { LayoutMap } from './shortcuts';
@@ -20,6 +20,10 @@ export interface Editor {
   /** Исполнитель команд интерфейса (`ui.*`): ставит редактор приложения; ядро
    * сообщает о них событием `uiCommand` (сочетание клавиш на холсте). */
   uiCommand?: (key: string) => void;
+  /** Открыть контекстное меню цели у точки окна `at` (спека подсистемы 2, раздел
+   * 5): ядро выбирает на правой кнопке и присылает пункты. `onAction` — действия
+   * над целью (переименовать, страницы). Ставит редактор приложения. */
+  contextMenu?: (target: ContextTarget, at: { x: number; y: number }, label: string, onAction?: (a: MenuActionDto) => void) => void;
   /** Раскладка клавиатуры пользователя для подписей (если браузер её отдаёт); сигнал. */
   layout(): LayoutMap | undefined;
   /** «Показать системные шрифты» (Chrome — с разрешения браузера). */

@@ -23,6 +23,49 @@ pub const FIT_PADDING_PX: f64 = 48.0;
 /// Зазор между новым фреймом из пресета и содержимым страницы.
 pub const PRESET_GAP: f64 = 100.0;
 
+/// Сдвиг повторной вставки того же содержимого по каждой оси (спека подсистемы 2,
+/// раздел 6).
+pub const PASTE_STEP: f64 = 10.0;
+
+/// Сколько разных образцов (тип, заливки, обводки) берёт «Выделить подобные».
+pub const MAX_SIMILAR_SAMPLES: usize = 64;
+
+/// Прошлый дубликат: оригиналы и копии по порядку слоёв и версия выделения после
+/// него — пока она та же, следующий Ctrl/Cmd+D повторяет сдвиг копий.
+#[derive(Debug, Clone)]
+pub(crate) struct Duplicated {
+    sources: Vec<NodeId>,
+    copies: Vec<NodeId>,
+    version: u64,
+}
+
+/// Способ вставки из буфера обмена (спека подсистемы 2, раздел 6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PasteMode {
+    /// «Вставить» (Ctrl/Cmd+V): на место, если исходное видно и помещается в
+    /// цель, иначе в центр цели; повтор того же содержимого — на +10, +10 от
+    /// прошлой вставки.
+    #[default]
+    Normal,
+    /// «Вставить поверх» (Ctrl/Cmd+Shift+V): на исходные координаты, без сдвига.
+    Over,
+    /// «Вставить с заменой» (Ctrl/Cmd+Shift+R): на место каждого выделенного узла.
+    Replace,
+    /// «Вставить свойства» (Ctrl/Cmd+Alt+V): интерфейс читает буфер и зовёт
+    /// `paste_props`, а не `paste_with`.
+    Props,
+}
+
+/// Узел, который заменит вставка: родитель, его мировая матрица, место в слоях
+/// и левый верхний угол рамки в мире.
+struct ReplaceTarget {
+    id: NodeId,
+    parent: Option<NodeId>,
+    parent_world: Affine,
+    index: usize,
+    origin: Point,
+}
+
 /// Выделенные дети одного родителя: родитель, число детей, позиции и узлы.
 type SiblingGroup = (Option<NodeId>, usize, Vec<(usize, NodeId)>);
 
@@ -110,7 +153,23 @@ impl Editor {
                     self.delete_selection();
                 }
             }
-            C::Paste => self.out.events.push(EditorEvent::PasteRequested),
+            C::Paste => self
+                .out
+                .events
+                .push(EditorEvent::PasteRequested(PasteMode::Normal)),
+            C::PasteOver => self
+                .out
+                .events
+                .push(EditorEvent::PasteRequested(PasteMode::Over)),
+            C::PasteReplace => self
+                .out
+                .events
+                .push(EditorEvent::PasteRequested(PasteMode::Replace)),
+            C::CopyProps => self.copy_props(),
+            C::PasteProps => self
+                .out
+                .events
+                .push(EditorEvent::PasteRequested(PasteMode::Props)),
             C::CopyAsPng => {
                 let ids = self.ordered_selection();
                 if !ids.is_empty() {
@@ -123,15 +182,10 @@ impl Editor {
                     self.out.events.push(EditorEvent::ExportSvg(ids));
                 }
             }
-            C::Duplicate => {
-                let ids = top_level(&self.scene, &self.selection);
-                if !ids.is_empty() {
-                    self.ctx()
-                        .commit(|tx, scene| duplicate(tx, scene, &ids, Vec2::ZERO));
-                }
-            }
+            C::Duplicate => self.smart_duplicate(),
             C::Delete => self.delete_selection(),
             C::SelectAll => self.select_all(),
+            C::SelectSimilar => self.select_similar(),
             C::Escape => {
                 if self.tool.kind() != ToolKind::Move {
                     self.set_tool(ToolKind::Move);
@@ -281,6 +335,80 @@ impl Editor {
             .filter(|id| !self.scene.is_draft(*id))
             .collect();
         self.selection.set(all);
+    }
+
+    /// Ctrl/Cmd+D, «умный дубликат» (спека подсистемы 2, раздел 6): копии встают на
+    /// место оригиналов, а если выделены копии прошлого дубликата (выделение с тех
+    /// пор не менялось — их только двигали), то со сдвигом этих копий от их
+    /// оригиналов: каждый следующий Ctrl/Cmd+D повторяет тот же шаг.
+    fn smart_duplicate(&mut self) {
+        let ids = self.ordered_selection();
+        if ids.is_empty() {
+            return;
+        }
+        let offset = match &self.last_duplicate {
+            Some(d) if d.version == self.selection.version() && d.copies == self.selection[..] => {
+                let at = |id: NodeId| self.scene.node(id).map(|n| n.world.translation());
+                match (d.copies.first().copied(), d.sources.first().copied()) {
+                    (Some(c), Some(s)) => match (at(c), at(s)) {
+                        (Some(c), Some(s)) => c - s,
+                        _ => Vec2::ZERO,
+                    },
+                    _ => Vec2::ZERO,
+                }
+            }
+            _ => Vec2::ZERO,
+        };
+        let ok = self
+            .ctx()
+            .commit(|tx, scene| duplicate(tx, scene, &ids, offset));
+        // Копии — по порядку слоёв, как и оригиналы: пары по номеру.
+        self.last_duplicate = ok.then(|| Duplicated {
+            sources: ids,
+            copies: self.selection.to_vec(),
+            version: self.selection.version(),
+        });
+    }
+
+    /// «Выделить подобные»: видимые и не заблокированные узлы страницы того же
+    /// типа с теми же заливками и обводками, что у кого-то из выделенных (образцов
+    /// — не больше `MAX_SIMILAR_SAMPLES` разных). Совпавший узел выделяется без
+    /// потомков. Обход — один, без рекурсии.
+    fn select_similar(&mut self) {
+        let mut samples: Vec<(NodeKind, &[Fill], &[ferrum_doc::Stroke])> = Vec::new();
+        for id in self.selection.iter() {
+            let Some(n) = self.scene.node(*id) else {
+                continue;
+            };
+            let key = (n.props.kind, &n.props.fills[..], &n.props.strokes[..]);
+            if !samples.contains(&key) {
+                samples.push(key);
+                if samples.len() == MAX_SIMILAR_SAMPLES {
+                    break;
+                }
+            }
+        }
+        let mut found = Vec::new();
+        let mut stack: Vec<ferrum_scene::Slot> = self.scene.roots().iter().rev().copied().collect();
+        while let Some(s) = stack.pop() {
+            if self.scene.is_draft_slot(s) {
+                continue;
+            }
+            let n = self.scene.at(s);
+            if !n.props.visible || n.props.locked {
+                continue;
+            }
+            let p = &n.props;
+            if samples
+                .iter()
+                .any(|(k, f, st)| *k == p.kind && *f == &p.fills[..] && *st == &p.strokes[..])
+            {
+                found.push(n.id);
+            } else {
+                stack.extend(n.children.iter().rev());
+            }
+        }
+        self.selection.set(found);
     }
 
     /// Ctrl+G и Ctrl+Alt+G: оборачивает выделение в группу или фрейм. Контейнер
@@ -544,11 +672,13 @@ impl Editor {
     }
 
     /// Копия выделения в формате буфера обмена Ferrum; `None` — нечего копировать.
+    /// Новая копия начинает счёт повторных вставок заново.
     pub fn copy(&mut self) -> Option<Vec<u8>> {
         let ids = self.ordered_selection();
         if ids.is_empty() {
             return None;
         }
+        self.last_paste = None;
         let page = self.doc.page(self.page).ok()?;
         let mut nodes: Vec<ClipNode> = Vec::new();
         for id in &ids {
@@ -667,6 +797,13 @@ impl Editor {
     /// новые идентификаторы и выделяются. Данные не доверенные; при ошибке документ
     /// и история не меняются.
     pub fn paste(&mut self, bytes: &[u8]) -> Result<(), ClipboardError> {
+        self.paste_with(bytes, PasteMode::Normal)
+    }
+
+    /// Вставка способом `mode` (обычная, поверх, с заменой) — одним шагом. В
+    /// правке текста любой способ вставляет тексты в правку. «С заменой» без
+    /// выделения (его сняли, пока читался буфер) — обычная вставка.
+    pub fn paste_with(&mut self, bytes: &[u8], mode: PasteMode) -> Result<(), ClipboardError> {
         self.begin_doc_edit();
         let payload = match ClipPayload::decode(bytes) {
             Ok(p) => p,
@@ -684,8 +821,28 @@ impl Editor {
             }
             self.end_text_edit();
         }
+        if mode == PasteMode::Replace {
+            let targets = self.replace_targets();
+            if !targets.is_empty() {
+                let ok = self.commit_replace(&payload, &targets);
+                return self.finish_paste(&payload, ok);
+            }
+        }
         let (target, target_world, target_box) = self.paste_target();
-        let offset = self.paste_offset(payload.bounds, target_box);
+        let key = *blake3::hash(bytes).as_bytes();
+        let offset = match mode {
+            PasteMode::Over => Vec2::ZERO,
+            _ => {
+                let base = self.paste_offset(payload.bounds, target_box);
+                // То же содержимое, а исходное видно: на шаг дальше прошлой вставки.
+                match self.last_paste {
+                    Some((k, prev)) if k == key && base == Vec2::ZERO => {
+                        prev + Vec2::new(PASTE_STEP, PASTE_STEP)
+                    }
+                    _ => base,
+                }
+            }
+        };
         let shift = Affine::translate(offset);
         let ok = self.ctx().commit(|tx, _| {
             let mut made: Vec<NodeId> = Vec::with_capacity(payload.nodes.len());
@@ -712,6 +869,78 @@ impl Editor {
             }
             Ok(roots)
         });
+        if ok && mode != PasteMode::Over {
+            self.last_paste = Some((key, offset));
+        }
+        self.finish_paste(&payload, ok)
+    }
+
+    /// Выделенные узлы, которые заменит вставка, — верхнего уровня, без
+    /// заблокированных, сверху вниз: вставка над верхним не сдвигает места нижних.
+    fn replace_targets(&self) -> Vec<ReplaceTarget> {
+        let mut out: Vec<ReplaceTarget> = self
+            .ordered_selection()
+            .into_iter()
+            .filter_map(|id| {
+                let slot = self.scene.slot(id)?;
+                if locked(&self.scene, slot) || self.scene.is_draft(id) {
+                    return None;
+                }
+                let n = self.scene.at(slot);
+                Some(ReplaceTarget {
+                    id,
+                    parent: n.parent.map(|p| self.scene.at(p).id),
+                    parent_world: parent_world(&self.scene, slot),
+                    index: self.scene.index(slot) as usize,
+                    origin: world_box(&self.scene, slot)?.origin(),
+                })
+            })
+            .collect();
+        out.reverse();
+        out
+    }
+
+    /// «Вставить с заменой» одним шагом: содержимое буфера встаёт на место каждого
+    /// узла — левый верхний угол его рамки, тот же родитель и место в слоях (как в
+    /// Figma), — а узел удаляется. Выделяются вставленные корни.
+    fn commit_replace(&mut self, payload: &ClipPayload, targets: &[ReplaceTarget]) -> bool {
+        self.ctx().commit(|tx, _| {
+            let mut all = Vec::new();
+            for t in targets {
+                let shift = Affine::translate(t.origin - payload.bounds.origin());
+                let mut made: Vec<NodeId> = Vec::with_capacity(payload.nodes.len());
+                let mut index = t.index;
+                for n in &payload.nodes {
+                    let mut props = n.props.clone();
+                    let (parent, at) = match n.parent {
+                        Some(i) => (Some(made[i]), None),
+                        None => {
+                            let world = shift * ferrum_scene::shape::local_transform(&props);
+                            let pose = decompose_props(t.parent_world.inverse() * world, &props);
+                            props.x = pose.x;
+                            props.y = pose.y;
+                            props.rotation = pose.rotation;
+                            (props.flip_x, props.flip_y) = (pose.flip_x, pose.flip_y);
+                            // Корни — над заменяемым узлом по порядку, снизу вверх.
+                            index += 1;
+                            (t.parent, Some(index))
+                        }
+                    };
+                    let id = tx.create_with_props(parent, at, &props)?;
+                    if n.parent.is_none() {
+                        all.push(id);
+                    }
+                    made.push(id);
+                }
+                tx.delete_nodes(&[t.id])?;
+            }
+            Ok(all)
+        })
+    }
+
+    /// Конец вставки: байты изображений — в документ, если она удалась; ошибка —
+    /// её текстом из события.
+    fn finish_paste(&mut self, payload: &ClipPayload, ok: bool) -> Result<(), ClipboardError> {
         if ok {
             // Байты кладутся только после успешной вставки: хэши уже проверены
             // `decode`, а неудавшаяся вставка не оставляет в документе ничего.

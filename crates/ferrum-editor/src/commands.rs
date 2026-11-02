@@ -42,12 +42,25 @@ pub enum CommandId {
     Copy,
     Cut,
     Paste,
+    /// «Вставить поверх» (Ctrl/Cmd+Shift+V): на исходные координаты, без сдвига
+    /// к центру вида (спека подсистемы 2, раздел 6).
+    PasteOver,
+    /// «Вставить с заменой» (Ctrl/Cmd+Shift+R, как в Figma): содержимое буфера —
+    /// на место каждого выделенного узла.
+    PasteReplace,
     CopyAsPng,
+    /// «Копировать свойства» и «Вставить свойства» (Ctrl/Cmd+Alt+C и V, как в
+    /// Figma): заливки, обводки, прозрачность, скругление, стиль текста.
+    CopyProps,
+    PasteProps,
     /// «Копировать как SVG» (подсистема 3, этап 5): без сочетания, как в Figma.
     CopyAsSvg,
     Duplicate,
     Delete,
     SelectAll,
+    /// «Выделить подобные»: узлы страницы того же типа с теми же заливками и
+    /// обводками (как «Select matching layers» в Figma).
+    SelectSimilar,
     /// Отменить жест, вернуться к «Перемещению», снять выделение — по очереди.
     Escape,
     Group,
@@ -402,6 +415,26 @@ pub const COMMANDS: &[Command] = &[
         &["буфер", "paste"],
         &["Mod+KeyV"],
     ),
+    // Как в Figma: Ctrl/Cmd+Shift+V. В правке текста то же сочетание по-прежнему
+    // вставляет обычный текст (его решает интерфейс по событию `paste`).
+    cmd(
+        C::PasteOver,
+        "edit.paste_over",
+        G::Edit,
+        "Вставить поверх",
+        &["на место", "на то же место", "paste over", "paste in place"],
+        &["Mod+Shift+KeyV"],
+    ),
+    // Как в Figma: Ctrl/Cmd+Shift+R. Страница перехватывает сочетание до браузера
+    // (перезагрузки нет, проверено в Chromium и Firefox); команда есть и в меню.
+    cmd(
+        C::PasteReplace,
+        "edit.paste_replace",
+        G::Edit,
+        "Вставить с заменой",
+        &["заменить", "подменить", "paste to replace", "replace"],
+        &["Mod+Shift+KeyR"],
+    ),
     cmd(
         C::CopyAsPng,
         "edit.copy_png",
@@ -409,6 +442,22 @@ pub const COMMANDS: &[Command] = &[
         "Копировать как PNG",
         &["картинка", "растр", "copy as png", "image"],
         &["Mod+Shift+KeyC"],
+    ),
+    cmd(
+        C::CopyProps,
+        "edit.copy_props",
+        G::Edit,
+        "Копировать свойства",
+        &["стиль", "оформление", "copy properties", "style"],
+        &["Mod+Alt+KeyC"],
+    ),
+    cmd(
+        C::PasteProps,
+        "edit.paste_props",
+        G::Edit,
+        "Вставить свойства",
+        &["стиль", "оформление", "paste properties", "style"],
+        &["Mod+Alt+KeyV"],
     ),
     cmd(
         C::CopyAsSvg,
@@ -441,6 +490,15 @@ pub const COMMANDS: &[Command] = &[
         "Выделить всё",
         &["все слои", "select all"],
         &["Mod+KeyA"],
+    ),
+    // Как «Select matching layers» в Figma: Ctrl/Cmd+Alt+A.
+    cmd(
+        C::SelectSimilar,
+        "edit.select_similar",
+        G::Edit,
+        "Выделить подобные",
+        &["такие же", "одинаковые", "select matching", "similar"],
+        &["Mod+Alt+KeyA"],
     ),
     cmd(
         C::Escape,

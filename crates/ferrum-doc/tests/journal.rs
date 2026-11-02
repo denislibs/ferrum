@@ -360,3 +360,21 @@ proptest! {
         prop_assert_eq!(state(&mut back), state(&mut doc));
     }
 }
+
+#[test]
+fn duplicated_page_survives_journal_and_full_save() {
+    let (file, mut doc) = opened();
+    let page = doc.pages()[0].0;
+    rect(&mut doc, page, 4.0);
+    let copy = doc.duplicate_page(page, "Копия").unwrap();
+    assert_eq!(doc.pages()[1], (copy, "Копия".to_string()));
+    // Копия правится независимо от оригинала.
+    rect(&mut doc, copy, 6.0);
+    let b1 = doc.take_journal().unwrap().unwrap();
+    let (mut back, replayed) = recover(&file, &[&b1]);
+    assert!(replayed.warnings.is_empty(), "{:?}", replayed.warnings);
+    assert_eq!(back.pages(), doc.pages());
+    assert_eq!(state(&mut back), state(&mut doc));
+    let mut again = decode(&encode(&back).unwrap()).unwrap().document;
+    assert_eq!(state(&mut again), state(&mut doc));
+}

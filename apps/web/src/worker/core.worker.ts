@@ -366,7 +366,8 @@ function handle(msg: ToWorker): void {
           postError('Не удалось вставить: данные Ferrum в буфере обмена повреждены');
           return;
         }
-        run({ t: 'cmd', cmd: { type: 'paste', bytes } });
+        // Способ вставки не доверенный: его проверяет разбор команды в ядре.
+        run({ t: 'cmd', cmd: { type: 'paste', bytes, mode: msg.mode } });
         break;
       }
       case 'encodeClipboard': {
