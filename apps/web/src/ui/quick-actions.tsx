@@ -33,14 +33,17 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
   const ed = useEditor();
   const returnFocus = document.activeElement as HTMLElement | null;
   const [query, setQuery] = createSignal('');
-  /** Ответ worker'а на последний отправленный запрос. */
-  const [layers, setLayers] = createSignal<readonly FoundLayerDto[]>([]);
+  /** Последний запрос к worker'у (пусто — слои не ищем) и ответ на него, если пришёл. */
+  const [asked, setAsked] = createSignal('');
+  const [answer, setAnswer] = createSignal<{ query: string; items: readonly FoundLayerDto[] }>({ query: '', items: [] });
+  /** Ответ на текущий запрос ещё не пришёл: слоёв нет, «Ничего не найдено» рано. */
+  const pending = () => asked() !== '' && answer().query !== asked();
   /** Номер строки с действием среди строк без заголовков. */
   const [active, setActive] = createSignal(0);
   let root!: HTMLDivElement;
   let list!: HTMLDivElement;
   let input!: HTMLInputElement;
-  let sent = '';
+  let lastQuery = '';
 
   const entries = createMemo(() => entriesByKey(ed.store.state.keymap.commands));
   const rows = createMemo(() =>
@@ -49,7 +52,8 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
       commands: ed.store.state.keymap.commands,
       hidden: props.hidden,
       recent: props.recent,
-      layers: layers(),
+      // Слои прежнего запроса не показываем и не даём выполнить.
+      layers: pending() ? [] : answer().items,
       pages: ed.store.state.pages.list,
     }),
   );
@@ -75,11 +79,17 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
     else ed.send({ type: 'setPage', id: r.id });
   };
 
-  // Новый список — выбрана первая доступная строка.
+  // Выбранная строка помнится по смыслу (команда, слой, страница): поздний ответ
+  // worker'а её не сбрасывает. Первая доступная — при новом тексте запроса и когда
+  // строки больше нет.
+  const identity = (r: Action | undefined) => (r ? (r.kind === 'command' ? `c:${r.key}` : `${r.kind}:${r.id}`) : '');
   createEffect(
-    on(actions, (a) => {
-      const i = a.findIndex((r) => !disabled(r));
-      setActive(Math.max(0, i));
+    on(actions, (a, prev) => {
+      const q = query();
+      const was = q === lastQuery ? identity(prev?.[active()]) : '';
+      lastQuery = q;
+      const kept = was ? a.findIndex((r) => identity(r) === was) : -1;
+      setActive(kept >= 0 ? kept : Math.max(0, a.findIndex((r) => !disabled(r))));
     }),
   );
   // Выбранная строка — в видимой части списка: чтение в measure, запись в mutate.
@@ -99,12 +109,19 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
 
   const search = (q: string) => {
     setQuery(q);
-    sent = clipQuery(q.trim());
+    const sent = clipQuery(q.trim());
+    setAsked(sent);
     if (sent) ed.send({ type: 'findLayers', query: sent, limit: LAYER_LIMIT });
-    else setLayers([]);
+  };
+
+  const isOwn = (e: KeyboardEvent) => {
+    const s = eventShortcut(e);
+    return !!s && !!entries().get('ui.quick_actions')?.bindings.includes(s);
   };
 
   const onKey = (e: KeyboardEvent) => {
+    // Составление IME: Enter, Esc и стрелки — его.
+    if (e.isComposing || e.keyCode === 229) return;
     const n = actions().length;
     switch (e.key) {
       case 'ArrowDown':
@@ -114,7 +131,8 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
         if (n) setActive((active() - 1 + n) % n);
         break;
       case 'Enter':
-        execute(actions()[active()]);
+        // Удержание Enter выполняет один раз.
+        if (!e.repeat) execute(actions()[active()]);
         break;
       case 'Escape':
         close(true);
@@ -122,12 +140,10 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
       case 'Tab':
         close(false);
         return;
-      default: {
+      default:
         // Сочетание палитры в её же поле закрывает её, как в Figma.
-        const s = eventShortcut(e);
-        if (!s || !entries().get('ui.quick_actions')?.bindings.includes(s)) return;
-        close(true);
-      }
+        if (!isOwn(e)) return;
+        if (!e.repeat) close(true);
     }
     e.preventDefault();
     e.stopPropagation();
@@ -139,16 +155,27 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
     const off = ed.core.on((e) => {
       if (e.type !== 'layersFound') return;
       ed.scheduler.enqueue(() => {
-        if (e.query === sent) setLayers(e.items);
+        if (e.query === asked()) setAnswer({ query: e.query, items: e.items });
       });
     });
     const outside = (e: PointerEvent) => {
       if (!(e.target instanceof Node && root.contains(e.target))) close(false);
     };
+    // Фокус ушёл из поля (его не должно: щелчки внутри его не забирают): Esc и
+    // сочетание палитры всё равно закрывают, остальные клавиши холст не получает.
+    const stray = (e: KeyboardEvent) => {
+      if (e.target === input || e.isComposing || e.keyCode === 229) return;
+      e.stopPropagation();
+      if (e.key !== 'Escape' && !isOwn(e)) return;
+      e.preventDefault();
+      if (!e.repeat) close(true);
+    };
     document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('keydown', stray, true);
     onCleanup(() => {
       off();
       document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('keydown', stray, true);
     });
   });
 
@@ -205,7 +232,16 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
   };
 
   return (
-    <div ref={root} class="fe-palette" role="dialog" aria-label="Быстрые действия">
+    // Щелчок внутри окна не забирает фокус из поля (кроме самого поля).
+    <div
+      ref={root}
+      class="fe-palette"
+      role="dialog"
+      aria-label="Быстрые действия"
+      onPointerDown={(e) => {
+        if (e.target !== input) e.preventDefault();
+      }}
+    >
       <div class="fe-palette__field">
         <Icon name="search" />
         <input
@@ -225,9 +261,8 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
           onKeyDown={onKey}
         />
       </div>
-      {/* Щелчок по списку не забирает фокус из поля. */}
-      <div ref={list} id="fe-palette-list" class="fe-palette__list" role="listbox" aria-label="Результаты" onPointerDown={(e) => e.preventDefault()}>
-        <Show when={rows().length === 0}>
+      <div ref={list} id="fe-palette-list" class="fe-palette__list" role="listbox" aria-label="Результаты">
+        <Show when={rows().length === 0 && !pending()}>
           <div class="fe-palette__empty">Ничего не найдено</div>
         </Show>
         {/* Index, не For: узлы строк остаются, ввод не пересоздаёт список. */}

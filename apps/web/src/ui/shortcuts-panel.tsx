@@ -42,7 +42,8 @@ export function ShortcutsPanel(props: ShortcutsPanelProps): JSX.Element {
     if (e.key === 'Escape' || own) {
       e.preventDefault();
       e.stopPropagation();
-      close();
+      // Удержание сочетания не закрывает и не открывает панель заново.
+      if (!e.repeat) close();
     }
   };
 

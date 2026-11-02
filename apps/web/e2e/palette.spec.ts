@@ -4,7 +4,7 @@
 // настройках. Открытие и ввод не читают раскладку вне фазы measure.
 
 import { expect, test, type Page } from '@playwright/test';
-import { appScreen, editorReady, live, liveWhen, mainMenu, openApp } from './helpers';
+import { appScreen, editorReady, live, liveWhen, mainMenu, openApp, screen } from './helpers';
 
 const palette = (page: Page) => page.getByRole('dialog', { name: 'Быстрые действия' });
 const field = (page: Page) => page.getByRole('combobox', { name: 'Быстрые действия' });
@@ -37,11 +37,148 @@ test('Ctrl/Cmd+K и Ctrl/Cmd+/ открывают поле сверху по ц�
   await openPalette(page);
   await page.keyboard.press('ControlOrMeta+KeyK');
   await expect(palette(page)).toHaveCount(0);
-  // Щелчок мимо закрывает, выделение и шаги не меняются от самой палитры.
+  // Щелчок мимо закрывает; ни шаги, ни выделение от самой палитры не меняются.
+  const before = await live(page);
   await openPalette(page);
   await page.locator('canvas').click({ position: { x: 10, y: 300 } });
   await expect(palette(page)).toHaveCount(0);
+  const after = await live(page);
+  expect(after.steps).toBe(before.steps);
+  expect(after.selectionCount).toBe(before.selectionCount);
   expect(await warnings(page)).toEqual([]);
+});
+
+test('Tab закрывает палитру без возврата фокуса на холст', async ({ page }) => {
+  await openApp(page);
+  await openPalette(page);
+  await page.keyboard.press('Tab');
+  await expect(palette(page)).toHaveCount(0);
+  await expect(page.locator('canvas')).not.toBeFocused();
+});
+
+test('щелчок мимо закрывает палитру, фокус остаётся там, куда щёлкнули', async ({ page }) => {
+  await openApp(page);
+  await openPalette(page);
+  const box = (await page.getByRole('tree', { name: 'Слои' }).boundingBox())!;
+  await page.mouse.click(box.x + 4, box.y + box.height - 4);
+  await expect(palette(page)).toHaveCount(0);
+  await expect(page.locator('canvas')).not.toBeFocused();
+});
+
+test('IME: Enter и Esc составления текста не выполняют и не закрывают палитру', async ({ page }) => {
+  await openApp(page);
+  await openPalette(page);
+  await field(page).fill('настройки');
+  await field(page).dispatchEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 229, isComposing: true });
+  await field(page).dispatchEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 229, isComposing: true });
+  await expect(palette(page)).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Настройки' })).toHaveCount(0);
+});
+
+test('щелчок внутри окна палитры оставляет фокус в поле; Delete не удаляет выделение', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  const at = await appScreen(page, l, 200, 40);
+  await page.mouse.click(at.x, at.y);
+  const sel = await liveWhen(page, 'l.selectionCount === 1');
+  await openPalette(page);
+  for (const where of ['.fe-palette__field svg', '.fe-palette__field', '.fe-palette__heading']) {
+    await palette(page).locator(where).first().click();
+    await expect(field(page)).toBeFocused();
+  }
+  await palette(page).click({ position: { x: 2, y: 2 } });
+  await expect(field(page)).toBeFocused();
+  await page.keyboard.press('Delete');
+  await page.keyboard.press('KeyR');
+  const now = await live(page);
+  expect(now.steps).toBe(sel.steps);
+  expect(now.selectionCount).toBe(1);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.tool)).toBe('move');
+  await expect(palette(page)).toBeVisible();
+});
+
+test('фокус ушёл из поля: Esc и сочетание палитры всё равно закрывают, клавиши холст не получает', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  const at = await appScreen(page, l, 200, 40);
+  await page.mouse.click(at.x, at.y);
+  const sel = await liveWhen(page, 'l.selectionCount === 1');
+  for (const key of ['Escape', 'ControlOrMeta+KeyK']) {
+    await openPalette(page);
+    await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+    await page.keyboard.press('Delete');
+    expect((await live(page)).steps).toBe(sel.steps);
+    await page.keyboard.press(key);
+    await expect(palette(page)).toHaveCount(0);
+    expect((await live(page)).steps).toBe(sel.steps);
+  }
+});
+
+test('удержание Enter выполняет команду один раз; удержание сочетания не мигает окном', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  const at = await appScreen(page, l, 200, 40);
+  await page.mouse.click(at.x, at.y);
+  const sel = await liveWhen(page, 'l.selectionCount === 1');
+  await openPalette(page);
+  await field(page).fill('дубл');
+  await field(page).dispatchEvent('keydown', { key: 'Enter', code: 'Enter', repeat: true });
+  await expect(palette(page)).toBeVisible();
+  expect((await live(page)).steps).toBe(sel.steps);
+  await page.keyboard.press('Escape');
+  // Удержание Ctrl/Cmd+K: открыто и остаётся открытым.
+  await page.locator('canvas').focus();
+  await page.keyboard.down('ControlOrMeta');
+  await page.keyboard.down('KeyK');
+  await expect(field(page)).toBeFocused();
+  await page.keyboard.down('KeyK');
+  await page.keyboard.down('KeyK');
+  await page.keyboard.up('KeyK');
+  await page.keyboard.up('ControlOrMeta');
+  await expect(palette(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  // То же для панели «Сочетания клавиш».
+  await page.locator('canvas').focus();
+  await page.keyboard.down('Control');
+  await page.keyboard.down('Shift');
+  await page.keyboard.down('Slash');
+  const keys = page.getByRole('dialog', { name: 'Сочетания клавиш' });
+  await expect(keys).toBeVisible();
+  await page.keyboard.down('Slash');
+  await page.keyboard.down('Slash');
+  await page.keyboard.up('Slash');
+  await page.keyboard.up('Shift');
+  await page.keyboard.up('Control');
+  await expect(keys).toBeVisible();
+});
+
+test('Ctrl/Cmd+K из поля панели открывает палитру; в модальном диалоге — нет', async ({ page }) => {
+  await openApp(page);
+  const l = await live(page);
+  const at = await appScreen(page, l, 200, 40);
+  await page.mouse.click(at.x, at.y);
+  await liveWhen(page, 'l.selectionCount === 1');
+  const x = page.getByRole('textbox', { name: 'X', exact: true });
+  await x.focus();
+  // Слушатель позже ядра: видит, отменил ли кто-то действие браузера (адресная строка).
+  await page.evaluate(() => {
+    const w = window as unknown as { __kPrevented: boolean[] };
+    w.__kPrevented = [];
+    window.addEventListener('keydown', (e) => e.code === 'KeyK' && w.__kPrevented.push(e.defaultPrevented));
+  });
+  await page.keyboard.press('ControlOrMeta+KeyK');
+  await expect(field(page)).toBeFocused();
+  expect(await page.evaluate(() => (window as unknown as { __kPrevented: boolean[] }).__kPrevented)).toEqual([true]);
+  await page.keyboard.press('Escape');
+  await expect(x).toBeFocused();
+  // Модальный диалог: окно не открывается.
+  await openPalette(page);
+  await field(page).fill('настройки');
+  await page.keyboard.press('Enter');
+  const settings = page.getByRole('dialog', { name: 'Настройки' });
+  await expect(settings).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+KeyK');
+  await expect(palette(page)).toHaveCount(0);
 });
 
 test('команды: название, группа и сочетание; серая не выполняется; Enter выполняет и закрывает', async ({ page }) => {
@@ -114,6 +251,7 @@ test('раскладка не важна: «щквук» находит кома
 
 test('слои: поиск в worker\'е, переход выделяет слой, показывает его и раскрывает предков', async ({ page }) => {
   await openApp(page);
+  const start = await live(page);
   await openPalette(page);
   // Фрейм «Экран 9» на странице-примере; ищем в другой раскладке.
   await field(page).fill("'rhfy 9");
@@ -126,7 +264,14 @@ test('слои: поиск в worker\'е, переход выделяет сло
   // Фрейм в виде целиком (1440×1024 — вписан, если не влезал).
   const tree = page.getByRole('tree', { name: 'Слои' });
   await expect(tree.getByRole('treeitem', { name: 'Экран 9', exact: true })).toHaveAttribute('aria-selected', 'true');
-  expect(after.zoom).toBeGreaterThan(0);
+  // Вид сменился, и фрейм виден целиком в окне холста.
+  expect([after.cameraX, after.cameraY, after.zoom]).not.toEqual([start.cameraX, start.cameraY, start.zoom]);
+  const inView = (l: typeof after) => {
+    const a = screen(l, l.selectionX, l.selectionY);
+    const b = screen(l, l.selectionX + l.selectionW, l.selectionY + l.selectionH);
+    return a.x >= 0 && a.y >= 0 && b.x <= l.viewportW && b.y <= l.viewportH;
+  };
+  expect(inView(after)).toBe(true);
   // Вложенный слой: предок раскрыт, строка выделена.
   await openPalette(page);
   await field(page).fill('слой 5');
@@ -134,7 +279,9 @@ test('слои: поиск в worker\'е, переход выделяет сло
   await expect(child).toBeVisible();
   await child.click();
   await expect(tree.getByRole('treeitem', { name: 'Слой 5', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await liveWhen(page, 'l.selectionCount === 1 && l.selectionW === 120');
+  const nested = await liveWhen(page, 'l.selectionCount === 1 && l.selectionW === 120');
+  // Координаты вложенного слоя — в системе предка (фрейма): к миру — сдвигом фрейма.
+  expect(inView({ ...nested, selectionX: after.selectionX + nested.selectionX, selectionY: after.selectionY + nested.selectionY })).toBe(true);
   expect(await warnings(page)).toEqual([]);
 });
 
@@ -202,15 +349,61 @@ test('недавние: последние команды первыми, пер
   await expect(list(page).getByRole('option').nth(0)).toHaveAttribute('data-command', 'edit.select_all');
 });
 
+test('новый запрос сразу убирает слои прежнего: Enter не переходит к ним', async ({ page }) => {
+  await openApp(page);
+  await openPalette(page);
+  await field(page).fill('слой 42');
+  await expect(list(page).getByRole('option', { name: 'Слой 42', exact: true }).first()).toBeVisible();
+  // Следующий запрос, пока worker не ответил (ответ — отдельной задачей позже).
+  const state = await page.evaluate(() => {
+    const input = document.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    input.value = 'экран 1';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    return {
+      names: [...document.querySelectorAll('[role="option"]')].map((o) => o.textContent),
+      empty: document.body.textContent!.includes('Ничего не найдено'),
+    };
+  });
+  expect(state.names.join('|')).not.toContain('Слой 42');
+  expect(state.empty).toBe(false);
+  await expect(list(page).getByRole('option', { name: 'Экран 1', exact: true })).toBeVisible();
+});
+
+test('поздний ответ на текущий запрос не сбрасывает выбранную стрелками строку', async ({ page }) => {
+  await openApp(page);
+  await openPalette(page);
+  await field(page).fill('слой');
+  await expect(list(page).getByRole('option', { name: /^Слой \d+$/ }).first()).toBeVisible();
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowDown');
+  const picked = async () => ({ id: await active(page).getAttribute('id'), text: await active(page).textContent() });
+  const before = await picked();
+  expect(before.id).not.toBe('fe-palette-option-0');
+  const answers = () => page.evaluate(() => window.__ferrum!.uiEvents!.filter((e) => e.type === 'layersFound').length);
+  const was = await answers();
+  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'findLayers', query: 'слой', limit: 50 }));
+  await expect.poll(answers).toBe(was + 1);
+  await page.waitForTimeout(100);
+  expect(await picked()).toEqual(before);
+  // Новый текст запроса — снова первая строка.
+  await field(page).fill('слои');
+  await expect(list(page).getByRole('option').first()).toBeVisible();
+  await expect.poll(async () => (await picked()).id).toBe(
+    await list(page).locator('[role="option"]:not([aria-disabled="true"])').first().getAttribute('id'),
+  );
+});
+
 test('в поле — обычный ввод: буквы не вызывают инструменты, стрелки не двигают выделение', async ({ page }) => {
   await openApp(page);
-  const before = await live(page);
+  const at = await appScreen(page, await live(page), 200, 40);
+  await page.mouse.click(at.x, at.y);
+  const before = await liveWhen(page, 'l.selectionCount === 1');
   await openPalette(page);
   await page.keyboard.type('rvl');
   await expect(field(page)).toHaveValue('rvl');
-  await page.keyboard.press('ArrowLeft');
+  for (const k of ['ArrowLeft', 'ArrowUp', 'ArrowDown', 'ArrowRight']) await page.keyboard.press(k);
   const l = await live(page);
   expect(l.steps).toBe(before.steps);
+  expect([l.selectionX, l.selectionY]).toEqual([before.selectionX, before.selectionY]);
   expect(await page.evaluate(() => window.__ferrum!.ui!.tool)).toBe('move');
 });
 

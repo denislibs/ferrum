@@ -9,9 +9,9 @@ import { Core, detectPlatform } from '../core/core';
 import type { TransportMode } from '../core/transport';
 import type { Editor } from './context';
 import { supportsCustomFormat } from './clipboard';
-import { forwardKey } from './keys';
+import { editableTarget, forwardKey, modalOpen } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
-import { loadLayoutMap, type LayoutMap } from './shortcuts';
+import { eventShortcut, loadLayoutMap, type LayoutMap } from './shortcuts';
 import { installSystemFonts, NO_SYSTEM_FONTS, type SystemFonts } from './system-fonts';
 import type { UiStore } from './store';
 
@@ -99,6 +99,15 @@ export function isTestMode(): boolean {
   return testMode(new URLSearchParams(location.search));
 }
 
+const OPENING = ['ui.quick_actions', 'ui.shortcuts'];
+
+/** Команда окна, которую открывает это сочетание, по таблице команд ядра. */
+function openingShortcut(store: UiStore, e: KeyboardEvent): string | undefined {
+  const s = eventShortcut(e);
+  if (!s) return undefined;
+  return store.state.keymap.commands.find((c) => OPENING.includes(c.key) && c.bindings.includes(s))?.key;
+}
+
 export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: BootOptions = {}): Promise<Editor> {
   const params = new URLSearchParams(location.search);
   const platform = detectPlatform();
@@ -125,6 +134,18 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
     test,
     transport: choice<TransportMode>(params, 'transport', ['sab', 'message']),
     keyFilter: (e) => {
+      // Открывающие сочетания («Быстрые действия», «Сочетания клавиш»): удержание не
+      // переключает окно туда-сюда; «Быстрые действия» открываются и из поля панели
+      // (в Figma так же; сочетание не уходит браузеру), но не из модального диалога.
+      const opening = openingShortcut(store, e);
+      if (opening) {
+        e.preventDefault();
+        if (e.repeat) return false;
+        if (opening === 'ui.quick_actions' && editableTarget(e.target) && !modalOpen() && !(e.target as Element).closest('[role="dialog"], [role="menu"]')) {
+          opts.onForwardedKey?.(e);
+          return true;
+        }
+      }
       const forward = forwardKey(e, isClipboardKey);
       if (forward) opts.onForwardedKey?.(e);
       return forward;
