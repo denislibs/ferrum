@@ -11,6 +11,7 @@ pub mod command_state;
 pub mod commands;
 pub mod context_menu;
 mod editor;
+pub mod find;
 mod flatten;
 pub mod geometry;
 pub mod input;
@@ -41,6 +42,9 @@ pub use command_state::CommandState;
 pub use commands::{Command, CommandGroup, CommandId, COMMANDS};
 pub use context_menu::{ContextTarget, MAX_SELECT_LAYER_ITEMS};
 pub use editor::{Editor, EditorEvent, Settings, ThemeChoice, WHEEL_ZOOM_SPEED};
+pub use find::{
+    fuzzy_score, FoundLayer, LayerIndex, FIND_NAME_CHARS, MAX_FIND_LIMIT, MAX_FIND_QUERY_BYTES,
+};
 pub use input::{Input, KeyEvent, Modifiers, Platform, PointerButton, PointerEvent, WheelEvent};
 pub use keymap::{browser_reserved, BindError, Conflict, Keymap, KeymapError, Shortcut};
 pub use menu::{main_menu, menu_commands, MenuAction, MenuNode};

@@ -760,6 +760,7 @@ fn main() {
     scale_selection(&mut report);
     command_states(&mut report);
     select_similar(&mut report);
+    find_layers(&mut report);
 
     println!("| Метрика | Значение | Цель | Итог |");
     println!("|---|---|---|---|");
@@ -867,6 +868,55 @@ fn select_similar(report: &mut Report) {
         found == NODES / 100,
         format!("{found}"),
         &format!("{}", NODES / 100),
+    );
+}
+
+/// Поиск слоёв «Быстрых действий» (подсистема 2, этап 3): нечёткий запрос по
+/// именам страницы из 100 000 узлов, лучшие 50. Первый запрос после правки имён
+/// складывает имена всей страницы заново, следующие идут по готовому массиву.
+/// Запросы — короткий (совпадает почти всё: отбор лучших), точное имя, в другой
+/// раскладке и не совпадающий ни с чем. Цель — 30 мс на запрос.
+fn find_layers(report: &mut Report) {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let ids: Vec<NodeId> = doc.transact(page, vec![], |p| fill(p, NODES)).unwrap();
+    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    let queries = ["с", "слой 42", "'rhfy 999", "кнопка отправки"];
+    let (mut cold, mut warm) = (Vec::new(), Vec::new());
+    let mut found = Vec::new();
+    for run in 0..COMMIT_RUNS {
+        // Правка имени — метка состава сцены сдвинулась, имена складываются заново.
+        ed.rename_node(ids[1], &format!("Слой {run}"));
+        ed.take_events();
+        for (i, q) in queries.iter().enumerate() {
+            let t = Instant::now();
+            let items = ed.find_layers(q, 50);
+            if i == 0 {
+                cold.push(t.elapsed())
+            } else {
+                warm.push(t.elapsed())
+            }
+            found.push((*q, items));
+        }
+    }
+    report.gate_median(
+        "Поиск слоёв, 100 000 узлов, первый запрос после правки имён",
+        &cold,
+        30.0,
+    );
+    report.gate_median("Поиск слоёв, 100 000 узлов, следующие запросы", &warm, 30.0);
+    let first = |q: &str| {
+        found
+            .iter()
+            .find(|(fq, _)| *fq == q)
+            .and_then(|(_, items)| items.first().map(|f| f.name.clone()))
+            .unwrap_or_default()
+    };
+    report.check(
+        "Поиск слоёв: точное имя и другая раскладка — первыми",
+        first("слой 42") == "Слой 42" && first("'rhfy 999") == "Экран 999",
+        format!("{} / {}", first("слой 42"), first("'rhfy 999")),
+        "Слой 42 / Экран 999",
     );
 }
 

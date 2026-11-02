@@ -64,6 +64,11 @@ fn commands() -> Vec<Command> {
         },
         Command::ExpandAllLayers { expanded: true },
         Command::DuplicatePage { id: "3@4".into() },
+        Command::FindLayers {
+            query: "кнопка".into(),
+            limit: 50,
+        },
+        Command::RevealLayer { id: "1@2".into() },
         Command::Snapshot { thumbnail: true },
         Command::MarkSaved { revision: 3.0 },
         Command::ReadPixels { reference: true },
@@ -248,6 +253,14 @@ fn events() -> Vec<CoreEvent> {
                     enabled: true,
                 },
             ],
+        },
+        CoreEvent::LayersFound {
+            query: "кн".into(),
+            items: vec![FoundLayerDto {
+                id: "1@2".into(),
+                name: "Кнопка".into(),
+                kind: NodeType::Rect,
+            }],
         },
         CoreEvent::RequestImage,
         CoreEvent::ToggleUi,
@@ -648,4 +661,37 @@ fn backend_codes_match_layout() {
         assert_eq!(Backend::parse(b.name()), Some(b));
     }
     assert_eq!(Backend::parse("vulkan"), None);
+}
+
+#[test]
+fn find_layers_field_names() {
+    assert_eq!(
+        serde_json::to_value(Command::FindLayers {
+            query: "кн".into(),
+            limit: 50
+        })
+        .unwrap(),
+        json!({"type": "findLayers", "query": "кн", "limit": 50})
+    );
+    assert_eq!(
+        serde_json::to_value(Command::RevealLayer { id: "1@2".into() }).unwrap(),
+        json!({"type": "revealLayer", "id": "1@2"})
+    );
+    assert_eq!(
+        serde_json::to_value(CoreEvent::LayersFound {
+            query: "кн".into(),
+            items: vec![FoundLayerDto {
+                id: "1@2".into(),
+                name: "Кнопка".into(),
+                kind: NodeType::Frame,
+            }],
+        })
+        .unwrap(),
+        json!({"type": "layersFound", "query": "кн", "items": [{"id": "1@2", "name": "Кнопка", "kind": "frame"}]})
+    );
+    // Предел числа — целое без знака: отрицательное — ошибка разбора.
+    assert!(serde_json::from_value::<Command>(
+        json!({"type": "findLayers", "query": "", "limit": -1})
+    )
+    .is_err());
 }
