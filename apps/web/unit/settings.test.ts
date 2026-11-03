@@ -48,6 +48,19 @@ test('старые настройки без вида экрана файлов 
   expect(loadSettings(s).filesView).toBe('grid');
 });
 
+test('недавние команды: нет в старых записях — пусто; только верные ключи, не больше восьми', () => {
+  const s = memory();
+  s.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'light' }));
+  expect(loadSettings(s).recentCommands).toBe('');
+  expect(parseSettingsPatch({ recentCommands: 'edit.undo <b> edit.undo ui.export' })).toEqual({ recentCommands: 'edit.undo ui.export' });
+  const many = Array.from({ length: 20 }, (_, i) => `edit.c${i}`).join(' ');
+  expect(parseSettingsPatch({ recentCommands: many }).recentCommands?.split(' ')).toHaveLength(8);
+  // Не строка и слишком длинная строка — поле отбрасывается.
+  expect(parseSettingsPatch({ recentCommands: ['edit.undo'] })).toEqual({});
+  expect(parseSettingsPatch({ recentCommands: 'x'.repeat(2000) })).toEqual({});
+  expect(diffSettings(DEFAULT_SETTINGS, { recentCommands: 'edit.undo' })).toEqual({ recentCommands: 'edit.undo' });
+});
+
 test('настройки: запись и чтение, мусор и отказ хранилища', () => {
   const s = memory();
   expect(loadSettings(s)).toEqual(DEFAULT_SETTINGS);

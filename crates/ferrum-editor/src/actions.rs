@@ -247,6 +247,7 @@ impl Editor {
             }
             C::Save => self.out.events.push(EditorEvent::SaveRequested),
             C::UiMainMenu
+            | C::UiQuickActions
             | C::UiNewFile
             | C::UiOpen
             | C::UiOpenDisk

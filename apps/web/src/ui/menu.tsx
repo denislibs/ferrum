@@ -56,6 +56,8 @@ export interface MenuProps {
   onClose: () => void;
   /** Поле поиска вверху (главное меню): результаты вместо пунктов. */
   search?: MenuSearch;
+  /** Команды из меню попадают в «Недавние» (главное и контекстное меню; кнопки панелей — нет). */
+  recents?: boolean;
 }
 
 let trees = 0;
@@ -90,6 +92,7 @@ export function Menu(props: MenuProps): JSX.Element {
       label={props.label}
       above={props.above}
       search={props.search}
+      recents={props.recents}
       tree={tree}
       depth={0}
       focusFirst
@@ -105,6 +108,7 @@ interface LevelProps {
   label: string;
   above?: boolean;
   search?: MenuSearch;
+  recents?: boolean;
   tree: string;
   depth: number;
   /** Фокус на первый пункт при открытии (клавиатура); наведение фокус не трогает. */
@@ -170,7 +174,10 @@ function Level(props: LevelProps): JSX.Element {
     if (disabled(it)) return;
     props.closeAll(true);
     if (it.onSelect) it.onSelect();
-    else if (it.command) ed?.run(it.command);
+    else if (it.command) {
+      if (props.recents) ed?.noteRecent?.(it.command);
+      ed?.run(it.command);
+    }
   };
 
   const onKey = (e: KeyboardEvent) => {
@@ -369,6 +376,7 @@ function Level(props: LevelProps): JSX.Element {
             items={entry(s().index)?.submenu ?? []}
             anchor={s().el}
             label={entry(s().index)?.label ?? ''}
+            recents={props.recents}
             tree={props.tree}
             depth={props.depth + 1}
             focusFirst={s().focus}

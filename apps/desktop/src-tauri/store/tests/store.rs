@@ -256,6 +256,10 @@ fn settings_are_written_by_field_and_checked() {
     s.set(patch(serde_json::json!({"theme": "light"}))).unwrap();
     s.set(patch(serde_json::json!({"filesView": "list"})))
         .unwrap();
+    s.set(patch(
+        serde_json::json!({"recentCommands": "edit.undo ui.export"}),
+    ))
+    .unwrap();
     assert!(s.set(patch(serde_json::json!({"чужое": 1}))).is_err());
     assert!(s
         .set(patch(serde_json::json!({"theme": {"x": 1}})))
@@ -265,7 +269,11 @@ fn settings_are_written_by_field_and_checked() {
     let again = Settings::open(&path).unwrap();
     assert_eq!(
         serde_json::Value::Object(again.all()),
-        serde_json::json!({"theme": "light", "filesView": "list"})
+        serde_json::json!({
+            "theme": "light",
+            "filesView": "list",
+            "recentCommands": "edit.undo ui.export"
+        })
     );
     fs::write(&path, b"[]").unwrap();
     assert!(

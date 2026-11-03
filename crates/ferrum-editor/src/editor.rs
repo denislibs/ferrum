@@ -200,6 +200,8 @@ pub struct Editor {
     pub(crate) text_edit: Option<TextEdit>,
     /// Раскладка правимого текста по ключу (узел, версия узла, поколение шрифтов).
     pub(crate) edit_layout_cache: RefCell<Option<EditLayout>>,
+    /// Сложенные имена страницы для поиска слоёв «Быстрых действий».
+    pub(crate) find_index: RefCell<crate::find::LayerIndex>,
     /// Время ядра, мс (`set_time`): мигание курсора и склейка ввода.
     pub(crate) now_ms: f64,
     /// Указатель над правимым текстом: курсор — текстовый.
@@ -309,6 +311,7 @@ impl Editor {
             fonts,
             text_edit: None,
             edit_layout_cache: RefCell::new(None),
+            find_index: RefCell::default(),
             now_ms: 0.0,
             text_hover: false,
             vector_edit: None,

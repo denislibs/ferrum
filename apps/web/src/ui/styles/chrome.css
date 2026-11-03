@@ -523,6 +523,209 @@
 .fe-menu__empty {
   padding-bottom: var(--space-1);
 }
+/* «Быстрые действия»: поле сверху по центру холста, список под ним. */
+.fe-palette {
+  position: absolute;
+  z-index: 40;
+  top: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  padding: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 20px;
+}
+.fe-palette__field {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-muted);
+}
+.fe-palette__field:focus-within {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.fe-palette__field input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+}
+.fe-palette__list {
+  position: relative;
+  overflow: auto;
+  min-height: 0;
+  max-height: 420px;
+  margin-top: var(--space-1);
+}
+.fe-palette__heading {
+  padding: var(--space-1) var(--space-2) 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.fe-palette__empty {
+  padding: var(--space-2);
+  color: var(--ink-muted);
+}
+.fe-palette__row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--row-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: default;
+  white-space: nowrap;
+}
+.fe-palette__row--active {
+  background: var(--surface-hover);
+}
+.fe-palette__row[aria-disabled='true'] {
+  color: var(--ink-faint);
+}
+.fe-palette__icon {
+  display: flex;
+  align-items: center;
+  color: var(--ink-muted);
+}
+.fe-palette__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fe-palette__group,
+.fe-palette__key {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+.fe-palette__key {
+  min-width: 48px;
+  text-align: right;
+}
+.fe-palette__row[aria-disabled='true'] .fe-palette__group,
+.fe-palette__row[aria-disabled='true'] .fe-palette__key,
+.fe-palette__row[aria-disabled='true'] .fe-palette__icon {
+  color: var(--ink-faint);
+}
+/* Панель «Сочетания клавиш»: поднимается снизу окна. */
+.fe-keys {
+  position: fixed;
+  z-index: 35;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  height: min(320px, 50vh);
+  border-top: 1px solid var(--line);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 20px;
+  animation: fe-rise 160ms ease-out;
+}
+@keyframes fe-rise {
+  from {
+    transform: translateY(100%);
+  }
+}
+.fe-keys__head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+.fe-keys__head h2 {
+  flex: none;
+  margin: 0;
+  font-size: 13px;
+}
+.fe-keys__head .fe-tabs {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+  padding: 0;
+  border-bottom: 0;
+}
+.fe-keys__settings {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--select);
+  font: inherit;
+  cursor: pointer;
+}
+.fe-keys__settings:hover {
+  text-decoration: underline;
+}
+.fe-keys__list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  columns: 280px;
+  column-gap: var(--space-6);
+}
+.fe-keys__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--row-height);
+  break-inside: avoid;
+}
+.fe-keys__name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.fe-keys__mark {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--select);
+}
+.fe-keys__caps {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+}
+.fe-keys__caps kbd {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 12px;
+}
+.fe-keys__row--used .fe-keys__caps kbd {
+  color: var(--select);
+}
+.fe-keys__none {
+  color: var(--ink-faint);
+}
 /* Кнопка с логотипом: главное меню (как в Figma UI3). */
 .fe-logo {
   display: flex;

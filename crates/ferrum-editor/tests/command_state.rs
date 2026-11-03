@@ -92,6 +92,7 @@ fn nothing_selected() {
         C::Save,
         C::PixelGrid,
         C::UiMainMenu,
+        C::UiQuickActions,
         C::UiSettings,
     ] {
         assert!(on(&h, c), "{c:?} доступна всегда");

@@ -9,6 +9,13 @@ export function editableTarget(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && t.isContentEditable;
 }
 
+/** Сочетание окна («Быстрые действия», «Сочетания клавиш») срабатывает в этом
+ * событии: в поле ввода — только с Ctrl/Cmd (иначе привязка к букве не давала бы её
+ * набрать), на холсте и вне полей — с любым. */
+export function opensWindow(e: Pick<KeyboardEvent, 'target' | 'ctrlKey' | 'metaKey'>): boolean {
+  return e.ctrlKey || e.metaKey || !editableTarget(e.target);
+}
+
 /** Открыт модальный диалог: холст не получает ни клавиш, ни буфера обмена. */
 export function modalOpen(): boolean {
   return !!document.querySelector('[role="dialog"][aria-modal="true"]');

@@ -8,7 +8,7 @@ use ferrum_editor::scale::{Anchor, MAX_SCALE_FACTOR, MIN_SCALE_FACTOR};
 use ferrum_editor::{
     browser_reserved, frame_presets, main_menu, BindError, CommandId, ContextTarget, DropTarget,
     KeymapError, MenuAction, MenuNode, NumField, PanelEdit, Phase, Shortcut, COMMANDS,
-    MAX_NAME_CHARS,
+    MAX_FIND_QUERY_BYTES, MAX_NAME_CHARS,
 };
 use ferrum_render::{decode_png, export_area, ExportBudget, ExportError, SvgOptions};
 use ferrum_scene::shape::COORD_LIMIT;
@@ -17,9 +17,9 @@ use serde_bytes::ByteBuf;
 use super::Core;
 use crate::protocol::{
     Align, Command, ConflictInfo, ContextTarget as TargetDto, CoreEvent, DropPosition, Edit,
-    EditPhase, ExportFormat, Field, FillDto, KeymapEntry, MenuActionDto, MenuItemDto, PageInfo,
-    PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto, EXPORT_SCALES, MAX_TEXT_BYTES,
-    SELECTION_IDS_MAX,
+    EditPhase, ExportFormat, Field, FillDto, FoundLayerDto, KeymapEntry, MenuActionDto,
+    MenuItemDto, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
+    EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
 };
 use crate::summary::{cap_of, join_of, summarize, MAX_PAINTS};
 
@@ -481,6 +481,37 @@ impl Core {
                     self.error(format!("Неверная правка: {m}"));
                 }
             },
+            Command::FindLayers { query, limit } => {
+                if query.len() > MAX_FIND_QUERY_BYTES {
+                    self.error(format!(
+                        "Запрос поиска слоёв длиннее {MAX_FIND_QUERY_BYTES} байт"
+                    ));
+                    return;
+                }
+                let items = self
+                    .editor
+                    .find_layers(&query, limit as usize)
+                    .into_iter()
+                    .map(|f| FoundLayerDto {
+                        id: f.id.to_string(),
+                        name: f.name,
+                        kind: f.kind.into(),
+                    })
+                    .collect();
+                self.events.push(CoreEvent::LayersFound { query, items });
+            }
+            Command::RevealLayer { id } => {
+                if let Some(id) = self.node(&id) {
+                    // Выделение не из панели: предки раскрываются, панель прокручивается.
+                    // Прежнее выделение события не даёт — раскрываем здесь же.
+                    if self.editor.reveal_layer(id) {
+                        self.reveal = self.layers.reveal(self.editor.scene(), &[id]);
+                        self.ui.layers = true;
+                    } else {
+                        self.error("Слой не найден на текущей странице");
+                    }
+                }
+            }
             Command::ContextMenu { target } => self.context_menu(target),
             Command::ExpandAllLayers { expanded } => {
                 self.layers.set_all_expanded(self.editor.scene(), expanded);

@@ -1,33 +1,20 @@
 // Главное меню (спека подсистемы 2, раздел 4): пункты из дерева ядра
-// (`MainMenu`) с названиями из таблицы команд и поиск по командам меню —
-// подстрока названия или синонима, без учёта регистра, «ё» и раскладки
-// (запрос «щквук» находит «order»: буквы переводятся ЙЦУКЕН ↔ QWERTY).
+// (`MainMenu`) с названиями из таблицы команд и поиск по командам меню — тот
+// же нечёткий поиск, что в «Быстрых действиях» (`fuzzy.ts`, `palette.ts`), без
+// учёта регистра, «ё» и раскладки (запрос «щквук» находит «order»: буквы
+// переводятся ЙЦУКЕН ↔ QWERTY).
 // Основной поток ничего не вычисляет о документе: доступность и галочки —
 // из состояния команд ядра, здесь — только названия и отбор по строке.
 
 import type { KeymapEntry, MenuItemDto } from '../wasm/ferrum_wasm';
 import type { MenuItem } from './menu';
+import { layoutVariants, normalize } from './fuzzy';
+import { rankCommands } from './palette';
+
+export { layoutVariants, normalize };
 
 /** Сколько результатов поиска показывать (как у «Быстрых действий»). */
 export const MAX_RESULTS = 50;
-
-const EN = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
-const RU = 'йцукенгшщзхъфывапролджэячсмитьбюё';
-
-const toRu = new Map([...EN].map((c, i) => [c, RU[i]]));
-const toEn = new Map([...RU].map((c, i) => [c, EN[i]]));
-
-/** Строка для сравнения: нижний регистр, «ё» как «е», без пробелов по краям. */
-export function normalize(s: string): string {
-  return s.trim().toLowerCase().replaceAll('ё', 'е');
-}
-
-/** Запрос в обеих раскладках: как набран, ЙЦУКЕН → QWERTY и обратно. */
-export function layoutVariants(query: string): string[] {
-  const q = query.trim().toLowerCase();
-  const swap = (m: Map<string, string>) => [...q].map((c) => m.get(c) ?? c).join('');
-  return [...new Set([q, swap(toRu), swap(toEn)].map(normalize))].filter(Boolean);
-}
 
 type Entries = ReadonlyMap<string, KeymapEntry>;
 
@@ -73,22 +60,14 @@ function treeKeys(tree: readonly MenuItemDto[], out: string[] = []): string[] {
   return out;
 }
 
-/** Поиск по командам меню: подстрока названия или синонима в любой раскладке.
- * Сначала команды, чьё название начинается с запроса, затем остальные — в
- * порядке меню; не больше `MAX_RESULTS`. */
+/** Поиск по командам меню, как в «Быстрых действиях»: нечётко по названию и
+ * синонимам в любой раскладке, лучшие первыми, при равном весе — в порядке
+ * меню; не больше `MAX_RESULTS`. */
 export function searchMenu(tree: readonly MenuItemDto[], entries: Entries, query: string, hidden: ReadonlySet<string> = new Set()): MenuItem[] {
-  const variants = layoutVariants(query);
-  if (!variants.length) return [];
-  const first: MenuItem[] = [];
-  const rest: MenuItem[] = [];
+  const list: KeymapEntry[] = [];
   for (const key of treeKeys(tree)) {
     const e = entries.get(key);
-    if (!e || hidden.has(key)) continue;
-    const name = normalize(e.name);
-    const words = e.keywords.map(normalize);
-    const item: MenuItem = { label: e.name, command: e.key };
-    if (variants.some((v) => name.startsWith(v))) first.push(item);
-    else if (variants.some((v) => name.includes(v) || words.some((w) => w.includes(v)))) rest.push(item);
+    if (e && !hidden.has(key)) list.push(e);
   }
-  return [...first, ...rest].slice(0, MAX_RESULTS);
+  return rankCommands(list, query, [], MAX_RESULTS).map((e) => ({ label: e.name, command: e.key }));
 }

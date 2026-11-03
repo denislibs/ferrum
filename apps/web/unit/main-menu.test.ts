@@ -1,5 +1,5 @@
-// Главное меню: пункты из дерева ядра и поиск по командам (подстрока, синонимы,
-// раскладка ЙЦУКЕН ↔ QWERTY).
+// Главное меню: пункты из дерева ядра и поиск по командам — нечёткий, как в
+// «Быстрых действиях» (синонимы, раскладка ЙЦУКЕН ↔ QWERTY).
 
 import { expect, test } from '@playwright/test';
 import type { KeymapEntry, MenuItemDto } from '../src/wasm/ferrum_wasm';
@@ -45,13 +45,21 @@ test('пункты из дерева: названия из таблицы, не
   expect(edit.submenu[1].label).toBe('Копировать как');
 });
 
-test('поиск: подстрока названия и синонима, сначала начало названия', () => {
+test('поиск: название и синоним, сначала начало названия', () => {
   const keys = (q: string) => searchMenu(tree, entries, q).map((m) => ('command' in m ? m.command : ''));
   expect(keys('сохр')).toEqual(['file.save', 'ui.save_disk']);
   expect(keys('копи')).toEqual(['edit.copy_png', 'edit.duplicate']);
   expect(keys('DUPLICATE')).toEqual(['edit.duplicate']);
   expect(keys('  ')).toEqual([]);
   expect(keys('нет такого')).toEqual([]);
+});
+
+test('поиск нечёткий: буквы по порядку, лучшие первыми', () => {
+  const keys = (q: string) => searchMenu(tree, entries, q).map((m) => ('command' in m ? m.command : ''));
+  // «сх диск» — не подстрока, но буквы идут по порядку в «Сохранить на диск…».
+  expect(keys('сх диск')).toEqual(['ui.save_disk']);
+  // Начало слова «PNG» весит больше букв вразброс.
+  expect(keys('png')[0]).toBe('edit.copy_png');
 });
 
 test('поиск не зависит от раскладки: «щквук» — «order», «le,km» — «дубль»', () => {

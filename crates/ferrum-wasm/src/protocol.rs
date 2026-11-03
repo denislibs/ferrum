@@ -669,6 +669,18 @@ pub enum Command {
     ContextMenu {
         target: ContextTarget,
     },
+    /// Поиск слоёв текущей страницы для «Быстрых действий» (спека подсистемы 2,
+    /// раздел 7): нечёткий, без учёта регистра, «ё» и раскладки. Ответ —
+    /// `LayersFound` с тем же `query`; `query` — не больше 256 байт, `limit` —
+    /// не больше 200 (больше — урезается).
+    FindLayers {
+        query: String,
+        limit: u32,
+    },
+    /// Переход к слою: выделить его, показать в виде и раскрыть предков в панели.
+    RevealLayer {
+        id: String,
+    },
     /// Развернуть (`true`) или свернуть все слои страницы.
     ExpandAllLayers {
         expanded: bool,
@@ -894,6 +906,15 @@ pub enum MenuItemDto {
     },
 }
 
+/// Найденный слой: идентификатор, имя (не длиннее 256 символов) и тип для иконки.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundLayerDto {
+    pub id: String,
+    pub name: String,
+    pub kind: NodeType,
+}
+
 /// Состояние команды: доступна ли и (у переключателя) отмечена ли.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -1059,6 +1080,12 @@ pub enum CoreEvent {
     /// меню не открывать.
     ContextMenu {
         items: Vec<MenuItemDto>,
+    },
+    /// Найденные слои (ответ на `FindLayers`): `query` — запрос, на который это
+    /// ответ (интерфейс отбрасывает ответы на прежние запросы); лучшие первыми.
+    LayersFound {
+        query: String,
+        items: Vec<FoundLayerDto>,
     },
     /// Измерения с Alt в оверлее: значения расстояний по порядку и число
     /// пунктирных направляющих.

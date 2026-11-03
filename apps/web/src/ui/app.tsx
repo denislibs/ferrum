@@ -14,12 +14,15 @@ import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
 import { Menu, type MenuItem, type MenuSearch } from './menu';
 import { buildMainMenu, entriesByKey, searchMenu } from './main-menu';
+import { bindingsToCommands, parseRecent, pushRecent } from './palette';
 import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
+import { QuickActions } from './quick-actions';
 import { diffSettings, resolveTheme, type Settings, type ThemeChoice } from './settings';
 import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
+import { ShortcutsPanel } from './shortcuts-panel';
 import { downloadBytes, fileName } from './files';
 import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import { systemFonts } from './system-fonts';
@@ -83,6 +86,8 @@ export function App(props: AppProps) {
   const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(saved.theme);
   const [pixelSnap, setPixelSnap] = createSignal(saved.pixelSnap);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  /** Недавние команды «Быстрых действий»: новые первыми, общие для вкладок. */
+  const [recent, setRecent] = createSignal(parseRecent(saved.recentCommands));
   /** Открытое контекстное меню: пункты из ядра, точка окна и название. */
   const [context, setContext] = createSignal<{ items: MenuItem[]; at: { x: number; y: number }; label: string } | null>(null);
   /** Запрошенное у ядра меню: куда его поставить и кто выполняет действия цели. */
@@ -152,6 +157,10 @@ export function App(props: AppProps) {
       written = { ...written, pixelSnap: p.pixelSnap };
       setPixelSnap(p.pixelSnap);
     }
+    if (p.recentCommands !== undefined) {
+      written = { ...written, recentCommands: p.recentCommands };
+      setRecent(parseRecent(p.recentCommands));
+    }
     if (p.keymap !== undefined && p.keymap !== keymap()) {
       const prev = keymap();
       const next = p.keymap;
@@ -184,6 +193,7 @@ export function App(props: AppProps) {
       leftWidth: left(),
       rightWidth: right(),
       pagesOpen: pagesOpen(),
+      recentCommands: recent().join(' '),
     };
     clearTimeout(writeTimer);
     writeTimer = window.setTimeout(flush, 250);
@@ -278,7 +288,15 @@ export function App(props: AppProps) {
         const action = s && clipboardAction(s, platform);
         if (!s || !action) return false;
         const key = { copy: 'edit.copy', cut: 'edit.cut', paste: 'edit.paste', pasteOver: 'edit.paste_over' }[action];
-        return !!store.state.keymap.commands.find((c) => c.key === key)?.bindings.includes(s);
+        const bound = !!store.state.keymap.commands.find((c) => c.key === key)?.bindings.includes(s);
+        if (bound) noteKeyUsed(key);
+        return bound;
+      },
+      onForwardedKey: (e) => {
+        if (e.repeat) return;
+        const s = eventShortcut(e);
+        const key = s && bindingIndex().get(s);
+        if (key) noteKeyUsed(key);
       },
     })
       .then((ed) => {
@@ -287,6 +305,7 @@ export function App(props: AppProps) {
           return;
         }
         ed.uiCommand = uiCommand;
+        ed.noteRecent = (key) => setRecent((r) => pushRecent(r, key));
         ed.contextMenu = (target: ContextTarget, at, label, onAction) => {
           setContext(null);
           pendingContext = { at, label, onAction };
@@ -501,6 +520,19 @@ export function App(props: AppProps) {
   // Главное меню (спека подсистемы 2, раздел 4): дерево — из ядра, названия — из
   // таблицы команд. Файла на диске без File System Access нет: его пунктов тоже.
   const [mainMenu, setMainMenu] = createSignal(false);
+  /** Открыты ли «Быстрые действия» (спека подсистемы 2, раздел 7). */
+  const [palette, setPalette] = createSignal(false);
+  /** Открыта ли панель сочетаний (раздел 8). */
+  const [shortcuts, setShortcuts] = createSignal(false);
+  /** Команды, вызванные сочетанием за этот сеанс (в настройки не пишутся): отмечены в
+   * панели вместе с недавними. Клавиша сопоставляется по действующей раскладке; что
+   * сделало ядро (например, ввод в правке текста), панели не важно. */
+  const [keysUsed, setKeysUsed] = createSignal<ReadonlySet<string>>(new Set());
+  const noteKeyUsed = (key: string) => {
+    if (!keysUsed().has(key)) setKeysUsed(new Set([...keysUsed(), key]));
+  };
+  const bindingIndex = createMemo(() => bindingsToCommands(store.state.keymap.commands));
+  const usedCommands = createMemo(() => new Set([...recent(), ...keysUsed()]));
   const hidden = createMemo(() => new Set(props.files.disk ? [] : ['ui.open_disk', 'ui.save_disk']));
   const entries = createMemo(() => entriesByKey(store.state.keymap.commands));
   const mainItems = () => buildMainMenu(store.state.mainMenu, entries(), hidden());
@@ -517,6 +549,9 @@ export function App(props: AppProps) {
     switch (key) {
       case 'ui.main_menu':
         setMainMenu(true);
+        break;
+      case 'ui.quick_actions':
+        setPalette(true);
         break;
       case 'ui.new_file':
         props.navigate({ kind: 'new' });
@@ -541,8 +576,11 @@ export function App(props: AppProps) {
         props.navigate({ kind: 'files', section: 'recent' });
         break;
       case 'ui.settings':
-      case 'ui.shortcuts':
         setSettingsOpen(true);
+        break;
+      case 'ui.shortcuts':
+        // Как в Figma: то же сочетание закрывает панель.
+        setShortcuts((v) => !v);
         break;
       case 'ui.about':
         store.toast('Ferrum — редактор векторной графики: ядро на Rust и WebAssembly, интерфейс — SolidJS');
@@ -602,6 +640,9 @@ export function App(props: AppProps) {
           {(ed) => (
             <EditorContext.Provider value={ed()}>
               <Toolbar />
+              <Show when={palette()}>
+                <QuickActions hidden={hidden()} recent={recent()} onClose={() => setPalette(false)} />
+              </Show>
             </EditorContext.Provider>
           )}
         </Show>
@@ -627,6 +668,9 @@ export function App(props: AppProps) {
               <ResizeEdge side="right" width={right()} onWidth={setRight} />
             </aside>
             <TooltipLayer />
+            <Show when={shortcuts()}>
+              <ShortcutsPanel used={usedCommands()} onSettings={() => setSettingsOpen(true)} onClose={() => setShortcuts(false)} />
+            </Show>
             <Show when={settingsOpen()}>
               <SettingsDialog
                 theme={themeChoice()}
@@ -637,7 +681,7 @@ export function App(props: AppProps) {
               />
             </Show>
             <Show when={context()}>
-              {(m) => <Menu label={m().label} items={m().items} anchor={m().at} onClose={() => setContext(null)} />}
+              {(m) => <Menu label={m().label} items={m().items} anchor={m().at} recents onClose={() => setContext(null)} />}
             </Show>
           </EditorContext.Provider>
         )}

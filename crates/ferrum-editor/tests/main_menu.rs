@@ -138,10 +138,14 @@ fn submenus_hold_the_commands_of_the_spec() {
 fn every_menu_command_is_in_the_table_and_groups_are_covered() {
     let all: HashSet<CommandId> = menu_commands(&main_menu()).into_iter().collect();
     // Команды групп меню — все в дереве, кроме тех, что живут только на
-    // клавишах: Esc, сдвиги, инструменты (у них тулбар), само главное меню.
+    // клавишах: Esc, сдвиги, инструменты (у них тулбар), само главное меню и
+    // «Быстрые действия» (их поиск — поле вверху главного меню).
     for c in COMMANDS {
         let only_keys = matches!(c.group, CommandGroup::Tool | CommandGroup::Nudge)
-            || matches!(c.id, CommandId::Escape | CommandId::UiMainMenu);
+            || matches!(
+                c.id,
+                CommandId::Escape | CommandId::UiMainMenu | CommandId::UiQuickActions
+            );
         assert_eq!(
             all.contains(&c.id),
             !only_keys || c.id == CommandId::ToolPen,

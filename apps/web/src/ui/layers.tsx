@@ -21,7 +21,7 @@ export const OVERSCAN = 10;
 /** Сдвиг указателя, после которого нажатие на строке становится перетаскиванием. */
 const DRAG_START_PX = 4;
 
-const KIND_ICON: Record<NodeType, IconName> = {
+export const KIND_ICON: Record<NodeType, IconName> = {
   frame: 'frame',
   group: 'group',
   rect: 'rect',

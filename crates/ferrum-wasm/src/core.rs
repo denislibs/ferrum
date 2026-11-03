@@ -206,6 +206,7 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::ExpandLayer { .. }
             | Command::ExpandAllLayers { .. }
             | Command::FilterLayers { .. }
+            | Command::FindLayers { .. }
             | Command::PrepareSearch
             | Command::HoverLayer { .. }
     )

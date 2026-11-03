@@ -72,6 +72,10 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     // Подсистема 2: главное меню — Alt+/ (в Figma поиск в меню — по логотипу);
     // «Экспорт…» и «Привязка к пикселям» — как в справке Figma.
     (CommandId::UiMainMenu, &["Alt+Slash"]),
+    // Подсистема 2, этап 3: «Быстрые действия» и «Сочетания клавиш» — как в
+    // справке Figma (Ctrl+Shift+? — Ctrl и на маке).
+    (CommandId::UiQuickActions, &["Mod+KeyK", "Mod+Slash"]),
+    (CommandId::UiShortcuts, &["Ctrl+Shift+Slash"]),
     (CommandId::UiExport, &["Mod+Shift+KeyE"]),
     (CommandId::UiPixelSnap, &["Mod+Shift+Quote"]),
     (CommandId::PixelGrid, &["Shift+Quote"]),
@@ -98,7 +102,6 @@ const NO_DEFAULTS: &[CommandId] = &[
     CommandId::UiSaveCopy,
     CommandId::UiAllFiles,
     CommandId::UiSettings,
-    CommandId::UiShortcuts,
     CommandId::UiAbout,
     CommandId::UiThemeDark,
     CommandId::UiThemeLight,
@@ -150,7 +153,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 85);
+    assert_eq!(COMMANDS.len(), 86);
 }
 
 #[test]
@@ -619,4 +622,25 @@ fn boolean_ops_are_alt_shift_letters_like_figma() {
         assert_eq!(map.lookup(&key("KeyE", false, false, true, false)), None);
         assert_eq!(map.lookup(&key("KeyE", false, true, false, false)), None);
     }
+}
+
+#[test]
+fn punctuation_labels_are_signs() {
+    for (code, sign) in [
+        ("Slash", "/"),
+        ("Semicolon", ";"),
+        ("Quote", "'"),
+        ("Comma", ","),
+        ("Period", "."),
+        ("Backquote", "`"),
+        ("Minus", "-"),
+        ("Equal", "="),
+        ("BracketLeft", "["),
+        ("BracketRight", "]"),
+        ("Backslash", "\\"),
+    ] {
+        assert_eq!(sc(code).label(Platform::Windows), sign, "{code}");
+    }
+    assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Mac), "⌃⇧/");
+    assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Linux), "Ctrl+Shift+/");
 }

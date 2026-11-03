@@ -79,3 +79,23 @@ test('сочетания буфера обмена по платформе', () 
   expect(clipboardAction('Shift+Meta+KeyV', 'mac')).toBe('pasteOver');
   expect(clipboardAction('Ctrl+Shift+KeyV', 'mac')).toBeNull();
 });
+
+test('знаки без раскладки (Firefox, WKWebView): подпись — сам знак, не имя кода', () => {
+  const signs: Record<string, string> = {
+    Slash: '/',
+    Semicolon: ';',
+    Quote: "'",
+    Comma: ',',
+    Period: '.',
+    Backquote: '`',
+    Minus: '-',
+    Equal: '=',
+    BracketLeft: '[',
+    BracketRight: ']',
+    Backslash: '\\',
+  };
+  for (const [code, sign] of Object.entries(signs)) expect(keyLabel(code)).toBe(sign);
+  expect(shortcutLabel('Ctrl+Shift+Slash', 'windows')).toBe('Ctrl+Shift+/');
+  expect(shortcutLabel('Ctrl+Shift+Slash', 'mac')).toBe('⌃⇧/');
+  expect(shortcutLabel('Alt+Slash', 'linux')).toBe('Alt+/');
+});
