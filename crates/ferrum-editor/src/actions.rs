@@ -113,17 +113,22 @@ impl Editor {
     /// Кнопка «Отменить» в уведомлении: отмена, только если шаг `step` ещё последний.
     /// `true` — отменён.
     pub fn undo_step(&mut self, step: u64) -> bool {
+        // Как `execute`: жест панели отменяется, во время жеста команды не идут.
+        self.cancel_panel();
         // Открытый путь пера: отмена сняла бы его точку, а не этот шаг.
         let pen_open = self.vector_edit.as_ref().is_some_and(|v| v.pen.dirty);
-        if pen_open
+        if self.is_busy()
+            || pen_open
             || self.doc.last_step() != Some(step)
             || !self.command_state(CommandId::Undo).enabled
         {
+            self.emit();
             return false;
         }
         self.run_command(CommandId::Undo);
         self.emit();
-        true
+        // Отмена не прошла (например, документ только для чтения): шаг остался последним.
+        self.doc.last_step() != Some(step)
     }
 
     fn run_command(&mut self, cmd: CommandId) {
@@ -164,6 +169,9 @@ impl Editor {
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
+            // В правке текста отмена и повтор — как Ctrl+Z: правка продолжается.
+            C::Undo if self.text_edit.is_some() => self.text_undo_redo(false),
+            C::Redo if self.text_edit.is_some() => self.text_undo_redo(true),
             C::Undo => self.undo_redo(false),
             C::Redo => self.undo_redo(true),
             // В правке текста — фрагмент текста и обычный текст.

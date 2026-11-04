@@ -101,3 +101,33 @@ test('разгруппировка и «Сплющить» из меню даю�
   await expect(f).toHaveCount(0);
   await liveWhen(page, `l.canRedo === 1 && l.steps === ${steps}`);
 });
+
+test('@firefox Esc на уведомлении закрывает его, выделение остаётся, фокус на холсте', async ({ page }) => {
+  await openApp(page);
+  const l = await selectLayer(page);
+  await page.keyboard.press('ControlOrMeta+KeyG');
+  await liveWhen(page, `l.nodes === ${l.nodes + 1}`);
+  await page.keyboard.press('ControlOrMeta+Shift+KeyG');
+  const t = page.locator('.fe-toast', { hasText: 'Разгруппировано' });
+  await expect(t).toBeVisible();
+  await t.getByRole('button', { name: 'Отменить' }).focus();
+  await page.keyboard.press('Escape');
+  await expect(t).toHaveCount(0);
+  await expect(page.locator('canvas')).toBeFocused();
+  expect((await live(page)).selectionCount).toBe(1);
+});
+
+test('«Отменить» во время правки нового текста — как Ctrl+Z: черновик закончен, слой вернулся', async ({ page }) => {
+  await openApp(page);
+  const l = await selectLayer(page);
+  await page.keyboard.press('Delete');
+  await liveWhen(page, `l.nodes === ${l.nodes - 1}`);
+  await page.keyboard.press('KeyT');
+  const at = await appScreen(page, l, 600, 400);
+  await page.mouse.click(at.x, at.y);
+  await expect(page.locator('.fe-text-input')).toBeFocused();
+  await notice(page).getByRole('button', { name: 'Отменить' }).click();
+  await liveWhen(page, `l.nodes === ${l.nodes}`);
+  await expect(notice(page)).toHaveCount(0);
+  expect(await page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!)).text.editing)).toBe(false);
+});

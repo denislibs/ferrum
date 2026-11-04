@@ -4,8 +4,9 @@
 
 mod common;
 
+use common::text::*;
 use common::*;
-use ferrum_doc::{Color, NodeKind, PropsPatch, Stroke, StrokeAlign};
+use ferrum_doc::{Color, NodeId, NodeKind, PropsPatch, Stroke, StrokeAlign};
 use ferrum_editor::*;
 
 fn notice(ev: &[EditorEvent]) -> Option<(&'static str, u64)> {
@@ -133,7 +134,7 @@ fn undo_step_only_while_it_is_last() {
 }
 
 #[test]
-fn delete_inside_vector_and_text_edit_shows_no_layer_notice() {
+fn delete_inside_vector_edit_shows_no_layer_notice() {
     let mut h = H::new();
     let r = h.rect(None, 100.0, 100.0, 50.0, 50.0);
     h.ed.select(&[r]);
@@ -160,4 +161,61 @@ fn undo_step_does_not_touch_an_open_pen_path() {
         "отмена сняла бы точку пера, а не удаление"
     );
     assert!(!h.ed.page_doc().contains(a));
+}
+
+/// Удалённый прямоугольник с уведомлением, затем правка существующего текста.
+fn deleted_rect_then_text_edit() -> (H, NodeId, NodeId, u64) {
+    let mut h = text_h();
+    let t = add_text(&mut h, 100.0, 100.0, "Привет мир", 24.0);
+    let a = h.rect(None, 400.0, 400.0, 50.0, 50.0);
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    h.ed.execute(CommandId::Delete);
+    let (_, step) = notice(&h.ed.take_events()).unwrap();
+    h.ed.select(&[t]);
+    h.key("Enter", none());
+    assert!(h.ed.is_editing_text());
+    (h, t, a, step)
+}
+
+#[test]
+fn undo_step_in_text_edit_works_like_ctrl_z() {
+    let (mut h, t, a, step) = deleted_rect_then_text_edit();
+    assert!(h.ed.undo_step(step));
+    assert!(h.ed.page_doc().contains(a));
+    assert!(h.ed.is_editing_text(), "правка продолжается");
+    assert_eq!(
+        h.sel(),
+        vec![t],
+        "выделение — текст в правке, а не восстановленный слой"
+    );
+}
+
+#[test]
+fn menu_undo_and_redo_in_text_edit_keep_the_session() {
+    let (mut h, t, a, _) = deleted_rect_then_text_edit();
+    h.ed.execute(CommandId::Undo);
+    assert!(h.ed.page_doc().contains(a));
+    assert!(h.ed.is_editing_text());
+    assert_eq!(h.sel(), vec![t]);
+    h.ed.execute(CommandId::Redo);
+    assert!(!h.ed.page_doc().contains(a));
+    assert!(h.ed.is_editing_text());
+    assert_eq!(h.sel(), vec![t]);
+}
+
+#[test]
+fn undo_step_with_a_text_draft_finishes_the_draft_like_ctrl_z() {
+    let mut h = text_h();
+    let a = h.rect(None, 400.0, 400.0, 50.0, 50.0);
+    h.ed.select(&[a]);
+    h.ed.take_events();
+    h.ed.execute(CommandId::Delete);
+    let (_, step) = notice(&h.ed.take_events()).unwrap();
+    h.key("KeyT", none());
+    h.click(100.0, 100.0, none());
+    assert!(h.ed.is_editing_text());
+    assert!(h.ed.undo_step(step));
+    assert!(!h.ed.is_editing_text());
+    assert!(h.ed.page_doc().contains(a));
 }

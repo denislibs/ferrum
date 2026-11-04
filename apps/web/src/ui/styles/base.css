@@ -245,6 +245,10 @@ select {
   pointer-events: auto;
   animation: fe-pop 120ms ease-out;
 }
+.fe-toast--gone {
+  opacity: 0;
+  animation: none;
+}
 .fe-toast__action {
   flex: none;
   padding: 2px var(--space-1);

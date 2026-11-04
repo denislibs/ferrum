@@ -91,6 +91,8 @@ export function forwardKey(e: KeyboardEvent, isClipboardKey: (e: KeyboardEvent) 
   // же обработчиком (та же команда `edit.delete`), сюда клавиша не доходит.
   if ((NAV_KEYS.has(e.code) || NAV_KEYS.has(e.key)) && controlOwnsNav(e.target)) return false;
   const el = e.target instanceof Element ? e.target : null;
+  // Esc на уведомлении закрывает его (`toasts.tsx`), а не снимает выделение.
+  if (e.code === 'Escape' && el?.closest('.fe-toast')) return false;
   if (el?.closest('[role="treeitem"]') && TREE_KEYS.has(e.code)) return false;
   if (el?.closest('button, [role="tab"], a') && WIDGET_KEYS.has(e.code)) return false;
   // Стрелки на вкладке, строке, пункте меню и списка, ползунке и крае панели — их навигация.
