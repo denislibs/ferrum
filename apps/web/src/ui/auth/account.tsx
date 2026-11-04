@@ -55,7 +55,13 @@ export function AccountTab() {
 /** Строка внизу панели экрана файлов (поведение: настройки открываются только из редактора,
  * а выйти нужно и отсюда). */
 export function AccountRow() {
+  const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const out = async () => {
+    setBusy(true);
+    setError(await leave(false));
+    setBusy(false);
+  };
   return (
     <Show when={currentUser()}>
       {(u) => (
@@ -64,7 +70,7 @@ export function AccountRow() {
           <span class="fe-account-row__name" title={u().email}>
             {u().name}
           </span>
-          <button class="fe-btn" onClick={() => void leave(false).then(setError)}>
+          <button class="fe-btn" disabled={busy()} onClick={() => void out()}>
             Выйти
           </button>
           <Show when={error()}>

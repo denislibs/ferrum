@@ -16,6 +16,7 @@ import { storage } from './settings';
 import { openSettings, type SettingsBackend, type SettingsStore } from './settings-store';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { allowRestart, type Restart } from './restart';
+import { editorHooks } from './extensions';
 import { historyIndex, parseRoute, routeHash, routeUrl, type Route } from './router';
 
 type View =
@@ -70,6 +71,7 @@ export function Root() {
   if (test && idb) window.__ferrumFiles = { store: idb };
   const [view, setView] = createSignal<View>({ kind: 'wait' });
   let leave: (() => Promise<boolean>) | null = null;
+  let flushEditor: (() => Promise<void>) | null = null;
   let unlock: (() => void) | null = null;
   let current: Route | null = null;
   let seq = 0;
@@ -235,6 +237,8 @@ export function Root() {
   const navigate = (r: Route) => void go(r, true);
   // «Назад», «вперёд» и адрес, набранный вручную.
   const onPop = (e: PopStateEvent) => {
+    // Служебные адреса (`#/auth/…`, ссылка из письма) ведает не приложение.
+    if (location.hash.startsWith('#/auth/')) return;
     if (restoring) {
       restoring = false;
       return;
@@ -247,6 +251,9 @@ export function Root() {
     void go(parseRoute(location.hash), false, { to: historyIndex(e.state) });
   };
   window.addEventListener('popstate', onPop);
+  // Выход и смена входа спрашивают у редактора то же, что уход к экрану файлов.
+  editorHooks.leave = () => (leave ? leave() : Promise.resolve(true));
+  editorHooks.flush = () => (leave && flushEditor ? flushEditor() : Promise.resolve());
   // Настройки — до первого экрана: тема, вид списка и раскладка нужны сразу (экраны
   // получают их готовыми). Хранилище настроек живёт у корня: перезапуск редактора
   // после сбоя ядра или потери GPU его не теряет.
@@ -264,6 +271,8 @@ export function Root() {
   onCleanup(() => {
     disposed = true;
     window.removeEventListener('popstate', onPop);
+    delete editorHooks.leave;
+    delete editorHooks.flush;
     release();
     settings?.dispose();
     files.dispose();
@@ -316,6 +325,7 @@ export function Root() {
             onRestart={(r) => restart(v.file, r, v.backend)}
             navigate={navigate}
             onLeave={(fn) => (leave = fn)}
+            onFlush={(fn) => (flushEditor = fn)}
             onOpenFailed={(message) => {
               // Испорченный файл: запись не трогаем, сохранять нечего.
               leave = null;

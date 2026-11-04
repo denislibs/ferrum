@@ -5,6 +5,7 @@
 import { createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
 import { MAX_NAME_CHARS, parseConfirmHash, parseEmail, parseNext, type SessionUser } from '@ferrum/protocol';
 import { dismissSplash } from '../boot';
+import { editorHooks } from '../extensions';
 import { confirmLink, getSession, requestLink, saveName } from './auth-api';
 import { failureText, resendLeft, screenFor, type AuthFailure, type AuthScreen } from './auth-logic';
 import { announceAuthChange, currentUser, onAuthChange, setCurrentUser } from './session';
@@ -13,23 +14,40 @@ export function AuthGate(props: { children: JSX.Element }) {
   const [screen, setScreen] = createSignal<AuthScreen | null>(null);
   const [failure, setFailure] = createSignal<AuthFailure | null>(null);
 
+  /** Ошибка остаётся на экране, пока повтор не удался: карточка не мигает пустой страницей. */
   const load = async () => {
-    setFailure(null);
     const hash = location.hash;
     // Страница подтверждения не спрашивает сессию: открытие ссылки ни к чему не обращается.
     const first = screenFor(hash, null);
     if (first.kind === 'confirm') {
+      setFailure(null);
       setScreen(first);
       return;
     }
-    const r = await getSession();
-    if (!r.ok) {
-      setFailure(r.failure);
-      return;
+    try {
+      const r = await getSession();
+      if (!r.ok) {
+        setFailure(r.failure);
+        return;
+      }
+      const s = screenFor(hash, r.value.user);
+      setCurrentUser(r.value.user);
+      setFailure(null);
+      setScreen(s);
+    } catch {
+      // Разбор ответа уже сводит всё к `NETWORK`; сюда попадает только невозможное, но заставка
+      // не должна остаться навсегда ни при каком исходе.
+      setFailure('NETWORK');
     }
-    const s = screenFor(hash, r.value.user);
-    setCurrentUser(r.value.user);
-    setScreen(s);
+  };
+  const loginNext = () => {
+    const s = screen();
+    return s?.kind === 'login' ? s.next : undefined;
+  };
+  const [retrying, setRetrying] = createSignal(false);
+  const retry = () => {
+    setRetrying(true);
+    void load().finally(() => setRetrying(false));
   };
 
   /** Новый адрес — без перезагрузки: приложение прочтёт его при монтировании. */
@@ -49,9 +67,20 @@ export function AuthGate(props: { children: JSX.Element }) {
 
   void load();
   // Ссылка из письма вставлена в эту же вкладку: сменился только адрес после `#`, страница не
-  // перезагружается. Внутри приложения адресом ведает оно само, кроме страницы подтверждения.
-  const onHash = () => {
-    if (screen()?.kind !== 'app' || parseConfirmHash(location.hash)) void load();
+  // перезагружается. Внутри приложения адресом ведает оно само (адреса `#/auth/` оно пропускает),
+  // а ссылку подтверждения открывает страница заново: приложение не снимается посреди записи,
+  // сначала редактор дописывает файл. Не вышло и человек остался — адрес возвращается.
+  const onHash = (e: HashChangeEvent) => {
+    if (screen()?.kind !== 'app') {
+      void load();
+      return;
+    }
+    if (!parseConfirmHash(location.hash)) return;
+    const back = new URL(e.oldURL).hash;
+    void (editorHooks.leave?.() ?? Promise.resolve(true)).then((ok) => {
+      if (ok) location.reload();
+      else history.replaceState(history.state, '', `${location.pathname}${location.search}${back}`);
+    });
   };
   window.addEventListener('hashchange', onHash);
   onCleanup(() => window.removeEventListener('hashchange', onHash));
@@ -60,11 +89,14 @@ export function AuthGate(props: { children: JSX.Element }) {
   onCleanup(
     onAuthChange(() => {
       if (screen()?.kind === 'confirm') return;
-      void getSession().then((r) => {
+      void getSession().then(async (r) => {
         if (!r.ok) return;
         const was = currentUser();
         const now = r.value.user;
-        if (was?.id !== now?.id || was?.name !== now?.name) location.reload();
+        if (was?.id === now?.id && was?.name === now?.name) return;
+        // Спросить человека некому (он в другой вкладке): журнал дописывается молча.
+        await editorHooks.flush?.().catch(() => {});
+        location.reload();
       });
     }),
   );
@@ -77,17 +109,21 @@ export function AuthGate(props: { children: JSX.Element }) {
             <p class="fe-auth__error" role="alert">
               {failureText(f())}
             </p>
-            <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => void load()}>
+            <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={retrying()} onClick={retry}>
               Повторить
             </button>
           </AuthCard>
         )}
       </Match>
       <Match when={screen()?.kind === 'app'}>{props.children}</Match>
+      {/* Вход не пересоздаётся при смене адреса (новая загрузка): «Проверьте почту» и набранный
+          адрес остаются, меняется только запрошенный `next`. */}
+      <Match when={loginNext() !== undefined}>
+        <LoginScreen next={loginNext() ?? null} />
+      </Match>
       <Match when={screen()} keyed>
         {(s) => (
           <>
-            {s.kind === 'login' && <LoginScreen next={s.next} />}
             {s.kind === 'confirm' && (
               <ConfirmScreen token={s.token} next={s.next} onDone={signedIn} onNewLink={(next) => go(next ?? '#/')} />
             )}
@@ -99,16 +135,25 @@ export function AuthGate(props: { children: JSX.Element }) {
   );
 }
 
+/** Смена экрана заметна и без зрения: фокус уходит на поле, а если поля нет, на заголовок
+ * (прежняя кнопка с фокусом исчезла, а новый заголовок иначе не объявляется). */
 function AuthCard(props: { title: string; children: JSX.Element }) {
-  onMount(() => dismissSplash(true));
+  let card!: HTMLElement;
+  let title!: HTMLHeadingElement;
+  onMount(() => {
+    dismissSplash(true);
+    (card.querySelector<HTMLElement>('input') ?? title).focus();
+  });
   return (
     <div class="fe-auth">
-      <main class="fe-auth__card">
+      <main class="fe-auth__card" ref={card}>
         <div class="fe-files__brand">
           <span class="fe-panel-head__mark" aria-hidden="true" />
           <span class="t-strong">Ferrum</span>
         </div>
-        <h1 class="fe-auth__title">{props.title}</h1>
+        <h1 class="fe-auth__title" tabindex="-1" ref={title}>
+          {props.title}
+        </h1>
         {props.children}
       </main>
     </div>
@@ -124,12 +169,15 @@ function LoginScreen(props: { next: string | null }) {
   const [now, setNow] = createSignal(Date.now());
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  /** Только ошибка самого адреса: сбой сети или предел писем поле не портят. */
+  const [invalid, setInvalid] = createSignal(false);
   const timer = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
 
   const send = async (address: string) => {
     setBusy(true);
     setError(null);
+    setInvalid(false);
     const r = await requestLink(address, props.next);
     setBusy(false);
     if (!r.ok) {
@@ -154,7 +202,10 @@ function LoginScreen(props: { next: string | null }) {
               e.preventDefault();
               const address = parseEmail(email());
               if (address) void send(address);
-              else setError('Проверьте адрес: например, ivan@example.com');
+              else {
+                setError('Проверьте адрес: например, ivan@example.com');
+                setInvalid(true);
+              }
             }}
           >
             <label class="fe-auth__label" for="fe-auth-email">
@@ -165,10 +216,9 @@ function LoginScreen(props: { next: string | null }) {
                 id="fe-auth-email"
                 type="email"
                 autocomplete="email"
-                autofocus
                 required
                 value={email()}
-                aria-invalid={error() !== null}
+                aria-invalid={invalid()}
                 onInput={(e) => setEmail(e.currentTarget.value)}
               />
             </div>
@@ -232,7 +282,9 @@ function LoginScreen(props: { next: string | null }) {
 }
 
 /** Ссылка из письма: кнопка вместо входа по GET, почтовые сканеры открывают ссылки и сожгли бы
- * одноразовый токен. Токен тратится только по нажатию. */
+ * одноразовый токен. Токен тратится только по нажатию. Ссылка мертва только при отказе
+ * `INVALID_TOKEN` (или если токена нет): любой другой сбой не тратит токен, поэтому «Войти»
+ * остаётся повтором, а токен в адресе не трогается. */
 function ConfirmScreen(props: {
   token: string | null;
   next: string | null;
@@ -240,9 +292,11 @@ function ConfirmScreen(props: {
   onNewLink: (next: string | null) => void;
 }) {
   const [busy, setBusy] = createSignal(false);
+  const [dead, setDead] = createSignal(!props.token);
   const [error, setError] = createSignal<string | null>(props.token ? null : failureText('INVALID_TOKEN'));
   const enter = async () => {
     setBusy(true);
+    setError(null);
     const r = await confirmLink(props.token!);
     if (r.ok) {
       props.onDone(props.next);
@@ -250,23 +304,26 @@ function ConfirmScreen(props: {
     }
     setBusy(false);
     setError(failureText(r.failure));
+    if (r.failure === 'INVALID_TOKEN') setDead(true);
   };
   return (
     <AuthCard title="Вход в Ferrum">
+      <Show when={error()}>
+        <p class="fe-auth__error" role="alert">
+          {error()}
+        </p>
+      </Show>
       <Show
-        when={!error()}
+        when={!dead()}
         fallback={
-          <>
-            <p class="fe-auth__error" role="alert">
-              {error()}
-            </p>
-            <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => props.onNewLink(parseNext(props.next))}>
-              Запросить новую ссылку
-            </button>
-          </>
+          <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => props.onNewLink(parseNext(props.next))}>
+            Запросить новую ссылку
+          </button>
         }
       >
-        <p class="fe-auth__text">Нажмите кнопку, чтобы завершить вход.</p>
+        <Show when={!error()}>
+          <p class="fe-auth__text">Нажмите кнопку, чтобы завершить вход.</p>
+        </Show>
         <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy()} onClick={() => void enter()}>
           Войти
         </button>
@@ -308,7 +365,6 @@ function NameScreen(props: { user: SessionUser; onDone: (user: SessionUser) => v
           <input
             id="fe-auth-name"
             autocomplete="name"
-            autofocus
             maxlength={MAX_NAME_CHARS}
             value={name()}
             onInput={(e) => setName(e.currentTarget.value)}

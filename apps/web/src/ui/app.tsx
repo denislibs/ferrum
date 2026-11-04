@@ -46,6 +46,8 @@ export interface AppProps {
   settings: SettingsStore;
   /** Уход с редактора: сохранить и остановить ядро; `false` — запись не удалась, остаться. */
   onLeave: (leave: () => Promise<boolean>) => void;
+  /** Дописать журнал без вопросов: вкладка сейчас перезагрузится (смена входа в другой вкладке). */
+  onFlush?: (flush: () => Promise<void>) => void;
   /** Файл из хранилища не открылся (испорчен): к экрану файлов с этим сообщением. */
   onOpenFailed: (message: string) => void;
   /** Редактор запущен заново после сбоя ядра или потери GPU: что сказать пользователю. */
@@ -300,6 +302,9 @@ export function App(props: AppProps) {
     if (disposed) return false;
     const reason = saver.failure() ?? 'Изменения не записаны в хранилище';
     return new Promise<boolean>((answer) => setAskLeave({ reason, answer }));
+  });
+  props.onFlush?.(async () => {
+    if (saver) await withTimeout(saver.flushJournal(), SETTLE_MS, false);
   });
   const answerLeave = (go: boolean) => {
     const a = askLeave();
