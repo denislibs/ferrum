@@ -51,7 +51,7 @@ test('@firefox Shift+R и пункт «Вид → Линейки» включа�
   // Настройка сохраняется: снова включаем — после перезагрузки включена.
   await mainMenu(page, 'Вид', 'Линейки');
   await expectPixel(page, box.x + 60, box.y + 2, RULER);
-  await page.waitForTimeout(400); // запись настроек — раз в четверть секунды
+  await expect.poll(() => page.evaluate(() => window.__ferrumFiles!.store.settings())).toMatchObject({ rulers: true });
   await page.reload();
   await page.waitForFunction(() => window.__ferrum?.ready === true && window.__ferrum.ui?.ready === true);
   await expectPixel(page, box.x + 60, box.y + 2, RULER);

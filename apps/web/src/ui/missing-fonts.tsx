@@ -77,7 +77,7 @@ export function MissingFontsSection() {
   const catalog = createMemo(() => [...ed.store.state.fontCatalog].sort((a, b) => a.family.localeCompare(b.family)));
   return (
     <Show when={list().length > 0}>
-      <Section title={`Отсутствующие шрифты (${list().length})`}>
+      <Section name="Отсутствующие шрифты" title={`Отсутствующие шрифты (${list().length})`}>
         <For each={list()}>{(f) => <MissingRow font={f} catalog={catalog()} />}</For>
       </Section>
     </Show>

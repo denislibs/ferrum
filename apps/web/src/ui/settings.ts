@@ -25,6 +25,11 @@ export interface Settings {
   /** Линейки и направляющие (спека подсистемы 2, раздел 9): настройка вида. */
   rulers: boolean;
   guides: boolean;
+  /** Боковые панели свёрнуты в узкую полосу (спека подсистемы 2, раздел 10). */
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
+  /** Свёрнутые секции панели свойств: имена через перевод строки. */
+  collapsedSections: string;
 }
 
 export type FilesView = 'grid' | 'list';
@@ -59,6 +64,9 @@ export const DEFAULT_SETTINGS: Settings = {
   recentCommands: '',
   rulers: false,
   guides: true,
+  leftCollapsed: false,
+  rightCollapsed: false,
+  collapsedSections: '',
 };
 
 /** Хранилище: `localStorage`, если доступ к нему не бросает. */
@@ -68,6 +76,22 @@ export function storage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+/** Свёрнутых секций не больше стольких, имя секции — не длиннее; их мало и они короткие. */
+const MAX_SECTIONS = 32;
+const MAX_SECTION_NAME = 64;
+const MAX_SECTIONS_BYTES = 2048;
+
+/** Имена свёрнутых секций из настройки: значение не доверенное — пустые, длинные и
+ * повторы отбрасываются, лишние не читаются. */
+export function parseSections(text: string): string[] {
+  const out = new Set<string>();
+  for (const name of text.split('\n')) {
+    if (out.size === MAX_SECTIONS) break;
+    if (name && name.length <= MAX_SECTION_NAME) out.add(name);
+  }
+  return [...out];
 }
 
 const utf8 = new TextEncoder();
@@ -88,6 +112,9 @@ const FIELDS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined }
   recentCommands: (v) => (typeof v === 'string' && v.length <= 1024 ? parseRecent(v).join(' ') : undefined),
   rulers: (v) => (typeof v === 'boolean' ? v : undefined),
   guides: (v) => (typeof v === 'boolean' ? v : undefined),
+  leftCollapsed: (v) => (typeof v === 'boolean' ? v : undefined),
+  rightCollapsed: (v) => (typeof v === 'boolean' ? v : undefined),
+  collapsedSections: (v) => (typeof v === 'string' && v.length <= MAX_SECTIONS_BYTES ? parseSections(v).join('\n') : undefined),
 };
 
 /** Только верные известные поля (чужое изменение из другой вкладки, запись базы). */

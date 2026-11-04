@@ -16,6 +16,7 @@ import {
   loadSettings,
   parseSettings,
   parseSettingsPatch,
+  parseSections,
   THEME_KEY,
   PANEL_MAX,
   PANEL_MIN,
@@ -487,4 +488,16 @@ test('линейки и направляющие: умолчания и пров
   expect(parseSettingsPatch({ rulers: true, guides: false })).toEqual({ rulers: true, guides: false });
   expect(parseSettingsPatch({ rulers: 'да', guides: 1 })).toEqual({});
   expect(parseSettings({ rulers: 'да' }).rulers).toBe(false);
+});
+
+test('свёрнутые панели и секции: умолчания и не доверенные значения', () => {
+  expect(DEFAULT_SETTINGS.leftCollapsed).toBe(false);
+  expect(DEFAULT_SETTINGS.rightCollapsed).toBe(false);
+  expect(parseSettingsPatch({ leftCollapsed: true, rightCollapsed: 1 })).toEqual({ leftCollapsed: true });
+  expect(parseSections('Вид\n\nВид\nЭкспорт')).toEqual(['Вид', 'Экспорт']);
+  expect(parseSections(`${'я'.repeat(65)}\nВид`)).toEqual(['Вид']);
+  expect(parseSections(Array.from({ length: 50 }, (_, i) => `с${i}`).join('\n'))).toHaveLength(32);
+  expect(parseSettingsPatch({ collapsedSections: 'x'.repeat(4000) })).toEqual({});
+  expect(parseSettingsPatch({ collapsedSections: ['Вид'] })).toEqual({});
+  expect(parseSettingsPatch({ collapsedSections: 'Вид\nВид' })).toEqual({ collapsedSections: 'Вид' });
 });

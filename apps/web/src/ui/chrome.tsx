@@ -20,13 +20,16 @@ export function FileHeader(props: {
   open: boolean;
   onOpen: (open: boolean) => void;
   onBack?: () => void;
+  /** Панель свёрнута в полосу: остаются логотип с меню и кнопка разворота. */
+  collapsed?: boolean;
+  onCollapse?: (collapsed: boolean) => void;
 }) {
   const ed = useEditor();
   const [editing, setEditing] = createSignal(false);
   let file!: HTMLDivElement;
   let logo!: HTMLButtonElement;
   return (
-    <div class="fe-panel-head">
+    <div class="fe-panel-head" classList={{ 'fe-panel-head--rail': props.collapsed }}>
       <button
         ref={logo}
         class="fe-logo"
@@ -40,6 +43,7 @@ export function FileHeader(props: {
         <span class="fe-panel-head__mark" aria-hidden="true" />
         <Caret />
       </button>
+      <Show when={!props.collapsed}>
       <div ref={file} class="fe-panel-head__file">
         <Show
           when={editing()}
@@ -78,6 +82,10 @@ export function FileHeader(props: {
             <Icon name="back" />
           </button>
         )}
+      </Show>
+      </Show>
+      <Show when={props.onCollapse}>
+        {(toggle) => <PanelToggle side="left" collapsed={!!props.collapsed} onToggle={toggle()} />}
       </Show>
       <Show when={props.open}>
         <Menu label="Главное меню" items={props.menu()} anchor={logo} search={props.search} recents onClose={() => props.onOpen(false)} />
@@ -145,6 +153,23 @@ export function DesignHeader() {
   );
 }
 
+/** Кнопка в шапке панели: свернуть в полосу или развернуть, как в Figma UI3. Элемент
+ * один и тот же в обоих состояниях: фокус с него не теряется. */
+export function PanelToggle(props: { side: 'left' | 'right'; collapsed: boolean; onToggle: (collapsed: boolean) => void }) {
+  const name = () => `${props.collapsed ? 'Развернуть' : 'Свернуть'} ${props.side === 'left' ? 'левую' : 'правую'} панель`;
+  return (
+    <button
+      class="fe-tool fe-tool--small fe-tool--muted"
+      aria-label={name()}
+      aria-expanded={!props.collapsed}
+      data-tip={name()}
+      onClick={() => props.onToggle(!props.collapsed)}
+    >
+      <Icon name={props.side === 'left' ? 'panelLeft' : 'panelRight'} />
+    </button>
+  );
+}
+
 /** Край панели: перетаскивание меняет ширину, стрелки с клавиатуры — на 8 px. */
 export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWidth: (w: number) => void }) {
   const ed = useEditor();
@@ -200,14 +225,22 @@ export function ResizeEdge(props: { side: 'left' | 'right'; width: number; onWid
   );
 }
 
-export function Section(props: { title: string; children: JSX.Element; actions?: JSX.Element; muted?: boolean }) {
+/** Секция панели свойств: заголовок сворачивает её (спека подсистемы 2, раздел 10).
+ * `name` — под каким именем свёрнутость хранится, если заголовок меняется. */
+export function Section(props: { title: string; name?: string; children: JSX.Element; actions?: JSX.Element; muted?: boolean }) {
+  const ed = useEditor();
+  const name = () => props.name ?? props.title;
+  const collapsed = () => ed.sectionCollapsed?.(name()) ?? false;
   return (
     <section class="fe-section" aria-label={props.title}>
       <div class="fe-section__head" classList={{ 't-muted': props.muted }}>
-        <h2 class="fe-section__title">{props.title}</h2>
+        <button class="fe-section__toggle" aria-expanded={!collapsed()} onClick={() => ed.toggleSection?.(name())}>
+          <Icon name="expand" size={12} class={collapsed() ? '' : 'fe-rot90'} />
+          <h2 class="fe-section__title">{props.title}</h2>
+        </button>
         <div class="fe-section__actions">{props.actions}</div>
       </div>
-      {props.children}
+      <Show when={!collapsed()}>{props.children}</Show>
     </section>
   );
 }

@@ -8,7 +8,7 @@ import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMou
 import { detectPlatform } from '../core/core';
 import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
 import { boot, dismissSplash, isTestMode } from './boot';
-import { DesignHeader, FileHeader, ResizeEdge } from './chrome';
+import { DesignHeader, FileHeader, PanelToggle, ResizeEdge } from './chrome';
 import { buildContextMenu, type ContextTarget } from './context-menu';
 import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
@@ -19,7 +19,7 @@ import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
 import { QuickActions } from './quick-actions';
-import { diffSettings, resolveTheme, type Settings, type ThemeChoice } from './settings';
+import { diffSettings, parseSections, resolveTheme, type Settings, type ThemeChoice } from './settings';
 import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
 import { ShortcutsPanel } from './shortcuts-panel';
@@ -83,6 +83,9 @@ export function App(props: AppProps) {
   const [left, setLeft] = createSignal(saved.leftWidth);
   const [right, setRight] = createSignal(saved.rightWidth);
   const [pagesOpen, setPagesOpen] = createSignal(saved.pagesOpen);
+  const [leftCollapsed, setLeftCollapsed] = createSignal(saved.leftCollapsed);
+  const [rightCollapsed, setRightCollapsed] = createSignal(saved.rightCollapsed);
+  const [sections, setSections] = createSignal<ReadonlySet<string>>(new Set(parseSections(saved.collapsedSections)));
   const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(saved.theme);
   const [pixelSnap, setPixelSnap] = createSignal(saved.pixelSnap);
   // Настройка вида: команду выполняет ядро (событие `view`), хранит — интерфейс.
@@ -207,6 +210,9 @@ export function App(props: AppProps) {
       leftWidth: left(),
       rightWidth: right(),
       pagesOpen: pagesOpen(),
+      leftCollapsed: leftCollapsed(),
+      rightCollapsed: rightCollapsed(),
+      collapsedSections: [...sections()].join('\n'),
       recentCommands: recent().join(' '),
     };
     clearTimeout(writeTimer);
@@ -321,6 +327,13 @@ export function App(props: AppProps) {
         }
         ed.uiCommand = uiCommand;
         ed.noteRecent = (key) => setRecent((r) => pushRecent(r, key));
+        ed.sectionCollapsed = (name) => sections().has(name);
+        ed.toggleSection = (name) =>
+          setSections((list) => {
+            const next = new Set(list);
+            if (!next.delete(name)) next.add(name);
+            return next;
+          });
         ed.contextMenu = (target: ContextTarget, at, label, onAction) => {
           setContext(null);
           pendingContext = { at, label, onAction };
@@ -589,6 +602,9 @@ export function App(props: AppProps) {
         break;
       case 'ui.export':
         // «Экспорт…»: к кнопке секции экспорта панели свойств (настройки — там же).
+        // Панель и секция могли быть свёрнуты: сигналы вне пачки обновляют сразу.
+        setRightCollapsed(false);
+        setSections((list) => new Set([...list].filter((n) => n !== 'Экспорт')));
         document.querySelector<HTMLElement>('[data-export-run]')?.focus();
         break;
       case 'ui.all_files':
@@ -630,7 +646,7 @@ export function App(props: AppProps) {
     <div
       class="fe-app"
       classList={{ 'fe-app--bare': store.state.uiHidden }}
-      style={{ '--left-w': `${left()}px`, '--right-w': `${right()}px` }}
+      style={{ '--left-w': leftCollapsed() ? 'var(--panel-rail)' : `${left()}px`, '--right-w': rightCollapsed() ? 'var(--panel-rail)' : `${right()}px` }}
     >
       <main class="fe-stage">
         <canvas
@@ -676,15 +692,24 @@ export function App(props: AppProps) {
                 open={mainMenu()}
                 onOpen={setMainMenu}
                 onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
+                collapsed={leftCollapsed()}
+                onCollapse={setLeftCollapsed}
               />
-              <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
-              <LayersPanel />
-              <ResizeEdge side="left" width={left()} onWidth={setLeft} />
+              <Show when={!leftCollapsed()}>
+                <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
+                <LayersPanel />
+                <ResizeEdge side="left" width={left()} onWidth={setLeft} />
+              </Show>
             </aside>
             <aside class="fe-side fe-side--right" aria-label="Свойства">
-              <DesignHeader />
-              <PropertiesPanel theme={theme()} />
-              <ResizeEdge side="right" width={right()} onWidth={setRight} />
+              <div class="fe-side__toggle">
+                <PanelToggle side="right" collapsed={rightCollapsed()} onToggle={setRightCollapsed} />
+              </div>
+              <Show when={!rightCollapsed()}>
+                <DesignHeader />
+                <PropertiesPanel theme={theme()} />
+                <ResizeEdge side="right" width={right()} onWidth={setRight} />
+              </Show>
             </aside>
             <TooltipLayer />
             <Show when={shortcuts()}>

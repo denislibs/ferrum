@@ -123,7 +123,7 @@ function PositionSection(props: {
   const h = () => props.val(s().h, live().h);
   const r = () => props.val(s().rotation, live().rotation);
   return (
-    <Section title={frame() ? 'Фрейм' : 'Положение'}>
+    <Section title={frame() ? 'Фрейм' : 'Положение'} name="Положение">
       <Show when={frame() && s().count === 1}>
         <button
           class="fe-select"

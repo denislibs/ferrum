@@ -8,7 +8,7 @@ import { MAX_FONT_BYTES, MAX_NAME_CHARS, MAX_OPEN_BYTES, MAX_SETTINGS_BYTES, too
 
 /** Поля настроек пользователя в хранилище `settings` — по ключу на поле: вкладки
  * пишут только свои изменения и не затирают чужие. Значения проверяет интерфейс. */
-export const SETTINGS_FIELDS = ['theme', 'pixelSnap', 'keymap', 'leftWidth', 'rightWidth', 'pagesOpen', 'filesView', 'recentCommands', 'rulers', 'guides'] as const;
+export const SETTINGS_FIELDS = ['theme', 'pixelSnap', 'keymap', 'leftWidth', 'rightWidth', 'pagesOpen', 'filesView', 'recentCommands', 'rulers', 'guides', 'leftCollapsed', 'rightCollapsed', 'collapsedSections'] as const;
 
 /** Запись о файле — без байтов: список читает только метаданные. Время — мс эпохи. */
 export interface FileMeta {

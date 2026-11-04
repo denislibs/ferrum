@@ -35,6 +35,23 @@
   border-bottom: 1px solid var(--line);
   flex: none;
 }
+/* Свёрнутая панель (спека подсистемы 2, раздел 10): всё в столбик. */
+.fe-panel-head--rail {
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+}
+.fe-side__toggle {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  width: var(--panel-rail);
+  height: var(--toolbar-height);
+  display: grid;
+  place-items: center;
+}
 .fe-panel-head__mark {
   width: 20px;
   height: 20px;
@@ -255,6 +272,24 @@
   align-items: center;
   justify-content: space-between;
   min-height: 24px;
+}
+/* Заголовок секции сворачивает её: стрелка и название — одна кнопка. */
+.fe-section__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  height: 24px;
+  margin-left: calc(-1 * var(--space-1));
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.fe-section__toggle:hover {
+  background: var(--surface-hover);
 }
 .fe-section__title {
   margin: 0;

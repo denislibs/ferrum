@@ -14,6 +14,8 @@
   --row-height: 28px;
   --toolbar-height: 44px;
   --panel-width: 248px;
+  /* Свёрнутая боковая панель: полоса с логотипом и кнопкой разворота. */
+  --panel-rail: 48px;
   --handle-size: 8px;
   --radius-sm: 4px;
   --radius-md: 6px;
