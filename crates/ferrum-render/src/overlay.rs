@@ -1,7 +1,7 @@
 //! Оверлеи поверх содержимого в экранных пикселях: пиксельная сетка, названия
-//! фреймов, подсветка наведения, рамка выделения мышью, линии привязки, рамка
-//! выделения с ручками, бейдж «W × H» и измерения расстояний с Alt. Толщины и
-//! размеры задаются в CSS-пикселях и умножаются на `devicePixelRatio`.
+//! фреймов, направляющие, подсветка наведения, рамка выделения мышью, линии привязки,
+//! рамка выделения с ручками, бейдж «W × H», измерения расстояний с Alt и линейки.
+//! Толщины и размеры задаются в CSS-пикселях и умножаются на `devicePixelRatio`.
 
 use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::shape::Geometry;
@@ -24,6 +24,16 @@ pub const LABEL_SIZE: f64 = 11.0;
 /// Штрих и промежуток пунктира направляющей измерения.
 pub const MEASURE_DASH: f64 = 4.0;
 pub const MEASURE_GAP: f64 = 3.0;
+/// Толщина линейки — CSS-пиксели (спека подсистемы 2, раздел 9).
+pub const RULER_SIZE: f64 = 20.0;
+/// Кегль делений линейки.
+const RULER_LABEL_SIZE: f64 = 10.0;
+/// Подписанные деления не ближе этого — CSS-пиксели.
+const RULER_MIN_GAP: f64 = 72.0;
+/// Мелкие деления не чаще этого — CSS-пиксели.
+const RULER_MIN_MINOR_GAP: f64 = 6.0;
+/// Наибольшее число делений за кадр по одной линейке: страховка от чисел камеры.
+const RULER_MAX_TICKS: usize = 2048;
 
 /// Цвета оверлеев из дизайн-системы Ferrum.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +52,12 @@ pub struct OverlayTheme {
     pub pixel_grid: Rgba,
     /// Линии и плашки измерений с Alt (`danger`); текст плашки — `on_select`.
     pub measure: Rgba,
+    /// Фон линеек (`surface`), деления и подписи (`ink-muted`), граница (`line`).
+    pub ruler: Rgba,
+    pub ruler_ink: Rgba,
+    pub ruler_line: Rgba,
+    /// Направляющие.
+    pub guide: Rgba,
 }
 
 fn hex(rgb: u32) -> Rgba {
@@ -59,6 +75,10 @@ impl OverlayTheme {
             snap: hex(0xf24822),
             pixel_grid: Rgba::from_rgba8(255, 255, 255, 26),
             measure: hex(0xff7a7a),
+            ruler: hex(RULER_DARK[0]),
+            ruler_ink: hex(RULER_DARK[1]),
+            ruler_line: hex(RULER_DARK[2]),
+            guide: hex(0xff5a5f),
         }
     }
 
@@ -72,6 +92,10 @@ impl OverlayTheme {
             snap: hex(0xf24822),
             pixel_grid: Rgba::from_rgba8(0, 0, 0, 20),
             measure: hex(0xc22c2c),
+            ruler: hex(RULER_LIGHT[0]),
+            ruler_ink: hex(RULER_LIGHT[1]),
+            ruler_line: hex(RULER_LIGHT[2]),
+            guide: hex(0xe5313a),
         }
     }
 }
@@ -154,6 +178,29 @@ impl PartialEq for VectorEditOverlay {
     }
 }
 
+/// Линейки: начало отсчёта и выделение полосой — в мировых координатах.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RulersOverlay {
+    pub origin: Point,
+    /// Рамка выделения: её стороны подсвечены на линейках.
+    pub band: Option<Rect>,
+}
+
+/// Направляющая в мировых координатах. Бесконечная (страницы) рисуется через весь
+/// холст, остальные — отрезком `line` (фрейм: от края до края).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GuideMark {
+    pub line: Line,
+    pub infinite: bool,
+}
+
+/// Тянущаяся направляющая: линия и значение на плашке (от начала отсчёта линеек).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActiveGuide {
+    pub mark: GuideMark,
+    pub value: f64,
+}
+
 /// Что показать поверх содержимого. Заполняет редактор (этап 3).
 #[derive(Debug, Clone)]
 pub struct Overlay {
@@ -174,6 +221,12 @@ pub struct Overlay {
     pub text_edit: Option<TextEditOverlay>,
     /// Правка вектора: сеть, точки и ручки.
     pub vector_edit: Option<VectorEditOverlay>,
+    /// Линейки (спека подсистемы 2, раздел 9); `None` — выключены.
+    pub rulers: Option<RulersOverlay>,
+    /// Направляющие страницы и фреймов.
+    pub guides: Vec<GuideMark>,
+    /// Направляющая, которую сейчас тянут.
+    pub active_guide: Option<ActiveGuide>,
 }
 
 impl Default for Overlay {
@@ -189,9 +242,16 @@ impl Default for Overlay {
             measurements: Vec::new(),
             text_edit: None,
             vector_edit: None,
+            rulers: None,
+            guides: Vec::new(),
+            active_guide: None,
         }
     }
 }
+
+/// Цвета линеек: как `--surface`, `--ink-muted` и `--line` темы интерфейса.
+const RULER_DARK: [u32; 3] = [0x232120, 0xa9a39c, 0x3b3835];
+const RULER_LIGHT: [u32; 3] = [0xffffff, 0x655f58, 0xe4e1dd];
 
 /// Координата тонкой линии, выровненная по пикселям: линия нечётной толщины
 /// проходит через центры пикселей, чётной — по их границам. Иначе линия в 1 px
@@ -237,6 +297,7 @@ pub(crate) fn draw(
     if overlay.frame_labels {
         frame_labels(backend, text, scene, camera, overlay);
     }
+    guides(backend, view, dpr, theme.guide, overlay);
     // Скрытый узел (или узел внутри скрытого) на холсте не виден — и обводки
     // наведения у него нет, даже если редактор передал его из панели слоёв.
     let hover = overlay.hover.filter(|h| {
@@ -279,6 +340,285 @@ pub(crate) fn draw(
     }
     selection(backend, text, scene, camera, overlay);
     measurements(backend, text, camera, overlay);
+    if let Some(r) = &overlay.rulers {
+        rulers(backend, text, camera, theme, r);
+    }
+    if let Some(a) = &overlay.active_guide {
+        active_guide_badge(backend, text, view, dpr, theme, a);
+    }
+}
+
+/// Концы линии на экране: у бесконечной — от края до края холста по её оси.
+fn guide_segment(m: &GuideMark, view: Affine, screen: Rect, dpr: f64) -> Option<(Point, Point)> {
+    let (a, b) = (view * m.line.p0, view * m.line.p1);
+    if !m.infinite {
+        // Оси параллельны — линия выравнивается по пикселям; повёрнутый фрейм — как есть.
+        let (a, b) = if a.x == b.x {
+            let x = crisp(a.x, dpr);
+            (Point::new(x, a.y), Point::new(x, b.y))
+        } else if a.y == b.y {
+            let y = crisp(a.y, dpr);
+            (Point::new(a.x, y), Point::new(b.x, y))
+        } else {
+            (a, b)
+        };
+        return visible(a, b, screen);
+    }
+    if a.x == b.x {
+        let x = crisp(a.x, dpr);
+        (x >= screen.x0 && x <= screen.x1)
+            .then_some((Point::new(x, screen.y0), Point::new(x, screen.y1)))
+    } else {
+        let y = crisp(a.y, dpr);
+        (y >= screen.y0 && y <= screen.y1)
+            .then_some((Point::new(screen.x0, y), Point::new(screen.x1, y)))
+    }
+}
+
+/// Направляющие. Параллельные осям — прямоугольниками: штрих всех сразу одним путём
+/// на тысячах линий стоил десятки миллисекунд, заливка выровненного прямоугольника
+/// ничего не сглаживает. Косые (повёрнутый фрейм) — штрихом.
+fn guides(
+    backend: &mut impl RenderBackend,
+    view: Affine,
+    dpr: f64,
+    color: Rgba,
+    overlay: &Overlay,
+) {
+    if overlay.guides.is_empty() && overlay.active_guide.is_none() {
+        return;
+    }
+    let (w, h) = backend.size();
+    let screen = Rect::new(0.0, 0.0, w as f64, h as f64);
+    let half = dpr / 2.0;
+    let mut slanted = BezPath::new();
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(color);
+    let active = overlay.active_guide.as_ref().map(|a| &a.mark);
+    for m in overlay.guides.iter().chain(active) {
+        let Some((a, b)) = guide_segment(m, view, screen, dpr) else {
+            continue;
+        };
+        if a.x == b.x {
+            backend.fill_rect(&Rect::new(
+                a.x - half,
+                a.y.min(b.y),
+                a.x + half,
+                a.y.max(b.y),
+            ));
+        } else if a.y == b.y {
+            backend.fill_rect(&Rect::new(
+                a.x.min(b.x),
+                a.y - half,
+                a.x.max(b.x),
+                a.y + half,
+            ));
+        } else {
+            slanted.move_to(a);
+            slanted.line_to(b);
+        }
+    }
+    if !slanted.elements().is_empty() {
+        backend.stroke_path(&slanted, &Stroke::new(dpr));
+    }
+}
+
+/// Шаг подписанных делений в единицах мира при зуме `zoom` и шаг мелких (`None` —
+/// мелких нет): 1, 2, 5, 10, 20, 50… Деления не бывают чаще единицы мира.
+pub fn ruler_steps(zoom: f64) -> (f64, Option<f64>) {
+    if !(zoom.is_finite() && zoom > 0.0) {
+        return (1.0, None);
+    }
+    let want = (RULER_MIN_GAP / zoom).max(1.0);
+    let mut decade = 10f64.powf(want.log10().floor());
+    let mut step = None;
+    // Запас одного десятка: `log10` у точных степеней бывает на волос меньше.
+    for _ in 0..2 {
+        for k in [1.0, 2.0, 5.0] {
+            if step.is_none() && k * decade >= want {
+                step = Some((k, k * decade));
+            }
+        }
+        decade *= 10.0;
+    }
+    let (k, step) = step.unwrap_or((1.0, want));
+    let parts = if k == 2.0 { 4.0 } else { 5.0 };
+    // 2 делится на 4 не нацело: мелкие только целые.
+    let minor = step / parts;
+    let minor = if minor >= 1.0 && minor.fract() == 0.0 {
+        Some(minor)
+    } else if step > 1.0 && (step / 2.0).fract() == 0.0 {
+        Some(step / 2.0)
+    } else {
+        None
+    };
+    (step, minor.filter(|m| m * zoom >= RULER_MIN_MINOR_GAP))
+}
+
+/// Подпись деления. `ceil` от малого отрицательного даёт −0: подписью был бы «-0».
+fn tick_label(v: f64) -> String {
+    format_size(v + 0.0)
+}
+
+/// Первое кратное `step` не меньше `lo` и число кратных до `hi` (не больше предела).
+fn ticks(lo: f64, hi: f64, step: f64) -> (f64, usize) {
+    let first = (lo / step).ceil() * step;
+    let n = ((hi - first) / step).floor();
+    let n = if n.is_finite() && n >= 0.0 {
+        (n as usize + 1).min(RULER_MAX_TICKS)
+    } else {
+        0
+    };
+    (first, n)
+}
+
+/// Линейки сверху и слева: полоса выделения, деления и подписи — в том же кадре,
+/// отдельным слоем поверх оверлеев. Подписи — один размер, кэш `TextEngine`.
+fn rulers(
+    backend: &mut impl RenderBackend,
+    text: &mut TextEngine,
+    camera: &Camera,
+    theme: &OverlayTheme,
+    r: &RulersOverlay,
+) {
+    let dpr = camera.effective_dpr();
+    let size = RULER_SIZE * dpr;
+    let (w, h) = backend.size();
+    let (w, h) = (w as f64, h as f64);
+    let view = camera.view_transform();
+    let scale = view.as_coeffs()[0];
+    let tx = view.as_coeffs()[4];
+    let ty = view.as_coeffs()[5];
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(theme.ruler);
+    backend.fill_rect(&Rect::new(0.0, 0.0, w, size));
+    backend.fill_rect(&Rect::new(0.0, size, size, h));
+
+    if let Some(b) = r.band {
+        backend.set_color(theme.select.multiply_alpha(0.25));
+        let (x0, x1) = (tx + b.x0 * scale, tx + b.x1 * scale);
+        let (y0, y1) = (ty + b.y0 * scale, ty + b.y1 * scale);
+        if x1 >= size && x0 <= w {
+            backend.fill_rect(&Rect::new(x0.max(size), 0.0, x1.min(w), size));
+        }
+        if y1 >= size && y0 <= h {
+            backend.fill_rect(&Rect::new(0.0, y0.max(size), size, y1.min(h)));
+        }
+    }
+
+    let zoom = camera.zoom();
+    let (step, minor) = ruler_steps(zoom);
+    // Значения делений: мир минус начало отсчёта. Видимое — на столько-то правее
+    // линейки слева и ниже линейки сверху.
+    let lo_x = (size - tx) / scale - r.origin.x;
+    let hi_x = (w - tx) / scale - r.origin.x;
+    let lo_y = (size - ty) / scale - r.origin.y;
+    let hi_y = (h - ty) / scale - r.origin.y;
+    let to_x = |v: f64| crisp(tx + (v + r.origin.x) * scale, dpr);
+    let to_y = |v: f64| crisp(ty + (v + r.origin.y) * scale, dpr);
+
+    let mut lines = BezPath::new();
+    // Граница линеек.
+    let edge = crisp(size - dpr, dpr);
+    lines.move_to((size, edge));
+    lines.line_to((w, edge));
+    lines.move_to((edge, size));
+    lines.line_to((edge, h));
+    backend.set_color(theme.ruler_line);
+    backend.stroke_path(&lines, &Stroke::new(dpr));
+
+    let mut lines = BezPath::new();
+    let (major_len, minor_len) = (6.0 * dpr, 3.0 * dpr);
+    if let Some(m) = minor {
+        let (first, n) = ticks(lo_x, hi_x, m);
+        for i in 0..n {
+            let x = to_x(first + i as f64 * m);
+            lines.move_to((x, size - minor_len));
+            lines.line_to((x, size));
+        }
+        let (first, n) = ticks(lo_y, hi_y, m);
+        for i in 0..n {
+            let y = to_y(first + i as f64 * m);
+            lines.move_to((size - minor_len, y));
+            lines.line_to((size, y));
+        }
+    }
+    let (first_x, nx) = ticks(lo_x, hi_x, step);
+    for i in 0..nx {
+        let x = to_x(first_x + i as f64 * step);
+        lines.move_to((x, size - major_len));
+        lines.line_to((x, size));
+    }
+    let (first_y, ny) = ticks(lo_y, hi_y, step);
+    for i in 0..ny {
+        let y = to_y(first_y + i as f64 * step);
+        lines.move_to((size - major_len, y));
+        lines.line_to((size, y));
+    }
+    backend.set_color(theme.ruler_ink);
+    backend.stroke_path(&lines, &Stroke::new(dpr));
+
+    let label_size = RULER_LABEL_SIZE * dpr;
+    let gap = 3.0 * dpr;
+    let room = RULER_MIN_GAP * dpr;
+    for i in 0..nx {
+        let v = first_x + i as f64 * step;
+        if let Some(l) = text.label(&tick_label(v), label_size, 400, room) {
+            l.draw(
+                backend,
+                Point::new(to_x(v) + gap, size - 8.0 * dpr),
+                theme.ruler_ink,
+            );
+        }
+    }
+    for i in 0..ny {
+        let v = first_y + i as f64 * step;
+        if let Some(l) = text.label(&tick_label(v), label_size, 400, room) {
+            // Слева подписи идут снизу вверх, как в Figma.
+            l.draw_rotated(
+                backend,
+                Point::new(size - 8.0 * dpr, to_y(v) - gap),
+                theme.ruler_ink,
+            );
+        }
+    }
+    backend.set_transform(Affine::IDENTITY);
+}
+
+/// Плашка значения у тянущейся направляющей: на линейке, если она включена, иначе
+/// у края холста.
+fn active_guide_badge(
+    backend: &mut impl RenderBackend,
+    text: &mut TextEngine,
+    view: Affine,
+    dpr: f64,
+    theme: &OverlayTheme,
+    a: &ActiveGuide,
+) {
+    let Some(label) = text.label(&format_size(a.value), LABEL_SIZE * dpr, 500, 200.0 * dpr) else {
+        return;
+    };
+    let p = view * a.mark.line.p0;
+    let vertical = a.mark.line.p0.x == a.mark.line.p1.x;
+    let top = if vertical {
+        2.0 * dpr
+    } else {
+        p.y - badge_height(&label, dpr) / 2.0
+    };
+    let center = if vertical {
+        p.x
+    } else {
+        RULER_SIZE * dpr + label.width / 2.0 + 8.0 * dpr
+    };
+    badge(
+        backend,
+        &label,
+        dpr,
+        center,
+        top,
+        theme.guide,
+        theme.on_select,
+    );
 }
 
 /// Правка текста: контур рамки, выделение, подчёркивание IME и курсор в 1 CSS px.
@@ -1082,6 +1422,14 @@ mod tests {
         assert!(dashes(Point::new(0.0, 500.0), Point::new(90.0, 500.0), 1.0, screen).is_empty());
         assert!(dashes(Point::new(5.0, 5.0), Point::new(5.0, 5.0), 1.0, screen).is_empty());
         assert!(dashes(Point::new(f64::NAN, 5.0), Point::new(5.0, 5.0), 1.0, screen).is_empty());
+    }
+
+    #[test]
+    fn tick_label_has_no_negative_zero() {
+        let (first, _) = ticks(-50.0, 300.0, 100.0);
+        assert!(first == 0.0 && first.is_sign_negative(), "сам ceil даёт −0");
+        assert_eq!(tick_label(first), "0");
+        assert_eq!(tick_label(-100.0), "-100");
     }
 
     #[test]

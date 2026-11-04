@@ -94,6 +94,10 @@ pub enum CommandId {
     Save,
     /// Пиксельная сетка при зуме от 800% (Shift+', как в Figma).
     PixelGrid,
+    /// Линейки (Shift+R, как в Figma).
+    ViewRulers,
+    /// Направляющие (Shift+G, спека подсистемы 2, раздел 9): видны при линейках.
+    ViewGuides,
     /// Войти в правку выделенного: текст — правка текста, вектор и фигура — правка
     /// вектора (как Enter).
     EditObject,
@@ -789,6 +793,27 @@ pub const COMMANDS: &[Command] = &[
         "Пиксельная сетка",
         &["сетка", "пиксели", "pixel grid", "grid"],
         &["Shift+Quote"],
+    )
+    .toggle(),
+    // Как в Figma: «Rulers» — Shift+R.
+    cmd(
+        C::ViewRulers,
+        "view.rulers",
+        G::View,
+        "Линейки",
+        &["линейка", "деления", "rulers", "ruler"],
+        &["Shift+KeyR"],
+    )
+    .toggle(),
+    // В справке Figma отдельного сочетания направляющих линеек нет (их прячет
+    // Shift+R); Shift+G — «Layout guides» там же, и в раскладке Ferrum свободно.
+    cmd(
+        C::ViewGuides,
+        "view.guides",
+        G::View,
+        "Направляющие",
+        &["гайды", "линии", "guides", "guide"],
+        &["Shift+KeyG"],
     )
     .toggle(),
     // Enter — физическая клавиша правки (как Esc у жеста); в таблице — для меню

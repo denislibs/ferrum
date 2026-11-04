@@ -14,6 +14,7 @@ mod editor;
 pub mod find;
 mod flatten;
 pub mod geometry;
+mod guides;
 pub mod input;
 pub mod keymap;
 pub mod measure;

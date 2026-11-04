@@ -877,6 +877,9 @@ impl Core {
                     self.dirty = true;
                 }
                 EditorEvent::PagesChanged => self.ui.pages = true,
+                EditorEvent::ViewChanged { rulers, guides } => {
+                    self.events.push(CoreEvent::View { rulers, guides })
+                }
                 EditorEvent::Clipboard(bytes) => self.events.push(CoreEvent::Clipboard {
                     bytes: ByteBuf::from(bytes),
                     plain: None,

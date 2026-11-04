@@ -79,6 +79,8 @@ fn toggles_are_exactly_the_checkable_commands() {
             C::BooleanExclude,
             C::ToggleUi,
             C::PixelGrid,
+            C::ViewRulers,
+            C::ViewGuides,
             C::UiPixelSnap,
             C::UiThemeDark,
             C::UiThemeLight,

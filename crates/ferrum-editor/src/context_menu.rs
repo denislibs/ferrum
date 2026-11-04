@@ -158,6 +158,8 @@ impl Editor {
                 S,
                 I(C::SelectAll),
                 I(C::ZoomToFit),
+                S,
+                I(C::ViewRulers),
             ];
         }
         let mut items = vec![

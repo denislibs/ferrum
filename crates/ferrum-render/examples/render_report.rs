@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 use ferrum_doc::container::{decode, encode};
 use ferrum_doc::fixture::fill;
 use ferrum_doc::{Document, NodeId, NodeKind, PageId, PropsPatch};
-use ferrum_render::{Camera, CpuBackend, NoImages, Overlay, Renderer, TextEngine, LABEL_SIZE};
+use ferrum_render::{
+    Camera, CpuBackend, GuideMark, NoImages, Overlay, Renderer, RulersOverlay, TextEngine,
+    LABEL_SIZE,
+};
 use ferrum_scene::Scene;
 use kurbo::{Point, Size};
 
@@ -637,6 +640,94 @@ fn boolean_section(report: &mut Report) {
 /// Экспорт SVG и PDF (подсистема 3, этап 5): SVG страницы из 10 000 узлов
 /// (фреймы по 100: фрейм + 99 фигур) и PDF страницы с текстом и вектором в
 /// 100 000 точек — в worker'е, без замирания интерфейса; цель — секунда.
+/// Кадр с линейками и без них (спека подсистемы 2, раздел 12): вид каждый кадр
+/// сдвигается, поэтому подписи делений меняются; замеры чередуются, чтобы загрузка
+/// машины легла на обе стороны поровну. Самый тяжёлый случай — экран 2×.
+fn rulers_section(report: &mut Report, scene: &Scene, base: &Camera) {
+    const RUNS: usize = 41;
+    for dpr in [1.0, 2.0] {
+        let mut camera = Camera::new(VIEWPORT, dpr);
+        camera.set_zoom(base.zoom());
+        camera.set_center(base.center());
+        let (w, h) = camera.device_size();
+        let mut backend = CpuBackend::new(w, h);
+        let mut renderer = Renderer::new();
+        let plain = Overlay::default();
+        let mut with = Overlay {
+            rulers: Some(RulersOverlay {
+                origin: Point::new(40.0, 40.0),
+                band: Some(kurbo::Rect::new(3000.0, 1800.0, 3400.0, 2100.0)),
+            }),
+            ..Default::default()
+        };
+        renderer.render(&mut backend, scene, &camera, &plain, &NoImages, None);
+        renderer.render(&mut backend, scene, &camera, &with, &NoImages, None);
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        for i in 0..RUNS {
+            camera.pan_by(kurbo::Vec2::new(if i % 2 == 0 { 7.0 } else { -3.0 }, 2.0));
+            for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                backend.reset(w, h);
+                let t = Instant::now();
+                renderer.render(&mut backend, scene, &camera, overlay, &NoImages, None);
+                runs.push(t.elapsed());
+            }
+        }
+        let (off, on) = (median(off), median(on));
+        report.gate(
+            if dpr == 1.0 {
+                "Кадр с линейками: прибавка к спискам кадра, 1920×1080"
+            } else {
+                "Кадр с линейками: прибавка к спискам кадра, 3840×2160 (2×)"
+            },
+            on.saturating_sub(off),
+            0.5,
+            "≤ 0.5 мс",
+        );
+        // Сами линейки на пустой сцене — с растеризацией CPU.
+        let empty = Scene::new();
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        for i in 0..RUNS {
+            camera.pan_by(kurbo::Vec2::new(if i % 2 == 0 { 7.0 } else { -3.0 }, 2.0));
+            for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                backend.reset(w, h);
+                let t = Instant::now();
+                renderer.render(&mut backend, &empty, &camera, overlay, &NoImages, None);
+                std::hint::black_box(backend.render());
+                runs.push(t.elapsed());
+            }
+        }
+        let extra = median(on).saturating_sub(median(off));
+        report.info(
+            if dpr == 1.0 {
+                "Кадр с линейками: прибавка с растеризацией CPU, 1920×1080"
+            } else {
+                "Кадр с линейками: прибавка с растеризацией CPU, 3840×2160 (2×)"
+            },
+            ms(extra),
+        );
+        // 2000 направляющих на экране — справочно.
+        with.guides = (0..2000)
+            .map(|i| GuideMark {
+                line: kurbo::Line::new((i as f64 * 3.0, 0.0), (i as f64 * 3.0, 1.0)),
+                infinite: true,
+            })
+            .collect();
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        for _ in 0..RUNS {
+            for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                backend.reset(w, h);
+                let t = Instant::now();
+                renderer.render(&mut backend, &empty, &camera, overlay, &NoImages, None);
+                runs.push(t.elapsed());
+            }
+        }
+        report.info(
+            "Кадр с линейками и 2000 направляющими: прибавка к спискам кадра",
+            ms(median(on).saturating_sub(median(off))),
+        );
+    }
+}
+
 fn export_section(report: &mut Report) {
     use ferrum_render::{ExportBudget, SvgOptions};
     use std::sync::Arc;
@@ -1081,6 +1172,7 @@ fn main() {
         "Типичный вьюпорт: растеризация CPU 1920×1080",
         ms(t.elapsed()),
     );
+    rulers_section(&mut report, &scene, &camera);
 
     // Вся страница при сильном отдалении: LOD и растровый кэш фреймов. Кэш
     // строится по `RASTER_BUILD_TIME_PER_FRAME` за кадр (не больше

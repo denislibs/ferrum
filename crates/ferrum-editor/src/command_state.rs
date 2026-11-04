@@ -205,6 +205,9 @@ impl Editor {
             }
             C::ToggleUi => (true, checked(self.settings.ui_hidden)),
             C::PixelGrid => (true, checked(self.settings.pixel_grid)),
+            C::ViewRulers => (true, checked(self.settings.rulers)),
+            // Как в Figma, без линеек направляющих не видно — пункт серый.
+            C::ViewGuides => (self.settings.rulers, checked(self.settings.guides)),
             C::EditObject => (edit && !text && !vector && f.editable, None),
             C::TextBold
             | C::TextItalic

@@ -193,3 +193,32 @@ fn page_menu_and_duplicate_page() {
     assert_eq!(list.len(), 3);
     assert_eq!(current, list[1].id);
 }
+
+#[test]
+fn rulers_setting_goes_through_set_view_and_the_command_reports_back() {
+    let mut core = demo(10);
+    core.command(Command::SetView {
+        rulers: Some(true),
+        guides: None,
+    });
+    let ev = core.take_events();
+    assert!(
+        !ev.iter().any(|e| matches!(e, CoreEvent::View { .. })),
+        "настройка пришла от интерфейса"
+    );
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        CoreEvent::CommandStates { changed } if changed.iter().any(|s| s.key == "view.rulers" && s.checked == Some(true))
+    )));
+    core.command(Command::Execute {
+        command: "view.rulers".into(),
+    });
+    let ev = core.take_events();
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        CoreEvent::View {
+            rulers: false,
+            guides: true
+        }
+    )));
+}

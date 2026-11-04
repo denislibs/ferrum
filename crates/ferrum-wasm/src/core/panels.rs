@@ -678,6 +678,7 @@ impl Core {
                 s.pixel_snap = pixel_snap;
                 self.editor.set_settings(s);
             }
+            Command::SetView { rulers, guides } => self.editor.set_view(rulers, guides),
             // Команды этапа 4 разбирает `Core::command`. Список полный, без `_`:
             // новая команда без ветки здесь — ошибка сборки, а не молчаливый пропуск.
             Command::Open { .. }

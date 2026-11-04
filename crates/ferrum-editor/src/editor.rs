@@ -55,6 +55,10 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Интерфейс скрыт (Ctrl/Cmd+\): отметка у «Скрыть интерфейс».
     pub ui_hidden: bool,
+    /// Линейки (Shift+R): настройка вида, хранит её интерфейс. По умолчанию выключены.
+    pub rulers: bool,
+    /// Направляющие (Shift+G): видны при включённых линейках. По умолчанию включены.
+    pub guides: bool,
 }
 
 /// Тема, которую выбрал пользователь: тёмная, светлая или как в системе.
@@ -75,6 +79,8 @@ impl Settings {
             pixel_grid: true,
             theme: ThemeChoice::Dark,
             ui_hidden: false,
+            rulers: false,
+            guides: true,
         }
     }
 }
@@ -116,6 +122,11 @@ pub enum EditorEvent {
     SaveRequested,
     /// Вызвана команда интерфейса (`ui.*`): её выполняет основной поток.
     UiCommand(CommandId),
+    /// Команда сменила показ линеек или направляющих: интерфейс сохраняет настройку.
+    ViewChanged {
+        rulers: bool,
+        guides: bool,
+    },
     /// Изменились состояния команд (доступна, отмечена) — только изменившиеся.
     CommandStates(Vec<(CommandId, CommandState)>),
     /// Сообщение об ошибке для пользователя.
@@ -160,6 +171,11 @@ struct FrameKey {
     tool: ToolOverlay,
     theme: OverlayTheme,
     pixel_grid: bool,
+    /// Линейки и направляющие: начало отсчёта и полоса зависят от сцены и выделения,
+    /// они уже в ключе; у линий — номер пересчёта.
+    rulers: bool,
+    guides_shown: bool,
+    guides_revision: u64,
     /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
     measures: Vec<Measure>,
     /// Правка текста: курсор (с миганием), выделение, превью IME.
@@ -226,6 +242,9 @@ pub struct Editor {
     pub(crate) last_duplicate: Option<crate::actions::Duplicated>,
     /// Внутренний буфер «Копировать свойства».
     pub(crate) props_clip: Option<ferrum_doc::Props>,
+    /// Линии направляющих страницы (`guides.rs`).
+    pub(crate) guides: crate::guides::GuideCache,
+    pub(crate) rulers_cache: crate::guides::RulersCache,
 }
 
 /// Ставит сцене источник контуров глифов для текста в булевых группах — реестр
@@ -284,6 +303,9 @@ impl Editor {
                 tool: ToolOverlay::default(),
                 theme: theme.clone(),
                 pixel_grid: true,
+                rulers: false,
+                guides_shown: false,
+                guides_revision: 0,
                 measures: Vec::new(),
                 text: None,
                 vector: None,
@@ -323,6 +345,8 @@ impl Editor {
             last_paste: None,
             props_clip: None,
             last_duplicate: None,
+            guides: Default::default(),
+            rulers_cache: Default::default(),
         })
     }
 
@@ -528,6 +552,9 @@ impl Editor {
             measurements: self.measures.clone(),
             text_edit: text,
             vector_edit: vector,
+            rulers: self.rulers_overlay(),
+            guides: self.guide_marks(),
+            active_guide: None,
         }
     }
 
@@ -1168,6 +1195,7 @@ impl Editor {
         self.resync_vector_edit();
         self.sync_text_outlines();
         self.update_measures();
+        self.refresh_guides();
         let now = Seen {
             selection: self.selection.version(),
             tool: self.tool_kind(),
@@ -1181,6 +1209,9 @@ impl Editor {
                 tool: self.tool.overlay(),
                 theme: self.theme.clone(),
                 pixel_grid: self.settings.pixel_grid,
+                rulers: self.rulers_visible(),
+                guides_shown: self.guides_visible(),
+                guides_revision: self.guides.revision,
                 measures: self.measures.clone(),
                 text: self.text_overlay().map(|o| o.overlay),
                 vector: self.vector_overlay(),

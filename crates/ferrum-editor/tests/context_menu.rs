@@ -85,7 +85,8 @@ fn right_click_selects_an_unselected_node_and_keeps_a_selected_one() {
             "edit.paste",
             "edit.paste_over",
             "edit.select_all",
-            "view.fit_all"
+            "view.fit_all",
+            "view.rulers"
         ]
     );
     check_level(&empty);

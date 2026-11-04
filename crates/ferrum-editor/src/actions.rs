@@ -265,6 +265,14 @@ impl Editor {
             C::FlipHorizontal => self.mirror(Vec2::new(-1.0, 1.0)),
             C::FlipVertical => self.mirror(Vec2::new(1.0, -1.0)),
             C::PixelGrid => self.settings.pixel_grid = !self.settings.pixel_grid,
+            C::ViewRulers => {
+                self.settings.rulers = !self.settings.rulers;
+                self.push_view();
+            }
+            C::ViewGuides => {
+                self.settings.guides = !self.settings.guides;
+                self.push_view();
+            }
             C::EditObject => self.edit_object(),
             C::TextBold
             | C::TextItalic

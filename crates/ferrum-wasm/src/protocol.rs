@@ -762,6 +762,12 @@ pub enum Command {
     SetSettings {
         pixel_snap: bool,
     },
+    /// Показ линеек и направляющих (спека подсистемы 2, разделы 9 и 11): настройка
+    /// вида, не шаг истории. Нет поля — не менять.
+    SetView {
+        rulers: Option<bool>,
+        guides: Option<bool>,
+    },
     // ——— Подсистема 3, этап 1: шрифты ———
     /// Список шрифтов источника: вшитые (манифест сборки — его читает worker ядра)
     /// или системные (Chrome — `queryLocalFonts`, десктоп — сканирование каталогов).
@@ -1022,6 +1028,11 @@ pub enum CoreEvent {
     /// Выбрать файл изображения и прислать `PlaceImage`.
     RequestImage,
     ToggleUi,
+    /// Команда сменила показ линеек или направляющих: интерфейс сохраняет настройку.
+    View {
+        rulers: bool,
+        guides: bool,
+    },
     /// Сохранённый файл `.ferrum`.
     Saved {
         #[tsify(type = "Uint8Array")]
