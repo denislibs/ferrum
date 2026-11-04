@@ -514,6 +514,34 @@ pub enum ContextTarget {
     Page { id: String },
 }
 
+/// Чьи направляющие в `SetGuides`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum GuideOwnerDto {
+    Page { id: String },
+    Frame { id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum GuideAxisDto {
+    X,
+    Y,
+}
+
+/// Направляющая: ось и смещение.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(deny_unknown_fields)]
+pub struct GuideDto {
+    pub axis: GuideAxisDto,
+    pub offset: f64,
+}
+
 /// Команда основного потока worker'у.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(
@@ -761,6 +789,14 @@ pub enum Command {
     },
     SetSettings {
         pixel_snap: bool,
+    },
+    /// Направляющие страницы или фрейма верхнего уровня целиком (спека подсистемы 2,
+    /// раздел 11): превью — без шага, запись — один шаг, отмена — назад к документу.
+    /// Не больше 1000; смещение конечно и по модулю не больше 1e9; иначе — `Error`.
+    SetGuides {
+        owner: GuideOwnerDto,
+        guides: Vec<GuideDto>,
+        phase: EditPhase,
     },
     /// Показ линеек и направляющих (спека подсистемы 2, разделы 9 и 11): настройка
     /// вида, не шаг истории. Нет поля — не менять.

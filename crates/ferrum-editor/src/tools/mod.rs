@@ -168,6 +168,8 @@ pub struct Ctx<'a> {
     /// У правки вектора открыт незаписанный путь пера (проверка пролога
     /// `Editor::begin_doc_edit`).
     pub(crate) pen_open: bool,
+    /// Линии направляющих страницы: цели привязки в жестах.
+    pub(crate) guides: &'a crate::guides::GuideCache,
 }
 
 /// Исходящее: события для интерфейса, счётчики.
@@ -225,6 +227,15 @@ impl Ctx<'_> {
 
     pub(crate) fn view(&self) -> Rect {
         self.camera.visible_world_rect()
+    }
+
+    /// Направляющие как цели привязки: пустой список, если их не видно.
+    pub(crate) fn snap_guides(&self) -> std::sync::Arc<Vec<crate::guides::PlacedGuide>> {
+        if self.settings.rulers && self.settings.guides {
+            self.guides.lines.clone()
+        } else {
+            Default::default()
+        }
     }
 
     /// Свежий идентификатор черновика. Loro не выдаёт узлам пир `u64::MAX`

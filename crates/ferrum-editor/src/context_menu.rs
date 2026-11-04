@@ -70,7 +70,12 @@ impl Editor {
         }
         let items = match target {
             ContextTarget::Canvas(p) => {
-                let under = self.context_select_at(p);
+                // Над линейкой выбора нет: меню — по нынешнему выделению.
+                let under = if self.over_ruler(p).is_some() {
+                    None
+                } else {
+                    self.context_select_at(p)
+                };
                 self.node_menu(under, false)
             }
             ContextTarget::Layer(id) => {

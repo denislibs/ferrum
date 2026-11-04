@@ -176,6 +176,8 @@ struct FrameKey {
     rulers: bool,
     guides_shown: bool,
     guides_revision: u64,
+    /// Тянущаяся направляющая: положение, длина и значение на плашке.
+    active_guide: Option<ferrum_render::ActiveGuide>,
     /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
     measures: Vec<Measure>,
     /// Правка текста: курсор (с миганием), выделение, превью IME.
@@ -245,6 +247,12 @@ pub struct Editor {
     /// Линии направляющих страницы (`guides.rs`).
     pub(crate) guides: crate::guides::GuideCache,
     pub(crate) rulers_cache: crate::guides::RulersCache,
+    /// Протяжка направляющей из линейки или за неё саму.
+    pub(crate) guide_drag: Option<crate::guides::GuideDrag>,
+    /// Превью `SetGuides`: список владельца вместо его направляющих, пока жест идёт.
+    pub(crate) guides_preview: Option<(ferrum_doc::GuideOwner, Vec<ferrum_doc::Guide>)>,
+    /// Что под указателем без жеста: линейка или направляющая — курсор и нажатие.
+    pub(crate) guide_hover: Option<crate::guides::GuideHover>,
 }
 
 /// Ставит сцене источник контуров глифов для текста в булевых группах — реестр
@@ -306,6 +314,7 @@ impl Editor {
                 rulers: false,
                 guides_shown: false,
                 guides_revision: 0,
+                active_guide: None,
                 measures: Vec::new(),
                 text: None,
                 vector: None,
@@ -347,6 +356,9 @@ impl Editor {
             last_duplicate: None,
             guides: Default::default(),
             rulers_cache: Default::default(),
+            guide_drag: None,
+            guides_preview: None,
+            guide_hover: None,
         })
     }
 
@@ -471,6 +483,7 @@ impl Editor {
     pub fn is_busy(&self) -> bool {
         self.tool.is_busy()
             || self.pan.is_some()
+            || self.guide_drag.is_some()
             || self.vector_edit.as_ref().is_some_and(|v| v.drag.is_some())
     }
 
@@ -504,6 +517,8 @@ impl Editor {
     pub fn cursor(&self) -> Cursor {
         if self.pan.is_some() {
             Cursor::Grabbing
+        } else if let Some(c) = self.guide_cursor() {
+            c
         } else if self.text_edit.is_some() {
             // Рамка с ручками во время правки скрыта: ни Resize, ни Rotate.
             if self.text_hover {
@@ -532,6 +547,9 @@ impl Editor {
             }
             t.snap_lines = v.snap_lines.clone();
         }
+        if let Some(d) = &self.guide_drag {
+            t.snap_lines = d.lines.clone();
+        }
         let editing = text.is_some() || self.vector_edit.is_some();
         Overlay {
             theme: self.theme.clone(),
@@ -554,7 +572,7 @@ impl Editor {
             vector_edit: vector,
             rulers: self.rulers_overlay(),
             guides: self.guide_marks(),
-            active_guide: None,
+            active_guide: self.active_guide(),
         }
     }
 
@@ -573,6 +591,7 @@ impl Editor {
             out,
             tool,
             fonts,
+            guides,
             ..
         } = self;
         (
@@ -589,6 +608,7 @@ impl Editor {
                 settings,
                 out,
                 fonts,
+                guides,
             },
         )
     }
@@ -660,6 +680,10 @@ impl Editor {
                 if self.pan.is_some() {
                     return;
                 }
+                // Линейка и направляющая — раньше инструмента и правки.
+                if self.guide_press(&e) {
+                    return;
+                }
                 // Правка текста: нажатие в тексте ставит курсор; мимо — правка
                 // кончается, и нажатие достаётся инструменту.
                 if self.text_edit.is_some() && self.text_pointer_down(&e) {
@@ -674,31 +698,36 @@ impl Editor {
                 if self.tool.is_busy() {
                     self.cancel_gesture();
                 }
-                let (tool, mut cx) = self.split();
-                tool.pointer_down(&mut cx, &e);
-                // Двойной щелчок по тексту (или нажатие инструментом «Текст»):
-                // инструмент просит войти в правку.
-                if let Some((id, world)) = self.out.edit_text.take() {
-                    if self.tool.is_busy() {
-                        let (tool, mut cx) = self.split();
-                        tool.cancel(&mut cx);
-                    }
-                    // Инструмент «Текст» своё сделал — после правки снова «Перемещение».
-                    if self.tool.kind() == ToolKind::Text {
-                        self.set_tool(ToolKind::Move);
-                        self.selection.set(vec![id]);
-                    }
-                    self.start_text_edit(id, EnterAt::Point(world));
-                }
-                // Двойной щелчок по вектору или фигуре — правка вектора.
-                if let Some(id) = self.out.edit_vector.take() {
-                    if self.tool.is_busy() {
-                        let (tool, mut cx) = self.split();
-                        tool.cancel(&mut cx);
-                    }
-                    self.start_vector_edit(id);
-                }
+                self.press_tool(&e);
             }
+        }
+    }
+
+    /// Нажатие достаётся инструменту.
+    pub(crate) fn press_tool(&mut self, e: &PointerEvent) {
+        let (tool, mut cx) = self.split();
+        tool.pointer_down(&mut cx, e);
+        // Двойной щелчок по тексту (или нажатие инструментом «Текст»):
+        // инструмент просит войти в правку.
+        if let Some((id, world)) = self.out.edit_text.take() {
+            if self.tool.is_busy() {
+                let (tool, mut cx) = self.split();
+                tool.cancel(&mut cx);
+            }
+            // Инструмент «Текст» своё сделал — после правки снова «Перемещение».
+            if self.tool.kind() == ToolKind::Text {
+                self.set_tool(ToolKind::Move);
+                self.selection.set(vec![id]);
+            }
+            self.start_text_edit(id, EnterAt::Point(world));
+        }
+        // Двойной щелчок по вектору или фигуре — правка вектора.
+        if let Some(id) = self.out.edit_vector.take() {
+            if self.tool.is_busy() {
+                let (tool, mut cx) = self.split();
+                tool.cancel(&mut cx);
+            }
+            self.start_vector_edit(id);
         }
     }
 
@@ -707,6 +736,14 @@ impl Editor {
         if let Some(mut hand) = self.pan.take() {
             hand.pointer_move(&mut self.ctx(), &e);
             self.pan = Some(hand);
+            return;
+        }
+        if self.guide_drag.is_some() {
+            self.guide_drag_move(&e);
+            return;
+        }
+        // Над линейкой инструмента нет: ни наведения, ни его курсора.
+        if self.ruler_hover_update(&e) {
             return;
         }
         if let Some(t) = &self.text_edit {
@@ -724,6 +761,7 @@ impl Editor {
         }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
+        self.guide_hover_update(&e);
     }
 
     fn pointer_up(&mut self, e: PointerEvent) {
@@ -731,6 +769,12 @@ impl Editor {
         if e.button == PointerButton::Middle {
             if let Some(mut hand) = self.pan.take() {
                 hand.pointer_up(&mut self.ctx(), &e);
+            }
+            return;
+        }
+        if self.guide_drag.is_some() {
+            if e.button == PointerButton::Primary {
+                self.guide_drag_up(&e);
             }
             return;
         }
@@ -745,6 +789,12 @@ impl Editor {
         if e.button != PointerButton::Primary || !self.tool.is_busy() {
             return;
         }
+        self.release_tool(&e);
+    }
+
+    /// Отпускание достаётся инструменту.
+    pub(crate) fn release_tool(&mut self, e: &PointerEvent) {
+        let e = *e;
         let (tool, mut cx) = self.split();
         if tool.pointer_up(&mut cx, &e) == Flow::Finished {
             self.set_tool(ToolKind::Move);
@@ -775,6 +825,9 @@ impl Editor {
     /// Камера сдвинулась во время жеста: та же экранная точка теперь над другим
     /// местом мира, жест пересчитывается.
     fn refresh_gesture(&mut self) {
+        if let (true, Some(e)) = (self.guide_drag.is_some(), self.last_pointer) {
+            self.guide_drag_move(&e);
+        }
         if let (true, Some(e)) = (self.tool.is_busy(), self.last_pointer) {
             let (tool, mut cx) = self.split();
             tool.pointer_move(&mut cx, &e);
@@ -801,8 +854,12 @@ impl Editor {
             e.modifiers = m;
         }
         self.last_pointer = Some(e);
+        if self.ruler_hover_update(&e) {
+            return;
+        }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
+        self.guide_hover_update(&e);
     }
 
     fn key_down(&mut self, e: KeyEvent) {
@@ -847,8 +904,9 @@ impl Editor {
         let Some(cmd) = self.keymap.lookup(&e) else {
             return;
         };
-        // Удержанная клавиша не входит в правку (как физический Enter выше).
-        if cmd == CommandId::EditObject && e.repeat {
+        // Удержанная клавиша не входит в правку (как физический Enter выше) и не
+        // мигает переключателем (линейки, направляющие, сетка).
+        if (cmd == CommandId::EditObject || cmd.info().toggle) && e.repeat {
             return;
         }
         if cmd == CommandId::HandHold {
@@ -888,6 +946,7 @@ impl Editor {
     /// не меняются.
     pub fn cancel_gesture(&mut self) {
         self.cancel_panel();
+        self.cancel_guides();
         self.cancel_vector_drag();
         if let Some(mut hand) = self.pan.take() {
             hand.cancel(&mut self.ctx());
@@ -1212,6 +1271,7 @@ impl Editor {
                 rulers: self.rulers_visible(),
                 guides_shown: self.guides_visible(),
                 guides_revision: self.guides.revision,
+                active_guide: self.active_guide(),
                 measures: self.measures.clone(),
                 text: self.text_overlay().map(|o| o.overlay),
                 vector: self.vector_overlay(),

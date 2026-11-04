@@ -222,3 +222,78 @@ fn rulers_setting_goes_through_set_view_and_the_command_reports_back() {
         }
     )));
 }
+
+#[test]
+fn set_guides_preview_commit_and_errors() {
+    let mut core = demo(10);
+    let page = core.editor().document().pages()[0].0.to_string();
+    let owner = GuideOwnerDto::Page { id: page };
+    let list = vec![GuideDto {
+        axis: GuideAxisDto::X,
+        offset: 12.0,
+    }];
+    let errors = |ev: Vec<CoreEvent>| {
+        ev.into_iter()
+            .filter(|e| matches!(e, CoreEvent::Error { .. }))
+            .count()
+    };
+    core.take_events();
+    core.command(Command::SetGuides {
+        owner: owner.clone(),
+        guides: list.clone(),
+        phase: EditPhase::Preview,
+    });
+    assert_eq!(errors(core.take_events()), 0);
+    assert!(!core.editor().document().can_undo());
+    core.command(Command::SetGuides {
+        owner: owner.clone(),
+        guides: list.clone(),
+        phase: EditPhase::Commit,
+    });
+    let ev = core.take_events();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, CoreEvent::Modified { modified: true, .. })),
+        "{ev:?}"
+    );
+    assert_eq!(errors(ev), 0);
+    assert!(core.editor().document().can_undo());
+    for bad in [
+        vec![GuideDto {
+            axis: GuideAxisDto::Y,
+            offset: f64::NAN,
+        }],
+        vec![GuideDto {
+            axis: GuideAxisDto::Y,
+            offset: 2e9,
+        }],
+        vec![
+            GuideDto {
+                axis: GuideAxisDto::Y,
+                offset: 0.0
+            };
+            1001
+        ],
+    ] {
+        core.command(Command::SetGuides {
+            owner: owner.clone(),
+            guides: bad,
+            phase: EditPhase::Commit,
+        });
+        assert_eq!(errors(core.take_events()), 1);
+    }
+    core.command(Command::SetGuides {
+        owner: GuideOwnerDto::Page {
+            id: "мусор".into()
+        },
+        guides: list.clone(),
+        phase: EditPhase::Commit,
+    });
+    assert_eq!(errors(core.take_events()), 1);
+    core.command(Command::SetGuides {
+        owner: GuideOwnerDto::Frame { id: "1@1".into() },
+        guides: list,
+        phase: EditPhase::Commit,
+    });
+    assert_eq!(errors(core.take_events()), 1, "такого узла нет");
+}

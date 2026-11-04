@@ -7,14 +7,20 @@
 //! такая координата лежит внутри полосы, значит и сам узел её пересекает. Поэтому
 //! полосы находят ровно все привязки в видимой части, а работа зависит от числа
 //! узлов рядом, а не от размера страницы.
+//!
+//! Направляющие — такие же цели, как края узлов (спека подсистемы 2, раздел 9): порог
+//! тот же, сдвиг считает тот же `best_offset`. В полосах R-tree их нет: они перебираются
+//! в списке линий страницы, отдельно по каждой оси.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use ferrum_doc::{NodeId, NodeKind};
+use ferrum_doc::{GuideAxis, GuideOwner, NodeId, NodeKind};
 use ferrum_scene::{Scene, Slot};
 use kurbo::{Line, Rect};
 
 use crate::geometry::world_box;
+use crate::guides::PlacedGuide;
 
 /// Порог привязки в экранных пикселях.
 pub const SNAP_THRESHOLD_PX: f64 = 4.0;
@@ -38,6 +44,10 @@ pub struct Snapper {
     /// Рамки родительских фреймов в мире с порядком узла: к их краям и центру тоже
     /// привязываемся. Порядок нужен для детерминированного выбора при равных сдвигах.
     frames: Vec<(Rect, Vec<u32>)>,
+    /// Линии направляющих на начало жеста; видимость уже учтена (`Ctx::snap_guides`).
+    guides: Arc<Vec<PlacedGuide>>,
+    /// Направляющая, которую тянут: к себе не привязывается.
+    skip_guide: Option<PlacedGuide>,
 }
 
 impl Snapper {
@@ -74,7 +84,65 @@ impl Snapper {
             excluded: exclude.iter().copied().collect(),
             parents,
             frames,
+            guides: Arc::default(),
+            skip_guide: None,
         }
+    }
+
+    /// Привязка и к линиям `guides`, кроме линий фреймов из самого жеста.
+    pub(crate) fn with_guides(mut self, guides: Arc<Vec<PlacedGuide>>) -> Snapper {
+        self.guides = guides;
+        self
+    }
+
+    pub(crate) fn skipping_guide(mut self, guide: Option<PlacedGuide>) -> Snapper {
+        self.skip_guide = guide;
+        self
+    }
+
+    /// Цели направляющих по оси `axis` рядом с `[lo, hi]`. Цель — вырожденная рамка
+    /// на линии: по этой оси у неё одна координата, поперёк — длина линии подсказки.
+    /// Линия фрейма действует только напротив него, как его края.
+    fn guide_candidates(
+        &self,
+        axis: GuideAxis,
+        lo: f64,
+        hi: f64,
+        threshold: f64,
+        moving: Rect,
+    ) -> Vec<(Rect, Vec<u32>)> {
+        let mut out = Vec::new();
+        for g in self.guides.iter() {
+            if g.guide.axis != axis || g.rotated || self.skip_guide.as_ref() == Some(g) {
+                continue;
+            }
+            if let GuideOwner::Frame(id) = g.owner {
+                if self.excluded.contains(&id) {
+                    continue;
+                }
+            }
+            let line = g.mark.line;
+            let (at, cross_a, cross_b, moving_lo, moving_hi) = match axis {
+                GuideAxis::X => (line.p0.x, line.p0.y, line.p1.y, moving.y0, moving.y1),
+                GuideAxis::Y => (line.p0.y, line.p0.x, line.p1.x, moving.x0, moving.x1),
+            };
+            if at < lo - threshold || at > hi + threshold {
+                continue;
+            }
+            let (from, to) = if g.mark.infinite {
+                (moving_lo, moving_hi)
+            } else {
+                if cross_b.max(cross_a) < moving_lo || cross_b.min(cross_a) > moving_hi {
+                    continue;
+                }
+                (cross_a.min(cross_b), cross_a.max(cross_b))
+            };
+            out.push(match axis {
+                GuideAxis::X => (Rect::new(at, from, at, to), Vec::new()),
+                GuideAxis::Y => (Rect::new(from, at, to, at), Vec::new()),
+            });
+        }
+        out
     }
 
     /// Можно ли привязываться к узлу: сосед, видим, не участвует в жесте.
@@ -141,19 +209,23 @@ impl Snapper {
             Vec::new()
         } else {
             let (lo, hi) = span(xs);
-            self.candidates(
+            let mut c = self.candidates(
                 scene,
                 Rect::new(lo - threshold, view.y0, hi + threshold, view.y1),
-            )
+            );
+            c.extend(self.guide_candidates(GuideAxis::X, lo, hi, threshold, moving));
+            c
         };
         let y_cands = if ys.is_empty() {
             Vec::new()
         } else {
             let (lo, hi) = span(ys);
-            self.candidates(
+            let mut c = self.candidates(
                 scene,
                 Rect::new(view.x0, lo - threshold, view.x1, hi + threshold),
-            )
+            );
+            c.extend(self.guide_candidates(GuideAxis::Y, lo, hi, threshold, moving));
+            c
         };
         let dx = best_offset(xs, &x_cands, x_targets, threshold);
         let dy = best_offset(ys, &y_cands, y_targets, threshold);

@@ -254,7 +254,7 @@ impl Tool for DrawTool {
             world,
             parent,
             parent_world,
-            snapper: Snapper::for_parent(cx.scene, parent, &[]),
+            snapper: Snapper::for_parent(cx.scene, parent, &[]).with_guides(cx.snap_guides()),
         });
     }
 
