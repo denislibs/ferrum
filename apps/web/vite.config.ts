@@ -19,7 +19,8 @@ export default defineConfig(({ mode }) => {
   if (mode === 'standalone') input.debug = 'debug.html';
   return {
     plugins: [solid()],
-    server: { headers },
+    // `npm run dev:server`: API — у сервера из Docker (PUBLIC_URL должен быть адресом vite).
+    server: { headers, fs: { allow: ['../..'] }, proxy: { '/api': process.env.FERRUM_API ?? 'http://localhost:8090' } },
     preview: { headers },
     worker: { format: 'es' as const },
     build: {

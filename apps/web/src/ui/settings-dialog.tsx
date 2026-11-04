@@ -11,12 +11,13 @@ import type { KeymapEntry } from '../wasm/ferrum_wasm';
 import { kb } from '../core/limits';
 import { useEditor } from './context';
 import { downloadBytes } from './files';
+import { extensions } from './extensions';
 import { Icon, type IconName } from './icons';
 import { conflictsOf, filterGroups, groupCommands, MAX_KEYMAP_FILE, recordKey, reservedOf } from './keymap-ui';
 import type { ThemeChoice } from './settings';
 import { shortcutLabel } from './shortcuts';
 
-type Tab = 'keys' | 'theme' | 'canvas';
+type Tab = 'keys' | 'theme' | 'canvas' | 'account';
 
 const TABS: { id: Tab; title: string }[] = [
   { id: 'keys', title: 'Горячие клавиши' },
@@ -38,6 +39,8 @@ export interface SettingsDialogProps {
 export function SettingsDialog(props: SettingsDialogProps) {
   const ed = useEditor();
   const [tab, setTab] = createSignal<Tab>('keys');
+  const Account = extensions.accountTab;
+  const tabs: { id: Tab; title: string }[] = Account ? [...TABS, { id: 'account', title: 'Аккаунт' }] : TABS;
   let el!: HTMLDivElement;
   const returnFocus = document.activeElement as HTMLElement | null;
   const close = () => {
@@ -99,7 +102,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             </button>
           </div>
           <div class="fe-tabs" role="tablist" aria-label="Разделы настроек">
-            <For each={TABS}>
+            <For each={tabs}>
               {(t) => (
                 <button
                   class="fe-tab"
@@ -110,21 +113,21 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   tabindex={tab() === t.id ? 0 : -1}
                   onClick={() => setTab(t.id)}
                   onKeyDown={(e) => {
-                    const i = TABS.findIndex((x) => x.id === tab());
+                    const i = tabs.findIndex((x) => x.id === tab());
                     const next =
                       e.key === 'ArrowRight'
-                        ? (i + 1) % TABS.length
+                        ? (i + 1) % tabs.length
                         : e.key === 'ArrowLeft'
-                          ? (i - 1 + TABS.length) % TABS.length
+                          ? (i - 1 + tabs.length) % tabs.length
                           : e.key === 'Home'
                             ? 0
                             : e.key === 'End'
-                              ? TABS.length - 1
+                              ? tabs.length - 1
                               : -1;
                     if (next < 0) return;
                     e.preventDefault();
-                    setTab(TABS[next].id);
-                    el.querySelector<HTMLElement>(`#settings-tab-${TABS[next].id}`)?.focus();
+                    setTab(tabs[next].id);
+                    el.querySelector<HTMLElement>(`#settings-tab-${tabs[next].id}`)?.focus();
                   }}
                 >
                   {t.title}
@@ -157,6 +160,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 </span>
               </label>
             </Show>
+            <Show when={Account && tab() === 'account'}>{Account && <Account />}</Show>
           </div>
         </div>
       </div>

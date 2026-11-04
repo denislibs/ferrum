@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 /** Метка, которую оставляет только ветка автономного режима в `main.tsx`. */
 export const LOCAL_MARKER = 'ferrumLocal';
+/** Адреса входа: код входа есть только в рабочей сборке. */
+export const AUTH_MARKER = '/api/auth/';
 
 /** Проблема сборки словами или `null`. `mode` — `standalone` или `server`. */
 export function checkDist(dist, mode) {
@@ -20,9 +22,13 @@ export function checkDist(dist, mode) {
   if (mode === 'server' && existsSync(join(dist, 'debug.html'))) return 'debug.html в рабочей сборке: стенд ядра открывался бы без входа';
   const assets = join(dist, 'assets');
   const code = existsSync(assets) ? readdirSync(assets).filter((f) => f.endsWith('.js')) : [];
-  const local = code.some((f) => readFileSync(join(assets, f), 'utf8').includes(LOCAL_MARKER));
+  const has = (marker) => code.some((f) => readFileSync(join(assets, f), 'utf8').includes(marker));
+  const local = has(LOCAL_MARKER);
+  const auth = has(AUTH_MARKER);
   if (mode === 'standalone' && !local) return 'в автономной сборке нет автономного режима: проверьте VITE_FERRUM_LOCAL (.env.standalone)';
+  if (mode === 'standalone' && auth) return 'в автономной сборке есть код входа: проверьте условия по VITE_FERRUM_LOCAL';
   if (mode === 'server' && local) return 'в рабочей сборке есть код автономного режима: VITE_FERRUM_LOCAL задан при сборке?';
+  if (mode === 'server' && !auth) return 'в рабочей сборке нет кода входа';
   return null;
 }
 

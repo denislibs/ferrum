@@ -13,6 +13,7 @@ import { dismissSplash } from './boot';
 import { ConfirmDialog } from './dialog';
 import { downloadBlob, fileName, formatSize, relativeTime } from './files';
 import { importFromDisk, type FileMeta, type FileStore, type Section } from './file-store';
+import { extensions } from './extensions';
 import { Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { RenameInput } from './rename-input';
@@ -494,6 +495,7 @@ export function FilesScreen(props: FilesScreenProps) {
             )}
           </For>
         </div>
+        {extensions.accountRow && <extensions.accountRow />}
       </aside>
       <main class="fe-files__main">
         <header class="fe-files__head">

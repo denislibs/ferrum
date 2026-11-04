@@ -1,0 +1,328 @@
+// Обязательный вход, как в Figma: без сессии открывается только экран входа, запрошенный адрес
+// остаётся в адресной строке и уходит в письмо. Приложение монтируется только при живой сессии.
+// Весь этот код есть только в рабочей сборке (см. `main.tsx`, `scripts/check-dist.mjs`).
+
+import { createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
+import { MAX_NAME_CHARS, parseConfirmHash, parseEmail, parseNext, type SessionUser } from '@ferrum/protocol';
+import { dismissSplash } from '../boot';
+import { confirmLink, getSession, requestLink, saveName } from './auth-api';
+import { failureText, resendLeft, screenFor, type AuthFailure, type AuthScreen } from './auth-logic';
+import { announceAuthChange, currentUser, onAuthChange, setCurrentUser } from './session';
+
+export function AuthGate(props: { children: JSX.Element }) {
+  const [screen, setScreen] = createSignal<AuthScreen | null>(null);
+  const [failure, setFailure] = createSignal<AuthFailure | null>(null);
+
+  const load = async () => {
+    setFailure(null);
+    const hash = location.hash;
+    // Страница подтверждения не спрашивает сессию: открытие ссылки ни к чему не обращается.
+    const first = screenFor(hash, null);
+    if (first.kind === 'confirm') {
+      setScreen(first);
+      return;
+    }
+    const r = await getSession();
+    if (!r.ok) {
+      setFailure(r.failure);
+      return;
+    }
+    const s = screenFor(hash, r.value.user);
+    setCurrentUser(r.value.user);
+    setScreen(s);
+  };
+
+  /** Новый адрес — без перезагрузки: приложение прочтёт его при монтировании. */
+  const go = (hash: string) => {
+    history.replaceState(null, '', `${location.pathname}${location.search}${hash}`);
+    void load();
+  };
+  const signedIn = (next: string | null) => {
+    announceAuthChange();
+    go(next ?? '#/');
+  };
+  const named = (user: SessionUser) => {
+    announceAuthChange();
+    setCurrentUser(user);
+    setScreen({ kind: 'app', user });
+  };
+
+  void load();
+  // Ссылка из письма вставлена в эту же вкладку: сменился только адрес после `#`, страница не
+  // перезагружается. Внутри приложения адресом ведает оно само, кроме страницы подтверждения.
+  const onHash = () => {
+    if (screen()?.kind !== 'app' || parseConfirmHash(location.hash)) void load();
+  };
+  window.addEventListener('hashchange', onHash);
+  onCleanup(() => window.removeEventListener('hashchange', onHash));
+  // Вход или выход в другой вкладке: здесь то же самое. Страница заново — только если человек
+  // или его имя правда другие: редактор не закрывается от повторного входа тем же адресом.
+  onCleanup(
+    onAuthChange(() => {
+      if (screen()?.kind === 'confirm') return;
+      void getSession().then((r) => {
+        if (!r.ok) return;
+        const was = currentUser();
+        const now = r.value.user;
+        if (was?.id !== now?.id || was?.name !== now?.name) location.reload();
+      });
+    }),
+  );
+
+  return (
+    <Switch>
+      <Match when={failure()}>
+        {(f) => (
+          <AuthCard title="Не удалось открыть Ferrum">
+            <p class="fe-auth__error" role="alert">
+              {failureText(f())}
+            </p>
+            <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => void load()}>
+              Повторить
+            </button>
+          </AuthCard>
+        )}
+      </Match>
+      <Match when={screen()?.kind === 'app'}>{props.children}</Match>
+      <Match when={screen()} keyed>
+        {(s) => (
+          <>
+            {s.kind === 'login' && <LoginScreen next={s.next} />}
+            {s.kind === 'confirm' && (
+              <ConfirmScreen token={s.token} next={s.next} onDone={signedIn} onNewLink={(next) => go(next ?? '#/')} />
+            )}
+            {s.kind === 'name' && <NameScreen user={s.user} onDone={named} />}
+          </>
+        )}
+      </Match>
+    </Switch>
+  );
+}
+
+function AuthCard(props: { title: string; children: JSX.Element }) {
+  onMount(() => dismissSplash(true));
+  return (
+    <div class="fe-auth">
+      <main class="fe-auth__card">
+        <div class="fe-files__brand">
+          <span class="fe-panel-head__mark" aria-hidden="true" />
+          <span class="t-strong">Ferrum</span>
+        </div>
+        <h1 class="fe-auth__title">{props.title}</h1>
+        {props.children}
+      </main>
+    </div>
+  );
+}
+
+const PROVIDERS = ['Войти через Google', 'Войти через GitHub'];
+
+function LoginScreen(props: { next: string | null }) {
+  const [email, setEmail] = createSignal('');
+  const [sentTo, setSentTo] = createSignal<string | null>(null);
+  const [sentAt, setSentAt] = createSignal(0);
+  const [now, setNow] = createSignal(Date.now());
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const timer = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(timer));
+
+  const send = async (address: string) => {
+    setBusy(true);
+    setError(null);
+    const r = await requestLink(address, props.next);
+    setBusy(false);
+    if (!r.ok) {
+      setError(failureText(r.failure));
+      return;
+    }
+    setSentTo(address);
+    setSentAt(Date.now());
+    setNow(Date.now());
+  };
+  const left = () => resendLeft(sentAt(), now());
+
+  return (
+    <Show
+      when={sentTo()}
+      fallback={
+        <AuthCard title="Вход в Ferrum">
+          <form
+            class="fe-auth__form"
+            novalidate
+            onSubmit={(e) => {
+              e.preventDefault();
+              const address = parseEmail(email());
+              if (address) void send(address);
+              else setError('Проверьте адрес: например, ivan@example.com');
+            }}
+          >
+            <label class="fe-auth__label" for="fe-auth-email">
+              Электронная почта
+            </label>
+            <div class="fe-field fe-field--text fe-auth__field">
+              <input
+                id="fe-auth-email"
+                type="email"
+                autocomplete="email"
+                autofocus
+                required
+                value={email()}
+                aria-invalid={error() !== null}
+                onInput={(e) => setEmail(e.currentTarget.value)}
+              />
+            </div>
+            <Show when={error()}>
+              <p class="fe-auth__error" role="alert">
+                {error()}
+              </p>
+            </Show>
+            <button class="fe-btn fe-btn--primary fe-auth__wide" type="submit" disabled={busy()}>
+              Получить ссылку
+            </button>
+          </form>
+          <div class="fe-auth__or" role="separator">
+            или
+          </div>
+          <For each={PROVIDERS}>
+            {(name) => (
+              // `aria-disabled`, а не `disabled`: подсказка должна открываться и с клавиатуры.
+              <button
+                class="fe-btn fe-btn--secondary fe-auth__wide fe-auth__soon"
+                type="button"
+                aria-disabled="true"
+                onClick={(e) => e.preventDefault()}
+              >
+                {name}
+                <span class="fe-tooltip fe-auth__tip" role="tooltip">
+                  Скоро
+                </span>
+              </button>
+            )}
+          </For>
+        </AuthCard>
+      }
+    >
+      {(address) => (
+        <AuthCard title="Проверьте почту">
+          <p class="fe-auth__text">
+            Мы отправили ссылку для входа на <b>{address()}</b>. Она действует 15 минут.
+          </p>
+          <Show when={error()}>
+            <p class="fe-auth__error" role="alert">
+              {error()}
+            </p>
+          </Show>
+          <button class="fe-btn fe-btn--secondary fe-auth__wide" disabled={left() > 0 || busy()} onClick={() => void send(address())}>
+            {left() > 0 ? `Отправить ещё раз через ${left()} с` : 'Отправить ещё раз'}
+          </button>
+          <button
+            class="fe-btn fe-auth__wide"
+            onClick={() => {
+              setError(null);
+              setSentTo(null);
+            }}
+          >
+            Другой адрес
+          </button>
+        </AuthCard>
+      )}
+    </Show>
+  );
+}
+
+/** Ссылка из письма: кнопка вместо входа по GET, почтовые сканеры открывают ссылки и сожгли бы
+ * одноразовый токен. Токен тратится только по нажатию. */
+function ConfirmScreen(props: {
+  token: string | null;
+  next: string | null;
+  onDone: (next: string | null) => void;
+  onNewLink: (next: string | null) => void;
+}) {
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(props.token ? null : failureText('INVALID_TOKEN'));
+  const enter = async () => {
+    setBusy(true);
+    const r = await confirmLink(props.token!);
+    if (r.ok) {
+      props.onDone(props.next);
+      return;
+    }
+    setBusy(false);
+    setError(failureText(r.failure));
+  };
+  return (
+    <AuthCard title="Вход в Ferrum">
+      <Show
+        when={!error()}
+        fallback={
+          <>
+            <p class="fe-auth__error" role="alert">
+              {error()}
+            </p>
+            <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => props.onNewLink(parseNext(props.next))}>
+              Запросить новую ссылку
+            </button>
+          </>
+        }
+      >
+        <p class="fe-auth__text">Нажмите кнопку, чтобы завершить вход.</p>
+        <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy()} onClick={() => void enter()}>
+          Войти
+        </button>
+      </Show>
+    </AuthCard>
+  );
+}
+
+/** Экран первого входа: имя видят другие участники. */
+function NameScreen(props: { user: SessionUser; onDone: (user: SessionUser) => void }) {
+  const [name, setName] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  return (
+    <AuthCard title="Как вас зовут?">
+      <p class="fe-auth__text">Это имя увидят те, с кем вы работаете. Вы вошли как {props.user.email}.</p>
+      <form
+        class="fe-auth__form"
+        novalidate
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!name().trim()) {
+            setError('Введите имя');
+            return;
+          }
+          setBusy(true);
+          setError(null);
+          void saveName(name()).then((r) => {
+            setBusy(false);
+            if (r.ok) props.onDone(r.value.user);
+            else setError(failureText(r.failure));
+          });
+        }}
+      >
+        <label class="fe-auth__label" for="fe-auth-name">
+          Имя
+        </label>
+        <div class="fe-field fe-field--text fe-auth__field">
+          <input
+            id="fe-auth-name"
+            autocomplete="name"
+            autofocus
+            maxlength={MAX_NAME_CHARS}
+            value={name()}
+            onInput={(e) => setName(e.currentTarget.value)}
+          />
+        </div>
+        <Show when={error()}>
+          <p class="fe-auth__error" role="alert">
+            {error()}
+          </p>
+        </Show>
+        <button class="fe-btn fe-btn--primary fe-auth__wide" type="submit" disabled={busy()}>
+          Продолжить
+        </button>
+      </form>
+    </AuthCard>
+  );
+}
