@@ -366,7 +366,7 @@ fn duplicated_page_survives_journal_and_full_save() {
     let (file, mut doc) = opened();
     let page = doc.pages()[0].0;
     rect(&mut doc, page, 4.0);
-    let copy = doc.duplicate_page(page, "Копия").unwrap();
+    let copy = doc.duplicate_page(page, "Копия", page, vec![]).unwrap();
     assert_eq!(doc.pages()[1], (copy, "Копия".to_string()));
     // Копия правится независимо от оригинала.
     rect(&mut doc, copy, 6.0);

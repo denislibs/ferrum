@@ -351,6 +351,17 @@ impl PageDoc {
     /// Только для тестов: значение `booleanOp` узла в Loro как есть (как в файле
     /// чужой сборки) — без проверки и без зеркала.
     #[doc(hidden)]
+    /// Записывает в узел направляющие как есть — как чужой файл (тесты разбора).
+    #[doc(hidden)]
+    pub fn force_guides_for_tests(&self, id: NodeId, raw: &[(&str, f64)]) {
+        let tid = self.tid(id).expect("узел есть");
+        let meta = self.tree.get_meta(tid).expect("узел есть");
+        meta.insert(codec::key::GUIDES, crate::guides::raw_value(raw))
+            .expect("запись");
+        self.doc.commit();
+    }
+
+    #[doc(hidden)]
     pub fn force_boolean_op_for_tests(&self, id: NodeId, op: &str) {
         let tid = self.tid(id).expect("узел есть");
         let meta = self.tree.get_meta(tid).expect("карта узла");
@@ -617,7 +628,8 @@ impl PageDoc {
         let foreign_text = before.text.is_none() && patch.text.is_some();
         let foreign_vector = before.vector.is_none() && patch.vector.is_some();
         let foreign_op = before.boolean_op.is_none() && patch.boolean_op.is_some();
-        let patch = if foreign_text || foreign_vector || foreign_op {
+        let foreign_guides = before.kind != NodeKind::Frame && patch.guides.is_some();
+        let patch = if foreign_text || foreign_vector || foreign_op || foreign_guides {
             stripped = PropsPatch {
                 text: if foreign_text {
                     None
@@ -630,6 +642,11 @@ impl PageDoc {
                     patch.vector.clone()
                 },
                 boolean_op: if foreign_op { None } else { patch.boolean_op },
+                guides: if foreign_guides {
+                    None
+                } else {
+                    patch.guides.clone()
+                },
                 ..patch.clone()
             };
             &stripped
@@ -638,6 +655,9 @@ impl PageDoc {
         };
         if let Some(v) = &patch.vector {
             check_vector(v)?;
+        }
+        if let Some(g) = &patch.guides {
+            crate::guides::check_guides(g)?;
         }
 
         let mut after = before.clone();

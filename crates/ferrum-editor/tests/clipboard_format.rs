@@ -585,3 +585,45 @@ fn boolean_with_children_round_trips_and_op_is_checked() {
     assert_eq!(foreign.nodes[0].props.kind, NodeKind::Rect);
     assert!(foreign.nodes[0].props.boolean_op.is_none());
 }
+
+#[test]
+fn frame_guides_go_with_the_copy_and_are_validated() {
+    use ferrum_doc::{Guide, GuideAxis, MAX_GUIDES};
+    use std::sync::Arc;
+    let mut p = sample();
+    let guides = vec![
+        Guide::new(GuideAxis::X, 5.0),
+        Guide::new(GuideAxis::Y, -1.5),
+    ];
+    p.nodes[0].props.guides = Some(Arc::new(guides.clone()));
+    let bytes = p.encode();
+    let got = ClipPayload::decode(&bytes).unwrap();
+    assert_eq!(got.nodes[0].props.guides.as_deref(), Some(&guides));
+    assert!(json_of(&bytes).contains("\"guides\""));
+    // Без направляющих поля нет: копия побайтно как у прежних сборок.
+    assert!(!json_of(&sample().encode()).contains("guides"));
+
+    let with_guides = |list: String| {
+        let json = json_of(&bytes);
+        let at = json.find("\"guides\":[").unwrap();
+        let end = at + json[at..].find(']').unwrap() + 1;
+        frame_bytes(
+            &format!("{}\"guides\":{list}{}", &json[..at], &json[end..]),
+            &[SAMPLE_IMAGE.to_vec()],
+        )
+    };
+    assert!(ClipPayload::decode(&with_guides(r#"[{"axis":"q","offset":1}]"#.into())).is_err());
+    assert!(ClipPayload::decode(&with_guides(r#"[{"axis":"x","offset":2e9}]"#.into())).is_err());
+    let many: Vec<String> = (0..=MAX_GUIDES)
+        .map(|i| format!(r#"{{"axis":"x","offset":{i}}}"#))
+        .collect();
+    assert!(ClipPayload::decode(&with_guides(format!("[{}]", many.join(",")))).is_err());
+    // У не фрейма поле игнорируется.
+    let json = json_of(&sample().encode()).replacen(
+        "\"kind\":\"line\"",
+        "\"guides\":[{\"axis\":\"x\",\"offset\":1}],\"kind\":\"line\"",
+        1,
+    );
+    let got = ClipPayload::decode(&frame_bytes(&json, &[SAMPLE_IMAGE.to_vec()])).unwrap();
+    assert!(got.nodes[2].props.guides.is_none());
+}

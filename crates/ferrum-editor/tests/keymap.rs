@@ -642,5 +642,8 @@ fn punctuation_labels_are_signs() {
         assert_eq!(sc(code).label(Platform::Windows), sign, "{code}");
     }
     assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Mac), "⌃⇧/");
-    assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Linux), "Ctrl+Shift+/");
+    assert_eq!(
+        sc("Ctrl+Shift+Slash").label(Platform::Linux),
+        "Ctrl+Shift+/"
+    );
 }

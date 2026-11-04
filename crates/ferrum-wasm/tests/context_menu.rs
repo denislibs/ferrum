@@ -175,4 +175,21 @@ fn page_menu_and_duplicate_page() {
     assert_eq!(names, ["Страница 1", "Страница 1 (копия)", "Страница 2"]);
     assert_eq!(current, list[1].id);
     assert_eq!(layer_rows(&mut core).0, 1, "копия с фреймом оригинала");
+    // Один шаг отмены: список страниц приходит и после отмены, и после повтора.
+    core.take_events();
+    core.command(Command::Execute {
+        command: "edit.undo".into(),
+    });
+    let (list, current) = pages(&core.take_events());
+    assert_eq!(list.len(), 2);
+    assert_eq!(
+        current, list[1].id,
+        "назад на страницу, с которой дублировали"
+    );
+    core.command(Command::Execute {
+        command: "edit.redo".into(),
+    });
+    let (list, current) = pages(&core.take_events());
+    assert_eq!(list.len(), 3);
+    assert_eq!(current, list[1].id);
 }

@@ -8,13 +8,15 @@ use loro::{
 };
 
 use crate::changes::Changes;
+use crate::codec::key::GUIDES as KEY_GUIDES;
 use crate::error::{DocError, DocResult};
-use crate::history::{History, HistoryEntry, TextMerge};
+use crate::guides::{check_guides, dedup_guides, guides_value, read_guides, Guide};
+use crate::history::{DocOp, History, HistoryEntry, TextMerge};
 use crate::images::ImageStore;
 use crate::journal::{self, BatchWriter, Replayed};
 use crate::page::{Inverse, PageDoc, Tx};
 use crate::scene_cache::SceneRow;
-use crate::types::{Color, NodeId, PageId};
+use crate::types::{Color, NodeId, PageId, PropsPatch};
 
 /// Текущая версия схемы документа. Растёт при несовместимых изменениях схемы.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -50,6 +52,21 @@ pub struct Restore {
     pub selection: Vec<NodeId>,
 }
 
+/// Чьи направляющие: страницы или фрейма на странице шага.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GuideOwner {
+    Page(PageId),
+    Frame(NodeId),
+}
+
+/// Что вернул повтор или отмена шага: операции обратного направления и новые
+/// идентификаторы страниц.
+struct Replay {
+    ops: Vec<Inverse>,
+    doc_ops: Vec<DocOp>,
+    remap: Option<(PageId, PageId)>,
+}
+
 pub struct Document {
     root: LoroDoc,
     pages_tree: LoroTree,
@@ -64,6 +81,12 @@ pub struct Document {
     /// уже отданы в журнал (`take_journal`). Страница получает версию при загрузке.
     journaled_root: VersionVector,
     journaled_pages: HashMap<PageId, VersionVector>,
+    /// Копии страниц, убранные отменой «Дублировать страницу», ждут повтора. Живут,
+    /// только пока есть шаги повтора.
+    parked: HashMap<PageId, PageDoc>,
+    /// Растёт при каждой смене направляющих страницы (кэш линий редактора):
+    /// у фрейма то же самое видно по счётчику сцены.
+    guides_revision: u64,
 }
 
 impl Document {
@@ -98,6 +121,8 @@ impl Document {
             read_only: false,
             journaled_root,
             journaled_pages: HashMap::new(),
+            parked: HashMap::new(),
+            guides_revision: 0,
         }
     }
 
@@ -164,6 +189,15 @@ impl Document {
     /// Только для тестов: документ становится «только чтение», как при
     /// загрузке страницы с неизвестными узлами.
     #[doc(hidden)]
+    /// Записывает в страницу направляющие как есть — как чужой файл (тесты разбора).
+    #[doc(hidden)]
+    pub fn force_page_guides_for_tests(&mut self, id: PageId, raw: &[(&str, f64)]) {
+        let meta = self.pages_tree.get_meta(id.0).expect("страница есть");
+        meta.insert(KEY_GUIDES, crate::guides::raw_value(raw))
+            .expect("запись");
+        self.root.commit();
+    }
+
     pub fn force_read_only_for_tests(&mut self) {
         self.read_only = true;
     }
@@ -225,9 +259,16 @@ impl Document {
     }
 
     /// Копия страницы `id` с именем `name` сразу после неё в списке: те же узлы
-    /// (с новыми идентификаторами) и фон. Как и остальные операции со страницами,
-    /// в историю отмены не попадает; копия целиком уйдёт в следующую пачку журнала.
-    pub fn duplicate_page(&mut self, id: PageId, name: &str) -> DocResult<PageId> {
+    /// (с новыми идентификаторами), фон и направляющие. Один шаг отмены (спека
+    /// подсистемы 2, раздел 10): отмена возвращает на `from` с выделением
+    /// `selection`, повтор — на копию. Копия целиком уйдёт в следующую пачку журнала.
+    pub fn duplicate_page(
+        &mut self,
+        id: PageId,
+        name: &str,
+        from: PageId,
+        selection: Vec<NodeId>,
+    ) -> DocResult<PageId> {
         // Сначала загрузка: страница с неизвестными узлами делает документ
         // доступным только для чтения, а копия их потеряла бы.
         self.page(id)?;
@@ -237,7 +278,9 @@ impl Document {
             .iter()
             .position(|(p, _)| *p == id)
             .map_or(0, |i| i + 1);
+        self.ensure_page(from)?;
         let background = self.page_background(id);
+        let guides = self.page_guides(id);
         // Узлы копируются до создания страницы: отказ не оставляет пустой копии.
         let copy = PageDoc::new();
         {
@@ -259,11 +302,192 @@ impl Document {
         if let Some(c) = background {
             meta.insert(KEY_BACKGROUND, c.to_hex())?;
         }
+        if !guides.is_empty() {
+            meta.insert(KEY_GUIDES, guides_value(&guides))?;
+        }
         self.root.commit();
         let new = PageId(t);
         self.loaded.insert(new, copy);
         self.journaled_pages.insert(new, VersionVector::default());
+        self.push_step(HistoryEntry {
+            id: 0,
+            page: from,
+            page_after: Some(new),
+            ops: Vec::new(),
+            doc_ops: vec![DocOp::RemovePage { page: new }],
+            selection_before: selection,
+            selection_after: Vec::new(),
+        });
         Ok(new)
+    }
+
+    /// Ставит страницу на место `to` в списке (после перестановки она там и
+    /// стоит). Один шаг отмены; то же место — ни шага, ни правки. Отмена возвращает
+    /// на страницу `current` с выделением `selection`.
+    pub fn move_page(
+        &mut self,
+        id: PageId,
+        to: usize,
+        current: PageId,
+        selection: Vec<NodeId>,
+    ) -> DocResult<()> {
+        self.writable()?;
+        self.ensure_page(id)?;
+        let from = self.page_index(id)?;
+        let to = to.min(self.pages().len().saturating_sub(1));
+        if from == to {
+            return Ok(());
+        }
+        self.place_page(id, to)?;
+        self.push_step(HistoryEntry {
+            id: 0,
+            page: current,
+            page_after: None,
+            ops: Vec::new(),
+            doc_ops: vec![DocOp::MovePage {
+                page: id,
+                index: from,
+            }],
+            selection_after: selection.clone(),
+            selection_before: selection,
+        });
+        Ok(())
+    }
+
+    fn page_index(&self, id: PageId) -> DocResult<usize> {
+        self.pages()
+            .iter()
+            .position(|(p, _)| *p == id)
+            .ok_or_else(|| DocError::PageNotFound(id.to_string()))
+    }
+
+    fn place_page(&mut self, id: PageId, to: usize) -> DocResult<()> {
+        self.pages_tree.mov_to(id.0, TreeParentId::Root, to)?;
+        self.root.commit();
+        Ok(())
+    }
+
+    /// Направляющие страницы. Неверные записи файла отброшены (`read_guides`);
+    /// страницу загружать не нужно: список лежит в корневом документе.
+    pub fn page_guides(&self, id: PageId) -> Vec<Guide> {
+        match self
+            .pages_tree
+            .get_meta(id.0)
+            .ok()
+            .and_then(|m| m.get(KEY_GUIDES))
+        {
+            Some(ValueOrContainer::Value(v)) => read_guides(&v),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Номер версии направляющих страниц: кэш редактора сравнивает его за O(1).
+    pub fn guides_revision(&self) -> u64 {
+        self.guides_revision
+    }
+
+    fn write_page_guides(&mut self, id: PageId, guides: &[Guide]) -> DocResult<()> {
+        let meta = self.pages_tree.get_meta(id.0)?;
+        if guides.is_empty() {
+            if meta.get(KEY_GUIDES).is_some() {
+                meta.delete(KEY_GUIDES)?;
+            }
+        } else {
+            meta.insert(KEY_GUIDES, guides_value(guides))?;
+        }
+        self.root.commit();
+        self.guides_revision += 1;
+        Ok(())
+    }
+
+    /// Новые списки направляющих одним шагом отмены (перенос из страницы во фрейм
+    /// — два списка). Без изменений шага нет. Неверный список, неизвестный узел и
+    /// узел не того типа — отказ целиком: ни правки, ни шага. Сначала загрузка
+    /// страницы: на незагруженной могут быть неизвестные узлы, и документ станет
+    /// доступен только для чтения.
+    pub fn set_guides(
+        &mut self,
+        page: PageId,
+        selection: Vec<NodeId>,
+        edits: &[(GuideOwner, Vec<Guide>)],
+    ) -> DocResult<()> {
+        self.page(page)?;
+        self.writable()?;
+        let mut frames = Vec::new();
+        let mut doc_ops = Vec::new();
+        let mut page_edit: Vec<(PageId, Vec<Guide>)> = Vec::new();
+        for (owner, guides) in edits {
+            check_guides(guides)?;
+            let guides = dedup_guides(guides.iter().copied());
+            match *owner {
+                GuideOwner::Page(id) => {
+                    self.ensure_page(id)?;
+                    if id != page {
+                        return Err(DocError::PageNotFound(id.to_string()));
+                    }
+                    let before = self.page_guides(id);
+                    if before != guides {
+                        doc_ops.push(DocOp::PageGuides {
+                            page: id,
+                            guides: before,
+                        });
+                        page_edit.push((id, guides));
+                    }
+                }
+                GuideOwner::Frame(id) => {
+                    let p = self.loaded.get(&page).expect("страница загружена выше");
+                    if p.kind(id)? != crate::types::NodeKind::Frame {
+                        return Err(DocError::InvalidGuides("у этого узла их не бывает".into()));
+                    }
+                    frames.push((id, guides));
+                }
+            }
+        }
+        let p = self.loaded.get(&page).expect("страница загружена выше");
+        p.begin_journal();
+        let tx = Tx::new(p);
+        let result = frames.iter().try_for_each(|(id, guides)| {
+            tx.set_props(
+                *id,
+                &PropsPatch {
+                    guides: Some(std::sync::Arc::new(guides.clone())),
+                    ..Default::default()
+                },
+            )
+        });
+        let ops = p.take_journal();
+        p.commit();
+        self.changes.entry(page).or_default().record(&ops);
+        if let Err(e) = result {
+            return Err(rollback(p, &ops, e));
+        }
+        for (id, guides) in &page_edit {
+            self.write_page_guides(*id, guides)?;
+        }
+        if !ops.is_empty() || !doc_ops.is_empty() {
+            self.push_step(HistoryEntry {
+                id: 0,
+                page,
+                page_after: None,
+                ops,
+                doc_ops,
+                selection_after: selection.clone(),
+                selection_before: selection,
+            });
+        }
+        Ok(())
+    }
+
+    /// Новый шаг сбрасывает повтор, а с ним — припаркованные копии страниц.
+    fn push_step(&mut self, entry: HistoryEntry) {
+        self.history.push(entry);
+        self.forget_parked();
+    }
+
+    fn forget_parked(&mut self) {
+        if !self.history.has_redo() {
+            self.parked.clear();
+        }
     }
 
     pub fn rename_page(&mut self, id: PageId, name: &str) -> DocResult<()> {
@@ -286,6 +510,7 @@ impl Document {
         self.loaded.remove(&id);
         self.unloaded.remove(&id);
         self.history.forget_page(id);
+        self.forget_parked();
         self.changes.remove(&id);
         self.journaled_pages.remove(&id);
         Ok(())
@@ -430,8 +655,11 @@ impl Document {
             Ok(selection_after) => {
                 if !ops.is_empty() {
                     let entry = HistoryEntry {
+                        id: 0,
                         page,
+                        page_after: None,
                         ops,
+                        doc_ops: Vec::new(),
                         selection_before,
                         selection_after: selection_after.clone(),
                     };
@@ -439,6 +667,7 @@ impl Document {
                         Some(m) => self.history.push_merging(entry, m),
                         None => self.history.push(entry),
                     }
+                    self.forget_parked();
                 }
                 Ok(selection_after)
             }
@@ -463,6 +692,13 @@ impl Document {
     /// шаблон), открывается как только что прочитанный файл — без шага «создать всё».
     pub fn clear_history(&mut self) {
         self.history = History::default();
+        self.parked.clear();
+    }
+
+    /// Номер последнего шага отмены: тот же шаг остаётся тем же номером и после
+    /// отмены с повтором; новый шаг — новый номер (спека подсистемы 2, раздел 10).
+    pub fn last_step(&self) -> Option<u64> {
+        self.history.top_undo_id()
     }
 
     /// Правки с прошлого вызова одной пачкой журнала: обновления Loro корня и
@@ -608,6 +844,8 @@ impl Document {
             out.applied = 0;
         }
         self.mark_journal();
+        // Журнал корня мог сменить направляющие страниц.
+        self.guides_revision += 1;
         out
     }
 
@@ -621,8 +859,11 @@ impl Document {
 
     /// Применяет операции шага и возвращает операции для обратного направления.
     /// Шаг не изменяется: при ошибке вызывающий код вернёт его в стек целиком.
-    fn replay(&mut self, entry: &HistoryEntry) -> DocResult<Vec<Inverse>> {
+    fn replay(&mut self, entry: &HistoryEntry) -> DocResult<Replay> {
+        // Страница, на которую ведёт шаг, могла быть не загружена; загрузка могла
+        // сделать документ доступным только для чтения.
         self.page(entry.page)?;
+        self.writable()?;
         let p = self.loaded.get(&entry.page).expect("загружена");
         // При сбое apply_inverse сам откатывает уже применённую часть шага.
         let result = p.apply_inverse(&entry.ops);
@@ -633,7 +874,118 @@ impl Document {
             Ok(done) => changes.record(done),
             Err(_) => changes.record(&entry.ops),
         }
-        result
+        let ops = result?;
+        match self.apply_doc_ops(&entry.doc_ops) {
+            Ok((doc_ops, remap)) => Ok(Replay {
+                ops,
+                doc_ops,
+                remap,
+            }),
+            // Операции страницы уже применены: назад, шаг вернётся в стек целиком.
+            Err(e) => {
+                let p = self.loaded.get(&entry.page).expect("загружена");
+                let back = p.apply_inverse(&ops);
+                let changes = self.changes.entry(entry.page).or_default();
+                changes.record(&ops);
+                Err(match back {
+                    Ok(_) => e,
+                    Err(rollback) => DocError::RollbackFailed {
+                        original: Box::new(e),
+                        rollback: Box::new(rollback),
+                    },
+                })
+            }
+        }
+    }
+
+    /// Операции над документом с конца; возвращает обратные к ним и новый
+    /// идентификатор страницы, возвращённой повтором дубля.
+    #[allow(clippy::type_complexity)]
+    fn apply_doc_ops(
+        &mut self,
+        ops: &[DocOp],
+    ) -> DocResult<(Vec<DocOp>, Option<(PageId, PageId)>)> {
+        let mut done = Vec::with_capacity(ops.len());
+        let mut remap = None;
+        for op in ops.iter().rev() {
+            match op {
+                DocOp::PageGuides { page, guides } => {
+                    self.ensure_page(*page)?;
+                    let before = self.page_guides(*page);
+                    self.write_page_guides(*page, guides)?;
+                    done.push(DocOp::PageGuides {
+                        page: *page,
+                        guides: before,
+                    });
+                }
+                DocOp::MovePage { page, index } => {
+                    let before = self.page_index(*page)?;
+                    self.place_page(*page, *index)?;
+                    done.push(DocOp::MovePage {
+                        page: *page,
+                        index: before,
+                    });
+                }
+                DocOp::RemovePage { page } => {
+                    let index = self.page_index(*page)?;
+                    if self.pages().len() <= 1 {
+                        return Err(DocError::LastPage);
+                    }
+                    // Страницу с кэшем ещё не открывали — загрузка: парковка хранит её целиком.
+                    self.page(*page)?;
+                    let (name, background, guides) = (
+                        self.pages()[index].1.clone(),
+                        self.page_background(*page),
+                        self.page_guides(*page),
+                    );
+                    self.pages_tree.delete(page.0)?;
+                    self.root.commit();
+                    let doc = self.loaded.remove(page).expect("загружена выше");
+                    self.parked.insert(*page, doc);
+                    self.changes.remove(page);
+                    self.journaled_pages.remove(page);
+                    self.guides_revision += 1;
+                    done.push(DocOp::RestorePage {
+                        page: *page,
+                        index,
+                        name,
+                        background,
+                        guides,
+                    });
+                }
+                DocOp::RestorePage {
+                    page,
+                    index,
+                    name,
+                    background,
+                    guides,
+                } => {
+                    if !self.parked.contains_key(page) {
+                        return Err(DocError::PageNotFound(page.to_string()));
+                    }
+                    let at = (*index).min(self.pages().len());
+                    let t = self.pages_tree.create_at(TreeParentId::Root, at)?;
+                    let meta = self.pages_tree.get_meta(t)?;
+                    meta.insert(KEY_NAME, name.as_str())?;
+                    if let Some(c) = background {
+                        meta.insert(KEY_BACKGROUND, c.to_hex())?;
+                    }
+                    if !guides.is_empty() {
+                        meta.insert(KEY_GUIDES, guides_value(guides))?;
+                    }
+                    self.root.commit();
+                    let new = PageId(t);
+                    let doc = self.parked.remove(page).expect("проверено выше");
+                    self.loaded.insert(new, doc);
+                    // Копия целиком — в следующую пачку журнала, как новая страница.
+                    self.journaled_pages.insert(new, VersionVector::default());
+                    self.guides_revision += 1;
+                    done.push(DocOp::RemovePage { page: new });
+                    remap = Some((*page, new));
+                }
+            }
+        }
+        Ok((done, remap))
     }
 
     pub fn undo(&mut self) -> DocResult<Option<Restore>> {
@@ -641,12 +993,16 @@ impl Document {
             return Ok(None);
         };
         match self.replay(&entry) {
-            Ok(ops) => {
+            Ok(r) => {
                 let restore = Restore {
                     page: entry.page,
                     selection: entry.selection_before.clone(),
                 };
-                self.history.push_redo(HistoryEntry { ops, ..entry });
+                self.history.push_redo(HistoryEntry {
+                    ops: r.ops,
+                    doc_ops: r.doc_ops,
+                    ..entry
+                });
                 Ok(Some(restore))
             }
             Err(e) => {
@@ -662,13 +1018,23 @@ impl Document {
             return Ok(None);
         };
         match self.replay(&entry) {
-            Ok(ops) => {
-                let restore = Restore {
-                    page: entry.page,
-                    selection: entry.selection_after.clone(),
+            Ok(r) => {
+                let mut next = HistoryEntry {
+                    ops: r.ops,
+                    doc_ops: r.doc_ops,
+                    ..entry
                 };
-                self.history
-                    .push_undo_keep_redo(HistoryEntry { ops, ..entry });
+                if let Some((old, new)) = r.remap {
+                    self.history.remap_page(old, new);
+                    if next.page_after == Some(old) {
+                        next.page_after = Some(new);
+                    }
+                }
+                let restore = Restore {
+                    page: next.page_after.unwrap_or(next.page),
+                    selection: next.selection_after.clone(),
+                };
+                self.history.push_undo_keep_redo(next);
                 Ok(Some(restore))
             }
             Err(e) => {
@@ -783,7 +1149,7 @@ mod tests {
         let (mut d2, _) = Document::from_parts(&root, unloaded, ImageStore::default()).unwrap();
         assert!(!d2.is_page_loaded(page));
         let before = d2.pages();
-        let err = d2.duplicate_page(page, "Копия");
+        let err = d2.duplicate_page(page, "Копия", page, vec![]);
         assert!(matches!(err, Err(DocError::ReadOnly)), "{err:?}");
         assert_eq!(d2.pages(), before, "копии нет");
     }
@@ -911,8 +1277,11 @@ mod tests {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         doc.history.push(HistoryEntry {
+            id: 0,
             page,
+            page_after: None,
             ops: vec![missing_props_op()],
+            doc_ops: vec![],
             selection_before: vec![],
             selection_after: vec![],
         });
@@ -926,8 +1295,11 @@ mod tests {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         doc.history.push_redo(HistoryEntry {
+            id: 0,
             page,
+            page_after: None,
             ops: vec![missing_props_op()],
+            doc_ops: vec![],
             selection_before: vec![],
             selection_after: vec![],
         });

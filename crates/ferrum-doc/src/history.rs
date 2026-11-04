@@ -1,8 +1,9 @@
 //! Глобальный стек отмены для всех страниц. Шаг хранит обратные операции
 //! своей транзакции и выделение до и после неё.
 
+use crate::guides::Guide;
 use crate::page::Inverse;
-use crate::types::{NodeId, PageId};
+use crate::types::{Color, NodeId, PageId};
 
 /// Пауза, после которой ввод подряд начинает новый шаг отмены (как в Figma).
 pub const MERGE_PAUSE_MS: f64 = 1000.0;
@@ -33,11 +34,59 @@ impl TextMerge {
     }
 }
 
+/// Обратная операция над самим документом, а не над страницей: дерево страниц
+/// живёт в корневом `LoroDoc` (спека подсистемы 2, разделы 9 и 10).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DocOp {
+    /// Прежние направляющие страницы.
+    PageGuides { page: PageId, guides: Vec<Guide> },
+    /// Прежнее место страницы в списке.
+    MovePage { page: PageId, index: usize },
+    /// Отмена дубля: копия уходит из списка и ждёт повтора в `Document::parked`.
+    RemovePage { page: PageId },
+    /// Повтор дубля: страница из `Document::parked` возвращается в список. В дереве
+    /// страниц Loro она получает новый идентификатор (`History::remap_page`).
+    RestorePage {
+        page: PageId,
+        index: usize,
+        name: String,
+        background: Option<Color>,
+        guides: Vec<Guide>,
+    },
+}
+
+impl DocOp {
+    fn page(&self) -> PageId {
+        match self {
+            DocOp::PageGuides { page, .. }
+            | DocOp::MovePage { page, .. }
+            | DocOp::RemovePage { page }
+            | DocOp::RestorePage { page, .. } => *page,
+        }
+    }
+
+    fn page_mut(&mut self) -> &mut PageId {
+        match self {
+            DocOp::PageGuides { page, .. }
+            | DocOp::MovePage { page, .. }
+            | DocOp::RemovePage { page }
+            | DocOp::RestorePage { page, .. } => page,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HistoryEntry {
+    /// Номер шага: один и тот же в стеках undo и redo. Его выдаёт `History::push`.
+    pub id: u64,
+    /// Страница шага: на неё возвращает отмена, ей принадлежат `ops`.
     pub page: PageId,
+    /// Куда возвращает повтор, если не на `page` («Дублировать страницу» — на копию).
+    pub page_after: Option<PageId>,
     /// Для шага в стеке undo — операции отмены; в стеке redo — операции повтора.
     pub ops: Vec<Inverse>,
+    /// Операции над документом в том же направлении.
+    pub doc_ops: Vec<DocOp>,
     pub selection_before: Vec<NodeId>,
     pub selection_after: Vec<NodeId>,
 }
@@ -49,11 +98,37 @@ pub(crate) struct History {
     /// Метка верхнего шага undo, если его записала сливаемая правка текста и с
     /// тех пор стек не менялся; иначе `None` — следующей правке не с чем слиться.
     last_merge: Option<(PageId, TextMerge)>,
+    next_id: u64,
+}
+
+impl HistoryEntry {
+    /// Шаг опирается на страницу: она удалена — шаг не применить.
+    fn references(&self, page: PageId) -> bool {
+        self.page == page
+            || self.page_after == Some(page)
+            || self.doc_ops.iter().any(|op| op.page() == page)
+    }
+
+    fn remap_page(&mut self, old: PageId, new: PageId) {
+        if self.page == old {
+            self.page = new;
+        }
+        if self.page_after == Some(old) {
+            self.page_after = Some(new);
+        }
+        for op in &mut self.doc_ops {
+            if op.page() == old {
+                *op.page_mut() = new;
+            }
+        }
+    }
 }
 
 impl History {
     /// Новый шаг пользователя сбрасывает возможность повтора.
-    pub fn push(&mut self, entry: HistoryEntry) {
+    pub fn push(&mut self, mut entry: HistoryEntry) {
+        self.next_id += 1;
+        entry.id = self.next_id;
         self.undo.push(entry);
         self.redo.clear();
         self.last_merge = None;
@@ -109,9 +184,28 @@ impl History {
         !self.redo.is_empty()
     }
 
+    /// Номер верхнего шага отмены: кнопка «Отменить» в уведомлении проверяет, что
+    /// её шаг ещё последний.
+    pub fn top_undo_id(&self) -> Option<u64> {
+        self.undo.last().map(|e| e.id)
+    }
+
     pub fn forget_page(&mut self, page: PageId) {
-        self.undo.retain(|e| e.page != page);
-        self.redo.retain(|e| e.page != page);
+        self.undo.retain(|e| !e.references(page));
+        self.redo.retain(|e| !e.references(page));
         self.last_merge = None;
+    }
+
+    /// Страница, возвращённая повтором дубля, получила новый идентификатор:
+    /// шаги повтора после дубля теперь про неё.
+    pub fn remap_page(&mut self, old: PageId, new: PageId) {
+        for e in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            e.remap_page(old, new);
+        }
+    }
+
+    /// Шаги повтора ещё есть: припаркованная копия страницы может понадобиться.
+    pub fn has_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 }

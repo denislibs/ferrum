@@ -11,6 +11,7 @@ use loro::TreeID;
 
 use crate::binary::{Reader, Writer};
 use crate::boolean::BooleanOp;
+use crate::guides::{Guide, GuideAxis, MAX_GUIDES};
 use crate::text::*;
 use crate::types::*;
 use crate::vector::*;
@@ -51,6 +52,8 @@ fn kind_code(k: NodeKind) -> u8 {
         // Пятая версия (`SCENE_CACHE_VERSION = 5`): у булевой группы после стиля
         // обводки — код операции.
         NodeKind::Boolean => 8,
+        // Шестая версия (`SCENE_CACHE_VERSION = 6`): у фрейма в конце строки —
+        // направляющие (`read_row_guides`).
     }
 }
 
@@ -141,6 +144,17 @@ pub(crate) fn encode(rows: &[SceneRow]) -> Option<Vec<u8>> {
         }
         if let Some(op) = p.boolean_op {
             w.u8(code(&BooleanOp::ALL, op));
+        }
+        if p.kind == NodeKind::Frame {
+            let guides = p.guides.as_deref().map_or(&[][..], |g| g.as_slice());
+            w.u16(u16::try_from(guides.len()).ok()?);
+            for g in guides {
+                w.u8(match g.axis {
+                    GuideAxis::X => 0,
+                    GuideAxis::Y => 1,
+                });
+                w.f64(g.offset);
+            }
         }
     }
     Some(w.buf)
@@ -417,6 +431,30 @@ fn read_text(r: &mut Reader) -> Option<TextData> {
     })
 }
 
+/// Направляющие фрейма в строке. Внешний `None` — таблица повреждена: сверх
+/// предела, нечисловое смещение, неизвестная ось (страница тогда читается из Loro,
+/// где неверные записи отбрасываются поодиночке).
+fn read_row_guides(r: &mut Reader) -> Option<Option<Arc<Vec<Guide>>>> {
+    let n = r.u16()? as usize;
+    if n > MAX_GUIDES {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let axis = match r.u8()? {
+            0 => GuideAxis::X,
+            1 => GuideAxis::Y,
+            _ => return None,
+        };
+        let g = Guide::new(axis, r.f64()?);
+        if !g.is_valid() {
+            return None;
+        }
+        out.push(g);
+    }
+    Some((!out.is_empty()).then(|| Arc::new(out)))
+}
+
 /// `None` — таблица повреждена; вызывающий код тогда просто не использует кэш.
 pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
     let mut r = Reader::new(bytes);
@@ -479,6 +517,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
             NodeKind::Boolean => Some(decode_enum(&BooleanOp::ALL, r.u8()?)?),
             _ => None,
         };
+        let guides = match kind {
+            NodeKind::Frame => read_row_guides(&mut r)?,
+            _ => None,
+        };
         let [x, y, w, h, rotation, opacity, corner_radius] = nums;
         rows.push(SceneRow {
             id,
@@ -505,6 +547,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<SceneRow>> {
                 text,
                 vector,
                 boolean_op,
+                guides,
             },
         });
     }

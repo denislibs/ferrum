@@ -90,6 +90,8 @@ pub enum EditorEvent {
     /// Документ изменён правкой, отменой или повтором.
     DocumentChanged,
     PageChanged(PageId),
+    /// Изменился список страниц или их порядок (отмена и повтор их шагов).
+    PagesChanged,
     /// Готовы байты для системного буфера обмена (формат `web application/x-ferrum`).
     Clipboard(Vec<u8>),
     /// Копия фрагмента текста в правке: наш формат и обычный текст (`text/plain`).
@@ -1069,12 +1071,24 @@ impl Editor {
         self.finish_pen_path();
         // Жест держит превью и черновики на узлах, которые отмена может убрать.
         self.cancel_gesture();
+        let pages = self.doc.pages();
+        let guides = self.doc.guides_revision();
         let result = if redo {
             self.doc.redo()
         } else {
             self.doc.undo()
         };
-        sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
+        let synced = sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
+        // Шаг мог не тронуть ни одного узла: список страниц и направляющие страницы
+        // живут в корне документа, сцена о них не знает.
+        let list_changed = self.doc.pages() != pages;
+        if list_changed {
+            self.out.events.push(EditorEvent::PagesChanged);
+        }
+        if !synced && (list_changed || self.doc.guides_revision() != guides) {
+            self.out.events.push(EditorEvent::DocumentChanged);
+            self.out.events.push(EditorEvent::NeedsRedraw);
+        }
         match result {
             Ok(Some(restore)) => {
                 if restore.page != self.page {

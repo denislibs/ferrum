@@ -8,6 +8,7 @@ use loro::{Container, LoroMap, LoroValue, ValueOrContainer};
 
 use crate::boolean::BooleanOp;
 use crate::error::{DocError, DocResult};
+use crate::guides::{guides_value, read_guides};
 use crate::text::TextData;
 use crate::text_codec;
 use crate::types::*;
@@ -38,6 +39,8 @@ pub(crate) mod key {
     pub const VECTOR: &str = "vector";
     /// Операция узла `boolean` — строка (`BooleanOp::as_str`).
     pub const BOOLEAN_OP: &str = "booleanOp";
+    /// Направляющие фрейма и страницы — список значений (`guides.rs`).
+    pub const GUIDES: &str = "guides";
 }
 
 pub(crate) fn value(map: &LoroMap, k: &str) -> Option<LoroValue> {
@@ -191,6 +194,14 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
             NodeKind::Boolean => Some(read_boolean_op(map, id)?),
             _ => None,
         },
+        // Только у фрейма; неверные записи отброшены (`read_guides`).
+        guides: match kind {
+            NodeKind::Frame => value(map, key::GUIDES)
+                .map(|v| read_guides(&v))
+                .filter(|g| !g.is_empty())
+                .map(Arc::new),
+            _ => None,
+        },
     })
 }
 
@@ -290,6 +301,7 @@ pub(crate) fn write_props(map: &LoroMap, p: &Props) -> DocResult<()> {
         stroke_miter_limit: neutral(p.stroke_style.miter_limit, crate::DEFAULT_MITER_LIMIT),
         vector: p.vector.clone(),
         boolean_op: p.boolean_op,
+        guides: p.guides.clone(),
     };
     write_patch(map, &patch)?;
     // Содержимое — в новый `LoroText` узла: узел только что создан (или
@@ -368,6 +380,16 @@ pub(crate) fn write_patch(map: &LoroMap, p: &PropsPatch) -> DocResult<()> {
     }
     if let Some(op) = p.boolean_op {
         map.insert(key::BOOLEAN_OP, op.as_str())?;
+    }
+    // Нейтральное значение (нет направляющих) не пишется, как фон страницы.
+    match &p.guides {
+        Some(g) if g.is_empty() => {
+            if map.get(key::GUIDES).is_some() {
+                map.delete(key::GUIDES)?;
+            }
+        }
+        Some(g) => map.insert(key::GUIDES, guides_value(g))?,
+        None => {}
     }
     Ok(())
 }

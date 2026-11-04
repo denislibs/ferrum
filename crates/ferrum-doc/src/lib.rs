@@ -8,6 +8,7 @@ mod codec;
 pub mod container;
 mod document;
 mod error;
+mod guides;
 mod history;
 mod images;
 pub mod journal;
@@ -21,8 +22,9 @@ mod vector;
 
 pub use boolean::BooleanOp;
 pub use changes::Changes;
-pub use document::{Document, Restore, SCHEMA_VERSION};
+pub use document::{Document, GuideOwner, Restore, SCHEMA_VERSION};
 pub use error::{DocError, DocResult};
+pub use guides::{check_guides, dedup_guides, Guide, GuideAxis, MAX_GUIDES, MAX_GUIDE_OFFSET};
 pub use history::{TextMerge, MERGE_PAUSE_MS};
 pub use images::ImageStore;
 pub use journal::Replayed;
