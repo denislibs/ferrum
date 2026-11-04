@@ -8,7 +8,8 @@ export const STAND_URL = 'http://localhost:18090';
 
 export default defineConfig({
   testDir: 'e2e-server',
-  timeout: 60_000,
+  // Как у автономного конфига: внутри сценариев запуск ядра ждётся до 90 с.
+  timeout: 120_000,
   // Тесты делят один стенд и очищают его счётчики.
   workers: 1,
   reporter: [['list']],

@@ -51,7 +51,8 @@ export async function linksFor(email: string, count = 1): Promise<string[]> {
         found = list.messages.filter((m) => m.To.some((t) => t.Address === email));
         return found.length;
       },
-      { message: `письма на ${email}` },
+      // Письмо уходит после ответа сервера: под нагрузкой не сразу.
+      { message: `письма на ${email}`, timeout: 15_000 },
     )
     .toBeGreaterThanOrEqual(count);
   return Promise.all(
