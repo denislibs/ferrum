@@ -7,10 +7,12 @@
   },
   "include": [
     "e2e/**/*.ts",
+    "e2e-server/**/*.ts",
     "unit/**/*.ts",
     "src/window.d.ts",
     "playwright.config.ts",
     "playwright.unit.config.ts",
+    "playwright.server.config.ts",
     "vite.config.ts",
     "scripts/**/*.mjs"
   ],
