@@ -68,6 +68,9 @@ test('@firefox «Линейки» в меню пустого места холс
   await expect(item).toHaveAttribute('aria-checked', 'false');
   await item.click();
   await expectPixel(page, box.x + 60, box.y + 2, RULER);
+  // Отметка в меню следует за настройкой.
+  await page.mouse.click(at.x, at.y, { button: 'right' });
+  await expect(page.getByRole('menuitemcheckbox', { name: /Линейки/ })).toHaveAttribute('aria-checked', 'true');
 });
 
 test('@firefox направляющая из линейки: один шаг, тянется, на линейке удаляется, отмена', async ({ page }) => {
@@ -168,17 +171,34 @@ test('@firefox Shift+G прячет направляющие: линий и пр
 test('удержание Shift+R не мигает линейками', async ({ page }) => {
   await openApp(page);
   const box = await rulersOn(page);
-  // Повтор клавиши: то же сочетание без отпускания.
+  // Нажатие и один повтор без отпускания: без защиты два переключения вернули бы линейки.
   await page.keyboard.down('Shift');
   await page.keyboard.down('KeyR');
-  await page.keyboard.down('KeyR');
-  await page.keyboard.down('KeyR');
+  await page.keyboard.down('KeyR'); // повтор клавиши: `repeat` истинно
   await page.keyboard.up('KeyR');
   await page.keyboard.up('Shift');
-  const before = await live(page);
-  await page.locator('canvas').hover({ position: { x: 300, y: 300 } });
-  await page.waitForFunction((f) => window.__ferrum!.core!.live!.frames >= f, before.frames);
-  // Первое нажатие выключило линейки, повторы ничего не поменяли.
+  await page.waitForTimeout(500); // кадры рисуются по требованию: даём ядру обработать оба события
+  // Первое нажатие выключило линейки, повтор ничего не поменял.
   const px = await pixel(page, box.x + 60, box.y + 2);
   expect(px.slice(0, 3)).not.toEqual(RULER);
+});
+
+test('удержание Shift+G не мигает направляющими', async ({ page }) => {
+  await openApp(page);
+  const box = await rulersOn(page);
+  const l = await live(page);
+  const y = Math.round(box.y + box.height - 60);
+  await drag(page, { x: box.x + 400, y: box.y + 10 }, 0, y - box.y - 10);
+  await liveWhen(page, `l.steps === ${l.steps + 1}`);
+  await expectGuide(page, box.x + 60, y);
+  await page.locator('canvas').focus();
+  await page.keyboard.down('Shift');
+  await page.keyboard.down('KeyG');
+  await page.keyboard.down('KeyG'); // повтор клавиши: `repeat` истинно
+  await page.keyboard.up('KeyG');
+  await page.keyboard.up('Shift');
+  // Первое нажатие спрятало направляющие, повтор их не вернул.
+  await expectGuide(page, box.x + 60, y, false);
+  await page.waitForTimeout(500);
+  await expectGuide(page, box.x + 60, y, false);
 });

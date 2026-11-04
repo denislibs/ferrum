@@ -189,3 +189,24 @@ fn rulers_in_menus() {
         .iter()
         .any(|i| matches!(i, MenuNode::Command(CommandId::ViewRulers))));
 }
+
+#[test]
+fn held_key_does_not_toggle_rulers_or_guides() {
+    let mut h = H::new();
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::NONE
+    };
+    for (code, cmd) in [
+        ("KeyR", CommandId::ViewRulers),
+        ("KeyG", CommandId::ViewGuides),
+    ] {
+        let before = checked(&h, cmd);
+        let mut e = KeyEvent::new(code, shift);
+        e.repeat = true;
+        h.ed.handle(Input::KeyDown(e));
+        assert_eq!(checked(&h, cmd), before, "{code}: повтор не переключает");
+        h.ed.handle(Input::KeyDown(KeyEvent::new(code, shift)));
+        assert_ne!(checked(&h, cmd), before, "{code}: нажатие переключает");
+    }
+}
