@@ -1,6 +1,6 @@
 //! Страницы из панели «Страницы» (этап 5): создать, дублировать, переименовать, удалить,
-//! цвет фона. Как и в `ferrum-doc`, в историю отмены попадает только «Дублировать
-//! страницу» (спека подсистемы 2, раздел 10), остальные операции — нет. Имена из интерфейса не доверенные: `clean_name` убирает управляющие
+//! цвет фона, порядок. Как и в `ferrum-doc`, в историю отмены попадают «Дублировать
+//! страницу» и порядок (спека подсистемы 2, раздел 10), остальные операции — нет. Имена из интерфейса не доверенные: `clean_name` убирает управляющие
 //! символы и ограничивает длину.
 
 use ferrum_doc::{Color, DocResult, PageId};
@@ -63,6 +63,22 @@ impl Editor {
         self.out.steps += 1;
         self.set_page(copy)?;
         Ok(copy)
+    }
+
+    /// Перестановка в списке: страница встаёт на место `to`. Один шаг отмены (спека
+    /// подсистемы 2, раздел 10); то же место — ни шага, ни правки.
+    pub fn move_page(&mut self, id: PageId, to: usize) -> DocResult<()> {
+        self.begin_doc_edit();
+        let before = self.doc.last_step();
+        self.doc
+            .move_page(id, to, self.page, self.selection.to_vec())?;
+        if self.doc.last_step() != before {
+            self.out.steps += 1;
+            self.out.events.push(EditorEvent::PagesChanged);
+            self.out.events.push(EditorEvent::DocumentChanged);
+        }
+        self.emit();
+        Ok(())
     }
 
     /// Переименование; пустое имя ничего не меняет.

@@ -726,6 +726,11 @@ pub enum Command {
     DuplicatePage {
         id: String,
     },
+    /// Перестановка страницы: встаёт на место `index` в списке; один шаг отмены.
+    MovePage {
+        id: String,
+        index: u32,
+    },
     SetPage {
         id: String,
     },

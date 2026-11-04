@@ -101,3 +101,42 @@ fn document_name_is_cleaned() {
     );
     assert_eq!(h.ed.document().name(), "Лендинг");
 }
+
+#[test]
+fn move_page_is_one_step_and_keeps_the_current_page() {
+    let mut h = H::new();
+    let a = h.ed.page();
+    let b = h.ed.create_page().unwrap();
+    let c = h.ed.create_page().unwrap();
+    h.ed.set_page(a).unwrap();
+    let order = |h: &H| {
+        h.ed.document()
+            .pages()
+            .iter()
+            .map(|p| p.0)
+            .collect::<Vec<_>>()
+    };
+    h.ed.take_events();
+    let steps = h.ed.step_count();
+    h.ed.move_page(c, 0).unwrap();
+    assert_eq!(order(&h), [c, a, b]);
+    assert_eq!(h.ed.page(), a, "текущая страница не меняется");
+    assert_eq!(h.ed.step_count(), steps + 1);
+    let ev = h.ed.take_events();
+    assert!(ev.contains(&EditorEvent::PagesChanged) && ev.contains(&EditorEvent::DocumentChanged));
+    // То же место: ни шага, ни событий списка.
+    h.ed.move_page(c, 0).unwrap();
+    assert_eq!(h.ed.step_count(), steps + 1);
+    assert!(!h.ed.take_events().contains(&EditorEvent::PagesChanged));
+
+    h.ed.execute(CommandId::Undo);
+    assert_eq!(order(&h), [a, b, c]);
+    assert_eq!(h.ed.page(), a);
+    assert!(h.ed.take_events().contains(&EditorEvent::PagesChanged));
+    h.ed.execute(CommandId::Redo);
+    assert_eq!(order(&h), [c, a, b]);
+
+    h.ed.document_mut_for_tests().force_read_only_for_tests();
+    assert!(h.ed.move_page(a, 2).is_err());
+    assert_eq!(order(&h), [c, a, b]);
+}

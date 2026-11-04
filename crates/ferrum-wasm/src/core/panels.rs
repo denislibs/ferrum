@@ -529,6 +529,14 @@ impl Core {
                 }
                 self.ui.pages = true;
             }
+            Command::MovePage { id, index } => {
+                if let Some(id) = self.page_id(&id) {
+                    if let Err(e) = self.editor.move_page(id, index as usize) {
+                        self.error(e.to_string());
+                    }
+                }
+                self.ui.pages = true;
+            }
             Command::AddPage => {
                 match self.editor.create_page() {
                     Ok(_) => self.touch(),
