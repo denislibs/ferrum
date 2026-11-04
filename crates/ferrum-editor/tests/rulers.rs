@@ -210,3 +210,36 @@ fn held_key_does_not_toggle_rulers_or_guides() {
         assert_ne!(checked(&h, cmd), before, "{code}: нажатие переключает");
     }
 }
+
+#[test]
+fn pan_view_scrolls_sideways_without_rehover() {
+    let mut h = H::new();
+    let r = h.rect(None, 0.0, 0.0, 400.0, 300.0);
+    h.hover(100.0, 100.0);
+    assert_eq!(h.ed.overlay().hover, Some(r));
+    let before = h.ed.camera().clone();
+    h.ed.take_events();
+    h.ed.pan_view(5000.0);
+    assert_ne!(h.ed.camera().center(), before.center(), "вид сдвинулся");
+    assert_eq!(
+        h.ed.overlay().hover,
+        Some(r),
+        "наведение — только от настоящего указателя, а не от прокрутки"
+    );
+    assert!(h.ed.take_events().contains(&EditorEvent::NeedsRedraw));
+    // Колесо, напротив, пересчитывает наведение под указателем.
+    h.ev(Input::Wheel(WheelEvent {
+        point: Point::new(100.0, 100.0),
+        delta: kurbo::Vec2::new(5000.0, 0.0),
+        modifiers: Modifiers::NONE,
+    }));
+    assert_eq!(h.ed.overlay().hover, None);
+}
+
+#[test]
+fn pan_view_without_pointer_leaves_no_hover() {
+    let mut h = H::new();
+    h.rect(None, -2000.0, -2000.0, 4000.0, 4000.0);
+    h.ed.pan_view(-248.0 / 2.0);
+    assert_eq!(h.ed.overlay().hover, None);
+}

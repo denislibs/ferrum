@@ -168,6 +168,38 @@ test('@firefox вид не прыгает: точка мира остаётся 
   await same(a, full);
 });
 
+test('@firefox сворачивание панели не оставляет ложной обводки наведения', async ({ page }) => {
+  await openApp(page);
+  const box = (await page.locator('canvas').boundingBox())!;
+  // Прямоугольник у верха холста; затем вид уезжает влево и вверх так, что он
+  // накрывает точку за краем холста (минус отступ холста от угла окна) — туда раньше
+  // падала точка синтетической прокрутки.
+  await page.keyboard.press('KeyR');
+  await page.mouse.move(box.x + 100, box.y + 50);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 700, box.y + 300, { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.press('Escape');
+  await liveWhen(page, 'l.selectionCount === 0');
+  const before = await live(page);
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height / 2);
+  await page.mouse.wheel(600, 80);
+  await liveWhen(page, `l.cameraX !== ${before.cameraX}`);
+  // Указатель уходит с холста: наведения нет, пока он не вернётся.
+  const collapse = page.getByRole('button', { name: 'Свернуть левую панель' });
+  await collapse.hover();
+  // Правая кромка прямоугольника (x = 100 от левого края холста): обводка наведения легла бы на неё.
+  const clip = { x: box.x + 86, y: box.y, width: 14, height: 200 };
+  await expect.poll(async () => (await page.screenshot({ clip })).length).toBeGreaterThan(0);
+  const quiet = await page.screenshot({ clip });
+  const full = (await live(page)).viewportW;
+  await collapse.click();
+  await liveWhen(page, `l.viewportW === ${full + 200}`);
+  await expect
+    .poll(async () => (await page.screenshot({ clip })).equals(quiet), { timeout: 5000 })
+    .toBe(true);
+});
+
 test('@firefox кнопка правой панели не налезает на «Масштаб» и «Поделиться» при минимальной ширине', async ({ page }) => {
   await openApp(page);
   const edge = page.getByRole('separator', { name: 'Ширина правой панели' });

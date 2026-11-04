@@ -11,7 +11,10 @@ export function Toasts(props: { store: UiStore; onUndo?: (step: number) => void 
    * по-прежнему доходить до него. С клавиатуры фокус возвращается на холст сам. */
   const keepFocus = (e: Event) => e.preventDefault();
   const canvas = () => document.querySelector<HTMLElement>('canvas');
-  /** Закрытие: фокус из уведомления уходит на холст. Элемент остаётся на 400 мс
+  /** Куда вернуть фокус: в правке текста — полю ввода (клавиши идут ему, не холсту). */
+  const back = () =>
+    (props.store.state.text.editing ? document.querySelector<HTMLElement>('.fe-text-input') : null) ?? canvas();
+  /** Закрытие: фокус из уведомления уходит на холст (в правке текста — на поле). Элемент остаётся на 400 мс
    * невидимым и перехватывает указатель — вторая половина двойного щелчка не должна
    * попасть в холст под ним и сменить только что восстановленное выделение. */
   const close = (t: Toast, el: HTMLElement) => {
@@ -20,7 +23,7 @@ export function Toasts(props: { store: UiStore; onUndo?: (step: number) => void 
     props.store.pauseToast(t.id);
     el.classList.add('fe-toast--gone');
     setTimeout(() => props.store.dismissToast(t.id), 400);
-    if (inside) canvas()?.focus();
+    if (inside) back()?.focus();
   };
   // Фокус был в уведомлении, а его заменили или вытеснили: он не должен упасть на body.
   let root!: HTMLDivElement;
@@ -31,7 +34,7 @@ export function Toasts(props: { store: UiStore; onUndo?: (step: number) => void 
       () =>
         queueMicrotask(() => {
           const a = document.activeElement;
-          if (hadFocus && (!a || a === document.body) && !root.contains(a)) canvas()?.focus();
+          if (hadFocus && (!a || a === document.body) && !root.contains(a)) back()?.focus();
           hadFocus = false;
         }),
       { defer: true },

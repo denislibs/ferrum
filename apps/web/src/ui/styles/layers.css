@@ -41,6 +41,13 @@
   height: var(--row-height);
   padding: 0 var(--space-2) 0 var(--space-1);
   cursor: default;
+  /* Протяжка строки не выделяет имена и не прокручивает список касанием. */
+  user-select: none;
+  touch-action: none;
+}
+/* Поле переименования остаётся полем: в нём текст выделяется. */
+.fe-page input {
+  user-select: text;
 }
 .fe-page:hover {
   background: var(--surface-hover);

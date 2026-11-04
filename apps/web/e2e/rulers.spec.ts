@@ -183,7 +183,7 @@ test('удержание Shift+R не мигает линейками', async ({
   expect(px.slice(0, 3)).not.toEqual(RULER);
 });
 
-test('удержание Shift+G не мигает направляющими', async ({ page }) => {
+test('@firefox удержание Shift+G не мигает направляющими', async ({ page }) => {
   await openApp(page);
   const box = await rulersOn(page);
   const l = await live(page);

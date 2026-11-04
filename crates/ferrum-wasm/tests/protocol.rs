@@ -171,6 +171,11 @@ fn commands() -> Vec<Command> {
         },
         Command::AddFramePreset { index: 3 },
         Command::SetZoom { zoom: 2.0 },
+        Command::SetView {
+            rulers: Some(true),
+            guides: None,
+        },
+        Command::PanView { dx: -124.0 },
         Command::Export {
             scale: 3.0,
             format: None,

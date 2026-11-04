@@ -822,3 +822,33 @@ fn cursor_follows_the_release_point_not_the_press_point() {
         h.ed.cursor()
     );
 }
+
+#[test]
+fn set_view_in_hidden_ui_keeps_a_visible_guide_drag() {
+    let mut h = with_rulers();
+    seed_page(&mut h, vec![gy(150.0)]);
+    h.ed.execute(CommandId::ToggleUi);
+    h.down(300.0, 150.0, NONE);
+    h.mv(300.0, 200.0, NONE);
+    assert!(h.ed.is_busy());
+    // Другая вкладка прислала тот же вид: линия на экране, жест идёт.
+    h.ed.set_view(Some(true), Some(true));
+    assert!(h.ed.is_busy(), "линия видна — тянуть её можно");
+    h.up(300.0, 200.0, NONE);
+    assert_eq!(page_guides(&h), [gy(200.0)]);
+}
+
+#[test]
+fn ruler_press_that_starts_no_guide_cancels_a_busy_tool_gesture() {
+    let mut h = with_rulers();
+    let r = h.rect(None, 100.0, 100.0, 50.0, 50.0);
+    h.ed.set_view(None, Some(false));
+    h.drag_hold((125.0, 125.0), (225.0, 125.0), NONE);
+    assert!(h.ed.is_busy());
+    // Потерянное отпускание, затем нажатие на линейку, которая линию не начнёт.
+    h.down(300.0, 10.0, NONE);
+    assert!(!h.ed.is_busy(), "жест инструмента отменён");
+    assert_eq!(h.props(r).x, 100.0, "узел вернулся");
+    h.up(300.0, 10.0, NONE);
+    assert_eq!(h.props(r).x, 100.0, "отпускание потерянный жест не пишет");
+}

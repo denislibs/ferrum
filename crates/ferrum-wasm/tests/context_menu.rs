@@ -297,3 +297,15 @@ fn set_guides_preview_commit_and_errors() {
     });
     assert_eq!(errors(core.take_events()), 1, "такого узла нет");
 }
+
+#[test]
+fn pan_view_moves_the_camera_and_keeps_the_hover() {
+    let mut core = demo(10);
+    let x = core.editor().camera().center().x;
+    core.command(Command::PanView { dx: 100.0 });
+    assert_ne!(core.editor().camera().center().x, x);
+    assert!(core
+        .take_events()
+        .iter()
+        .all(|e| !matches!(e, CoreEvent::Error { .. })));
+}

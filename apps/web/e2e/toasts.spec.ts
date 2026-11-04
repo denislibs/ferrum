@@ -117,7 +117,25 @@ test('@firefox Esc на уведомлении закрывает его, выд
   expect((await live(page)).selectionCount).toBe(1);
 });
 
-test('«Отменить» во время правки нового текста — как Ctrl+Z: черновик закончен, слой вернулся', async ({ page }) => {
+test('@firefox Esc на уведомлении во время правки текста возвращает фокус полю, а не холсту', async ({ page }) => {
+  await openApp(page);
+  const l = await selectLayer(page);
+  await page.keyboard.press('Delete');
+  await liveWhen(page, `l.nodes === ${l.nodes - 1}`);
+  await page.keyboard.press('KeyT');
+  const at = await appScreen(page, l, 600, 400);
+  await page.mouse.click(at.x, at.y);
+  await expect(page.locator('.fe-text-input')).toBeFocused();
+  await expect(notice(page)).toBeVisible();
+  await notice(page).getByRole('button', { name: 'Закрыть уведомление' }).focus();
+  await page.keyboard.press('Escape');
+  await expect(notice(page)).toHaveCount(0);
+  await expect(page.locator('.fe-text-input')).toBeFocused();
+  await page.keyboard.type('Ab');
+  expect(await page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!)).text.editing)).toBe(true);
+});
+
+test('@firefox «Отменить» во время правки нового текста — как Ctrl+Z: черновик закончен, слой вернулся', async ({ page }) => {
   await openApp(page);
   const l = await selectLayer(page);
   await page.keyboard.press('Delete');

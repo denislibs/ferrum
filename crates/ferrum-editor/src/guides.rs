@@ -108,6 +108,9 @@ pub(crate) fn axis_aligned(scene: &Scene, slot: Slot) -> bool {
 }
 
 /// Линия фрейма в мире: от края до края его рамки. У повёрнутого — косая.
+/// Поведение: смещение линии хранится как есть, и после уменьшения фрейма линия
+/// может оказаться за его рамкой — она рисуется там же (на `w`/`h` фрейма) и остаётся
+/// доступной; не удаляется и не прижимается к рамке.
 fn frame_line(scene: &Scene, slot: Slot, g: Guide) -> Line {
     let n = scene.at(slot);
     let (w, h) = (n.props.w, n.props.h);
@@ -147,7 +150,7 @@ impl Editor {
             self.settings.guides = v;
         }
         // Невидимую линию не тянут и не пишут.
-        if self.guide_drag.is_some() && !(self.rulers_visible() && self.settings.guides) {
+        if self.guide_drag.is_some() && !self.guides_visible() {
             self.cancel_guides();
         }
         self.emit();
@@ -464,11 +467,13 @@ impl Editor {
         self.cancel_guides();
         if let Some(over) = self.over_ruler(e.point) {
             let editing = self.text_edit.is_some() || self.vector_edit.is_some();
+            // Нажатие забрала линейка: потерянный жест инструмента (отпускание не
+            // дошло) кончается, даже если линия не начнётся.
+            if self.tool.is_busy() {
+                self.cancel_gesture();
+            }
             if let GuideHover::Ruler(axis) = over {
                 if !editing && !self.doc.is_read_only() && self.guides_visible() {
-                    if self.tool.is_busy() {
-                        self.cancel_gesture();
-                    }
                     self.guide_drag = Some(GuideDrag {
                         axis,
                         source: None,

@@ -134,11 +134,21 @@ export function App(props: AppProps) {
     editor()?.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
   });
   createEffect(() => editor()?.send({ type: 'setSettings', pixelSnap: pixelSnap() }));
-  createEffect(() => editor()?.send({ type: 'setView', rulers: rulers(), guides: guides() }));
+  // Показ линеек и направляющих, каким его знает ядро: пришедшее от него событие `view`
+  // обратно командой не уходит (иначе два быстрых Shift+R дали бы лишний кадр).
+  let coreView: { rulers: boolean; guides: boolean } | null = null;
+  createEffect(() => {
+    const v = { rulers: rulers(), guides: guides() };
+    const ed = editor();
+    if (!ed || (coreView && coreView.rulers === v.rulers && coreView.guides === v.guides)) return;
+    coreView = v;
+    ed.send({ type: 'setView', ...v });
+  });
   // Холст держит в центре одну и ту же точку мира: сменилась ширина колонки панели —
   // центр холста ушёл на половину разницы, и содержимое поехало бы. Возвращаем его на
-  // экранное место прокруткой на эту половину (как колесо); край, перетянутый мышью,
-  // ведёт себя как прежде. 48 — `--panel-rail`.
+  // экранное место сдвигом вида на эту половину (команда `panView`, без наведения под
+  // указателем: над холстом его сейчас нет); край, перетянутый мышью, ведёт себя
+  // как прежде. 48 — `--panel-rail`.
   const RAIL = 48;
   let railL = leftCollapsed();
   let railR = rightCollapsed();
@@ -151,9 +161,7 @@ export function App(props: AppProps) {
       railL = l;
       railR = r;
       const dx = (dL - dR) / 2;
-      if (dx !== 0 && canvas && !store.state.uiHidden) {
-        canvas.dispatchEvent(new WheelEvent('wheel', { deltaX: dx, deltaY: 0, cancelable: true }));
-      }
+      if (dx !== 0 && !store.state.uiHidden) editor()?.send({ type: 'panView', dx });
     });
   });
   // Запись — не чаще раза в четверть секунды (края панелей тянутся каждый кадр), и
@@ -308,7 +316,8 @@ export function App(props: AppProps) {
       beforeDocument: (ed) => {
         ed.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
         ed.send({ type: 'setSettings', pixelSnap: pixelSnap() });
-        ed.send({ type: 'setView', rulers: rulers(), guides: guides() });
+        coreView = { rulers: rulers(), guides: guides() };
+        ed.send({ type: 'setView', ...coreView });
         // Нынешняя раскладка: другая вкладка могла сменить её, пока ядро запускалось.
         const km = keymap();
         if (km) {
@@ -408,6 +417,7 @@ export function App(props: AppProps) {
         ed.core.on((e) => {
           if (e.type === 'uiCommand') uiCommand(e.key);
           if (e.type === 'view') {
+            coreView = { rulers: e.rulers, guides: e.guides };
             setRulers(e.rulers);
             setGuides(e.guides);
           }

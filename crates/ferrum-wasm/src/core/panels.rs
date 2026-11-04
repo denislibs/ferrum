@@ -696,6 +696,13 @@ impl Core {
                 }
             }
             Command::SetView { rulers, guides } => self.editor.set_view(rulers, guides),
+            Command::PanView { dx } => {
+                if dx.is_finite() && dx.abs() <= 1e6 {
+                    self.editor.pan_view(dx);
+                } else {
+                    self.error("Неверный сдвиг вида");
+                }
+            }
             Command::SetGuides {
                 owner,
                 guides,

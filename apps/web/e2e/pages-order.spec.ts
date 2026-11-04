@@ -130,3 +130,11 @@ test('@firefox прокрутка списка посреди протяжки: 
   await page.mouse.up();
   await expect.poll(() => names(page).then((n) => n.indexOf('Страница 1'))).toBe(target);
 });
+
+test('@firefox протяжка страницы не выделяет текст имён', async ({ page }) => {
+  await threePages(page);
+  await dragRow(page, 0, 2, false);
+  expect(await page.evaluate(() => getSelection()?.toString() ?? '')).toBe('');
+  await page.mouse.up();
+  expect(await page.evaluate(() => getSelection()?.toString() ?? '')).toBe('');
+});
