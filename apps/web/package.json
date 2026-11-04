@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "wasm": "node scripts/build-wasm.mjs",
-    "dev": "vite",
-    "build": "vite build && node scripts/check-dist.mjs",
+    "dev": "vite --mode standalone",
+    "dev:server": "vite",
+    "build": "vite build --mode standalone && node scripts/check-dist.mjs standalone",
+    "build:server": "vite build --outDir dist-server && node scripts/check-dist.mjs server",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.e2e.json",
     "unit": "playwright test -c playwright.unit.config.ts",

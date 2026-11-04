@@ -15,6 +15,9 @@ import { render } from 'solid-js/web';
 import { Root } from './ui/root';
 import { runSmoke } from './ui/tauri';
 
+// Условие — прямо по `import.meta.env`, без константы: сборщик выбрасывает ветку целиком,
+// `scripts/check-dist.mjs` проверяет, что в рабочей сборке её нет.
+if (import.meta.env.VITE_FERRUM_LOCAL === '1') document.documentElement.dataset.ferrumLocal = '1';
 render(() => <Root />, document.getElementById('app')!);
 // Десктоп с `FERRUM_SMOKE=1`: проверка запуска (вне Tauri ничего не делает).
 void runSmoke();

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "identifier": "app.ferrum.desktop",
   "build": {
+    "beforeBuildCommand": "npm --prefix ../web run build",
     "frontendDist": "../../web/dist"
   },
   "app": {
