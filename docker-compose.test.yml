@@ -27,4 +27,5 @@ services:
   mailpit:
     ports: !override
       - '127.0.0.1:18025:8025'
+      - '127.0.0.1:11025:1025'
     restart: 'no'

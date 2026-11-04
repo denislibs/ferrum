@@ -51,5 +51,5 @@ test('имя без номера — отказ до всякой записи',
 
 test('миграции репозитория применяются на пустой базе', async () => {
   const applied = await migrate(pool, join(import.meta.dir, '../migrations'));
-  expect(applied[0]).toBe('001_init.sql');
+  expect(applied).toEqual(['001_init.sql', '002_better_auth.sql']);
 });

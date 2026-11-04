@@ -5,10 +5,13 @@
   "type": "module",
   "dependencies": {
     "@ferrum/protocol": "file:../../packages/protocol",
+    "better-auth": "1.7.16",
+    "nodemailer": "10.2.0",
     "pg": "8.23.1"
   },
   "devDependencies": {
     "@types/bun": "1.4.3",
+    "@types/nodemailer": "8.0.2",
     "@types/pg": "8.23.1"
   }
 }

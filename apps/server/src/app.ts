@@ -2,6 +2,8 @@
 // тесты поднимают настоящий сервер на свободном порту против настоящих Postgres и Valkey.
 
 import type { Pool } from 'pg';
+import { authRoutes } from './auth-routes';
+import type { Auth } from './auth';
 import { serveStatic, withHeaders } from './static';
 import { valkeyAlive } from './valkey';
 
@@ -9,6 +11,9 @@ export interface AppDeps {
   pool: Pool;
   valkey: Bun.RedisClient;
   webDist: string;
+  auth: Auth;
+  publicUrl: string;
+  trustProxy: boolean;
 }
 
 /** Проверка не должна висеть дольше проверки контейнера. */
@@ -27,10 +32,12 @@ async function health(deps: AppDeps): Promise<Response> {
 }
 
 export function startServer(deps: AppDeps, port: number): Bun.Server<undefined> {
+  const handleAuth = authRoutes(deps);
   return Bun.serve({
     port,
     routes: {
       '/healthz': async () => withHeaders(await health(deps)),
+      '/api/auth/*': async (req, server) => withHeaders(await handleAuth(req, server.requestIP(req)?.address)),
     },
     fetch: async (req) => withHeaders(await serveStatic(req, deps.webDist)),
     error: (e) => {

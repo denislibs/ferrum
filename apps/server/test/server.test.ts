@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Pool } from 'pg';
 import { startServer } from '../src/app';
+import { createAuth } from '../src/auth';
 import { connectValkey } from '../src/valkey';
-import { TEST_VALKEY_URL, testPool } from './helpers';
+import { TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
 
 const web = mkdtempSync(join(tmpdir(), 'ferrum-web-'));
 mkdirSync(join(web, 'assets'));
@@ -15,7 +16,10 @@ writeFileSync(join(web, 'assets/core.wasm'), new Uint8Array([0, 97, 115, 109]));
 
 const pool = testPool();
 const valkey = connectValkey(TEST_VALKEY_URL);
-const server = startServer({ pool, valkey, webDist: web }, 0);
+const publicUrl = 'http://localhost:1';
+const auth = createAuth({ publicUrl, secret: TEST_SECRET, pool, valkey, mailer: { send: async () => {} }, allowedEmails: [] });
+const deps = { valkey, webDist: web, auth, publicUrl, trustProxy: false };
+const server = startServer({ ...deps, pool }, 0);
 const url = (p: string) => `http://127.0.0.1:${server.port}${p}`;
 afterAll(async () => {
   server.stop(true);
@@ -39,7 +43,7 @@ test('/healthz: база и Valkey живы', async () => {
 test('/healthz: база недоступна — 503 и что именно упало', async () => {
   const dead = new Pool({ connectionString: 'postgres://ferrum:ferrum@127.0.0.1:1/ferrum', connectionTimeoutMillis: 200 });
   dead.on('error', () => {});
-  const s = startServer({ pool: dead, valkey, webDist: web }, 0);
+  const s = startServer({ ...deps, pool: dead }, 0);
   const res = await fetch(`http://127.0.0.1:${s.port}/healthz`);
   expect(res.status).toBe(503);
   expect(await res.json()).toEqual({ ok: false, postgres: false, valkey: true });

@@ -3,10 +3,10 @@
 
 export const API_SIGN_IN = '/api/auth/sign-in/magic-link';
 export const API_CONFIRM = '/api/auth/confirm';
-export const API_SESSION = '/api/auth/get-session';
-export const API_UPDATE_USER = '/api/auth/update-user';
+export const API_SESSION = '/api/auth/session';
+export const API_NAME = '/api/auth/name';
 export const API_SIGN_OUT = '/api/auth/sign-out';
-export const API_SIGN_OUT_EVERYWHERE = '/api/auth/revoke-sessions';
+export const API_SIGN_OUT_EVERYWHERE = '/api/auth/sign-out-everywhere';
 
 /** Адрес не длиннее, чем позволяет RFC 5321. */
 export const MAX_EMAIL_BYTES = 254;
@@ -23,7 +23,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 
-export type AuthErrorCode = 'BAD_REQUEST' | 'BAD_ORIGIN' | 'INVALID_TOKEN' | 'TOO_MANY_REQUESTS' | 'UNAUTHORIZED';
+export type AuthErrorCode = 'BAD_REQUEST' | 'BAD_ORIGIN' | 'INVALID_TOKEN' | 'TOO_MANY_REQUESTS' | 'UNAUTHORIZED' | 'NOT_FOUND';
 
 export interface AuthErrorBody {
   error: AuthErrorCode;
@@ -46,7 +46,13 @@ export interface NameRequest {
 export interface SessionUser {
   id: string;
   email: string;
+  /** Пусто, пока человек не прошёл экран первого входа. */
   name: string;
+}
+
+/** Ответ `GET /api/auth/session`: без токена сессии, он живёт только в cookie `HttpOnly`. */
+export interface SessionResponse {
+  user: SessionUser | null;
 }
 
 function record(v: unknown): Record<string, unknown> | null {
