@@ -37,7 +37,12 @@ test('запись файла стирает пачки до номера сни
   const r = await page.evaluate(async () => {
     const s = window.__ferrumFiles!.store;
     const m = await s.create('Снимок', new Blob([new Uint8Array([9])]));
-    for (const [session, batch] of [[5, 1], [7, 1], [7, 2], [7, 3]]) {
+    for (const [session, batch] of [
+      [5, 1],
+      [7, 1],
+      [7, 2],
+      [7, 3],
+    ]) {
       await s.appendJournal(m.id, { session, batch }, new Uint8Array([session * 10 + batch]).buffer);
     }
     await s.failWrites(true);
@@ -117,9 +122,7 @@ test('база версии 1 с файлами открывается как н
   const page = await ctx.newPage();
   await testMode(page);
   // Пустая страница того же происхождения: приложение не открывает базу.
-  await page.route('**/v1-seed', (route) =>
-    route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>seed</title>' }),
-  );
+  await page.route('**/v1-seed', (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>seed</title>' }));
   await page.goto('/v1-seed');
   await page.evaluate(
     () =>

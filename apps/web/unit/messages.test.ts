@@ -8,9 +8,7 @@ import { FERRUM_TEXT_MARKER, MAX_CLIPBOARD_TEXT } from '../src/core/clipboard-te
 test('pasteImage: больше 64 МБ — отказ на русском', () => {
   expect(MAX_COMMAND_BYTES.pasteImage).toBe(64 * 1024 * 1024);
   const big = new Uint8Array(MAX_COMMAND_BYTES.pasteImage + 1);
-  expect(commandSizeError({ type: 'pasteImage', bytes: big })).toBe(
-    'Слишком большой объём данных: 65 МБ, предел — 64 МБ',
-  );
+  expect(commandSizeError({ type: 'pasteImage', bytes: big })).toBe('Слишком большой объём данных: 65 МБ, предел — 64 МБ');
   expect(commandSizeError({ type: 'pasteImage', bytes: new Uint8Array(8) })).toBeNull();
   expect(commandSizeError({ type: 'pasteImage', bytes: [1, 2] as unknown as Uint8Array })).toBe(
     'Неверная команда: данные не в виде байтов',
@@ -69,7 +67,7 @@ test('openWithJournal: файл и журнал вместе — не больш
   expect(commandSizeError({ type: 'openWithJournal', bytes: file, journal: 'x' as unknown as Uint8Array[] })).toBe(
     'Неверная команда: данные не в виде байтов',
   );
-  const many = new Array<Uint8Array>(MAX_JOURNAL_ENTRIES + 1).fill(new Uint8Array(1));
+  const many = Array.from({ length: MAX_JOURNAL_ENTRIES + 1 }, () => new Uint8Array(1));
   expect(commandSizeError({ type: 'openWithJournal', bytes: file, journal: many })).toBe(
     'Неверная команда: в журнале изменений больше 100000 записей',
   );
@@ -89,7 +87,9 @@ test('openWithJournal: файл и журнал вместе — не больш
 test('pasteProps: текст — не длиннее предела, байты — как у вставки', () => {
   expect(commandSizeError({ type: 'pasteProps', text: `${FERRUM_TEXT_MARKER}AQI=` })).toBeNull();
   expect(commandSizeError({ type: 'pasteProps' })).toBeNull();
-  expect(commandSizeError({ type: 'pasteProps', text: 'A'.repeat(MAX_CLIPBOARD_TEXT + 1) })).toBe('Слишком большой объём данных: предел — 64 МБ');
+  expect(commandSizeError({ type: 'pasteProps', text: 'A'.repeat(MAX_CLIPBOARD_TEXT + 1) })).toBe(
+    'Слишком большой объём данных: предел — 64 МБ',
+  );
   expect(commandSizeError({ type: 'pasteProps', bytes: new Uint8Array(4) })).toBeNull();
   expect(commandSizeError({ type: 'pasteProps', bytes: [1] as unknown as Uint8Array })).toBe('Неверная команда: данные не в виде байтов');
 });

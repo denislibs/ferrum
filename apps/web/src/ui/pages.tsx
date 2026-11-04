@@ -102,8 +102,7 @@ export function PagesPanel(props: { open: boolean; onToggle: (open: boolean) => 
     d.ready = true;
   };
   /** Промежуток между строками под указателем: 0…число строк. */
-  const slotAt = (clientY: number, d: Drag) =>
-    Math.max(0, Math.min(pages().list.length, Math.round((clientY - d.top) / d.rowH)));
+  const slotAt = (clientY: number, d: Drag) => Math.max(0, Math.min(pages().list.length, Math.round((clientY - d.top) / d.rowH)));
   /** Промежуток → итоговое место строки: её саму из списка уже вынули. */
   const placeOf = (slot: number, from: number) => (slot > from ? slot - 1 : slot);
   const startDrag = (e: PointerEvent, id: string, from: number) => {

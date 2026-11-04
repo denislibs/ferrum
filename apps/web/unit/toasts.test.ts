@@ -21,7 +21,7 @@ function fakeTimers() {
   return {
     advance(ms: number) {
       now += ms;
-      for (const [id, t] of [...queue]) {
+      for (const [id, t] of Array.from(queue)) {
         if (t.at <= now) {
           queue.delete(id);
           t.f();

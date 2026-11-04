@@ -108,7 +108,10 @@ test('пресет фрейма — размер одним шагом', async (
   await openApp(page);
   await selectRow(page, 'Экран 9');
   await page.getByRole('button', { name: 'Пресет размера' }).click();
-  await page.getByRole('menu', { name: 'Пресеты размера' }).getByRole('menuitemcheckbox', { name: /iPhone 16 Pro Max/ }).click();
+  await page
+    .getByRole('menu', { name: 'Пресеты размера' })
+    .getByRole('menuitemcheckbox', { name: /iPhone 16 Pro Max/ })
+    .click();
   await expect(field(page, 'Ширина')).toHaveValue('440');
   await expect(field(page, 'Высота')).toHaveValue('956');
   expect((await live(page)).steps).toBe(1);
@@ -141,7 +144,13 @@ test('набранное в поле не затирается событиям�
   const send = (f: string, value: number) =>
     page.evaluate(
       ([field, value]) =>
-        window.__ferrum!.core!.send({ type: 'editSelection', edit: { type: 'number', field, value, relative: false } as never, phase: 'commit', ids: undefined, selectionVersion: undefined }),
+        window.__ferrum!.core!.send({
+          type: 'editSelection',
+          edit: { type: 'number', field, value, relative: false } as never,
+          phase: 'commit',
+          ids: undefined,
+          selectionVersion: undefined,
+        }),
       [f, value] as const,
     );
   await expect(x).toHaveValue('14400');
@@ -288,10 +297,7 @@ test('набранное применяется к тем, кого правил
   const ids = await page.evaluate(() => window.__ferrum!.ui!.selectionIds.slice());
   expect(ids.length).toBe(1);
   await coreSend(page, { type: 'layersWindow', start: 0, count: 40 });
-  const other = await page.evaluate(
-    (id) => (window.__ferrum!.ui!.layers.rows.find((r) => r.id !== id) ?? { id: '' }).id,
-    ids[0],
-  );
+  const other = await page.evaluate((id) => (window.__ferrum!.ui!.layers.rows.find((r) => r.id !== id) ?? { id: '' }).id, ids[0]);
   await coreSend(page, { type: 'select', ids: [other], mode: 'replace' });
   await liveWhen(page, `l.steps === ${before.steps + 2}`);
   await page.waitForTimeout(200);
@@ -331,7 +337,9 @@ test('Enter при вводе через IME не применяет; друго
   await x.click();
   await x.press('ControlOrMeta+a');
   await x.pressSequentially('321');
-  await x.evaluate((el) => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })));
+  await x.evaluate((el) =>
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })),
+  );
   await page.waitForTimeout(200);
   expect((await live(page)).steps).toBe(before.steps);
   await expect(x).toHaveValue('321');
@@ -372,11 +380,14 @@ test('превью подписи — не чаще кадра и без пов�
   await page.mouse.move(box.x + 5, box.y + 5);
   await page.mouse.down();
   // 40 движений в одной задаче: до кадра превью уходит не больше одного.
-  await page.getByRole('tabpanel').locator('.fe-field__label', { hasText: /^X$/ }).evaluate((el, x0) => {
-    for (let i = 1; i <= 40; i++) {
-      el.dispatchEvent(new PointerEvent('pointermove', { clientX: x0 + i, clientY: 10, bubbles: true, pointerId: 1, buttons: 1 }));
-    }
-  }, box.x + 5);
+  await page
+    .getByRole('tabpanel')
+    .locator('.fe-field__label', { hasText: /^X$/ })
+    .evaluate((el, x0) => {
+      for (let i = 1; i <= 40; i++) {
+        el.dispatchEvent(new PointerEvent('pointermove', { clientX: x0 + i, clientY: 10, bubbles: true, pointerId: 1, buttons: 1 }));
+      }
+    }, box.x + 5);
   await page.waitForTimeout(100);
   const prev = await page.evaluate(() => (window as unknown as { __prev: number[] }).__prev);
   expect(prev.length).toBeGreaterThan(0);
@@ -398,7 +409,13 @@ test('поворот: ввод, равный показанному, — не п
   await selectRow(page, 'Экран 9');
   const r = field(page, 'Поворот');
   const before = await live(page);
-  await coreSend(page, { type: 'editSelection', edit: { type: 'number', field: 'rotation', value: 30.004, relative: false }, phase: 'commit', ids: undefined, selectionVersion: undefined });
+  await coreSend(page, {
+    type: 'editSelection',
+    edit: { type: 'number', field: 'rotation', value: 30.004, relative: false },
+    phase: 'commit',
+    ids: undefined,
+    selectionVersion: undefined,
+  });
   await liveWhen(page, `l.steps === ${before.steps + 1}`);
   await expect(r).toHaveValue('30°');
   await r.fill('30');

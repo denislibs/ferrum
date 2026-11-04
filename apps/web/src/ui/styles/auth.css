@@ -1,0 +1,153 @@
+/* Экраны входа и аккаунт: карточка на холсте темы, токены и компоненты дизайн-системы.
+   Экран входа — единственный, который открывается без сессии. */
+
+.fe-auth {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  overflow: auto;
+  padding: var(--space-6);
+  background: var(--canvas);
+}
+.fe-auth__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: 340px;
+  padding: var(--space-6);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-popover);
+}
+.fe-auth__title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+}
+/* Фокус ставит скрипт при смене экрана (для экранных дикторов), а заголовок не элемент управления. */
+.fe-auth__title:focus-visible {
+  outline: none;
+}
+.fe-auth__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+.fe-auth__text b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.fe-auth__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.fe-auth__label {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--ink-muted);
+}
+.fe-auth__field {
+  height: 32px;
+}
+.fe-auth__error {
+  margin: 0;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+.fe-auth__wide {
+  justify-content: center;
+  width: 100%;
+  height: 32px;
+}
+.fe-auth__or {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-faint);
+}
+.fe-auth__or::before,
+.fe-auth__or::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+/* Неактивная кнопка входа через другой сервис; подсказка «Скоро» — чистым CSS: на этом экране
+   нет редактора, а значит и слоя подсказок. */
+.fe-auth__soon {
+  position: relative;
+  color: var(--ink-faint);
+  cursor: default;
+}
+.fe-auth__soon:hover,
+.fe-auth__soon:active {
+  background: transparent;
+}
+.fe-auth__tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  translate: -50% 0;
+  display: none;
+}
+.fe-auth__soon:hover .fe-auth__tip,
+.fe-auth__soon:focus-visible .fe-auth__tip {
+  display: flex;
+}
+
+.fe-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: hsl(var(--avatar-hue) 55% 42%);
+  color: #ffffff;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+}
+
+.fe-account {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.fe-account__who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.fe-account__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.fe-account__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.fe-account-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: auto;
+}
+.fe-account-row__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

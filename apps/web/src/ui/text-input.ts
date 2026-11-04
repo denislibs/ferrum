@@ -73,7 +73,11 @@ export function installTextInput(ed: Editor, stage: HTMLElement, canvas: HTMLCan
     if (e.inputType === 'insertCompositionText' || e.isComposing) return;
     e.preventDefault();
     if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
-      send({ type: 'textKey', key: 'KeyZ', mods: { shift: e.inputType === 'historyRedo', ctrl: ed.platform !== 'mac', meta: ed.platform === 'mac', alt: false } });
+      send({
+        type: 'textKey',
+        key: 'KeyZ',
+        mods: { shift: e.inputType === 'historyRedo', ctrl: ed.platform !== 'mac', meta: ed.platform === 'mac', alt: false },
+      });
       return;
     }
     const kind = inputKind(e.inputType);

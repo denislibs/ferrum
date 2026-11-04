@@ -41,7 +41,9 @@ type Listener = (e: CoreEvent) => void;
 
 // Подменённые глобальные объекты возвращаются после каждого теста.
 const g = globalThis as Record<string, unknown>;
-const saved = ['window', 'document', 'performance', 'clearTimeout'].map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)] as const);
+const saved = ['window', 'document', 'performance', 'clearTimeout'].map(
+  (k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)] as const,
+);
 test.afterEach(() => {
   for (const [k, d] of saved) {
     if (d) Object.defineProperty(globalThis, k, d);

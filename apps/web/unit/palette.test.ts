@@ -44,7 +44,8 @@ const commands = [
 
 const rows = (over: Partial<Parameters<typeof paletteRows>[0]> = {}) =>
   paletteRows({ query: '', commands, hidden: new Set(), recent: [], layers: [], pages: [], ...over });
-const show = (r: PaletteRow[]) => r.map((x) => (x.kind === 'heading' ? `# ${x.title}` : x.kind === 'command' ? x.key : `${x.kind}:${x.name}`));
+const show = (r: PaletteRow[]) =>
+  r.map((x) => (x.kind === 'heading' ? `# ${x.title}` : x.kind === 'command' ? x.key : `${x.kind}:${x.name}`));
 
 test('пустой запрос: недавние, затем остальные команды; без удержания, сдвигов и самой палитры', () => {
   expect(show(rows({ recent: ['edit.delete', 'ui.unknown', 'edit.undo'], hidden: new Set(['ui.open_disk']) }))).toEqual([
@@ -62,7 +63,14 @@ test('пустой запрос: недавние, затем остальные
 
 test('запрос: команды, слои, страницы с заголовками; раскладка и недавность', () => {
   const layers: FoundLayerDto[] = [{ id: '1@2', name: 'Порядок карточек', kind: 'frame' }];
-  const r = rows({ query: 'порядок', layers, pages: [{ id: '0@1', name: 'Порядок' }, { id: '0@2', name: 'Обложка' }] });
+  const r = rows({
+    query: 'порядок',
+    layers,
+    pages: [
+      { id: '0@1', name: 'Порядок' },
+      { id: '0@2', name: 'Обложка' },
+    ],
+  });
   expect(show(r)).toEqual(['# Команды', 'arrange.front', 'arrange.back', '# Слои', 'layer:Порядок карточек', '# Страницы', 'page:Порядок']);
   // «щквук» — «order» в русской раскладке; недавняя команда — первой.
   expect(show(rows({ query: 'щквук', recent: ['arrange.back'] }))).toEqual(['# Команды', 'arrange.back', 'arrange.front']);
@@ -110,7 +118,7 @@ test('недавние: в начало, без повторов, не боль�
   expect(parseRecent('')).toEqual([]);
 });
 
-test('запрос к worker\'у — не длиннее 256 байт, по границе символа', () => {
+test("запрос к worker'у — не длиннее 256 байт, по границе символа", () => {
   expect(clipQuery('кнопка')).toBe('кнопка');
   const long = 'я'.repeat(200);
   const clipped = clipQuery(long);

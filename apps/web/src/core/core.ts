@@ -161,9 +161,9 @@ export class Core {
     worker.onerror = (e) => {
       e.preventDefault?.();
       // Без текста приходит отказ загрузки или разбора самого скрипта.
-      core.fail(e.message || (core.failed ? 'скрипт worker\'а не загрузился' : 'сбой worker\'а'));
+      core.fail(e.message || (core.failed ? "скрипт worker'а не загрузился" : "сбой worker'а"));
     };
-    worker.onmessageerror = () => core.fail('сообщение worker\'а не удалось разобрать');
+    worker.onmessageerror = () => core.fail("сообщение worker'а не удалось разобрать");
     const r = canvas.getBoundingClientRect();
     core.rect = { left: r.left, top: r.top, width: r.width, height: r.height };
     const offscreen = canvas.transferControlToOffscreen();

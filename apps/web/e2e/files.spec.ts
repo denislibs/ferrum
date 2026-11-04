@@ -31,8 +31,7 @@ async function setup(page: Page): Promise<void> {
   });
 }
 
-const workers = (page: Page) =>
-  page.evaluate(() => (window as unknown as { __workers: { url: string; terminated: boolean }[] }).__workers);
+const workers = (page: Page) => page.evaluate(() => (window as unknown as { __workers: { url: string; terminated: boolean }[] }).__workers);
 
 async function openFiles(page: Page, url = '/'): Promise<void> {
   await setup(page);
@@ -157,9 +156,7 @@ test('Ctrl+S сохраняет: перезагрузка файла показ�
   await page.keyboard.press('ControlOrMeta+KeyS');
   await expect.poll(() => page.evaluate(() => window.__ferrum!.uiEvents!.some((e) => e.type === 'saveRequested'))).toBe(true);
   // Снимок — сразу по сочетанию, а не через 2 с отложенного сохранения.
-  await expect
-    .poll(() => page.evaluate(() => window.__ferrum!.uiEvents!.some((e) => e.type === 'snapshot')), { timeout: 1500 })
-    .toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.uiEvents!.some((e) => e.type === 'snapshot')), { timeout: 1500 }).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
   await page.reload();
   await editorReady(page);
@@ -271,7 +268,8 @@ test('поиск фильтрует по имени без учёта регис
 
 test('сетка и список переключаются и запоминаются; старые настройки читаются', async ({ page }) => {
   await page.addInitScript(() => {
-    if (!localStorage.getItem('ferrum.settings.v1')) localStorage.setItem('ferrum.settings.v1', JSON.stringify({ theme: 'light', leftWidth: 300 }));
+    if (!localStorage.getItem('ferrum.settings.v1'))
+      localStorage.setItem('ferrum.settings.v1', JSON.stringify({ theme: 'light', leftWidth: 300 }));
   });
   await openFiles(page);
   await create(page, 'Макет');
@@ -301,7 +299,9 @@ test('назад браузера из редактора возвращает �
   await editorReady(page);
   await page.goBack();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
-  await expect.poll(async () => (await workers(page)).filter((w) => w.url.includes('core.worker')).map((w) => w.terminated)).toEqual([true]);
+  await expect
+    .poll(async () => (await workers(page)).filter((w) => w.url.includes('core.worker')).map((w) => w.terminated))
+    .toEqual([true]);
   // Вперёд — снова редактор с тем же файлом.
   await page.goForward();
   await editorReady(page);
@@ -361,7 +361,10 @@ test('клавиатура: Tab до карточек, стрелки по се�
   await page.getByRole('searchbox', { name: 'Поиск' }).focus();
   for (let i = 0; i < 10; i++) {
     await page.keyboard.press('Tab');
-    const role = await page.evaluate(() => [document.activeElement?.getAttribute('role'), document.activeElement?.closest('main') !== null]);
+    const role = await page.evaluate(() => [
+      document.activeElement?.getAttribute('role'),
+      document.activeElement?.closest('main') !== null,
+    ]);
     if (role[0] === 'option' && role[1]) break;
   }
   await expect(card(page, 'Первый')).toBeFocused();
@@ -450,7 +453,7 @@ test('1000 записей: виртуальный список, без длин�
   expect(long).toEqual([]);
 });
 
-test('превью 100 000 узлов: время в worker\'е ядра и запись без длинных задач @perf', async ({ page }, info) => {
+test("превью 100 000 узлов: время в worker'е ядра и запись без длинных задач @perf", async ({ page }, info) => {
   test.skip(info.project.name !== 'chromium', 'замер — в проекте chromium');
   await setup(page);
   await page.goto('/?nodes=100000#/new');

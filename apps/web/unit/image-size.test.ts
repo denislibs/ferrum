@@ -12,8 +12,8 @@ test('PNG: IHDR', () => {
 });
 
 test('JPEG: маркер SOF после APP0, огромный размер читается без декодирования', () => {
-  const app0 = [0xff, 0xe0, 0, 16, ...new Array(14).fill(0)];
-  const sof = [0xff, 0xc2, 0, 17, 8, 0xea, 0x60, 0xea, 0x60, 3, ...new Array(9).fill(0)];
+  const app0 = [0xff, 0xe0, 0, 16, ...Array.from({ length: 14 }, () => 0)];
+  const sof = [0xff, 0xc2, 0, 17, 8, 0xea, 0x60, 0xea, 0x60, 3, ...Array.from({ length: 9 }, () => 0)];
   expect(imageSize(bytes([0xff, 0xd8], app0, sof))).toEqual({ width: 60000, height: 60000, type: 'jpeg' });
   expect(imageSize(bytes([0xff, 0xd8], app0))).toBeNull();
 });
@@ -26,7 +26,18 @@ test('WebP: VP8, VP8L, VP8X', () => {
   const w = 99;
   const h = 49;
   const bits = w | (h << 14);
-  const vp8l = new Uint8Array([...head('VP8L'), 0x2f, bits & 0xff, (bits >> 8) & 0xff, (bits >> 16) & 0xff, (bits >> 24) & 0xff, 0, 0, 0, 0]);
+  const vp8l = new Uint8Array([
+    ...head('VP8L'),
+    0x2f,
+    bits & 0xff,
+    (bits >> 8) & 0xff,
+    (bits >> 16) & 0xff,
+    (bits >> 24) & 0xff,
+    0,
+    0,
+    0,
+    0,
+  ]);
   expect(imageSize(vp8l)).toEqual({ width: 100, height: 50, type: 'webp' });
   const vp8x = new Uint8Array([...head('VP8X'), 0, 0, 0, 0, 0x3f, 0x1f, 0, 0x0f, 0x27, 0]);
   expect(imageSize(vp8x)).toEqual({ width: 8000, height: 10000, type: 'webp' });

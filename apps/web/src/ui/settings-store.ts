@@ -18,7 +18,16 @@
 
 import { SETTLE_MS } from './saver';
 import { MAX_SETTINGS_BYTES } from '../core/limits';
-import { loadSettings, parseSettings, parseSettingsPatch, diffSettings, PENDING_KEY, SETTINGS_KEY, THEME_KEY, type Settings } from './settings';
+import {
+  loadSettings,
+  parseSettings,
+  parseSettingsPatch,
+  diffSettings,
+  PENDING_KEY,
+  SETTINGS_KEY,
+  THEME_KEY,
+  type Settings,
+} from './settings';
 
 /** Поля раскладки панелей: у каждой вкладки свои, изменения других вкладок не применяются. */
 const LOCAL_FIELDS: readonly (keyof Settings)[] = ['leftWidth', 'rightWidth', 'pagesOpen'];

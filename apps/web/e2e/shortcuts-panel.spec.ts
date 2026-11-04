@@ -57,7 +57,19 @@ test('пункт «Справка → Сочетания клавиш» и вк�
   await openApp(page);
   await mainMenu(page, 'Справка', 'Сочетания клавиш');
   await expect(panel(page)).toBeVisible();
-  await expect(panel(page).getByRole('tab')).toHaveText(['Инструменты', 'Правка', 'Объект', 'Текст', 'Вектор', 'Порядок', 'Сдвиг', 'Вид', 'Файл', 'Настройки', 'Справка']);
+  await expect(panel(page).getByRole('tab')).toHaveText([
+    'Инструменты',
+    'Правка',
+    'Объект',
+    'Текст',
+    'Вектор',
+    'Порядок',
+    'Сдвиг',
+    'Вид',
+    'Файл',
+    'Настройки',
+    'Справка',
+  ]);
   await expect(row(page, 'tool.rect')).toContainText('Прямоугольник');
   await expect(row(page, 'tool.rect').locator('kbd')).toHaveText(['R']);
   await expect(row(page, 'tool.frame').locator('kbd')).toHaveText(['F', 'A']);

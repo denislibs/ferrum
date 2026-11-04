@@ -164,7 +164,10 @@ test('страницы: удалить единственную нельзя, «
   const firstId = await page.evaluate(() => window.__ferrum!.ui!.pages.list[0].id);
   expect(copyId).not.toBe(firstId);
   const id = fileId(page);
-  const link = await page.evaluate(([f, p]) => `${location.origin}${location.pathname}${location.search}#/file/${f}?page=${encodeURIComponent(p)}`, [id, copyId]);
+  const link = await page.evaluate(
+    ([f, p]) => `${location.origin}${location.pathname}${location.search}#/file/${f}?page=${encodeURIComponent(p)}`,
+    [id, copyId],
+  );
   if (browserName === 'chromium') expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(link);
   await first.click();
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.pages.current)).toBe(firstId);

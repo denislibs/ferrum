@@ -171,15 +171,12 @@ async function recordSent(page: Page): Promise<void> {
   });
 }
 const sent = (page: Page) => page.evaluate(() => (window as unknown as { __sent: Sent[] }).__sent);
-const phases = async (page: Page, type = 'editSelection') =>
-  (await sent(page)).filter((c) => c.type === type).map((c) => c.phase);
+const phases = async (page: Page, type = 'editSelection') => (await sent(page)).filter((c) => c.type === type).map((c) => c.phase);
 const count = (list: (string | undefined)[], phase: string) => list.filter((p) => p === phase).length;
-const coreSend = (page: Page, cmd: Record<string, unknown>) =>
-  page.evaluate((c) => window.__ferrum!.core!.send(c as never), cmd);
+const coreSend = (page: Page, cmd: Record<string, unknown>) => page.evaluate((c) => window.__ferrum!.core!.send(c as never), cmd);
 const steps = async (page: Page) => (await live(page)).steps;
 /** События ядра, дошедшие до интерфейса (журнал тестового режима). */
-const events = (page: Page, type: string) =>
-  page.evaluate((t) => window.__ferrum!.uiEvents!.filter((e) => e.type === t).length, type);
+const events = (page: Page, type: string) => page.evaluate((t) => window.__ferrum!.uiEvents!.filter((e) => e.type === t).length, type);
 
 async function selectedId(page: Page): Promise<string> {
   return page.evaluate(() => window.__ferrum!.ui!.selectionIds[0]);
@@ -197,11 +194,14 @@ test('жест палитры: превью не чаще кадра, одна �
   await page.mouse.down();
   await page.waitForTimeout(100);
   // 40 движений в одной задаче: до кадра превью уходит не больше одного.
-  await area.evaluate((el, [x0, y0]) => {
-    for (let i = 1; i <= 40; i++) {
-      el.dispatchEvent(new PointerEvent('pointermove', { clientX: x0 + i * 2, clientY: y0 + i, bubbles: true, pointerId: 1 }));
-    }
-  }, [box.x + 10, box.y + 10]);
+  await area.evaluate(
+    (el, [x0, y0]) => {
+      for (let i = 1; i <= 40; i++) {
+        el.dispatchEvent(new PointerEvent('pointermove', { clientX: x0 + i * 2, clientY: y0 + i, bubbles: true, pointerId: 1 }));
+      }
+    },
+    [box.x + 10, box.y + 10],
+  );
   await page.waitForTimeout(150);
   let p = await phases(page);
   expect(count(p, 'preview')).toBeGreaterThan(0);
@@ -537,7 +537,7 @@ test('палитра с клавиатуры: фокус внутрь, стре�
   await expect(alphaSlider).toHaveAttribute('aria-valuenow', '99');
   // Стрелки не дошли до холста: объект стоит на месте.
   await page.waitForTimeout(150);
-  expect((await page.evaluate(() => window.__ferrum!.ui!.summary!.x.value))).toBe(x0);
+  expect(await page.evaluate(() => window.__ferrum!.ui!.summary!.x.value)).toBe(x0);
   await page.keyboard.press('Escape');
   await expect(picker).toHaveCount(0);
   await expect(swatch).toBeFocused();
@@ -615,9 +615,7 @@ test('HEX с альфой в панели: заливка, обводка, фо�
   const sh = page.getByRole('textbox', { name: 'HEX обводки' });
   await sh.fill('00ff0040');
   await sh.press('Enter');
-  await expect
-    .poll(() => page.evaluate(() => window.__ferrum!.ui!.summary!.strokes!.list[0].color))
-    .toBe('#00ff0040');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.summary!.strokes!.list[0].color)).toBe('#00ff0040');
   await coreSend(page, { type: 'select', ids: [], mode: 'replace' });
   const bg = page.getByRole('textbox', { name: 'HEX фона страницы' });
   await bg.fill('3366994d');
@@ -674,7 +672,5 @@ test('смена выделения закрывает палитру: фоку�
   // У рамки одна заливка: свотч, к которому была открыта палитра, исчезает.
   await coreSend(page, { type: 'select', ids: [frame], mode: 'replace' });
   await expect(page.getByRole('dialog', { name: 'Цвет заливки' })).toHaveCount(0);
-  await expect
-    .poll(() => page.evaluate(() => document.activeElement === document.body || document.activeElement === null))
-    .toBe(false);
+  await expect.poll(() => page.evaluate(() => document.activeElement === document.body || document.activeElement === null)).toBe(false);
 });

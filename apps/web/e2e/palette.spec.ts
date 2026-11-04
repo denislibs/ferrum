@@ -224,7 +224,9 @@ test('команды: название, группа и сочетание; се
   await openApp(page);
   await openPalette(page);
   await field(page).fill('дубл');
-  const dup = list(page).getByRole('option', { name: /Дублировать/ }).first();
+  const dup = list(page)
+    .getByRole('option', { name: /Дублировать/ })
+    .first();
   await expect(dup).toHaveAttribute('data-command', 'edit.duplicate');
   await expect(dup).toContainText('Правка');
   await expect(dup).toContainText(/D/);
@@ -288,7 +290,7 @@ test('раскладка не важна: «щквук» находит кома
   expect(await warnings(page)).toEqual([]);
 });
 
-test('слои: поиск в worker\'е, переход выделяет слой, показывает его и раскрывает предков @firefox', async ({ page }) => {
+test("слои: поиск в worker'е, переход выделяет слой, показывает его и раскрывает предков @firefox", async ({ page }) => {
   await openApp(page);
   const start = await live(page);
   await openPalette(page);
@@ -320,11 +322,13 @@ test('слои: поиск в worker\'е, переход выделяет сло
   await expect(tree.getByRole('treeitem', { name: 'Слой 5', exact: true })).toHaveAttribute('aria-selected', 'true');
   const nested = await liveWhen(page, 'l.selectionCount === 1 && l.selectionW === 120');
   // Координаты вложенного слоя — в системе предка (фрейма): к миру — сдвигом фрейма.
-  expect(inView({ ...nested, selectionX: after.selectionX + nested.selectionX, selectionY: after.selectionY + nested.selectionY })).toBe(true);
+  expect(inView({ ...nested, selectionX: after.selectionX + nested.selectionX, selectionY: after.selectionY + nested.selectionY })).toBe(
+    true,
+  );
   expect(await warnings(page)).toEqual([]);
 });
 
-test('ответ worker\'а на прежний запрос не показывается @firefox', async ({ page }) => {
+test("ответ worker'а на прежний запрос не показывается @firefox", async ({ page }) => {
   await openApp(page);
   await openPalette(page);
   await field(page).fill('слой 42');
@@ -391,7 +395,10 @@ test('недавние: последние команды первыми, пер
 test('кнопки панелей (масштаб, тулбар) недавних не пополняют: только палитра и меню @firefox', async ({ page }) => {
   await openApp(page);
   await page.getByRole('button', { name: 'Масштаб', exact: true }).click();
-  await page.getByRole('menu', { name: 'Масштаб' }).getByRole('menuitem', { name: /Показать всё/ }).click();
+  await page
+    .getByRole('menu', { name: 'Масштаб' })
+    .getByRole('menuitem', { name: /Показать всё/ })
+    .click();
   await page.getByRole('button', { name: 'Инструменты перемещения' }).click();
   await page.getByRole('menu', { name: 'Инструменты перемещения' }).getByRole('menuitemcheckbox').last().click();
   await openPalette(page);
@@ -428,7 +435,11 @@ test('поздний ответ на текущий запрос не сбрас
   await openApp(page);
   await openPalette(page);
   await field(page).fill('слой');
-  await expect(list(page).getByRole('option', { name: /^Слой \d+$/ }).first()).toBeVisible();
+  await expect(
+    list(page)
+      .getByRole('option', { name: /^Слой \d+$/ })
+      .first(),
+  ).toBeVisible();
   for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowDown');
   const picked = async () => ({ id: await active(page).getAttribute('id'), text: await active(page).textContent() });
   const before = await picked();
@@ -442,9 +453,9 @@ test('поздний ответ на текущий запрос не сбрас
   // Новый текст запроса — снова первая строка.
   await field(page).fill('слои');
   await expect(list(page).getByRole('option').first()).toBeVisible();
-  await expect.poll(async () => (await picked()).id).toBe(
-    await list(page).locator('[role="option"]:not([aria-disabled="true"])').first().getAttribute('id'),
-  );
+  await expect
+    .poll(async () => (await picked()).id)
+    .toBe(await list(page).locator('[role="option"]:not([aria-disabled="true"])').first().getAttribute('id'));
 });
 
 test('в поле — обычный ввод: буквы не вызывают инструменты, стрелки не двигают выделение @firefox', async ({ page }) => {

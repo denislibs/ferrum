@@ -32,18 +32,7 @@ function ownsKeys(t: EventTarget | null): boolean {
 /** Навигация и удаление: на холсте они двигают и удаляют выделение. Элемент
  * управления (кнопка, переключатель, вкладка, строка, ползунок, край панели)
  * держит их у себя; контейнеры (панель, корень дерева, тулбар) — пропускают. */
-const NAV_KEYS = new Set([
-  'ArrowLeft',
-  'ArrowRight',
-  'ArrowUp',
-  'ArrowDown',
-  'Home',
-  'End',
-  'PageUp',
-  'PageDown',
-  'Delete',
-  'Backspace',
-]);
+const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Delete', 'Backspace']);
 
 const CONTROLS =
   'button, select, [role="radio"], [role="tab"], [role="option"], [role="treeitem"], [role="slider"], [role="separator"], [role="menuitem"], [role="menuitemcheckbox"]';
@@ -76,8 +65,7 @@ const WIDGET_KEYS = new Set(['Tab', 'Enter', 'Space', 'NumpadEnter']);
 /** Строки дерева слоёв: ещё F2 (переименовать); стрелки — ниже, у ARROW_ROLES. */
 const TREE_KEYS = new Set([...WIDGET_KEYS, 'F2']);
 
-const ARROW_ROLES =
-  '[role="tab"], [role="treeitem"], [role="menuitem"], [role="option"], [role="slider"], [role="separator"]';
+const ARROW_ROLES = '[role="tab"], [role="treeitem"], [role="menuitem"], [role="option"], [role="slider"], [role="separator"]';
 
 /** Пересылать ли клавишу редактору. */
 export function forwardKey(e: KeyboardEvent, isClipboardKey: (e: KeyboardEvent) => boolean): boolean {

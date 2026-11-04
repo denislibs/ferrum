@@ -175,7 +175,12 @@ export function LayersPanel() {
   // Новые строки окна: фокус — к своему слою или к строке, которую ждали.
   createEffect(
     on(
-      () => [layers().start, layers().rows.map((r) => r.id).join()],
+      () => [
+        layers().start,
+        layers()
+          .rows.map((r) => r.id)
+          .join(),
+      ],
       () => {
         if (pendingFocus != null && pendingFocus >= layers().total) pendingFocus = null;
         if (pendingFocus != null) {
@@ -206,8 +211,7 @@ export function LayersPanel() {
     el?.focus({ preventScroll: true });
     ed.scheduler.measure(() => {
       const top = i * ROW;
-      const next =
-        top < tree.scrollTop ? top : top + ROW > tree.scrollTop + tree.clientHeight ? top + ROW - tree.clientHeight : null;
+      const next = top < tree.scrollTop ? top : top + ROW > tree.scrollTop + tree.clientHeight ? top + ROW - tree.clientHeight : null;
       if (next == null) return;
       ed.scheduler.mutate(() => {
         tree.scrollTop = next;

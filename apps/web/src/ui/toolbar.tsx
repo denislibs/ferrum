@@ -124,13 +124,7 @@ export function Toolbar() {
   ];
 
   const menuLabel = (kind: MenuKind) =>
-    kind === 'move'
-      ? 'Инструменты перемещения'
-      : kind === 'frame'
-        ? 'Пресеты фреймов'
-        : kind === 'shapes'
-          ? 'Фигуры'
-          : 'Булевы операции';
+    kind === 'move' ? 'Инструменты перемещения' : kind === 'frame' ? 'Пресеты фреймов' : kind === 'shapes' ? 'Фигуры' : 'Булевы операции';
   const menuItems = (kind: MenuKind) =>
     kind === 'move' ? moverItems() : kind === 'frame' ? frameItems() : kind === 'shapes' ? shapeItems() : booleanItems();
 
@@ -270,15 +264,7 @@ export function Toolbar() {
         )}
       </For>
       <Show when={menu()}>
-        {(m) => (
-          <Menu
-            label={menuLabel(m().kind)}
-            items={menuItems(m().kind)}
-            anchor={m().anchor}
-            above
-            onClose={() => setMenu(null)}
-          />
-        )}
+        {(m) => <Menu label={menuLabel(m().kind)} items={menuItems(m().kind)} anchor={m().anchor} above onClose={() => setMenu(null)} />}
       </Show>
     </div>
   );

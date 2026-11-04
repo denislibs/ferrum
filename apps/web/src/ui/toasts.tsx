@@ -12,8 +12,7 @@ export function Toasts(props: { store: UiStore; onUndo?: (step: number) => void 
   const keepFocus = (e: Event) => e.preventDefault();
   const canvas = () => document.querySelector<HTMLElement>('canvas');
   /** Куда вернуть фокус: в правке текста — полю ввода (клавиши идут ему, не холсту). */
-  const back = () =>
-    (props.store.state.text.editing ? document.querySelector<HTMLElement>('.fe-text-input') : null) ?? canvas();
+  const back = () => (props.store.state.text.editing ? document.querySelector<HTMLElement>('.fe-text-input') : null) ?? canvas();
   /** Закрытие: фокус из уведомления уходит на холст (в правке текста — на поле). Элемент остаётся на 400 мс
    * невидимым и перехватывает указатель — вторая половина двойного щелчка не должна
    * попасть в холст под ним и сменить только что восстановленное выделение. */

@@ -90,7 +90,14 @@ export function QuickActions(props: QuickActionsProps): JSX.Element {
       const was = q === lastQuery ? identity(prev?.[active()]) : '';
       lastQuery = q;
       const kept = was ? a.findIndex((r) => identity(r) === was) : -1;
-      setActive(kept >= 0 ? kept : Math.max(0, a.findIndex((r) => !disabled(r))));
+      setActive(
+        kept >= 0
+          ? kept
+          : Math.max(
+              0,
+              a.findIndex((r) => !disabled(r)),
+            ),
+      );
     }),
   );
   // Выбранная строка — в видимой части списка: чтение в measure, запись в mutate.

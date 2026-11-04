@@ -63,7 +63,12 @@ function treeKeys(tree: readonly MenuItemDto[], out: string[] = []): string[] {
 /** Поиск по командам меню, как в «Быстрых действиях»: нечётко по названию и
  * синонимам в любой раскладке, лучшие первыми, при равном весе — в порядке
  * меню; не больше `MAX_RESULTS`. */
-export function searchMenu(tree: readonly MenuItemDto[], entries: Entries, query: string, hidden: ReadonlySet<string> = new Set()): MenuItem[] {
+export function searchMenu(
+  tree: readonly MenuItemDto[],
+  entries: Entries,
+  query: string,
+  hidden: ReadonlySet<string> = new Set(),
+): MenuItem[] {
   const list: KeymapEntry[] = [];
   for (const key of treeKeys(tree)) {
     const e = entries.get(key);

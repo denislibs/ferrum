@@ -74,8 +74,7 @@ export function hsbToRgb({ h, s, b }: Hsb): Rgb {
   const c = b * s;
   const x = c * (1 - Math.abs((hh % 2) - 1));
   const m = b - c;
-  const [r, g, bl] =
-    hh < 1 ? [c, x, 0] : hh < 2 ? [x, c, 0] : hh < 3 ? [0, c, x] : hh < 4 ? [0, x, c] : hh < 5 ? [x, 0, c] : [c, 0, x];
+  const [r, g, bl] = hh < 1 ? [c, x, 0] : hh < 2 ? [x, c, 0] : hh < 3 ? [0, c, x] : hh < 4 ? [0, x, c] : hh < 5 ? [x, 0, c] : [c, 0, x];
   return { r: byte((r + m) * 255), g: byte((g + m) * 255), b: byte((bl + m) * 255) };
 }
 

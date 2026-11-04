@@ -85,7 +85,9 @@ test('«Вставить с заменой» и «Вставить поверх�
   await pick(page, 60, 40);
   await liveWhen(page, 'l.selectionCount === 1');
   await page.keyboard.press('ControlOrMeta+c');
-  await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.read())[0]?.types ?? [])).toContain('web application/x-ferrum');
+  await expect
+    .poll(() => page.evaluate(async () => (await navigator.clipboard.read())[0]?.types ?? []))
+    .toContain('web application/x-ferrum');
   // Заменить «Слой 1» (прямоугольник в (140, 0)): эллипс на его месте, одним шагом.
   await pick(page, 200, 40);
   const l = await liveWhen(page, 'l.selectionCount === 1 && l.selectionX === 140');
@@ -96,7 +98,10 @@ test('«Вставить с заменой» и «Вставить поверх�
   // Поверх из контекстного меню: на исходное место эллипса.
   const at = await appScreen(page, r, 200, 40);
   await page.mouse.click(at.x, at.y, { button: 'right' });
-  await page.getByRole('menu', { name: 'Действия с выделением' }).getByRole('menuitem', { name: /^Вставить поверх/ }).click();
+  await page
+    .getByRole('menu', { name: 'Действия с выделением' })
+    .getByRole('menuitem', { name: /^Вставить поверх/ })
+    .click();
   await liveWhen(page, `l.nodes === ${l.nodes + 1} && l.selectionX === 0 && l.selectionY === 0`);
 });
 
@@ -122,7 +127,9 @@ test('Ctrl/Cmd+Shift+R на холсте — «Вставить с замено�
   await pick(page, 60, 40);
   await liveWhen(page, 'l.selectionCount === 1');
   await page.keyboard.press('ControlOrMeta+c');
-  await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.read())[0]?.types ?? [])).toContain('web application/x-ferrum');
+  await expect
+    .poll(() => page.evaluate(async () => (await navigator.clipboard.read())[0]?.types ?? []))
+    .toContain('web application/x-ferrum');
   await pick(page, 200, 40);
   const l = await liveWhen(page, 'l.selectionCount === 1 && l.selectionX === 140');
   await page.keyboard.press('ControlOrMeta+Shift+KeyR');

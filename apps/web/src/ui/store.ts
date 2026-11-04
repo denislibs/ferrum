@@ -133,7 +133,10 @@ export function createUiStore() {
   /** Часы заново: уведомление живёт `TOAST_MS` с этой минуты. */
   function startToast(id: number): void {
     clearTimeout(toastTimers.get(id));
-    toastTimers.set(id, setTimeout(() => dismissToast(id), TOAST_MS));
+    toastTimers.set(
+      id,
+      setTimeout(() => dismissToast(id), TOAST_MS),
+    );
   }
 
   function pauseToast(id: number): void {

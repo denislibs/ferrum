@@ -36,7 +36,11 @@ body {
   gap: 16px;
   background: var(--boot-canvas);
   color: var(--boot-ink-muted);
-  font: 500 12px/16px Onest, 'Segoe UI', system-ui, sans-serif;
+  font:
+    500 12px/16px Onest,
+    'Segoe UI',
+    system-ui,
+    sans-serif;
   letter-spacing: 0.01em;
   transition: opacity 240ms ease-out;
 }
@@ -87,9 +91,15 @@ body {
   animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 /* Ручки — третий…шестой <rect> в SVG: появляются по кругу с небольшим сдвигом. */
-.fe-splash__handle:nth-of-type(4) { animation-delay: 40ms; }
-.fe-splash__handle:nth-of-type(6) { animation-delay: 80ms; }
-.fe-splash__handle:nth-of-type(5) { animation-delay: 120ms; }
+.fe-splash__handle:nth-of-type(4) {
+  animation-delay: 40ms;
+}
+.fe-splash__handle:nth-of-type(6) {
+  animation-delay: 80ms;
+}
+.fe-splash__handle:nth-of-type(5) {
+  animation-delay: 120ms;
+}
 .fe-splash__cursor {
   transform-origin: 0 0;
   animation-name: fe-splash-cursor;
@@ -103,29 +113,83 @@ body {
 }
 
 @keyframes fe-splash-draw {
-  0%, 8% { transform: scale(0.001); opacity: 1; }
-  40% { transform: scale(1); }
-  84% { transform: scale(1); opacity: 1; }
-  96%, 100% { transform: scale(1); opacity: 0; }
+  0%,
+  8% {
+    transform: scale(0.001);
+    opacity: 1;
+  }
+  40% {
+    transform: scale(1);
+  }
+  84% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  96%,
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
 }
 @keyframes fe-splash-cursor {
-  0% { transform: translate(0, 0); opacity: 0; }
-  6% { opacity: 1; }
-  8% { transform: translate(0, 0); }
-  40% { transform: translate(72px, 52px); opacity: 1; }
-  52%, 100% { transform: translate(78px, 58px); opacity: 0; }
+  0% {
+    transform: translate(0, 0);
+    opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  8% {
+    transform: translate(0, 0);
+  }
+  40% {
+    transform: translate(72px, 52px);
+    opacity: 1;
+  }
+  52%,
+  100% {
+    transform: translate(78px, 58px);
+    opacity: 0;
+  }
 }
 @keyframes fe-splash-handle {
-  0%, 40% { transform: scale(0); opacity: 1; }
-  50% { transform: scale(1); }
-  84% { transform: scale(1); opacity: 1; }
-  96%, 100% { transform: scale(1); opacity: 0; }
+  0%,
+  40% {
+    transform: scale(0);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1);
+  }
+  84% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  96%,
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
 }
 @keyframes fe-splash-fill {
-  0%, 50% { opacity: 0; transform: scale(0.92); }
-  64% { opacity: 1; transform: scale(1); }
-  84% { opacity: 1; transform: scale(1); }
-  96%, 100% { opacity: 0; transform: scale(1); }
+  0%,
+  50% {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  64% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  84% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  96%,
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
 }
 
 .fe-splash__label::after {
@@ -136,10 +200,19 @@ body {
   animation: fe-splash-dots 1.4s steps(4, end) infinite;
 }
 @keyframes fe-splash-dots {
-  0% { content: ''; }
-  25% { content: '.'; }
-  50% { content: '..'; }
-  75%, 100% { content: '...'; }
+  0% {
+    content: '';
+  }
+  25% {
+    content: '.';
+  }
+  50% {
+    content: '..';
+  }
+  75%,
+  100% {
+    content: '...';
+  }
 }
 
 /* Без анимаций: готовый фрейм с ручками, без курсора и точек. */
@@ -150,8 +223,16 @@ body {
     animation: none !important;
     transition: none !important;
   }
-  .fe-splash__fill { opacity: 1; }
-  .fe-splash__handle { transform: none; }
-  .fe-splash__cursor { opacity: 0; }
-  .fe-splash__label::after { content: '…'; }
+  .fe-splash__fill {
+    opacity: 1;
+  }
+  .fe-splash__handle {
+    transform: none;
+  }
+  .fe-splash__cursor {
+    opacity: 0;
+  }
+  .fe-splash__label::after {
+    content: '…';
+  }
 }

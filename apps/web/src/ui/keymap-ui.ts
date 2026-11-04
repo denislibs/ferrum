@@ -1,4 +1,3 @@
-
 // Таблица раскладки для настроек: группы команд из таблицы ядра (`tool`, `edit`…),
 // поиск по названию и подписи, сочетания, которые перехватывает браузер,
 // конфликты, запись сочетания с клавиатуры.
@@ -53,9 +52,7 @@ export function filterGroups(groups: KeymapGroup[], query: string, platform: Pla
     .map((g) => ({
       ...g,
       commands: g.commands.filter(
-        (c) =>
-          c.name.toLowerCase().includes(q) ||
-          c.bindings.some((b) => shortcutLabel(b, platform, layout).toLowerCase() === q),
+        (c) => c.name.toLowerCase().includes(q) || c.bindings.some((b) => shortcutLabel(b, platform, layout).toLowerCase() === q),
       ),
     }))
     .filter((g) => g.commands.length > 0);

@@ -17,9 +17,7 @@ test('не больше двух перезапусков за минуту', ()
 
 test('тексты: сохранено, потеряны секунды, запасной рендер', () => {
   expect(restartText({ reason: 'crash', lost: false, message: '' })).toBe('Редактор перезапущен, изменения сохранены');
-  expect(restartText({ reason: 'crash', lost: true, message: '' })).toBe(
-    'Редактор перезапущен. Правки последних секунд не сохранились',
-  );
+  expect(restartText({ reason: 'crash', lost: true, message: '' })).toBe('Редактор перезапущен. Правки последних секунд не сохранились');
   expect(restartText({ reason: 'gpu', lost: false, backend: 'webgl', message: '' })).toBe(
     'Видеокарта недоступна — редактор перезапущен с рендером WebGL2',
   );

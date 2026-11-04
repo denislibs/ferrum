@@ -1,0 +1,12 @@
+target/
+docs/
+**/node_modules/
+**/dist/
+**/package-lock.json
+apps/web/src/wasm/
+apps/web/src/core/layout.gen.ts
+apps/web/test-results/
+apps/web/playwright-report/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/icons/
+.superpowers/

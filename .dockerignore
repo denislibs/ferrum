@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/dist-server
+target
+docs
+.git
+**/.env*
+.claude
+.superpowers
+apps/web/src/wasm
+apps/web/test-results
+apps/web/playwright-report
+apps/desktop

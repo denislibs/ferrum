@@ -180,7 +180,10 @@ export function guardLayout(
     }
   }
   const off = () => {
-    restore.splice(0).reverse().forEach((r) => r());
+    restore
+      .splice(0)
+      .reverse()
+      .forEach((r) => r());
     if (g[KEY] === off) delete g[KEY];
   };
   g[KEY] = off;

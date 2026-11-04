@@ -29,9 +29,7 @@ export function dismissSplash(immediate = false) {
   const el = document.getElementById('fe-splash');
   if (!el || el.classList.contains('fe-splash--done')) return;
   const quick =
-    immediate ||
-    (window as { __ferrumTest?: boolean }).__ferrumTest === true ||
-    matchMedia('(prefers-reduced-motion: reduce)').matches;
+    immediate || (window as { __ferrumTest?: boolean }).__ferrumTest === true || matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Уже ждёт своих 2 с, а теперь — сразу (ошибка, уход на экран файлов): ускорить.
   if (el.dataset.leaving && !quick) return;
   el.dataset.leaving = '1';
@@ -141,7 +139,12 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
       if (opening && opensWindow(e)) {
         e.preventDefault();
         if (e.repeat) return false;
-        if (opening === 'ui.quick_actions' && editableTarget(e.target) && !modalOpen() && !(e.target as Element).closest('[role="dialog"], [role="menu"]')) {
+        if (
+          opening === 'ui.quick_actions' &&
+          editableTarget(e.target) &&
+          !modalOpen() &&
+          !(e.target as Element).closest('[role="dialog"], [role="menu"]')
+        ) {
           opts.onForwardedKey?.(e);
           return true;
         }

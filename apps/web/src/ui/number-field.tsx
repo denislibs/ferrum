@@ -7,16 +7,7 @@
 import { createEffect, createSignal, on, onCleanup, untrack, type JSX } from 'solid-js';
 import type { EditPhase } from '../wasm/ferrum_wasm';
 import { useEditor, type Editor } from './context';
-import {
-  arrowStep,
-  clamp,
-  fieldKey,
-  formatNumber,
-  MAX_INPUT,
-  parseFieldInput,
-  scrubValue,
-  type FieldInput,
-} from './number';
+import { arrowStep, clamp, fieldKey, formatNumber, MAX_INPUT, parseFieldInput, scrubValue, type FieldInput } from './number';
 
 /** Кому адресована правка: выделенные на начало жеста. Выделение больше предела id
  * (`ids` неполон) — без списка, но с версией выделения: ядро применит правку ко всем

@@ -13,7 +13,14 @@
 // асинхронное чтение своего формата. Картинки из других приложений (PNG, JPEG,
 // WebP) ставятся узлом-изображением; не-PNG перекодирует worker.
 
-import { FERRUM_PROPS_MARKER, FERRUM_TEXT_MARKER, isMarkedText, isPropsText, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_TEXT } from '../core/clipboard-text';
+import {
+  FERRUM_PROPS_MARKER,
+  FERRUM_TEXT_MARKER,
+  isMarkedText,
+  isPropsText,
+  MAX_CLIPBOARD_BYTES,
+  MAX_CLIPBOARD_TEXT,
+} from '../core/clipboard-text';
 
 export {
   decodeText,

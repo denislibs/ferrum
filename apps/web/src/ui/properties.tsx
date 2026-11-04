@@ -143,15 +143,7 @@ function PositionSection(props: {
         <NumberField label="X" name="X" value={x().value} mixed={x().mixed} onEdit={props.edit('x')} />
         <NumberField label="Y" name="Y" value={y().value} mixed={y().mixed} onEdit={props.edit('y')} />
         <NumberField label="W" name="Ширина" value={w().value} mixed={w().mixed} min={0.01} onEdit={props.edit('w')} />
-        <NumberField
-          label="H"
-          name="Высота"
-          value={h().value}
-          mixed={h().mixed}
-          min={0.01}
-          disabled={!s().h}
-          onEdit={props.edit('h')}
-        />
+        <NumberField label="H" name="Высота" value={h().value} mixed={h().mixed} min={0.01} disabled={!s().h} onEdit={props.edit('h')} />
       </div>
       <div class="fe-row">
         <NumberField

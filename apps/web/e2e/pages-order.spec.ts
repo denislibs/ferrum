@@ -5,7 +5,10 @@ import { live, liveWhen, openApp } from './helpers';
 
 const rows = (page: Page) => page.getByRole('listbox', { name: 'Страницы' }).getByRole('option');
 const selected = (page: Page) => page.getByRole('listbox', { name: 'Страницы' }).getByRole('option', { selected: true });
-const names = (page: Page) => rows(page).allInnerTexts().then((list) => list.map((s) => s.trim()));
+const names = (page: Page) =>
+  rows(page)
+    .allInnerTexts()
+    .then((list) => list.map((s) => s.trim()));
 
 async function threePages(page: Page) {
   await openApp(page);

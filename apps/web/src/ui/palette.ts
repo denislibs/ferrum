@@ -79,7 +79,12 @@ export function scoreCommand(e: KeymapEntry, variants: readonly string[][], rece
 }
 
 /** Совпавшие команды, лучшие первыми, при равном весе — в порядке `entries`. */
-export function rankCommands(entries: readonly KeymapEntry[], query: string, recent: readonly string[] = [], limit = PALETTE_ROWS): KeymapEntry[] {
+export function rankCommands(
+  entries: readonly KeymapEntry[],
+  query: string,
+  recent: readonly string[] = [],
+  limit = PALETTE_ROWS,
+): KeymapEntry[] {
   const variants = queryVariants(query);
   if (!variants.length) return [];
   const hits: { e: KeymapEntry; s: number; i: number }[] = [];
@@ -134,8 +139,14 @@ export function paletteRows(src: PaletteSources): PaletteRow[] {
   if (!queryVariants(src.query).length) {
     const byKey = new Map(usable.map((e) => [e.key, e]));
     const recent = src.recent.filter((k) => byKey.has(k));
-    section('Недавние', recent.map((key) => ({ kind: 'command', key })));
-    section('Команды', usable.filter((e) => !recent.includes(e.key)).map((e) => ({ kind: 'command', key: e.key })));
+    section(
+      'Недавние',
+      recent.map((key) => ({ kind: 'command', key })),
+    );
+    section(
+      'Команды',
+      usable.filter((e) => !recent.includes(e.key)).map((e) => ({ kind: 'command', key: e.key })),
+    );
     return out;
   }
   const commands = rankCommands(usable, src.query, src.recent, COMMANDS_MAX);
@@ -147,7 +158,10 @@ export function paletteRows(src: PaletteSources): PaletteRow[] {
     .slice(0, PAGES_MAX)
     .map((x): PaletteRow => ({ kind: 'page', id: x.p.id, name: x.p.name }));
   const layerRoom = PALETTE_ROWS - Math.min(commands.length, PALETTE_ROWS) - pages.length;
-  section('Команды', commands.map((e) => ({ kind: 'command', key: e.key })));
+  section(
+    'Команды',
+    commands.map((e) => ({ kind: 'command', key: e.key })),
+  );
   section(
     'Слои',
     src.layers.slice(0, Math.max(0, layerRoom)).map((l) => ({ kind: 'layer', id: l.id, name: l.name, type: l.kind })),

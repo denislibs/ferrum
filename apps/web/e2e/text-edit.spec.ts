@@ -231,7 +231,9 @@ test.describe('без разрешения на чтение буфера', () =
     await page.evaluate(() => {
       const dt = new DataTransfer();
       dt.setData('text/plain', 'чужой');
-      document.querySelector('.fe-text-input')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      document
+        .querySelector('.fe-text-input')!
+        .dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
     });
     expect(await copyAll(page)).toBe('чужой');
     expect(await page.evaluate(() => (window as unknown as { asyncReads: number }).asyncReads)).toBe(0);

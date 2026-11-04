@@ -57,12 +57,7 @@ const JOINS: { value: StrokeJoinDto; label: string }[] = [
 function StrokeStyleRows() {
   const ed = useEditor();
   const style = () => ed.store.state.summary?.strokeStyle;
-  const send = (edit: {
-    capStart?: StrokeCapDto;
-    capEnd?: StrokeCapDto;
-    join?: StrokeJoinDto;
-    miterLimit?: number;
-  }) =>
+  const send = (edit: { capStart?: StrokeCapDto; capEnd?: StrokeCapDto; join?: StrokeJoinDto; miterLimit?: number }) =>
     sendEdit(
       ed.send,
       { type: 'strokeStyle', capStart: edit.capStart, capEnd: edit.capEnd, join: edit.join, miterLimit: edit.miterLimit },
@@ -83,7 +78,9 @@ function StrokeStyleRows() {
                   onChange={(e) => send({ capStart: e.currentTarget.value as StrokeCapDto })}
                 >
                   <Show when={!s().capStart}>
-                    <option value="" disabled hidden>Смешанное</option>
+                    <option value="" disabled hidden>
+                      Смешанное
+                    </option>
                   </Show>
                   <For each={CAPS}>{(c) => <option value={c.value}>{c.label}</option>}</For>
                 </select>
@@ -96,7 +93,9 @@ function StrokeStyleRows() {
                   onChange={(e) => send({ capEnd: e.currentTarget.value as StrokeCapDto })}
                 >
                   <Show when={!s().capEnd}>
-                    <option value="" disabled hidden>Смешанное</option>
+                    <option value="" disabled hidden>
+                      Смешанное
+                    </option>
                   </Show>
                   <For each={CAPS}>{(c) => <option value={c.value}>{c.label}</option>}</For>
                 </select>
@@ -113,7 +112,9 @@ function StrokeStyleRows() {
                   onChange={(e) => send({ join: e.currentTarget.value as StrokeJoinDto })}
                 >
                   <Show when={!s().join}>
-                    <option value="" disabled hidden>Смешанное</option>
+                    <option value="" disabled hidden>
+                      Смешанное
+                    </option>
                   </Show>
                   <For each={JOINS}>{(j) => <option value={j.value}>{j.label}</option>}</For>
                 </select>
@@ -130,7 +131,12 @@ function StrokeStyleRows() {
                     const cur = s().miterLimit.value;
                     const raw = input.kind === 'set' ? input.value : cur + input.delta;
                     const miterLimit = Math.min(MAX_MITER_LIMIT, Math.max(MIN_MITER_LIMIT, raw));
-                    sendEdit(ed.send, { type: 'strokeStyle', miterLimit, capStart: undefined, capEnd: undefined, join: undefined }, phase, target);
+                    sendEdit(
+                      ed.send,
+                      { type: 'strokeStyle', miterLimit, capStart: undefined, capEnd: undefined, join: undefined },
+                      phase,
+                      target,
+                    );
                   }}
                 />
               </Show>
@@ -188,8 +194,17 @@ export function FillsSection() {
   const begin = (): FillBase => ({ ...captureEdit(ed), list: list().map((x) => ({ ...x })) });
   const send = (b: FillBase, fills: FillDto[], phase: EditPhase) => sendEdit(ed.send, { type: 'fills', fills }, phase, b.target);
   const replace = (b: FillBase, i: number, f: Partial<FillDto>, phase: EditPhase = 'commit') =>
-    send(b, b.list.map((x, j) => (j === i ? { ...x, ...f } : x)), phase);
-  closeOnSelection(ed, () => !!picker(), () => setPicker(null), () => picker()?.anchor);
+    send(
+      b,
+      b.list.map((x, j) => (j === i ? { ...x, ...f } : x)),
+      phase,
+    );
+  closeOnSelection(
+    ed,
+    () => !!picker(),
+    () => setPicker(null),
+    () => picker()?.anchor,
+  );
   // Секцию свернули (клавиатурой) при открытой палитре: якорь исчезает вместе с ней.
   createEffect(() => {
     if (ed.sectionCollapsed?.('Заливка')) setPicker(null);
@@ -236,9 +251,7 @@ export function FillsSection() {
                         <span class="fe-swatch fe-swatch--image" aria-hidden="true">
                           <Icon name="image" />
                         </span>
-                        <span class="fe-row__grow fe-paint__label">
-                          Изображение · {SCALE_MODES[fill().scaleMode ?? 'fill']}
-                        </span>
+                        <span class="fe-row__grow fe-paint__label">Изображение · {SCALE_MODES[fill().scaleMode ?? 'fill']}</span>
                       </>
                     }
                   >
@@ -248,9 +261,7 @@ export function FillsSection() {
                       aria-haspopup="dialog"
                       aria-expanded={picker()?.index === index()}
                       style={{ '--swatch': cssColor(c().rgb, c().alpha) }}
-                      onClick={(e) =>
-                        setPicker(picker()?.index === index() ? null : { index: index(), anchor: e.currentTarget })
-                      }
+                      onClick={(e) => setPicker(picker()?.index === index() ? null : { index: index(), anchor: e.currentTarget })}
                     />
                     <CommitInput
                       name="HEX заливки"
@@ -302,7 +313,11 @@ export function FillsSection() {
                     data-tip="Удалить заливку"
                     onClick={() => {
                       const b = begin();
-                      send(b, b.list.filter((_, j) => j !== index()), 'commit');
+                      send(
+                        b,
+                        b.list.filter((_, j) => j !== index()),
+                        'commit',
+                      );
                     }}
                   >
                     <Icon name="minus" />
@@ -325,9 +340,7 @@ export function FillsSection() {
                   alpha={start.alpha}
                   anchor={pk().anchor}
                   begin={begin}
-                  onChange={(rgb, alpha, phase, b) =>
-                    replace(b, index, { color: toHex({ ...rgb, a: 255 }), opacity: alpha }, phase)
-                  }
+                  onChange={(rgb, alpha, phase, b) => replace(b, index, { color: toHex({ ...rgb, a: 255 }), opacity: alpha }, phase)}
                   onClose={() => setPicker(null)}
                 />
               );
@@ -345,11 +358,19 @@ export function StrokesSection() {
   const [picker, setPicker] = createSignal<{ index: number; anchor: HTMLElement } | null>(null);
   const list = () => (paints()?.list ?? []) as StrokeDto[];
   const begin = (): StrokeBase => ({ ...captureEdit(ed), list: list().map((x) => ({ ...x })) });
-  const send = (b: StrokeBase, strokes: StrokeDto[], phase: EditPhase) =>
-    sendEdit(ed.send, { type: 'strokes', strokes }, phase, b.target);
+  const send = (b: StrokeBase, strokes: StrokeDto[], phase: EditPhase) => sendEdit(ed.send, { type: 'strokes', strokes }, phase, b.target);
   const replace = (b: StrokeBase, i: number, s: Partial<StrokeDto>, phase: EditPhase = 'commit') =>
-    send(b, b.list.map((x, j) => (j === i ? { ...x, ...s } : x)), phase);
-  closeOnSelection(ed, () => !!picker(), () => setPicker(null), () => picker()?.anchor);
+    send(
+      b,
+      b.list.map((x, j) => (j === i ? { ...x, ...s } : x)),
+      phase,
+    );
+  closeOnSelection(
+    ed,
+    () => !!picker(),
+    () => setPicker(null),
+    () => picker()?.anchor,
+  );
   createEffect(() => {
     if (ed.sectionCollapsed?.('Обводка')) setPicker(null);
   });
@@ -417,7 +438,11 @@ export function StrokesSection() {
                       data-tip="Удалить обводку"
                       onClick={() => {
                         const b = begin();
-                        send(b, b.list.filter((_, j) => j !== i()), 'commit');
+                        send(
+                          b,
+                          b.list.filter((_, j) => j !== i()),
+                          'commit',
+                        );
                       }}
                     >
                       <Icon name="minus" />
@@ -472,9 +497,7 @@ export function StrokesSection() {
                   alpha={start.alpha}
                   anchor={pk().anchor}
                   begin={begin}
-                  onChange={(rgb, alpha, phase, b) =>
-                    replace(b, index, { color: toHex({ ...rgb, a: Math.round(alpha * 255) }) }, phase)
-                  }
+                  onChange={(rgb, alpha, phase, b) => replace(b, index, { color: toHex({ ...rgb, a: Math.round(alpha * 255) }) }, phase)}
                   onClose={() => setPicker(null)}
                 />
               );

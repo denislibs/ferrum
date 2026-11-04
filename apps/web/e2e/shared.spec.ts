@@ -5,12 +5,20 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import * as enc from '../src/core/input';
-import { Ctrl, CTRL_BYTES, Kind, LIVE_OFFSET, LIVE_SLOTS, RECORD_SIZE, RING_CAPACITY, RING_OFFSET, SAB_BYTES } from '../src/core/layout.gen';
+import {
+  Ctrl,
+  CTRL_BYTES,
+  Kind,
+  LIVE_OFFSET,
+  LIVE_SLOTS,
+  RECORD_SIZE,
+  RING_CAPACITY,
+  RING_OFFSET,
+  SAB_BYTES,
+} from '../src/core/layout.gen';
 import { commandSizeError, MAX_COMMAND_BYTES, prepareCommand, type FromWorker, type ToWorker } from '../src/core/messages';
 import { addSaturating, drainRing, holdInput, LIVE_READ_RETRIES, LiveReader, writeLive, type Held } from '../src/core/shared';
 import { MessageTransport, SabTransport } from '../src/core/transport';
-
-const MiB = 1024 * 1024;
 
 function sharedParts() {
   const sab = new SharedArrayBuffer(SAB_BYTES);
@@ -331,7 +339,13 @@ test.describe('записи ввода совпадают с Rust', () => {
     [
       'wheel',
       (s) =>
-        enc.wheel(s, { deltaMode: 0, deltaX: -4, deltaY: 120, shiftKey: false, altKey: false, ctrlKey: true, metaKey: false } as WheelEvent, 100, 200, 720),
+        enc.wheel(
+          s,
+          { deltaMode: 0, deltaX: -4, deltaY: 120, shiftKey: false, altKey: false, ctrlKey: true, metaKey: false } as WheelEvent,
+          100,
+          200,
+          720,
+        ),
     ],
     ['pinch', (s) => enc.pinch(s, 3, 4, 1.25)],
     [
@@ -376,7 +390,17 @@ test.describe('переполнение очереди ввода', () => {
     for (let i = 0; i < total; i++) enc.pointer(t.sink, Kind.POINTER_MOVE, ev, i, 0);
     expect(t.dropped()).toBe(500);
     enc.pointer(t.sink, Kind.POINTER_UP, { ...ev, button: 0 } as PointerEvent, 7, 7);
-    enc.key(t.sink, Kind.KEY_UP, { code: 'KeyA', key: 'a', repeat: false, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, getModifierState: () => false, timeStamp: 0 } as unknown as KeyboardEvent);
+    enc.key(t.sink, Kind.KEY_UP, {
+      code: 'KeyA',
+      key: 'a',
+      repeat: false,
+      shiftKey: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      getModifierState: () => false,
+      timeStamp: 0,
+    } as unknown as KeyboardEvent);
     expect(t.dropped()).toBe(502); // каждое вытеснило одно движение
     const kinds: number[] = [];
     const out = new Uint8Array(RING_CAPACITY * RECORD_SIZE);
@@ -407,7 +431,7 @@ test.describe('переполнение очереди ввода', () => {
   });
 });
 
-test.describe('сообщения worker\'а', () => {
+test.describe("сообщения worker'а", () => {
   function fake() {
     const worker = { onmessage: null as ((e: MessageEvent<unknown>) => void) | null, postMessage: () => undefined };
     return worker;
@@ -469,7 +493,10 @@ test.describe('очередь ввода на время перекодиров�
     q.flatMap((h) =>
       'msg' in h
         ? [`m${h.msg}`]
-        : Array.from({ length: h.input.length / RECORD_SIZE }, (_, i) => `${h.input[i * RECORD_SIZE]}:${h.input[(i + 1) * RECORD_SIZE - 1]}`),
+        : Array.from(
+            { length: h.input.length / RECORD_SIZE },
+            (_, i) => `${h.input[i * RECORD_SIZE]}:${h.input[(i + 1) * RECORD_SIZE - 1]}`,
+          ),
     );
 
   test('записи и сообщения — в порядке прихода, записи копируются', () => {
@@ -491,6 +518,12 @@ test.describe('очередь ввода на время перекодиров�
     expect(holdInput(q, cat(rec(Kind.POINTER_DOWN, 6)), 3)).toBe(1);
     // Теряемых нет — нетеряемые идут сверх предела.
     expect(holdInput(q, cat(rec(Kind.POINTER_UP, 7), rec(Kind.KEY_DOWN, 8)), 3)).toBe(0);
-    expect(order(q)).toEqual([`${Kind.KEY_DOWN}:2`, `${Kind.KEY_UP}:5`, `${Kind.POINTER_DOWN}:6`, `${Kind.POINTER_UP}:7`, `${Kind.KEY_DOWN}:8`]);
+    expect(order(q)).toEqual([
+      `${Kind.KEY_DOWN}:2`,
+      `${Kind.KEY_UP}:5`,
+      `${Kind.POINTER_DOWN}:6`,
+      `${Kind.POINTER_UP}:7`,
+      `${Kind.KEY_DOWN}:8`,
+    ]);
   });
 });

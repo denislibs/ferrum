@@ -11,15 +11,21 @@ const headers: Record<string, string> = isolated
     }
   : {};
 
-// Две страницы: редактор (index.html, интерфейс на SolidJS) и стенд этапа 4
-// (debug.html: холст на всё окно и отладочная плашка) — для тестов ядра.
-export default defineConfig({
-  plugins: [solid()],
-  server: { headers },
-  preview: { headers },
-  worker: { format: 'es' },
-  build: {
-    target: 'es2022',
-    rolldownOptions: { input: { main: 'index.html', debug: 'debug.html' } },
-  },
+// Автономная сборка (`--mode standalone`) — две страницы: редактор (index.html) и стенд
+// этапа 4 (debug.html: холст на всё окно и отладочная плашка) для тестов ядра. Рабочая
+// сборка — только редактор: стенд открывался бы без входа.
+export default defineConfig(({ mode }) => {
+  const input: Record<string, string> = { main: 'index.html' };
+  if (mode === 'standalone') input.debug = 'debug.html';
+  return {
+    plugins: [solid()],
+    // `npm run dev:server`: API — у сервера из Docker (PUBLIC_URL должен быть адресом vite).
+    server: { headers, fs: { allow: ['../..'] }, proxy: { '/api': process.env.FERRUM_API ?? 'http://localhost:8090' } },
+    preview: { headers },
+    worker: { format: 'es' as const },
+    build: {
+      target: 'es2022',
+      rolldownOptions: { input },
+    },
+  };
 });

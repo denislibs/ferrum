@@ -51,9 +51,7 @@ export function formatSpacing(v: SpacingDto): string {
 }
 
 /** Строка выбора шрифта: заголовок группы или семейство. */
-export type FontRow =
-  | { kind: 'heading'; label: string }
-  | { kind: 'font'; family: string; source: 'bundled' | 'system' | 'document' };
+export type FontRow = { kind: 'heading'; label: string } | { kind: 'font'; family: string; source: 'bundled' | 'system' | 'document' };
 
 /** Группы «В документе» / «Вшитые» / «Системные» с поиском по имени (без регистра). */
 export function fontRows(catalog: readonly FontChoice[], pageFonts: readonly string[], query: string): FontRow[] {
@@ -61,9 +59,21 @@ export function fontRows(catalog: readonly FontChoice[], pageFonts: readonly str
   const hit = (f: string) => q === '' || f.toLowerCase().includes(q);
   const sorted = [...catalog].sort((a, b) => a.family.localeCompare(b.family));
   const groups: [string, FontRow[]][] = [
-    ['В документе', [...pageFonts].sort((a, b) => a.localeCompare(b)).filter(hit).map((family) => ({ kind: 'font', family, source: 'document' }))],
-    ['Вшитые', sorted.filter((c) => c.source === 'bundled' && hit(c.family)).map((c) => ({ kind: 'font', family: c.family, source: 'bundled' }))],
-    ['Системные', sorted.filter((c) => c.source === 'system' && hit(c.family)).map((c) => ({ kind: 'font', family: c.family, source: 'system' }))],
+    [
+      'В документе',
+      [...pageFonts]
+        .sort((a, b) => a.localeCompare(b))
+        .filter(hit)
+        .map((family) => ({ kind: 'font', family, source: 'document' })),
+    ],
+    [
+      'Вшитые',
+      sorted.filter((c) => c.source === 'bundled' && hit(c.family)).map((c) => ({ kind: 'font', family: c.family, source: 'bundled' })),
+    ],
+    [
+      'Системные',
+      sorted.filter((c) => c.source === 'system' && hit(c.family)).map((c) => ({ kind: 'font', family: c.family, source: 'system' })),
+    ],
   ];
   const out: FontRow[] = [];
   for (const [label, rows] of groups) {
@@ -75,10 +85,12 @@ export function fontRows(catalog: readonly FontChoice[], pageFonts: readonly str
 
 /** Начертание при смене семейства: то же имя, иначе Regular, иначе первое. */
 export function styleFor(catalog: readonly FontChoice[], family: string, current: string): string {
-  return defaultStyle(
-    catalog.find((c) => c.family === family),
-    current,
-  ) || 'Regular';
+  return (
+    defaultStyle(
+      catalog.find((c) => c.family === family),
+      current,
+    ) || 'Regular'
+  );
 }
 
 /** Окно строк виртуального списка: первая и сколько (с запасом сверху и снизу). */
