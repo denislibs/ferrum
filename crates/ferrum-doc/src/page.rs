@@ -348,9 +348,6 @@ impl PageDoc {
         self.doc.commit();
     }
 
-    /// Только для тестов: значение `booleanOp` узла в Loro как есть (как в файле
-    /// чужой сборки) — без проверки и без зеркала.
-    #[doc(hidden)]
     /// Записывает в узел направляющие как есть — как чужой файл (тесты разбора).
     #[doc(hidden)]
     pub fn force_guides_for_tests(&self, id: NodeId, raw: &[(&str, f64)]) {
@@ -361,6 +358,8 @@ impl PageDoc {
         self.doc.commit();
     }
 
+    /// Только для тестов: значение `booleanOp` узла в Loro как есть (как в файле
+    /// чужой сборки) — без проверки и без зеркала.
     #[doc(hidden)]
     pub fn force_boolean_op_for_tests(&self, id: NodeId, op: &str) {
         let tid = self.tid(id).expect("узел есть");

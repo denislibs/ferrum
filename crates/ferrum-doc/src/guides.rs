@@ -103,7 +103,6 @@ pub(crate) fn guides_value(guides: &[Guide]) -> LoroValue {
 }
 
 /// Список как есть, без проверок: так тесты пишут неверные данные чужого файла.
-#[doc(hidden)]
 pub(crate) fn raw_value(raw: &[(&str, f64)]) -> LoroValue {
     LoroValue::from(
         raw.iter()
@@ -119,7 +118,8 @@ fn read_guide(v: &LoroValue) -> Option<Guide> {
 }
 
 /// Список из файла: неверные записи и повторы отброшены, не больше `MAX_GUIDES`.
-/// Обход останавливается на пределе: чужой файл не заставит разбирать весь список.
+/// Обход останавливается, набрав предел верных записей; список из одного мусора
+/// проходится целиком (его размер ограничен файлом).
 pub(crate) fn read_guides(v: &LoroValue) -> Vec<Guide> {
     let LoroValue::List(list) = v else {
         return Vec::new();

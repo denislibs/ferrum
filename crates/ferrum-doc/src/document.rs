@@ -186,9 +186,6 @@ impl Document {
         self.read_only
     }
 
-    /// Только для тестов: документ становится «только чтение», как при
-    /// загрузке страницы с неизвестными узлами.
-    #[doc(hidden)]
     /// Записывает в страницу направляющие как есть — как чужой файл (тесты разбора).
     #[doc(hidden)]
     pub fn force_page_guides_for_tests(&mut self, id: PageId, raw: &[(&str, f64)]) {
@@ -198,6 +195,9 @@ impl Document {
         self.root.commit();
     }
 
+    /// Только для тестов: документ становится «только чтение», как при
+    /// загрузке страницы с неизвестными узлами.
+    #[doc(hidden)]
     pub fn force_read_only_for_tests(&mut self) {
         self.read_only = true;
     }
@@ -361,7 +361,9 @@ impl Document {
             .ok_or_else(|| DocError::PageNotFound(id.to_string()))
     }
 
+    /// Место за концом списка (после удаления другой страницы) — последнее.
     fn place_page(&mut self, id: PageId, to: usize) -> DocResult<()> {
+        let to = to.min(self.pages().len().saturating_sub(1));
         self.pages_tree.mov_to(id.0, TreeParentId::Root, to)?;
         self.root.commit();
         Ok(())
@@ -509,7 +511,9 @@ impl Document {
         self.root.commit();
         self.loaded.remove(&id);
         self.unloaded.remove(&id);
-        self.history.forget_page(id);
+        for orphan in self.history.forget_page(id) {
+            self.parked.remove(&orphan);
+        }
         self.forget_parked();
         self.changes.remove(&id);
         self.journaled_pages.remove(&id);
@@ -931,8 +935,8 @@ impl Document {
                     if self.pages().len() <= 1 {
                         return Err(DocError::LastPage);
                     }
-                    // Страницу с кэшем ещё не открывали — загрузка: парковка хранит её целиком.
-                    self.page(*page)?;
+                    // Копия всегда загружена (дубль или повтор): парковка хранит её целиком.
+                    self.writable()?;
                     let (name, background, guides) = (
                         self.pages()[index].1.clone(),
                         self.page_background(*page),

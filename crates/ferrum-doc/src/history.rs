@@ -190,10 +190,33 @@ impl History {
         self.undo.last().map(|e| e.id)
     }
 
-    pub fn forget_page(&mut self, page: PageId) {
-        self.undo.retain(|e| !e.references(page));
-        self.redo.retain(|e| !e.references(page));
+    /// Забывает шаги, опирающиеся на удалённую страницу. Отброшенный шаг дубля
+    /// уносит с собой копию, которая должна была вернуться повтором: шаги про неё
+    /// тоже забываются (по цепочке). Возвращает такие копии — документ освободит их
+    /// из парковки.
+    pub fn forget_page(&mut self, page: PageId) -> Vec<PageId> {
+        let mut orphans = Vec::new();
+        let mut queue = vec![page];
+        while let Some(p) = queue.pop() {
+            for stack in [&mut self.undo, &mut self.redo] {
+                stack.retain(|e| {
+                    if !e.references(p) {
+                        return true;
+                    }
+                    for op in &e.doc_ops {
+                        if let DocOp::RestorePage { page, .. } = op {
+                            if !orphans.contains(page) {
+                                orphans.push(*page);
+                                queue.push(*page);
+                            }
+                        }
+                    }
+                    false
+                });
+            }
+        }
         self.last_merge = None;
+        orphans
     }
 
     /// Страница, возвращённая повтором дубля, получила новый идентификатор:

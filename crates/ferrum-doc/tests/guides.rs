@@ -531,3 +531,78 @@ fn duplicate_page_undo_redo_survive_the_journal() {
     assert_eq!(pages[1].1, "Копия");
     assert_eq!(b.page(pages[1].0).unwrap().walk().len(), 2, "узлы копии");
 }
+
+#[test]
+fn undo_redo_of_a_page_move_survives_deleting_another_page() {
+    let mut doc = Document::new();
+    let a = doc.pages()[0].0;
+    let b = doc.add_page("B").unwrap();
+    let c = doc.add_page("C").unwrap();
+    let d = doc.add_page("D").unwrap();
+    doc.clear_history();
+    doc.move_page(d, 0, a, vec![]).unwrap();
+    doc.delete_page(b).unwrap();
+    let order = |x: &Document| x.pages().iter().map(|p| p.0).collect::<Vec<_>>();
+    assert_eq!(order(&doc), [d, a, c]);
+    doc.undo().expect("не заклинивает");
+    assert_eq!(order(&doc), [a, c, d]);
+    assert!(!doc.can_undo());
+    doc.redo().expect("повтор тоже");
+    assert_eq!(order(&doc), [d, a, c]);
+}
+
+#[test]
+fn deleting_the_source_page_forgets_the_parked_copy_and_its_steps() {
+    let (mut doc, page, _, _) = doc_with_frame();
+    let _b = doc.add_page("B").unwrap();
+    doc.clear_history();
+    let copy = doc.duplicate_page(page, "Копия", page, vec![]).unwrap();
+    doc.transact(copy, vec![], |tx| {
+        Ok(vec![tx.create_node(None, None, NodeKind::Ellipse)?])
+    })
+    .unwrap();
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    assert!(doc.can_redo());
+    doc.delete_page(page).unwrap();
+    assert!(!doc.can_redo(), "повтор без копии невозможен");
+    assert!(doc.redo().unwrap().is_none());
+    assert!(doc.undo().unwrap().is_none());
+}
+
+#[test]
+fn deleting_the_source_page_forgets_chained_copies() {
+    let (mut doc, page, _, _) = doc_with_frame();
+    let _b = doc.add_page("B").unwrap();
+    doc.clear_history();
+    let p1 = doc.duplicate_page(page, "К1", page, vec![]).unwrap();
+    doc.duplicate_page(p1, "К2", p1, vec![]).unwrap();
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    doc.delete_page(page).unwrap();
+    assert!(!doc.can_redo());
+    assert!(doc.redo().unwrap().is_none());
+}
+
+#[test]
+fn frame_guides_survive_page_copy_and_delete_with_undo() {
+    let (mut doc, page, frame, _) = doc_with_frame();
+    doc.set_guides(page, vec![], &[(GuideOwner::Frame(frame), vec![gy(2.0)])])
+        .unwrap();
+    doc.clear_history();
+    let copy = doc.duplicate_page(page, "Копия", page, vec![]).unwrap();
+    let copied = doc.page(copy).unwrap().walk()[0];
+    assert_eq!(frame_guides(&mut doc, copy, copied), [gy(2.0)]);
+    doc.undo().unwrap();
+    doc.redo().unwrap();
+    let back = doc.pages()[1].0;
+    let copied = doc.page(back).unwrap().walk()[0];
+    assert_eq!(frame_guides(&mut doc, back, copied), [gy(2.0)]);
+    doc.transact(page, vec![frame], |tx| {
+        tx.delete_nodes(&[frame])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    doc.undo().unwrap();
+    assert_eq!(frame_guides(&mut doc, page, frame), [gy(2.0)]);
+}
