@@ -247,7 +247,7 @@ fn nan_pointer_up_cancels() {
 }
 
 #[test]
-fn click_on_guide_selects_what_is_under_it_and_double_click_still_works() {
+fn click_on_guide_selects_what_is_under_it() {
     let mut h = with_rulers();
     let r = h.rect(None, 100.0, 100.0, 200.0, 200.0);
     seed_page(&mut h, vec![gx(200.0)]);
@@ -348,7 +348,7 @@ fn hover_shows_resize_cursor_on_ruler_and_guide_without_node_hover() {
 }
 
 #[test]
-fn ruler_click_does_not_reach_tool_or_end_edit() {
+fn ruler_click_does_not_reach_tool_or_clear_selection() {
     let mut h = with_rulers();
     let r = h.rect(None, 0.0, 0.0, 500.0, 500.0);
     h.ed.select(&[r]);
@@ -729,4 +729,96 @@ fn remembered_hover_does_not_outlive_tool_view_or_edit_changes() {
     h.down(300.0, 10.0, NONE);
     assert!(!h.ed.is_busy());
     h.up(300.0, 10.0, NONE);
+}
+
+// ——— Раунд правок 1 ———
+
+#[test]
+fn guide_of_a_locked_frame_is_not_grabbed() {
+    let mut h = with_rulers();
+    let f = h.frame(None, 100.0, 100.0, 400.0, 400.0);
+    h.ed.set_guides(GuideOwner::Frame(f), vec![gx(50.0)], Phase::Commit)
+        .unwrap();
+    h.set(
+        f,
+        PropsPatch {
+            locked: Some(true),
+            ..Default::default()
+        },
+    );
+    let steps = h.ed.step_count();
+    h.hover(150.0, 300.0);
+    assert!(
+        !matches!(h.ed.cursor(), Cursor::Resize { .. }),
+        "курсор протяжки у заблокированной линии"
+    );
+    h.drag((150.0, 200.0), (180.0, 200.0), NONE);
+    assert_eq!(frame_guides(&mut h, f), [gx(50.0)]);
+    assert!(page_guides(&h).is_empty());
+    assert_eq!(h.ed.step_count(), steps);
+}
+
+#[test]
+fn hidden_ui_does_not_delete_a_guide_on_the_unseen_ruler() {
+    let mut h = with_rulers();
+    seed_page(&mut h, vec![gy(150.0)]);
+    h.ed.execute(CommandId::ToggleUi);
+    h.drag((300.0, 150.0), (300.0, 12.0), NONE);
+    assert_eq!(page_guides(&h), [gy(12.0)], "линия перенесена, не удалена");
+}
+
+#[test]
+fn snap_hint_redraws_when_it_changes_and_clears_with_the_gesture() {
+    let mut h = with_rulers();
+    h.rect(None, 100.0, 100.0, 50.0, 50.0);
+    h.down(10.0, 300.0, NONE);
+    h.mv(152.0, 300.0, NONE);
+    h.ed.take_events();
+    h.mv(152.0, 500.0, NONE);
+    assert!(h.ed.take_events().contains(&EditorEvent::NeedsRedraw));
+    h.up(152.0, 500.0, NONE);
+    assert!(h.ed.take_events().contains(&EditorEvent::NeedsRedraw));
+    assert!(h.ed.overlay().snap_lines.is_empty());
+}
+
+#[test]
+fn hiding_guides_mid_drag_cancels_the_gesture() {
+    let mut h = with_rulers();
+    let steps = h.ed.step_count();
+    h.down(300.0, 10.0, NONE);
+    h.mv(300.0, 150.0, NONE);
+    h.ed.set_view(None, Some(false));
+    assert!(!h.ed.is_busy());
+    assert!(h.ed.overlay().active_guide.is_none());
+    h.up(300.0, 150.0, NONE);
+    assert!(page_guides(&h).is_empty());
+    assert_eq!(h.ed.step_count(), steps);
+}
+
+#[test]
+fn refused_commit_drops_the_preview() {
+    let mut h = with_rulers();
+    let owner = GuideOwner::Page(h.ed.page());
+    h.ed.set_guides(owner, vec![gx(10.0)], Phase::Preview)
+        .unwrap();
+    assert_eq!(h.ed.overlay().guides.len(), 1);
+    assert!(h
+        .ed
+        .set_guides(owner, vec![gx(f64::NAN)], Phase::Commit)
+        .is_err());
+    assert!(h.ed.overlay().guides.is_empty(), "превью снято");
+}
+
+#[test]
+fn cursor_follows_the_release_point_not_the_press_point() {
+    let mut h = with_rulers();
+    h.hover(10.0, 100.0);
+    h.down(10.0, 100.0, NONE);
+    h.mv(300.0, 10.0, NONE);
+    h.up(300.0, 10.0, NONE);
+    assert!(
+        matches!(h.ed.cursor(), Cursor::Resize { angle } if angle == 90.0),
+        "{:?}",
+        h.ed.cursor()
+    );
 }

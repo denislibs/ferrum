@@ -178,6 +178,8 @@ struct FrameKey {
     guides_revision: u64,
     /// Тянущаяся направляющая: положение, длина и значение на плашке.
     active_guide: Option<ferrum_render::ActiveGuide>,
+    /// Подсказки привязки тянущейся линии: меняются без сдвига самой линии.
+    guide_snap: Vec<kurbo::Line>,
     /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
     measures: Vec<Measure>,
     /// Правка текста: курсор (с миганием), выделение, превью IME.
@@ -315,6 +317,7 @@ impl Editor {
                 guides_shown: false,
                 guides_revision: 0,
                 active_guide: None,
+                guide_snap: Vec::new(),
                 measures: Vec::new(),
                 text: None,
                 vector: None,
@@ -775,6 +778,7 @@ impl Editor {
         if self.guide_drag.is_some() {
             if e.button == PointerButton::Primary {
                 self.guide_drag_up(&e);
+                self.rehover_guides(&e);
             }
             return;
         }
@@ -1272,6 +1276,10 @@ impl Editor {
                 guides_shown: self.guides_visible(),
                 guides_revision: self.guides.revision,
                 active_guide: self.active_guide(),
+                guide_snap: self
+                    .guide_drag
+                    .as_ref()
+                    .map_or_else(Vec::new, |d| d.lines.clone()),
                 measures: self.measures.clone(),
                 text: self.text_overlay().map(|o| o.overlay),
                 vector: self.vector_overlay(),

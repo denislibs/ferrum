@@ -146,6 +146,10 @@ impl Editor {
         if let Some(v) = guides {
             self.settings.guides = v;
         }
+        // Невидимую линию не тянут и не пишут.
+        if self.guide_drag.is_some() && !(self.rulers_visible() && self.settings.guides) {
+            self.cancel_guides();
+        }
         self.emit();
     }
 
@@ -330,6 +334,12 @@ impl Editor {
                 GuideAxis::X => ((world.x - line.p0.x).abs(), world.y, line.p0.y, line.p1.y),
                 GuideAxis::Y => ((world.y - line.p0.y).abs(), world.x, line.p0.x, line.p1.x),
             };
+            // Линия заблокированного фрейма не берётся: она едет вместе с ним.
+            if let GuideOwner::Frame(id) = g.owner {
+                if self.scene.node(id).is_none_or(|n| n.props.locked) {
+                    continue;
+                }
+            }
             if d > tol || (!g.mark.infinite && (cross < a.min(b) || cross > a.max(b))) {
                 continue;
             }
@@ -407,6 +417,14 @@ impl Editor {
         if let Some(g) = self.grabbable_guide(e) {
             self.guide_hover = Some(GuideHover::Guide(g));
             self.hover = None;
+        }
+    }
+
+    /// После жеста указатель стоит на новом месте: наведение считается заново.
+    pub(crate) fn rehover_guides(&mut self, e: &PointerEvent) {
+        self.guide_hover = None;
+        if !self.ruler_hover_update(e) {
+            self.guide_hover_update(e);
         }
     }
 
@@ -518,10 +536,12 @@ impl Editor {
         if d.started {
             let world = self.camera.screen_to_world(e.point);
             d.frame = self.top_frame_under(world);
-            d.over_ruler = match d.axis {
-                GuideAxis::X => e.point.x < RULER_SIZE,
-                GuideAxis::Y => e.point.y < RULER_SIZE,
-            };
+            // Удаление — только на видимой линейке (при скрытом интерфейсе её нет).
+            d.over_ruler = self.rulers_visible()
+                && match d.axis {
+                    GuideAxis::X => e.point.x < RULER_SIZE,
+                    GuideAxis::Y => e.point.y < RULER_SIZE,
+                };
             let raw = match d.axis {
                 GuideAxis::X => world.x,
                 GuideAxis::Y => world.y,
@@ -669,6 +689,21 @@ impl Editor {
     /// уровня на текущей странице; сверх предела и неверные смещения — отказ. Страница
     /// может быть не загружена: сначала загрузка, затем проверка «только для чтения».
     pub fn set_guides(
+        &mut self,
+        owner: GuideOwner,
+        guides: Vec<Guide>,
+        phase: Phase,
+    ) -> DocResult<()> {
+        let result = self.set_guides_inner(owner, guides, phase);
+        // Отказ при записи: превью, оставшееся от жеста, снимается.
+        if result.is_err() && phase == Phase::Commit {
+            self.cancel_guides();
+            self.emit();
+        }
+        result
+    }
+
+    fn set_guides_inner(
         &mut self,
         owner: GuideOwner,
         guides: Vec<Guide>,
