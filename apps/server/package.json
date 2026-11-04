@@ -1,0 +1,14 @@
+{
+  "name": "ferrum-server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "dependencies": {
+    "@ferrum/protocol": "file:../../packages/protocol",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "@types/pg": "8.23.1"
+  }
+}

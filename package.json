@@ -4,10 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "typecheck": "npm --prefix apps/web run typecheck",
+    "typecheck": "npm --prefix apps/web run typecheck && tsc -p apps/server/tsconfig.json && tsc -p packages/protocol/tsconfig.json",
     "lint": "oxlint --deny-warnings",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test:stand": "docker compose -p ferrum-test --env-file docker-compose.test.env -f docker-compose.yml -f docker-compose.test.yml up -d --wait postgres valkey mailpit",
+    "test:server": "npm run test:stand && cd packages/protocol && bun test && cd ../../apps/server && bun test",
+    "test:stand:down": "docker compose -p ferrum-test --env-file docker-compose.test.env -f docker-compose.yml -f docker-compose.test.yml down -v"
   },
   "devDependencies": {
     "oxlint": "1.89.0",

@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/dist-server
+target
+docs
+.git
+.env
+.superpowers
+apps/web/src/wasm
+apps/web/test-results
+apps/web/playwright-report
+apps/desktop

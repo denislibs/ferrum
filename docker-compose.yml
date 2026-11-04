@@ -1,0 +1,72 @@
+# Ferrum одной командой: `cp .env.example .env && docker compose up --build`.
+name: ferrum
+
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - '${FERRUM_PORT:-8090}:8090'
+    environment:
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?задайте BETTER_AUTH_SECRET в .env, образец — .env.example}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8090}
+      DATABASE_URL: postgres://ferrum:${POSTGRES_PASSWORD:-ferrum}@postgres:5432/ferrum
+      VALKEY_URL: redis://valkey:6379
+      SMTP_URL: ${SMTP_URL:-smtp://mailpit:1025}
+      MAIL_FROM: ${MAIL_FROM:-Ferrum <ferrum@localhost>}
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+    volumes:
+      - ferrum-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, bun, -e, "const r = await fetch('http://127.0.0.1:8090/healthz'); process.exit(r.ok ? 0 : 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ferrum
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ferrum}
+      POSTGRES_DB: ferrum
+    volumes:
+      - ferrum-postgres:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U ferrum -d ferrum]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  valkey:
+    image: valkey/valkey:9-alpine
+    restart: unless-stopped
+    # Сессии лежат здесь: перезапуск не должен выходить из всех устройств.
+    command: [valkey-server, --appendonly, 'yes']
+    volumes:
+      - ferrum-valkey:/data
+    healthcheck:
+      test: [CMD, valkey-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Перехватывает письма в разработке: http://localhost:8025. В рабочем развёртывании
+  # профиля `dev` нет, письма уходят на SMTP_URL.
+  mailpit:
+    image: axllent/mailpit:v1.33.0
+    restart: unless-stopped
+    profiles: [dev]
+    ports:
+      - '${MAILPIT_PORT:-8025}:8025'
+
+volumes:
+  ferrum-data:
+  ferrum-postgres:
+  ferrum-valkey:
