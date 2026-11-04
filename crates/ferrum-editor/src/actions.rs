@@ -77,8 +77,61 @@ enum Arrange {
     Back,
 }
 
+/// Текст уведомления с кнопкой «Отменить» (спека подсистемы 2, раздел 10) у команд,
+/// после которых оно положено.
+fn undo_notice(cmd: CommandId) -> Option<&'static str> {
+    match cmd {
+        CommandId::Delete => Some("Удалено"),
+        CommandId::Flatten => Some("Сплющено"),
+        CommandId::OutlineStroke => Some("Контур обводки создан"),
+        CommandId::Ungroup => Some("Разгруппировано"),
+        _ => None,
+    }
+}
+
 impl Editor {
+    /// Команда; у удаления, «Сплющить», «Контура обводки» и разгруппировки её шаг
+    /// сообщается интерфейсу. Правка текста и вектора шлют эти же команды своим
+    /// жестам (удалить точку, символ): уведомление — только про слои.
     pub(crate) fn run(&mut self, cmd: CommandId) {
+        let notice =
+            undo_notice(cmd).filter(|_| self.text_edit.is_none() && self.vector_edit.is_none());
+        let before = self.doc.last_step();
+        self.run_command(cmd);
+        if let Some(text) = notice {
+            self.notify_step(text, before);
+        }
+    }
+
+    /// Появился новый шаг — интерфейс показывает уведомление с его номером.
+    pub(crate) fn notify_step(&mut self, text: &'static str, before: Option<u64>) {
+        if let Some(step) = self.doc.last_step().filter(|s| Some(*s) != before) {
+            self.out.events.push(EditorEvent::UndoNotice { text, step });
+        }
+    }
+
+    /// Кнопка «Отменить» в уведомлении: отмена, только если шаг `step` ещё последний.
+    /// `true` — отменён.
+    pub fn undo_step(&mut self, step: u64) -> bool {
+        // Как `execute`: жест панели отменяется, во время жеста команды не идут.
+        self.cancel_panel();
+        // Открытый путь пера: отмена сняла бы его точку, а не этот шаг.
+        let pen_open = self.vector_edit.as_ref().is_some_and(|v| v.pen.dirty);
+        if self.is_busy()
+            || pen_open
+            || self.doc.last_step() != Some(step)
+            || !self.command_state(CommandId::Undo).enabled
+        {
+            self.emit();
+            return false;
+        }
+        self.run_command(CommandId::Undo);
+        self.emit();
+        // Отмена не прошла (например, документ только для чтения): шаг остался последним.
+        self.doc.last_step() != Some(step)
+    }
+
+    fn run_command(&mut self, cmd: CommandId) {
         use CommandId as C;
         // Недоступная команда ничего не делает: ни шага, ни сообщения (спека
         // подсистемы 2, раздел 3) — так же, как её пункт в меню.
@@ -116,6 +169,9 @@ impl Editor {
             // Удержание обрабатывается при нажатии и отпускании клавиши.
             C::HandHold => {}
             C::ToolImage => self.out.events.push(EditorEvent::RequestImage),
+            // В правке текста отмена и повтор — как Ctrl+Z: правка продолжается.
+            C::Undo if self.text_edit.is_some() => self.text_undo_redo(false),
+            C::Redo if self.text_edit.is_some() => self.text_undo_redo(true),
             C::Undo => self.undo_redo(false),
             C::Redo => self.undo_redo(true),
             // В правке текста — фрагмент текста и обычный текст.
@@ -265,6 +321,14 @@ impl Editor {
             C::FlipHorizontal => self.mirror(Vec2::new(-1.0, 1.0)),
             C::FlipVertical => self.mirror(Vec2::new(1.0, -1.0)),
             C::PixelGrid => self.settings.pixel_grid = !self.settings.pixel_grid,
+            C::ViewRulers => {
+                self.settings.rulers = !self.settings.rulers;
+                self.push_view();
+            }
+            C::ViewGuides => {
+                self.settings.guides = !self.settings.guides;
+                self.push_view();
+            }
             C::EditObject => self.edit_object(),
             C::TextBold
             | C::TextItalic
@@ -825,7 +889,9 @@ impl Editor {
         if mode == PasteMode::Replace {
             let targets = self.replace_targets();
             if !targets.is_empty() {
+                let before = self.doc.last_step();
                 let ok = self.commit_replace(&payload, &targets);
+                self.notify_step("Заменено", before);
                 return self.finish_paste(&payload, ok);
             }
         }

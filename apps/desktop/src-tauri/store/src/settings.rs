@@ -12,7 +12,7 @@ use crate::atomic::atomic_write;
 use crate::io_error;
 
 /// Поля настроек — те же, что `SETTINGS_FIELDS` интерфейса.
-pub const SETTINGS_FIELDS: [&str; 8] = [
+pub const SETTINGS_FIELDS: [&str; 13] = [
     "theme",
     "pixelSnap",
     "keymap",
@@ -21,6 +21,11 @@ pub const SETTINGS_FIELDS: [&str; 8] = [
     "pagesOpen",
     "filesView",
     "recentCommands",
+    "rulers",
+    "guides",
+    "leftCollapsed",
+    "rightCollapsed",
+    "collapsedSections",
 ];
 /// Запись настроек не больше этого (как `MAX_SETTINGS_BYTES`).
 pub const MAX_SETTINGS_BYTES: usize = 80 * 1024;

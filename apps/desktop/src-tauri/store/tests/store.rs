@@ -256,6 +256,8 @@ fn settings_are_written_by_field_and_checked() {
     s.set(patch(serde_json::json!({"theme": "light"}))).unwrap();
     s.set(patch(serde_json::json!({"filesView": "list"})))
         .unwrap();
+    s.set(patch(serde_json::json!({"rulers": true, "guides": false})))
+        .unwrap();
     s.set(patch(
         serde_json::json!({"recentCommands": "edit.undo ui.export"}),
     ))
@@ -272,6 +274,8 @@ fn settings_are_written_by_field_and_checked() {
         serde_json::json!({
             "theme": "light",
             "filesView": "list",
+            "rulers": true,
+            "guides": false,
             "recentCommands": "edit.undo ui.export"
         })
     );

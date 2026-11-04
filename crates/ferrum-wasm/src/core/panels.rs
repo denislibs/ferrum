@@ -3,7 +3,10 @@
 //! доверенное: идентификаторы, строки и списки проверяются и ограничиваются,
 //! неверное — событие `Error` на русском, документ не меняется.
 
-use ferrum_doc::{Color, Fill, FillKind, NodeId, PageId, ScaleMode, Stroke, StrokeAlign};
+use ferrum_doc::{
+    Color, Fill, FillKind, Guide, GuideAxis, GuideOwner, NodeId, PageId, ScaleMode, Stroke,
+    StrokeAlign,
+};
 use ferrum_editor::scale::{Anchor, MAX_SCALE_FACTOR, MIN_SCALE_FACTOR};
 use ferrum_editor::{
     browser_reserved, frame_presets, main_menu, BindError, CommandId, ContextTarget, DropTarget,
@@ -17,9 +20,9 @@ use serde_bytes::ByteBuf;
 use super::Core;
 use crate::protocol::{
     Align, Command, ConflictInfo, ContextTarget as TargetDto, CoreEvent, DropPosition, Edit,
-    EditPhase, ExportFormat, Field, FillDto, FoundLayerDto, KeymapEntry, MenuActionDto,
-    MenuItemDto, PageInfo, PaintKind, PresetInfo, ScaleModeDto, SelectMode, StrokeDto,
-    EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
+    EditPhase, ExportFormat, Field, FillDto, FoundLayerDto, GuideAxisDto, GuideOwnerDto,
+    KeymapEntry, MenuActionDto, MenuItemDto, PageInfo, PaintKind, PresetInfo, ScaleModeDto,
+    SelectMode, StrokeDto, EXPORT_SCALES, MAX_TEXT_BYTES, SELECTION_IDS_MAX,
 };
 use crate::summary::{cap_of, join_of, summarize, MAX_PAINTS};
 
@@ -526,6 +529,14 @@ impl Core {
                 }
                 self.ui.pages = true;
             }
+            Command::MovePage { id, index } => {
+                if let Some(id) = self.page_id(&id) {
+                    if let Err(e) = self.editor.move_page(id, index as usize) {
+                        self.error(e.to_string());
+                    }
+                }
+                self.ui.pages = true;
+            }
             Command::AddPage => {
                 match self.editor.create_page() {
                     Ok(_) => self.touch(),
@@ -677,6 +688,54 @@ impl Core {
                 let mut s = self.editor.settings().clone();
                 s.pixel_snap = pixel_snap;
                 self.editor.set_settings(s);
+            }
+            Command::UndoStep { step } => {
+                // Номер из события: только неотрицательные целые в точности f64.
+                if step.is_finite() && step >= 0.0 && step.fract() == 0.0 {
+                    self.editor.undo_step(step as u64);
+                }
+            }
+            Command::SetView { rulers, guides } => self.editor.set_view(rulers, guides),
+            Command::PanView { dx } => {
+                if dx.is_finite() && dx.abs() <= 1e6 {
+                    self.editor.pan_view(dx);
+                } else {
+                    self.error("Неверный сдвиг вида");
+                }
+            }
+            Command::SetGuides {
+                owner,
+                guides,
+                phase: p,
+            } => {
+                // Сверх предела — до разбора: запрос отвергается целиком.
+                if guides.len() > ferrum_doc::MAX_GUIDES {
+                    self.error(format!(
+                        "Направляющих не больше {} на один узел",
+                        ferrum_doc::MAX_GUIDES
+                    ));
+                    return;
+                }
+                let owner = match owner {
+                    GuideOwnerDto::Page { id } => self.page_id(&id).map(GuideOwner::Page),
+                    GuideOwnerDto::Frame { id } => self.node(&id).map(GuideOwner::Frame),
+                };
+                let Some(owner) = owner else {
+                    return;
+                };
+                let list = guides
+                    .iter()
+                    .map(|g| {
+                        let axis = match g.axis {
+                            GuideAxisDto::X => GuideAxis::X,
+                            GuideAxisDto::Y => GuideAxis::Y,
+                        };
+                        Guide::new(axis, g.offset)
+                    })
+                    .collect();
+                if let Err(e) = self.editor.set_guides(owner, list, phase(p)) {
+                    self.error(e.to_string());
+                }
             }
             // Команды этапа 4 разбирает `Core::command`. Список полный, без `_`:
             // новая команда без ветки здесь — ошибка сборки, а не молчаливый пропуск.

@@ -462,6 +462,8 @@ impl Editor {
             | C::ZoomOut
             | C::ToggleUi
             | C::PixelGrid
+            | C::ViewRulers
+            | C::ViewGuides
             | C::EditObject
             | C::Save => return false,
             // Команды интерфейса правку не трогают (меню, настройки, файлы).

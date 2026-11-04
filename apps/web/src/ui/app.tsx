@@ -4,11 +4,11 @@
 // файл из хранилища (`file`): байты читает worker ввода-вывода, сохраняет `saver`;
 // уход к экрану файлов или другому файлу сначала сохраняет текущий (`onLeave`).
 
-import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { detectPlatform } from '../core/core';
 import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
 import { boot, dismissSplash, isTestMode } from './boot';
-import { DesignHeader, FileHeader, ResizeEdge } from './chrome';
+import { DesignHeader, FileHeader, PanelToggle, ResizeEdge } from './chrome';
 import { buildContextMenu, type ContextTarget } from './context-menu';
 import { EditorContext, type Editor } from './context';
 import { ConfirmDialog } from './dialog';
@@ -19,7 +19,7 @@ import { LayersPanel } from './layers';
 import { PagesPanel } from './pages';
 import { PropertiesPanel } from './properties';
 import { QuickActions } from './quick-actions';
-import { diffSettings, resolveTheme, type Settings, type ThemeChoice } from './settings';
+import { diffSettings, parseSections, resolveTheme, type Settings, type ThemeChoice } from './settings';
 import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
 import { ShortcutsPanel } from './shortcuts-panel';
@@ -83,8 +83,14 @@ export function App(props: AppProps) {
   const [left, setLeft] = createSignal(saved.leftWidth);
   const [right, setRight] = createSignal(saved.rightWidth);
   const [pagesOpen, setPagesOpen] = createSignal(saved.pagesOpen);
+  const [leftCollapsed, setLeftCollapsed] = createSignal(saved.leftCollapsed);
+  const [rightCollapsed, setRightCollapsed] = createSignal(saved.rightCollapsed);
+  const [sections, setSections] = createSignal<ReadonlySet<string>>(new Set(parseSections(saved.collapsedSections)));
   const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(saved.theme);
   const [pixelSnap, setPixelSnap] = createSignal(saved.pixelSnap);
+  // Настройка вида: команду выполняет ядро (событие `view`), хранит — интерфейс.
+  const [rulers, setRulers] = createSignal(saved.rulers);
+  const [guides, setGuides] = createSignal(saved.guides);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   /** Недавние команды «Быстрых действий»: новые первыми, общие для вкладок. */
   const [recent, setRecent] = createSignal(parseRecent(saved.recentCommands));
@@ -128,6 +134,36 @@ export function App(props: AppProps) {
     editor()?.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
   });
   createEffect(() => editor()?.send({ type: 'setSettings', pixelSnap: pixelSnap() }));
+  // Показ линеек и направляющих, каким его знает ядро: пришедшее от него событие `view`
+  // обратно командой не уходит (иначе два быстрых Shift+R дали бы лишний кадр).
+  let coreView: { rulers: boolean; guides: boolean } | null = null;
+  createEffect(() => {
+    const v = { rulers: rulers(), guides: guides() };
+    const ed = editor();
+    if (!ed || (coreView && coreView.rulers === v.rulers && coreView.guides === v.guides)) return;
+    coreView = v;
+    ed.send({ type: 'setView', ...v });
+  });
+  // Холст держит в центре одну и ту же точку мира: сменилась ширина колонки панели —
+  // центр холста ушёл на половину разницы, и содержимое поехало бы. Возвращаем его на
+  // экранное место сдвигом вида на эту половину (команда `panView`, без наведения под
+  // указателем: над холстом его сейчас нет); край, перетянутый мышью, ведёт себя
+  // как прежде. 48 — `--panel-rail`.
+  const RAIL = 48;
+  let railL = leftCollapsed();
+  let railR = rightCollapsed();
+  createEffect(() => {
+    const l = leftCollapsed();
+    const r = rightCollapsed();
+    untrack(() => {
+      const dL = (l ? RAIL : left()) - (railL ? RAIL : left());
+      const dR = (r ? RAIL : right()) - (railR ? RAIL : right());
+      railL = l;
+      railR = r;
+      const dx = (dL - dR) / 2;
+      if (dx !== 0 && !store.state.uiHidden) editor()?.send({ type: 'panView', dx });
+    });
+  });
   // Запись — не чаще раза в четверть секунды (края панелей тянутся каждый кадр), и
   // сразу при уходе со страницы.
   let pending: Settings | null = null;
@@ -146,7 +182,8 @@ export function App(props: AppProps) {
     pending = null;
   };
   // Настройки, изменённые в другой вкладке: тема, привязка и раскладка — на лету
-  // (ширина панелей у каждой вкладки своя).
+  // (ширина и свёрнутость панелей и секций у каждой вкладки свои: последняя
+  // записавшая вкладка выигрывает при следующем запуске).
   const offRemote = props.settings.onChange((p) => {
     // Принятое от другой вкладки — уже в базе: обратно не пишется.
     if (p.theme) {
@@ -156,6 +193,14 @@ export function App(props: AppProps) {
     if (p.pixelSnap !== undefined) {
       written = { ...written, pixelSnap: p.pixelSnap };
       setPixelSnap(p.pixelSnap);
+    }
+    if (p.rulers !== undefined) {
+      written = { ...written, rulers: p.rulers };
+      setRulers(p.rulers);
+    }
+    if (p.guides !== undefined) {
+      written = { ...written, guides: p.guides };
+      setGuides(p.guides);
     }
     if (p.recentCommands !== undefined) {
       written = { ...written, recentCommands: p.recentCommands };
@@ -189,10 +234,15 @@ export function App(props: AppProps) {
       ...written,
       theme: themeChoice(),
       pixelSnap: pixelSnap(),
+      rulers: rulers(),
+      guides: guides(),
       keymap: keymap(),
       leftWidth: left(),
       rightWidth: right(),
       pagesOpen: pagesOpen(),
+      leftCollapsed: leftCollapsed(),
+      rightCollapsed: rightCollapsed(),
+      collapsedSections: [...sections()].join('\n'),
       recentCommands: recent().join(' '),
     };
     clearTimeout(writeTimer);
@@ -266,6 +316,8 @@ export function App(props: AppProps) {
       beforeDocument: (ed) => {
         ed.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
         ed.send({ type: 'setSettings', pixelSnap: pixelSnap() });
+        coreView = { rulers: rulers(), guides: guides() };
+        ed.send({ type: 'setView', ...coreView });
         // Нынешняя раскладка: другая вкладка могла сменить её, пока ядро запускалось.
         const km = keymap();
         if (km) {
@@ -306,6 +358,13 @@ export function App(props: AppProps) {
         }
         ed.uiCommand = uiCommand;
         ed.noteRecent = (key) => setRecent((r) => pushRecent(r, key));
+        ed.sectionCollapsed = (name) => sections().has(name);
+        ed.toggleSection = (name) =>
+          setSections((list) => {
+            const next = new Set(list);
+            if (!next.delete(name)) next.add(name);
+            return next;
+          });
         ed.contextMenu = (target: ContextTarget, at, label, onAction) => {
           setContext(null);
           pendingContext = { at, label, onAction };
@@ -357,6 +416,11 @@ export function App(props: AppProps) {
         let linkedPage = props.page;
         ed.core.on((e) => {
           if (e.type === 'uiCommand') uiCommand(e.key);
+          if (e.type === 'view') {
+            coreView = { rulers: e.rulers, guides: e.guides };
+            setRulers(e.rulers);
+            setGuides(e.guides);
+          }
           if (!opening && linkedPage && e.type === 'pages') {
             const want = linkedPage;
             linkedPage = undefined;
@@ -570,6 +634,9 @@ export function App(props: AppProps) {
         break;
       case 'ui.export':
         // «Экспорт…»: к кнопке секции экспорта панели свойств (настройки — там же).
+        // Панель и секция могли быть свёрнуты: сигналы вне пачки обновляют сразу.
+        setRightCollapsed(false);
+        setSections((list) => new Set([...list].filter((n) => n !== 'Экспорт')));
         document.querySelector<HTMLElement>('[data-export-run]')?.focus();
         break;
       case 'ui.all_files':
@@ -611,7 +678,7 @@ export function App(props: AppProps) {
     <div
       class="fe-app"
       classList={{ 'fe-app--bare': store.state.uiHidden }}
-      style={{ '--left-w': `${left()}px`, '--right-w': `${right()}px` }}
+      style={{ '--left-w': leftCollapsed() ? 'var(--panel-rail)' : `${left()}px`, '--right-w': rightCollapsed() ? 'var(--panel-rail)' : `${right()}px` }}
     >
       <main class="fe-stage">
         <canvas
@@ -657,15 +724,24 @@ export function App(props: AppProps) {
                 open={mainMenu()}
                 onOpen={setMainMenu}
                 onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
+                collapsed={leftCollapsed()}
+                onCollapse={setLeftCollapsed}
               />
-              <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
-              <LayersPanel />
-              <ResizeEdge side="left" width={left()} onWidth={setLeft} />
+              <Show when={!leftCollapsed()}>
+                <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
+                <LayersPanel />
+                <ResizeEdge side="left" width={left()} onWidth={setLeft} />
+              </Show>
             </aside>
             <aside class="fe-side fe-side--right" aria-label="Свойства">
-              <DesignHeader />
-              <PropertiesPanel theme={theme()} />
-              <ResizeEdge side="right" width={right()} onWidth={setRight} />
+              <div class="fe-side__toggle">
+                <PanelToggle side="right" collapsed={rightCollapsed()} onToggle={setRightCollapsed} />
+              </div>
+              <Show when={!rightCollapsed()}>
+                <DesignHeader />
+                <PropertiesPanel theme={theme()} />
+                <ResizeEdge side="right" width={right()} onWidth={setRight} />
+              </Show>
             </aside>
             <TooltipLayer />
             <Show when={shortcuts()}>
@@ -698,7 +774,7 @@ export function App(props: AppProps) {
           />
         )}
       </Show>
-      <Toasts store={store} />
+      <Toasts store={store} onUndo={(step) => editor()?.send({ type: 'undoStep', step })} />
     </div>
     </ErrorBoundary>
   );

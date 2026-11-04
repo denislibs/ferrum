@@ -55,6 +55,10 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Интерфейс скрыт (Ctrl/Cmd+\): отметка у «Скрыть интерфейс».
     pub ui_hidden: bool,
+    /// Линейки (Shift+R): настройка вида, хранит её интерфейс. По умолчанию выключены.
+    pub rulers: bool,
+    /// Направляющие (Shift+G): видны при включённых линейках. По умолчанию включены.
+    pub guides: bool,
 }
 
 /// Тема, которую выбрал пользователь: тёмная, светлая или как в системе.
@@ -75,6 +79,8 @@ impl Settings {
             pixel_grid: true,
             theme: ThemeChoice::Dark,
             ui_hidden: false,
+            rulers: false,
+            guides: true,
         }
     }
 }
@@ -90,6 +96,8 @@ pub enum EditorEvent {
     /// Документ изменён правкой, отменой или повтором.
     DocumentChanged,
     PageChanged(PageId),
+    /// Изменился список страниц или их порядок (отмена и повтор их шагов).
+    PagesChanged,
     /// Готовы байты для системного буфера обмена (формат `web application/x-ferrum`).
     Clipboard(Vec<u8>),
     /// Копия фрагмента текста в правке: наш формат и обычный текст (`text/plain`).
@@ -114,6 +122,16 @@ pub enum EditorEvent {
     SaveRequested,
     /// Вызвана команда интерфейса (`ui.*`): её выполняет основной поток.
     UiCommand(CommandId),
+    /// Шаг, у которого уведомление предлагает «Отменить» (`Editor::undo_step`).
+    UndoNotice {
+        text: &'static str,
+        step: u64,
+    },
+    /// Команда сменила показ линеек или направляющих: интерфейс сохраняет настройку.
+    ViewChanged {
+        rulers: bool,
+        guides: bool,
+    },
     /// Изменились состояния команд (доступна, отмечена) — только изменившиеся.
     CommandStates(Vec<(CommandId, CommandState)>),
     /// Сообщение об ошибке для пользователя.
@@ -158,6 +176,15 @@ struct FrameKey {
     tool: ToolOverlay,
     theme: OverlayTheme,
     pixel_grid: bool,
+    /// Линейки и направляющие: начало отсчёта и полоса зависят от сцены и выделения,
+    /// они уже в ключе; у линий — номер пересчёта.
+    rulers: bool,
+    guides_shown: bool,
+    guides_revision: u64,
+    /// Тянущаяся направляющая: положение, длина и значение на плашке.
+    active_guide: Option<ferrum_render::ActiveGuide>,
+    /// Подсказки привязки тянущейся линии: меняются без сдвига самой линии.
+    guide_snap: Vec<kurbo::Line>,
     /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
     measures: Vec<Measure>,
     /// Правка текста: курсор (с миганием), выделение, превью IME.
@@ -224,6 +251,15 @@ pub struct Editor {
     pub(crate) last_duplicate: Option<crate::actions::Duplicated>,
     /// Внутренний буфер «Копировать свойства».
     pub(crate) props_clip: Option<ferrum_doc::Props>,
+    /// Линии направляющих страницы (`guides.rs`).
+    pub(crate) guides: crate::guides::GuideCache,
+    pub(crate) rulers_cache: crate::guides::RulersCache,
+    /// Протяжка направляющей из линейки или за неё саму.
+    pub(crate) guide_drag: Option<crate::guides::GuideDrag>,
+    /// Превью `SetGuides`: список владельца вместо его направляющих, пока жест идёт.
+    pub(crate) guides_preview: Option<(ferrum_doc::GuideOwner, Vec<ferrum_doc::Guide>)>,
+    /// Что под указателем без жеста: линейка или направляющая — курсор и нажатие.
+    pub(crate) guide_hover: Option<crate::guides::GuideHover>,
 }
 
 /// Ставит сцене источник контуров глифов для текста в булевых группах — реестр
@@ -282,6 +318,11 @@ impl Editor {
                 tool: ToolOverlay::default(),
                 theme: theme.clone(),
                 pixel_grid: true,
+                rulers: false,
+                guides_shown: false,
+                guides_revision: 0,
+                active_guide: None,
+                guide_snap: Vec::new(),
                 measures: Vec::new(),
                 text: None,
                 vector: None,
@@ -321,6 +362,11 @@ impl Editor {
             last_paste: None,
             props_clip: None,
             last_duplicate: None,
+            guides: Default::default(),
+            rulers_cache: Default::default(),
+            guide_drag: None,
+            guides_preview: None,
+            guide_hover: None,
         })
     }
 
@@ -445,6 +491,7 @@ impl Editor {
     pub fn is_busy(&self) -> bool {
         self.tool.is_busy()
             || self.pan.is_some()
+            || self.guide_drag.is_some()
             || self.vector_edit.as_ref().is_some_and(|v| v.drag.is_some())
     }
 
@@ -478,6 +525,8 @@ impl Editor {
     pub fn cursor(&self) -> Cursor {
         if self.pan.is_some() {
             Cursor::Grabbing
+        } else if let Some(c) = self.guide_cursor() {
+            c
         } else if self.text_edit.is_some() {
             // Рамка с ручками во время правки скрыта: ни Resize, ни Rotate.
             if self.text_hover {
@@ -506,6 +555,9 @@ impl Editor {
             }
             t.snap_lines = v.snap_lines.clone();
         }
+        if let Some(d) = &self.guide_drag {
+            t.snap_lines = d.lines.clone();
+        }
         let editing = text.is_some() || self.vector_edit.is_some();
         Overlay {
             theme: self.theme.clone(),
@@ -526,6 +578,9 @@ impl Editor {
             measurements: self.measures.clone(),
             text_edit: text,
             vector_edit: vector,
+            rulers: self.rulers_overlay(),
+            guides: self.guide_marks(),
+            active_guide: self.active_guide(),
         }
     }
 
@@ -544,6 +599,7 @@ impl Editor {
             out,
             tool,
             fonts,
+            guides,
             ..
         } = self;
         (
@@ -560,6 +616,7 @@ impl Editor {
                 settings,
                 out,
                 fonts,
+                guides,
             },
         )
     }
@@ -631,6 +688,10 @@ impl Editor {
                 if self.pan.is_some() {
                     return;
                 }
+                // Линейка и направляющая — раньше инструмента и правки.
+                if self.guide_press(&e) {
+                    return;
+                }
                 // Правка текста: нажатие в тексте ставит курсор; мимо — правка
                 // кончается, и нажатие достаётся инструменту.
                 if self.text_edit.is_some() && self.text_pointer_down(&e) {
@@ -645,31 +706,36 @@ impl Editor {
                 if self.tool.is_busy() {
                     self.cancel_gesture();
                 }
-                let (tool, mut cx) = self.split();
-                tool.pointer_down(&mut cx, &e);
-                // Двойной щелчок по тексту (или нажатие инструментом «Текст»):
-                // инструмент просит войти в правку.
-                if let Some((id, world)) = self.out.edit_text.take() {
-                    if self.tool.is_busy() {
-                        let (tool, mut cx) = self.split();
-                        tool.cancel(&mut cx);
-                    }
-                    // Инструмент «Текст» своё сделал — после правки снова «Перемещение».
-                    if self.tool.kind() == ToolKind::Text {
-                        self.set_tool(ToolKind::Move);
-                        self.selection.set(vec![id]);
-                    }
-                    self.start_text_edit(id, EnterAt::Point(world));
-                }
-                // Двойной щелчок по вектору или фигуре — правка вектора.
-                if let Some(id) = self.out.edit_vector.take() {
-                    if self.tool.is_busy() {
-                        let (tool, mut cx) = self.split();
-                        tool.cancel(&mut cx);
-                    }
-                    self.start_vector_edit(id);
-                }
+                self.press_tool(&e);
             }
+        }
+    }
+
+    /// Нажатие достаётся инструменту.
+    pub(crate) fn press_tool(&mut self, e: &PointerEvent) {
+        let (tool, mut cx) = self.split();
+        tool.pointer_down(&mut cx, e);
+        // Двойной щелчок по тексту (или нажатие инструментом «Текст»):
+        // инструмент просит войти в правку.
+        if let Some((id, world)) = self.out.edit_text.take() {
+            if self.tool.is_busy() {
+                let (tool, mut cx) = self.split();
+                tool.cancel(&mut cx);
+            }
+            // Инструмент «Текст» своё сделал — после правки снова «Перемещение».
+            if self.tool.kind() == ToolKind::Text {
+                self.set_tool(ToolKind::Move);
+                self.selection.set(vec![id]);
+            }
+            self.start_text_edit(id, EnterAt::Point(world));
+        }
+        // Двойной щелчок по вектору или фигуре — правка вектора.
+        if let Some(id) = self.out.edit_vector.take() {
+            if self.tool.is_busy() {
+                let (tool, mut cx) = self.split();
+                tool.cancel(&mut cx);
+            }
+            self.start_vector_edit(id);
         }
     }
 
@@ -678,6 +744,14 @@ impl Editor {
         if let Some(mut hand) = self.pan.take() {
             hand.pointer_move(&mut self.ctx(), &e);
             self.pan = Some(hand);
+            return;
+        }
+        if self.guide_drag.is_some() {
+            self.guide_drag_move(&e);
+            return;
+        }
+        // Над линейкой инструмента нет: ни наведения, ни его курсора.
+        if self.ruler_hover_update(&e) {
             return;
         }
         if let Some(t) = &self.text_edit {
@@ -695,6 +769,7 @@ impl Editor {
         }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
+        self.guide_hover_update(&e);
     }
 
     fn pointer_up(&mut self, e: PointerEvent) {
@@ -702,6 +777,13 @@ impl Editor {
         if e.button == PointerButton::Middle {
             if let Some(mut hand) = self.pan.take() {
                 hand.pointer_up(&mut self.ctx(), &e);
+            }
+            return;
+        }
+        if self.guide_drag.is_some() {
+            if e.button == PointerButton::Primary {
+                self.guide_drag_up(&e);
+                self.rehover_guides(&e);
             }
             return;
         }
@@ -716,6 +798,12 @@ impl Editor {
         if e.button != PointerButton::Primary || !self.tool.is_busy() {
             return;
         }
+        self.release_tool(&e);
+    }
+
+    /// Отпускание достаётся инструменту.
+    pub(crate) fn release_tool(&mut self, e: &PointerEvent) {
+        let e = *e;
         let (tool, mut cx) = self.split();
         if tool.pointer_up(&mut cx, &e) == Flow::Finished {
             self.set_tool(ToolKind::Move);
@@ -743,9 +831,21 @@ impl Editor {
         self.rehover(Some(e.point), Some(e.modifiers));
     }
 
+    /// Сдвиг вида вбок на `dx` экранных пикселей (как колесо с `deltaX = dx`), когда
+    /// интерфейс сам меняет раскладку (панель свернулась). Указателя над холстом при
+    /// этом нет, поэтому наведение и последняя точка указателя не трогаются.
+    pub fn pan_view(&mut self, dx: f64) {
+        self.camera.pan_by(Vec2::new(-dx, 0.0));
+        self.refresh_gesture();
+        self.emit();
+    }
+
     /// Камера сдвинулась во время жеста: та же экранная точка теперь над другим
     /// местом мира, жест пересчитывается.
     fn refresh_gesture(&mut self) {
+        if let (true, Some(e)) = (self.guide_drag.is_some(), self.last_pointer) {
+            self.guide_drag_move(&e);
+        }
         if let (true, Some(e)) = (self.tool.is_busy(), self.last_pointer) {
             let (tool, mut cx) = self.split();
             tool.pointer_move(&mut cx, &e);
@@ -772,8 +872,12 @@ impl Editor {
             e.modifiers = m;
         }
         self.last_pointer = Some(e);
+        if self.ruler_hover_update(&e) {
+            return;
+        }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
+        self.guide_hover_update(&e);
     }
 
     fn key_down(&mut self, e: KeyEvent) {
@@ -818,8 +922,9 @@ impl Editor {
         let Some(cmd) = self.keymap.lookup(&e) else {
             return;
         };
-        // Удержанная клавиша не входит в правку (как физический Enter выше).
-        if cmd == CommandId::EditObject && e.repeat {
+        // Удержанная клавиша не входит в правку (как физический Enter выше) и не
+        // мигает переключателем (линейки, направляющие, сетка).
+        if (cmd == CommandId::EditObject || cmd.info().toggle) && e.repeat {
             return;
         }
         if cmd == CommandId::HandHold {
@@ -859,6 +964,7 @@ impl Editor {
     /// не меняются.
     pub fn cancel_gesture(&mut self) {
         self.cancel_panel();
+        self.cancel_guides();
         self.cancel_vector_drag();
         if let Some(mut hand) = self.pan.take() {
             hand.cancel(&mut self.ctx());
@@ -1069,12 +1175,24 @@ impl Editor {
         self.finish_pen_path();
         // Жест держит превью и черновики на узлах, которые отмена может убрать.
         self.cancel_gesture();
+        let pages = self.doc.pages();
+        let guides = self.doc.guides_revision();
         let result = if redo {
             self.doc.redo()
         } else {
             self.doc.undo()
         };
-        sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
+        let synced = sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
+        // Шаг мог не тронуть ни одного узла: список страниц и направляющие страницы
+        // живут в корне документа, сцена о них не знает.
+        let list_changed = self.doc.pages() != pages;
+        if list_changed {
+            self.out.events.push(EditorEvent::PagesChanged);
+        }
+        if !synced && (list_changed || self.doc.guides_revision() != guides) {
+            self.out.events.push(EditorEvent::DocumentChanged);
+            self.out.events.push(EditorEvent::NeedsRedraw);
+        }
         match result {
             Ok(Some(restore)) => {
                 if restore.page != self.page {
@@ -1154,6 +1272,7 @@ impl Editor {
         self.resync_vector_edit();
         self.sync_text_outlines();
         self.update_measures();
+        self.refresh_guides();
         let now = Seen {
             selection: self.selection.version(),
             tool: self.tool_kind(),
@@ -1167,6 +1286,14 @@ impl Editor {
                 tool: self.tool.overlay(),
                 theme: self.theme.clone(),
                 pixel_grid: self.settings.pixel_grid,
+                rulers: self.rulers_visible(),
+                guides_shown: self.guides_visible(),
+                guides_revision: self.guides.revision,
+                active_guide: self.active_guide(),
+                guide_snap: self
+                    .guide_drag
+                    .as_ref()
+                    .map_or_else(Vec::new, |d| d.lines.clone()),
                 measures: self.measures.clone(),
                 text: self.text_overlay().map(|o| o.overlay),
                 vector: self.vector_overlay(),

@@ -465,6 +465,19 @@ impl Label {
             backend.fill_path(path, Fill::NonZero);
         }
     }
+
+    /// То же, повёрнутое на 90° против часовой: текст идёт снизу вверх (левая линейка).
+    pub fn draw_rotated(&self, backend: &mut impl RenderBackend, origin: Point, color: Rgba) {
+        backend.set_color(color);
+        let turn =
+            Affine::translate(origin.to_vec2()) * Affine::rotate(-std::f64::consts::FRAC_PI_2);
+        for (path, at, scale) in &self.glyphs {
+            backend.set_transform(
+                turn * Affine::translate(at.to_vec2()) * Affine::scale_non_uniform(*scale, -*scale),
+            );
+            backend.fill_path(path, Fill::NonZero);
+        }
+    }
 }
 
 struct Pen(BezPath);

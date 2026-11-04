@@ -287,3 +287,26 @@ fn text_tool_on_a_text_edits_it_at_the_point() {
     h.click(400.0, 400.0, none());
     assert!(info(&h).draft);
 }
+
+#[test]
+fn new_text_is_named_by_its_content_until_renamed() {
+    let mut h = text_h();
+    h.ed.set_tool(ToolKind::Text);
+    h.click(100.0, 100.0, Modifiers::NONE);
+    for ch in ["А", "б"] {
+        h.ed.text_input(TextInputKind::Insert, ch).unwrap();
+    }
+    let id = h.ed.selection()[0];
+    assert_eq!(h.props(id).name, "Аб", "имя с первой же буквы");
+    h.key("Escape", Modifiers::NONE);
+    h.ed.rename_node(id, "Заголовок");
+    h.key("Enter", Modifiers::NONE);
+    h.ed.text_input(TextInputKind::Insert, "в").unwrap();
+    assert_eq!(h.props(id).name, "Заголовок", "переименованный остаётся");
+    h.key("Escape", Modifiers::NONE);
+    // Вставка текста в пустоту — слой с именем из вставленного.
+    h.ed.select(&[]);
+    h.ed.paste_plain("Строка из буфера\nвторая").unwrap();
+    let made = h.ed.selection()[0];
+    assert_eq!(h.props(made).name, "Строка из буфера");
+}

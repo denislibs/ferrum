@@ -551,6 +551,8 @@ fn malformed_panel_commands_are_errors() {
         },
         Command::AddFramePreset { index: 999 },
         Command::SetZoom { zoom: -1.0 },
+        Command::PanView { dx: f64::NAN },
+        Command::PanView { dx: 1e7 },
         Command::PasteImage {
             bytes: ByteBuf::from(vec![1, 2, 3]),
         },

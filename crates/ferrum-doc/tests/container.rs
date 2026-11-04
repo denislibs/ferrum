@@ -459,6 +459,7 @@ fn scene_cache_roundtrips_every_field() {
                     clip_content: Some(i % 2 == 1),
                     flip_x: Some(i % 2 == 0),
                     flip_y: Some(i % 3 == 1),
+                    guides: None,
                     fills: Some(vec![
                         Fill::solid(Color::rgba(i as u8, 2, 3, 4)),
                         Fill {

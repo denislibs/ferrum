@@ -383,7 +383,7 @@ impl SelectTool {
                     .map(|p| cx.scene.at(p).id);
                 State::Dragging(Drag {
                     start: world,
-                    snapper: Snapper::new(cx.scene, &ids),
+                    snapper: Snapper::new(cx.scene, &ids).with_guides(cx.snap_guides()),
                     originals,
                     copies: None,
                     box0,
@@ -436,7 +436,7 @@ impl SelectTool {
                     handle,
                     sbox,
                     bases,
-                    snapper: Snapper::new(cx.scene, &ids),
+                    snapper: Snapper::new(cx.scene, &ids).with_guides(cx.snap_guides()),
                     transform: Affine::IDENTITY,
                     k: 1.0,
                 })

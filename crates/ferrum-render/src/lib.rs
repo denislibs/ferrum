@@ -36,9 +36,10 @@ pub use ferrum_text::{Fonts, SharedFonts};
 pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, GPU_ATLAS_SIDE};
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use overlay::{
-    format_size, Measure, MeasureKind, Overlay, OverlayTheme, TextEditOverlay, VectorEditOverlay,
-    HANDLE_SIZE, LABEL_SIZE, MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, TEXT_SELECTION_ALPHA,
-    VECTOR_HANDLE_RADIUS, VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
+    format_size, ruler_steps, ActiveGuide, GuideMark, Measure, MeasureKind, Overlay, OverlayTheme,
+    RulersOverlay, TextEditOverlay, VectorEditOverlay, HANDLE_SIZE, LABEL_SIZE, MEASURE_DASH,
+    MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, RULER_SIZE, TEXT_SELECTION_ALPHA, VECTOR_HANDLE_RADIUS,
+    VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
 };
 pub use pdf::MAX_PDF_SIDE;
 pub use svg::{ImageBytes, NoImageBytes, SvgOptions};

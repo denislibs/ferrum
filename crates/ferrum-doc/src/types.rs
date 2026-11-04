@@ -8,6 +8,7 @@ use loro::TreeID;
 
 use crate::boolean::BooleanOp;
 use crate::error::DocError;
+use crate::guides::Guide;
 use crate::text::{TextContent, TextData, TextProps, TEXT_COLOR};
 use crate::vector::{StrokeCap, StrokeJoin, StrokeStyle, VectorNetwork};
 
@@ -251,6 +252,9 @@ pub struct Props {
     pub vector: Option<Arc<VectorNetwork>>,
     /// Операция — только у `NodeKind::Boolean`.
     pub boolean_op: Option<BooleanOp>,
+    /// Направляющие — только у `NodeKind::Frame`; `None` — их нет (пустого списка
+    /// не бывает). `Arc`: копия свойств не копирует список.
+    pub guides: Option<Arc<Vec<Guide>>>,
 }
 
 impl Props {
@@ -311,6 +315,7 @@ impl Props {
             text: (kind == NodeKind::Text).then(|| Arc::new(TextData::default())),
             vector: (kind == NodeKind::Vector).then(|| Arc::new(VectorNetwork::default())),
             boolean_op: (kind == NodeKind::Boolean).then_some(BooleanOp::Union),
+            guides: None,
         }
     }
 
@@ -356,6 +361,9 @@ pub struct PropsPatch {
     pub vector: Option<Arc<VectorNetwork>>,
     /// Операция булевой группы. У другого узла пропускается.
     pub boolean_op: Option<BooleanOp>,
+    /// Направляющие фрейма целиком; пустой список — убрать. У другого узла
+    /// пропускается.
+    pub guides: Option<Arc<Vec<Guide>>>,
 }
 
 impl PropsPatch {
@@ -396,6 +404,10 @@ impl PropsPatch {
                 _ => None,
             },
             boolean_op: self.boolean_op.and(before.boolean_op),
+            guides: self
+                .guides
+                .as_ref()
+                .map(|_| before.guides.clone().unwrap_or_default()),
         }
     }
 
@@ -452,6 +464,10 @@ impl PropsPatch {
         }
         if let (Some(v), Some(dst)) = (self.boolean_op, &mut p.boolean_op) {
             *dst = v;
+        }
+
+        if let Some(v) = &self.guides {
+            p.guides = (!v.is_empty()).then(|| v.clone());
         }
 
         if let Some(t) = &mut p.text {

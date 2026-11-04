@@ -293,6 +293,33 @@ impl Default for TextContent {
     }
 }
 
+/// Сколько символов первой строки текста идёт в имя его слоя.
+pub const TEXT_NAME_CHARS: usize = 40;
+
+/// Имя текстового слоя по содержимому (спека подсистемы 2, раздел 10), как в Figma:
+/// первые 40 символов первой строки без пробелов по краям; пустая строка — имя по
+/// умолчанию. Обход останавливается на границе: стоимость не зависит от длины текста.
+pub fn text_layer_name(content: &TextContent) -> String {
+    let mut name = String::new();
+    let mut taken = 0;
+    'runs: for run in &content.runs {
+        for c in run.text.chars() {
+            if c == '\n' || taken == TEXT_NAME_CHARS {
+                break 'runs;
+            }
+            // Табуляция и прочие управляющие — как в именах из поля ввода (`clean_name`).
+            name.push(if c.is_control() { ' ' } else { c });
+            taken += 1;
+        }
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        crate::types::NodeKind::Text.default_name().to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 impl TextContent {
     /// Текст без разметки; перевод строки в конце добавляется, если его нет.
     pub fn plain(text: &str) -> TextContent {

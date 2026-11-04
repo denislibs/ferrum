@@ -16,6 +16,7 @@ import {
   loadSettings,
   parseSettings,
   parseSettingsPatch,
+  parseSections,
   THEME_KEY,
   PANEL_MAX,
   PANEL_MIN,
@@ -479,4 +480,24 @@ test('запасная запись при неудачном чтении — �
   expect((await openSettings(fakeBackend({ theme: 'dark' }).backend, legacy)).current.theme).toBe('dark');
   legacy.setItem(PENDING, JSON.stringify({ theme: 'light', keymap: 'a'.repeat(90_000) }));
   expect((await openSettings(fakeBackend({ theme: 'dark' }).backend, legacy)).current.theme).toBe('dark');
+});
+
+test('линейки и направляющие: умолчания и проверка значений', () => {
+  expect(DEFAULT_SETTINGS.rulers).toBe(false);
+  expect(DEFAULT_SETTINGS.guides).toBe(true);
+  expect(parseSettingsPatch({ rulers: true, guides: false })).toEqual({ rulers: true, guides: false });
+  expect(parseSettingsPatch({ rulers: 'да', guides: 1 })).toEqual({});
+  expect(parseSettings({ rulers: 'да' }).rulers).toBe(false);
+});
+
+test('свёрнутые панели и секции: умолчания и не доверенные значения', () => {
+  expect(DEFAULT_SETTINGS.leftCollapsed).toBe(false);
+  expect(DEFAULT_SETTINGS.rightCollapsed).toBe(false);
+  expect(parseSettingsPatch({ leftCollapsed: true, rightCollapsed: 1 })).toEqual({ leftCollapsed: true });
+  expect(parseSections('Вид\n\nВид\nЭкспорт')).toEqual(['Вид', 'Экспорт']);
+  expect(parseSections(`${'я'.repeat(65)}\nВид`)).toEqual(['Вид']);
+  expect(parseSections(Array.from({ length: 50 }, (_, i) => `с${i}`).join('\n'))).toHaveLength(32);
+  expect(parseSettingsPatch({ collapsedSections: 'x'.repeat(4000) })).toEqual({});
+  expect(parseSettingsPatch({ collapsedSections: ['Вид'] })).toEqual({});
+  expect(parseSettingsPatch({ collapsedSections: 'Вид\nВид' })).toEqual({ collapsedSections: 'Вид' });
 });

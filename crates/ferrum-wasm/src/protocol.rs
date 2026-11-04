@@ -514,6 +514,34 @@ pub enum ContextTarget {
     Page { id: String },
 }
 
+/// Чьи направляющие в `SetGuides`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum GuideOwnerDto {
+    Page { id: String },
+    Frame { id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum GuideAxisDto {
+    X,
+    Y,
+}
+
+/// Направляющая: ось и смещение.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(deny_unknown_fields)]
+pub struct GuideDto {
+    pub axis: GuideAxisDto,
+    pub offset: f64,
+}
+
 /// Команда основного потока worker'у.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(
@@ -698,6 +726,11 @@ pub enum Command {
     DuplicatePage {
         id: String,
     },
+    /// Перестановка страницы: встаёт на место `index` в списке; один шаг отмены.
+    MovePage {
+        id: String,
+        index: u32,
+    },
     SetPage {
         id: String,
     },
@@ -761,6 +794,34 @@ pub enum Command {
     },
     SetSettings {
         pixel_snap: bool,
+    },
+    /// Направляющие страницы или фрейма верхнего уровня целиком (спека подсистемы 2,
+    /// раздел 11): превью — без шага, запись — один шаг, отмена — назад к документу.
+    /// Не больше 1000; смещение конечно и по модулю не больше 1e9; иначе — `Error`.
+    SetGuides {
+        owner: GuideOwnerDto,
+        guides: Vec<GuideDto>,
+        phase: EditPhase,
+    },
+    /// Кнопка «Отменить» в уведомлении: отмена, только если шаг `step` ещё последний.
+    UndoStep {
+        step: f64,
+    },
+    /// Показ линеек и направляющих (спека подсистемы 2, разделы 9 и 11): настройка
+    /// вида, не шаг истории. Нет поля — не менять.
+    SetView {
+        #[serde(default)]
+        #[tsify(optional)]
+        rulers: Option<bool>,
+        #[serde(default)]
+        #[tsify(optional)]
+        guides: Option<bool>,
+    },
+    /// Сдвиг вида вбок на `dx` экранных пикселей (как колесо с `deltaX`): интерфейс
+    /// возвращает содержимое на место, когда панель свернулась. Без наведения под
+    /// указателем. `dx` конечно и по модулю не больше 1e6; иначе — `Error`.
+    PanView {
+        dx: f64,
     },
     // ——— Подсистема 3, этап 1: шрифты ———
     /// Список шрифтов источника: вшитые (манифест сборки — его читает worker ядра)
@@ -1022,6 +1083,17 @@ pub enum CoreEvent {
     /// Выбрать файл изображения и прислать `PlaceImage`.
     RequestImage,
     ToggleUi,
+    /// Уведомление с кнопкой «Отменить» (спека подсистемы 2, раздел 10): номер шага
+    /// возвращается командой `UndoStep`.
+    UndoNotice {
+        text: String,
+        step: f64,
+    },
+    /// Команда сменила показ линеек или направляющих: интерфейс сохраняет настройку.
+    View {
+        rulers: bool,
+        guides: bool,
+    },
     /// Сохранённый файл `.ferrum`.
     Saved {
         #[tsify(type = "Uint8Array")]

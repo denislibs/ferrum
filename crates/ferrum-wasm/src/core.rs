@@ -876,6 +876,14 @@ impl Core {
                     self.ui.pages = true;
                     self.dirty = true;
                 }
+                EditorEvent::PagesChanged => self.ui.pages = true,
+                EditorEvent::UndoNotice { text, step } => self.events.push(CoreEvent::UndoNotice {
+                    text: text.to_string(),
+                    step: step as f64,
+                }),
+                EditorEvent::ViewChanged { rulers, guides } => {
+                    self.events.push(CoreEvent::View { rulers, guides })
+                }
                 EditorEvent::Clipboard(bytes) => self.events.push(CoreEvent::Clipboard {
                     bytes: ByteBuf::from(bytes),
                     plain: None,

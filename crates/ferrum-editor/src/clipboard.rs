@@ -16,7 +16,8 @@
 //! двоичной формы `VectorNetwork`): сборка без векторов пропускает узел «vector»
 //! как неизвестный. Булева группа — узел «boolean» с полем `booleanOp` (только
 //! известные операции; без поля — объединение): сборка без булевых групп
-//! пропускает её вместе с детьми.
+//! пропускает её вместе с детьми. Направляющие фрейма — необязательное поле `guides`
+//! (`[{ axis, offset }]`): старая сборка его не читает, а без поля их просто нет.
 //!
 //! Вставка не доверяет данным: размеры и количества ограничены, длины проверяются
 //! до копирования, числа приводятся к пределам сцены, ссылки на родителя — только
@@ -28,9 +29,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ferrum_doc::{
-    BooleanOp, Color, Fill, FillKind, NodeKind, Props, PropsPatch, ScaleMode, Stroke, StrokeAlign,
-    StrokeCap, StrokeJoin, StrokeStyle, TextData, VectorNetwork, DEFAULT_MITER_LIMIT,
-    MITER_LIMIT_RANGE,
+    check_guides, dedup_guides, BooleanOp, Color, Fill, FillKind, Guide, GuideAxis, NodeKind,
+    Props, PropsPatch, ScaleMode, Stroke, StrokeAlign, StrokeCap, StrokeJoin, StrokeStyle,
+    TextData, VectorNetwork, DEFAULT_MITER_LIMIT, MITER_LIMIT_RANGE,
 };
 use ferrum_scene::shape;
 use kurbo::Rect;
@@ -134,6 +135,15 @@ struct JsonNode {
     /// Операция булевой группы — только у неё.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     boolean_op: Option<String>,
+    /// Направляющие — только у фрейма (спека подсистемы 2, раздел 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guides: Option<Vec<JsonGuide>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct JsonGuide {
+    axis: String,
+    offset: f64,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -274,6 +284,14 @@ impl ClipPayload {
                             .filter(|m| *m != DEFAULT_MITER_LIMIT),
                         vector: p.vector.as_ref().map(|v| v.to_base64()),
                         boolean_op: p.boolean_op.map(|op| op.as_str().to_string()),
+                        guides: p.guides.as_ref().map(|list| {
+                            list.iter()
+                                .map(|g| JsonGuide {
+                                    axis: g.axis.as_str().to_string(),
+                                    offset: g.offset,
+                                })
+                                .collect()
+                        }),
                     }
                 })
                 .collect(),
@@ -555,6 +573,23 @@ fn props_from_json(kind: NodeKind, n: JsonNode) -> Result<Props, ClipboardError>
             (NodeKind::Boolean, None) => Some(BooleanOp::Union),
             _ => None,
         },
+        // Направляющие — только у фрейма; неверные и сверх предела — отказ вставки.
+        guides: match (kind, n.guides) {
+            (NodeKind::Frame, Some(list)) => {
+                let guides = list
+                    .into_iter()
+                    .map(|g| {
+                        GuideAxis::parse(&g.axis)
+                            .map(|axis| Guide::new(axis, g.offset))
+                            .ok_or_else(|| corrupted("ось направляющей"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                check_guides(&guides).map_err(|e| corrupted(e.to_string()))?;
+                let guides = dedup_guides(guides);
+                (!guides.is_empty()).then(|| Arc::new(guides))
+            }
+            _ => None,
+        },
     };
     // Нечисловые и огромные значения — к допустимым, как у строк кэша сцены.
     shape::sanitize(&mut props);
@@ -621,5 +656,6 @@ pub fn full_patch(p: &Props) -> PropsPatch {
         stroke_miter_limit: Some(p.stroke_style.miter_limit).filter(|m| *m != DEFAULT_MITER_LIMIT),
         vector: p.vector.clone(),
         boolean_op: p.boolean_op,
+        guides: p.guides.clone(),
     }
 }

@@ -348,6 +348,16 @@ impl PageDoc {
         self.doc.commit();
     }
 
+    /// Записывает в узел направляющие как есть — как чужой файл (тесты разбора).
+    #[doc(hidden)]
+    pub fn force_guides_for_tests(&self, id: NodeId, raw: &[(&str, f64)]) {
+        let tid = self.tid(id).expect("узел есть");
+        let meta = self.tree.get_meta(tid).expect("узел есть");
+        meta.insert(codec::key::GUIDES, crate::guides::raw_value(raw))
+            .expect("запись");
+        self.doc.commit();
+    }
+
     /// Только для тестов: значение `booleanOp` узла в Loro как есть (как в файле
     /// чужой сборки) — без проверки и без зеркала.
     #[doc(hidden)]
@@ -617,7 +627,8 @@ impl PageDoc {
         let foreign_text = before.text.is_none() && patch.text.is_some();
         let foreign_vector = before.vector.is_none() && patch.vector.is_some();
         let foreign_op = before.boolean_op.is_none() && patch.boolean_op.is_some();
-        let patch = if foreign_text || foreign_vector || foreign_op {
+        let foreign_guides = before.kind != NodeKind::Frame && patch.guides.is_some();
+        let patch = if foreign_text || foreign_vector || foreign_op || foreign_guides {
             stripped = PropsPatch {
                 text: if foreign_text {
                     None
@@ -630,6 +641,11 @@ impl PageDoc {
                     patch.vector.clone()
                 },
                 boolean_op: if foreign_op { None } else { patch.boolean_op },
+                guides: if foreign_guides {
+                    None
+                } else {
+                    patch.guides.clone()
+                },
                 ..patch.clone()
             };
             &stripped
@@ -638,6 +654,9 @@ impl PageDoc {
         };
         if let Some(v) = &patch.vector {
             check_vector(v)?;
+        }
+        if let Some(g) = &patch.guides {
+            crate::guides::check_guides(g)?;
         }
 
         let mut after = before.clone();
@@ -1264,7 +1283,39 @@ impl<'a> Tx<'a> {
     }
 
     pub fn set_props(&self, id: NodeId, patch: &PropsPatch) -> DocResult<()> {
+        if patch.content.is_some() && patch.name.is_none() {
+            return self.renaming_text(id, || self.page.set_props(id, patch));
+        }
         self.page.set_props(id, patch)
+    }
+
+    /// Правка содержимого текста тем же шагом ведёт за собой имя слоя, пока оно своё:
+    /// такое, какое дало бы содержимое до правки, или имя по умолчанию. Имя, заданное
+    /// вручную, отличается от них и остаётся (спека подсистемы 2, раздел 10). Отмена
+    /// возвращает имя вместе с текстом: обе правки — в журнале одного шага.
+    fn renaming_text(&self, id: NodeId, edit: impl FnOnce() -> DocResult<()>) -> DocResult<()> {
+        let before = self.page.props(id)?;
+        let auto = before.text.as_ref().is_some_and(|t| {
+            before.name == before.kind.default_name()
+                || before.name == crate::text::text_layer_name(&t.content)
+        });
+        edit()?;
+        if auto {
+            let after = self.page.props(id)?;
+            if let Some(t) = &after.text {
+                let name = crate::text::text_layer_name(&t.content);
+                if name != after.name {
+                    self.page.set_props(
+                        id,
+                        &PropsPatch {
+                            name: Some(name),
+                            ..Default::default()
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Фигура становится вектором с сетью `net` на месте: тот же узел, ID и
@@ -1317,12 +1368,12 @@ impl<'a> Tx<'a> {
         text: &str,
         attrs: Option<&TextAttrs>,
     ) -> DocResult<()> {
-        self.page.insert_text(id, at, text, attrs)
+        self.renaming_text(id, || self.page.insert_text(id, at, text, attrs))
     }
 
     /// Удаление символов текста (последний перевод строки не удаляется).
     pub fn delete_text(&self, id: NodeId, range: Range<usize>) -> DocResult<()> {
-        self.page.delete_text(id, range)
+        self.renaming_text(id, || self.page.delete_text(id, range))
     }
 
     /// Разметка диапазона текста: задать ключи `set`, снять ключи `clear`.
@@ -1338,12 +1389,12 @@ impl<'a> Tx<'a> {
 
     /// Содержимое текста целиком.
     pub fn set_text_content(&self, id: NodeId, content: &TextContent) -> DocResult<()> {
-        self.page.set_text_content(id, content)
+        self.renaming_text(id, || self.page.set_text_content(id, content))
     }
 
     /// Вставка участков с их разметкой в позицию `at` (символы Unicode).
     pub fn insert_runs(&self, id: NodeId, at: usize, runs: &[TextRun]) -> DocResult<()> {
-        self.page.insert_runs(id, at, runs)
+        self.renaming_text(id, || self.page.insert_runs(id, at, runs))
     }
 }
 

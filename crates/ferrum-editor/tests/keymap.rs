@@ -79,6 +79,8 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::UiExport, &["Mod+Shift+KeyE"]),
     (CommandId::UiPixelSnap, &["Mod+Shift+Quote"]),
     (CommandId::PixelGrid, &["Shift+Quote"]),
+    (CommandId::ViewRulers, &["Shift+KeyR"]),
+    (CommandId::ViewGuides, &["Shift+KeyG"]),
     (CommandId::EditObject, &["Enter"]),
     (CommandId::TextBold, &["Mod+KeyB"]),
     (CommandId::TextItalic, &["Mod+KeyI"]),
@@ -153,7 +155,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 86);
+    assert_eq!(COMMANDS.len(), 88);
 }
 
 #[test]
@@ -203,11 +205,16 @@ fn lookup_by_physical_code_with_exact_modifiers() {
         win.lookup(&key("KeyV", true, false, false, false)),
         Some(CommandId::Paste)
     );
-    // Shift без своей команды не падает на команду без Shift: Shift+R — не «Прямоугольник».
-    assert_eq!(win.lookup(&key("KeyR", false, false, true, false)), None);
+    // Shift без своей команды не падает на команду без Shift: Shift+O — не «Эллипс».
+    assert_eq!(win.lookup(&key("KeyO", false, false, true, false)), None);
     assert_eq!(
-        Keymap::new(Platform::Mac).lookup(&key("KeyR", false, false, true, false)),
+        Keymap::new(Platform::Mac).lookup(&key("KeyO", false, false, true, false)),
         None
+    );
+    // А Shift+R — своя команда, «Линейки».
+    assert_eq!(
+        win.lookup(&key("KeyR", false, false, true, false)),
+        Some(CommandId::ViewRulers)
     );
 }
 
@@ -642,5 +649,8 @@ fn punctuation_labels_are_signs() {
         assert_eq!(sc(code).label(Platform::Windows), sign, "{code}");
     }
     assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Mac), "⌃⇧/");
-    assert_eq!(sc("Ctrl+Shift+Slash").label(Platform::Linux), "Ctrl+Shift+/");
+    assert_eq!(
+        sc("Ctrl+Shift+Slash").label(Platform::Linux),
+        "Ctrl+Shift+/"
+    );
 }

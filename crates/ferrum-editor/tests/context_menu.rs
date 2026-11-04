@@ -85,7 +85,8 @@ fn right_click_selects_an_unselected_node_and_keeps_a_selected_one() {
             "edit.paste",
             "edit.paste_over",
             "edit.select_all",
-            "view.fit_all"
+            "view.fit_all",
+            "view.rulers"
         ]
     );
     check_level(&empty);
@@ -315,7 +316,7 @@ fn duplicate_page_copies_nodes_after_the_source_and_opens_it() {
     );
     assert_eq!(pages[1].1, "Страница 1 (копия)");
     assert_eq!(h.ed.page(), copy, "копия — текущая");
-    assert_eq!(h.ed.step_count(), steps, "в историю отмены не попадает");
+    assert_eq!(h.ed.step_count(), steps + 1, "один шаг отмены");
     assert_eq!(h.ed.page_background(), Some(Color::rgba(10, 20, 30, 255)));
     let after = h.state();
     assert_eq!(after.len(), before.len());
@@ -333,4 +334,29 @@ fn duplicate_page_copies_nodes_after_the_source_and_opens_it() {
     h.set(child, patch(200.0, 200.0, 50.0, 50.0));
     h.ed.set_page(first).unwrap();
     assert_eq!(h.state(), before);
+}
+
+#[test]
+fn duplicate_page_undo_returns_and_redo_opens_the_copy() {
+    let mut h = H::new();
+    let first = h.ed.page();
+    let f = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    h.ed.select(&[f]);
+    let copy = h.ed.duplicate_page(first).unwrap();
+    h.ed.take_events();
+    assert_eq!(h.ed.page(), copy);
+    h.ed.execute(CommandId::Undo);
+    assert_eq!(h.ed.page(), first, "копия была текущей: назад на исходную");
+    assert_eq!(h.ed.selection(), [f], "выделение на момент дубля");
+    assert_eq!(h.ed.document().pages().len(), 1);
+    let ev = h.ed.take_events();
+    assert!(ev.contains(&EditorEvent::PagesChanged), "{ev:?}");
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, EditorEvent::PageChanged(p) if *p == first)));
+    h.ed.execute(CommandId::Redo);
+    assert_eq!(h.ed.document().pages().len(), 2);
+    assert_eq!(h.ed.page(), h.ed.document().pages()[1].0);
+    assert!(h.ed.take_events().contains(&EditorEvent::PagesChanged));
+    assert_eq!(h.state().len(), 1, "сцена копии на месте");
 }

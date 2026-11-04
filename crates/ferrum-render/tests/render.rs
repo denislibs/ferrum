@@ -953,3 +953,177 @@ fn culling_sees_children_of_mirrored_frame_where_they_are_drawn() {
     let stats = draw(&mut r, &scene, &cam);
     assert_eq!(stats.drawn, 2, "фрейм и ребёнок нарисованы");
 }
+
+// ——— Линейки и направляющие (спека подсистемы 2, раздел 9) ———
+
+fn overlay_frame(cam: &Camera, overlay: &ferrum_render::Overlay) -> Pixmap {
+    let (w, h) = cam.device_size();
+    let mut backend = CpuBackend::new(w, h);
+    let mut r = Renderer::new();
+    let scene = Scene::new();
+    r.render(&mut backend, &scene, cam, overlay, &NoImages, Some(WHITE));
+    backend.render()
+}
+
+fn rgb(img: &Pixmap, x: u16, y: u16) -> (u8, u8, u8) {
+    let p = img.data()[y as usize * img.width() as usize + x as usize];
+    (p.r, p.g, p.b)
+}
+
+#[test]
+fn ruler_steps_are_round_and_keep_their_gap() {
+    for zoom in [0.001, 0.02, 0.25, 0.3, 1.0, 1.4, 3.0, 8.0, 64.0, 256.0] {
+        let (step, minor) = ferrum_render::ruler_steps(zoom);
+        let mut k = step;
+        while k >= 10.0 {
+            k /= 10.0;
+        }
+        assert!(
+            [1.0, 2.0, 5.0].iter().any(|m| (k - m).abs() < 1e-9),
+            "круглый шаг: {step} при {zoom}"
+        );
+        assert!(step >= 1.0, "деления не чаще единицы мира");
+        // Подписи не теснее 72 px, если шаг не упёрся в единицу мира.
+        assert!(step * zoom >= 72.0 || step == 1.0, "{step} при {zoom}");
+        if step > 1.0 {
+            assert!(
+                step * zoom < 72.0 * 5.0,
+                "и не реже следующего шага: {step} при {zoom}"
+            );
+        }
+        if let Some(m) = minor {
+            assert!(m < step && m >= 1.0 && m * zoom >= 6.0, "{m} при {zoom}");
+            assert_eq!((step / m).fract(), 0.0, "мелкие делят шаг нацело");
+        }
+    }
+    assert_eq!(ferrum_render::ruler_steps(1.0).0, 100.0);
+    assert_eq!(ferrum_render::ruler_steps(0.25).0, 500.0);
+    assert_eq!(ferrum_render::ruler_steps(f64::NAN), (1.0, None));
+    assert_eq!(ferrum_render::ruler_steps(0.0), (1.0, None));
+}
+
+#[test]
+fn rulers_are_drawn_on_top_of_the_canvas_edges_only() {
+    use ferrum_render::{Overlay, OverlayTheme, RulersOverlay, RULER_SIZE};
+    let mut cam = Camera::new(Size::new(400.0, 300.0), 1.0);
+    cam.set_center(Point::new(200.0, 150.0));
+    let plain = overlay_frame(&cam, &Overlay::default());
+    assert_eq!(rgb(&plain, 100, 5), (255, 255, 255));
+    let overlay = Overlay {
+        rulers: Some(RulersOverlay {
+            origin: Point::ZERO,
+            band: Some(Rect::new(100.0, 120.0, 160.0, 180.0)),
+        }),
+        ..Default::default()
+    };
+    let img = overlay_frame(&cam, &overlay);
+    let ruler = OverlayTheme::dark().ruler.to_rgba8();
+    let bg = (ruler.r, ruler.g, ruler.b);
+    let size = RULER_SIZE as u16;
+    // Фон линеек сверху и слева, вне делений и подписей.
+    assert_eq!(rgb(&img, 60, 1), bg);
+    assert_eq!(rgb(&img, 1, 60), bg);
+    assert_eq!(rgb(&img, 1, 1), bg, "угол");
+    // Холст дальше линеек не тронут.
+    assert_eq!(rgb(&img, 200, size + 2), (255, 255, 255));
+    assert_eq!(rgb(&img, size + 2, 200), (255, 255, 255));
+    // Полоса выделения — другой цвет на обеих линейках и только в своих границах.
+    assert_ne!(rgb(&img, 130, 1), bg);
+    assert_ne!(rgb(&img, 1, 150), bg);
+    assert_eq!(rgb(&img, 165, 1), bg);
+    assert_eq!(rgb(&img, 1, 185), bg);
+    // Деление на кратном есть, между кратными — нет.
+    let dark = |x: u16, y: u16| rgb(&img, x, y) != bg;
+    assert!(dark(200, size - 3), "деление на отметке 200 мира");
+    assert!(!dark(245, size - 3), "между мелкими делениями пусто");
+}
+
+#[test]
+fn rulers_follow_their_origin() {
+    use ferrum_render::{Overlay, OverlayTheme, RulersOverlay, RULER_SIZE};
+    let mut cam = Camera::new(Size::new(400.0, 300.0), 1.0);
+    cam.set_center(Point::new(200.0, 150.0));
+    let at = |origin: Point| {
+        overlay_frame(
+            &cam,
+            &Overlay {
+                rulers: Some(RulersOverlay { origin, band: None }),
+                ..Default::default()
+            },
+        )
+    };
+    let ruler = OverlayTheme::dark().ruler.to_rgba8();
+    let bg = (ruler.r, ruler.g, ruler.b);
+    let tick = |img: &Pixmap, x: u16| rgb(img, x, RULER_SIZE as u16 - 3) != bg;
+    let zero = at(Point::ZERO);
+    assert!(tick(&zero, 100), "кратное 100 от нуля страницы");
+    let moved = at(Point::new(37.0, 0.0));
+    assert!(tick(&moved, 137), "кратное 100 от начала отсчёта");
+    assert!(!tick(&moved, 100), "и уже не на прежнем месте");
+}
+
+#[test]
+fn guides_page_spans_the_canvas_and_frame_only_its_segment() {
+    use ferrum_render::{GuideMark, Overlay, OverlayTheme};
+    let mut cam = Camera::new(Size::new(400.0, 300.0), 1.0);
+    cam.set_center(Point::new(200.0, 150.0));
+    let overlay = Overlay {
+        guides: vec![
+            GuideMark {
+                line: kurbo::Line::new((120.0, 0.0), (120.0, 1.0)),
+                infinite: true,
+            },
+            GuideMark {
+                line: kurbo::Line::new((10.0, 100.0), (80.0, 100.0)),
+                infinite: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let img = overlay_frame(&cam, &overlay);
+    let g = OverlayTheme::dark().guide.to_rgba8();
+    let guide = (g.r, g.g, g.b);
+    for y in [0, 150, 299] {
+        assert_eq!(rgb(&img, 120, y), guide, "бесконечная вся, y = {y}");
+    }
+    assert_eq!(rgb(&img, 40, 100), guide, "отрезок фрейма");
+    assert_eq!(
+        rgb(&img, 200, 100),
+        (255, 255, 255),
+        "дальше края фрейма нет"
+    );
+}
+
+#[test]
+fn rulers_with_fractional_dpr_and_huge_coordinates_stay_bounded() {
+    use ferrum_render::{Overlay, OverlayTheme, RulersOverlay};
+    let ruler = OverlayTheme::dark().ruler.to_rgba8();
+    let bg = (ruler.r, ruler.g, ruler.b);
+    for (dpr, center, origin) in [
+        (1.5, Point::new(200.0, 150.0), Point::ZERO),
+        (1.25, Point::new(1e300, -1e300), Point::new(1e300, 1e300)),
+        (2.0, Point::new(1e15, 1e15), Point::new(-1e15, 0.0)),
+    ] {
+        let mut cam = Camera::new(Size::new(400.0, 300.0), dpr);
+        cam.set_center(center);
+        let overlay = Overlay {
+            rulers: Some(RulersOverlay { origin, band: None }),
+            ..Default::default()
+        };
+        let img = overlay_frame(&cam, &overlay);
+        assert_eq!(rgb(&img, 1, 1), bg, "угол, dpr {dpr}");
+        // Угловой квадрат 20×20 CSS-пикселей чист: подписи слева в него не заходят.
+        // На осмысленных числах; при 1e300 вид — мусор, там проверяется лишь
+        // отсутствие паники и ограниченность.
+        let corner = if center.x.abs() < 1e10 {
+            (20.0 * dpr) as u16
+        } else {
+            2
+        };
+        for y in 0..corner - 2 {
+            for x in 0..corner - 2 {
+                assert_eq!(rgb(&img, x, y), bg, "({x}, {y}) при dpr {dpr}");
+            }
+        }
+    }
+}

@@ -327,3 +327,26 @@ fn paste_skips_locked_and_hidden_containers() {
     let f = h.sel()[0];
     assert_eq!(h.parent(f), None);
 }
+
+#[test]
+fn frame_guides_survive_copy_paste_and_duplicate() {
+    use ferrum_doc::{Guide, GuideAxis, GuideOwner};
+    let mut h = H::new();
+    let f = h.frame(None, 100.0, 100.0, 300.0, 200.0);
+    let page = h.ed.page();
+    let guides = vec![Guide::new(GuideAxis::Y, 25.0)];
+    h.ed.document_mut_for_tests()
+        .set_guides(page, vec![], &[(GuideOwner::Frame(f), guides.clone())])
+        .unwrap();
+    h.ed.select(&[f]);
+    let clip = copy_of(&mut h);
+    h.ed.select(&[]);
+    h.ed.paste(&clip).unwrap();
+    let pasted = h.sel()[0];
+    assert_eq!(h.props(pasted).guides.as_deref(), Some(&guides));
+    h.ed.select(&[f]);
+    h.ed.execute(CommandId::Duplicate);
+    let dup = h.sel()[0];
+    assert_ne!(dup, f);
+    assert_eq!(h.props(dup).guides.as_deref(), Some(&guides));
+}

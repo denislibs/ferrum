@@ -1,7 +1,7 @@
 
 // Настройки пользователя: тема, привязка к пикселям, отличия раскладки клавиш,
 // ширина панелей, вид экрана файлов (сетка или список), недавние команды
-// «Быстрых действий». С этапа 6 хранятся в
+// «Быстрых действий», линейки и направляющие. С этапа 6 хранятся в
 // IndexedDB по полю (`settings-store.ts`); здесь — поля, их разбор (значения из
 // хранилища не доверенные: неверное поле — умолчание) и прежняя запись
 // `localStorage`, из которой настройки переносятся при первом запуске.
@@ -22,6 +22,14 @@ export interface Settings {
   /** Недавние команды «Быстрых действий»: ключи через пробел, новые первыми (поле
    * появилось в подсистеме 2; в старых записях его нет — тогда пусто). */
   recentCommands: string;
+  /** Линейки и направляющие (спека подсистемы 2, раздел 9): настройка вида. */
+  rulers: boolean;
+  guides: boolean;
+  /** Боковые панели свёрнуты в узкую полосу (спека подсистемы 2, раздел 10). */
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
+  /** Свёрнутые секции панели свойств: имена через перевод строки. */
+  collapsedSections: string;
 }
 
 export type FilesView = 'grid' | 'list';
@@ -54,6 +62,11 @@ export const DEFAULT_SETTINGS: Settings = {
   pagesOpen: true,
   filesView: 'grid',
   recentCommands: '',
+  rulers: false,
+  guides: true,
+  leftCollapsed: false,
+  rightCollapsed: false,
+  collapsedSections: '',
 };
 
 /** Хранилище: `localStorage`, если доступ к нему не бросает. */
@@ -63,6 +76,22 @@ export function storage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+/** Свёрнутых секций не больше стольких, имя секции — не длиннее; их мало и они короткие. */
+const MAX_SECTIONS = 32;
+const MAX_SECTION_NAME = 64;
+const MAX_SECTIONS_CHARS = 2048;
+
+/** Имена свёрнутых секций из настройки: значение не доверенное — пустые, длинные и
+ * повторы отбрасываются, лишние не читаются. */
+export function parseSections(text: string): string[] {
+  const out = new Set<string>();
+  for (const name of text.split('\n')) {
+    if (out.size === MAX_SECTIONS) break;
+    if (name && name.length <= MAX_SECTION_NAME) out.add(name);
+  }
+  return [...out];
 }
 
 const utf8 = new TextEncoder();
@@ -81,6 +110,11 @@ const FIELDS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined }
   filesView: (v) => (v === 'list' || v === 'grid' ? v : undefined),
   // Только верные ключи, не больше восьми; строка длиннее не бывает (предел — на разбор).
   recentCommands: (v) => (typeof v === 'string' && v.length <= 1024 ? parseRecent(v).join(' ') : undefined),
+  rulers: (v) => (typeof v === 'boolean' ? v : undefined),
+  guides: (v) => (typeof v === 'boolean' ? v : undefined),
+  leftCollapsed: (v) => (typeof v === 'boolean' ? v : undefined),
+  rightCollapsed: (v) => (typeof v === 'boolean' ? v : undefined),
+  collapsedSections: (v) => (typeof v === 'string' && v.length <= MAX_SECTIONS_CHARS ? parseSections(v).join('\n') : undefined),
 };
 
 /** Только верные известные поля (чужое изменение из другой вкладки, запись базы). */

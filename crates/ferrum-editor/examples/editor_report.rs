@@ -762,6 +762,7 @@ fn main() {
     scale_selection(&mut report);
     command_states(&mut report);
     select_similar(&mut report);
+    guides_section(&mut report);
     find_layers(&mut report);
 
     println!("| Метрика | Значение | Цель | Итог |");
@@ -841,6 +842,96 @@ fn command_states(report: &mut Report) {
         "Состояния команд после шага, выделено всё — 100 000 (медиана)",
         ms(median(whole)),
     );
+}
+
+/// Направляющие (спека подсистемы 2, раздел 9): 100 000 узлов, линейки и по 1000 линий
+/// у страницы и фрейма. Движение указателя считает попадание по линиям, протяжка —
+/// привязку к ним; обе не должны зависеть от размера страницы.
+fn guides_section(report: &mut Report) {
+    use ferrum_doc::{Guide, GuideAxis, GuideOwner};
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let ids: Vec<NodeId> = doc.transact(page, vec![], |p| fill(p, NODES)).unwrap();
+    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    let mut cam = Camera::new(VIEWPORT, 1.0);
+    cam.set_center(Point::new(960.0, 540.0));
+    ed.set_camera(cam);
+    ed.set_view(Some(true), Some(true));
+    let list = |axis| {
+        (0..ferrum_doc::MAX_GUIDES)
+            .map(|i| Guide::new(axis, 13.0 + i as f64 * 7.0))
+            .collect::<Vec<_>>()
+    };
+    ed.set_guides(
+        GuideOwner::Page(page),
+        list(GuideAxis::X),
+        ferrum_editor::Phase::Commit,
+    )
+    .unwrap();
+    ed.set_guides(
+        GuideOwner::Frame(ids[0]),
+        list(GuideAxis::Y),
+        ferrum_editor::Phase::Commit,
+    )
+    .unwrap();
+    ed.take_events();
+    let mut clock = Clock(0.0);
+    let hover: Vec<Duration> = (0..300)
+        .map(|i| {
+            let p = Point::new(300.0 + (i % 200) as f64, 300.0 + (i % 150) as f64);
+            let e = clock.at(p);
+            timed(&mut ed, Input::PointerMove(e))
+        })
+        .collect();
+    report.gate_median("Линейки и 2000 линий: движение указателя", &hover, 8.0);
+    // Протяжка из линейки: привязка и превью на каждый шаг.
+    let e = clock.at(Point::new(10.0, 300.0));
+    ed.handle(Input::PointerDown(e));
+    let moves: Vec<Duration> = (0..300)
+        .map(|i| {
+            let p = Point::new(30.0 + i as f64 * 2.0, 300.0);
+            let e = clock.at(p);
+            timed(&mut ed, Input::PointerMove(e))
+        })
+        .collect();
+    report.gate_median("Линейки и 2000 линий: протяжка линии, шаг", &moves, 8.0);
+    report.check(
+        "Линейки и 2000 линий: протяжка идёт",
+        ed.overlay().active_guide.is_some(),
+        "да".to_string(),
+        "да",
+    );
+    let t = Instant::now();
+    ed.handle(Input::PointerCancel);
+    report.info("Линейки и 2000 линий: отмена протяжки", ms(t.elapsed()));
+    // Перетаскивание узла: привязка к линиям и пересчёт линий при превью сцены.
+    let node = ids[1];
+    let at = origin(&ed, node);
+    let from = screen(&ed, at.x + 40.0, at.y + 40.0); // ниже линейки
+    ed.select(&[node]);
+    let e = clock.at(from);
+    ed.handle(Input::PointerMove(e));
+    let e = clock.at(from);
+    ed.handle(Input::PointerDown(e));
+    let moves: Vec<Duration> = (0..300)
+        .map(|i| {
+            let p = Point::new(from.x + i as f64 * 0.7, from.y + i as f64 * 0.3);
+            let e = clock.at(p);
+            timed(&mut ed, Input::PointerMove(e))
+        })
+        .collect();
+    report.gate_median(
+        "Линейки и 2000 линий: перетаскивание узла, шаг",
+        &moves,
+        8.0,
+    );
+    report.check(
+        "Линейки и 2000 линий: узел сдвинут в превью",
+        origin(&ed, node) != at,
+        format!("{:?}", origin(&ed, node) - at),
+        "не ноль",
+    );
+    ed.handle(Input::PointerCancel);
 }
 
 /// «Выделить подобные» (подсистема 2, этап 2): на странице из 100 000 узлов

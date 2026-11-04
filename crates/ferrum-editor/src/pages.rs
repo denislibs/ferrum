@@ -1,6 +1,6 @@
 //! Страницы из панели «Страницы» (этап 5): создать, дублировать, переименовать, удалить,
-//! цвет фона. Как и в `ferrum-doc`, операции со страницами не попадают в историю
-//! отмены. Имена из интерфейса не доверенные: `clean_name` убирает управляющие
+//! цвет фона, порядок. Как и в `ferrum-doc`, в историю отмены попадают «Дублировать
+//! страницу» и порядок (спека подсистемы 2, раздел 10), остальные операции — нет. Имена из интерфейса не доверенные: `clean_name` убирает управляющие
 //! символы и ограничивает длину.
 
 use ferrum_doc::{Color, DocResult, PageId};
@@ -38,24 +38,47 @@ impl Editor {
     }
 
     /// «Дублировать страницу»: копия встаёт сразу после страницы с именем
-    /// «<имя> (копия)» и становится текущей, как новая страница (в историю
-    /// отмены не попадает, как и остальные операции со страницами).
+    /// «<имя> (копия)» и становится текущей, как новая страница. Один шаг отмены:
+    /// отмена убирает копию и возвращает на прежнюю страницу.
     pub fn duplicate_page(&mut self, id: PageId) -> DocResult<PageId> {
         let Some((_, name)) = self.doc.pages().into_iter().find(|(p, _)| *p == id) else {
             return Err(ferrum_doc::DocError::PageNotFound(id.to_string()));
         };
-        self.finish_pen_path();
+        // Шаг дубля — последним: незаписанный текст и путь пера пишутся раньше него.
+        self.cancel_gesture();
+        self.finish_text_edit();
+        self.finish_vector_edit();
         // Имя копии — не длиннее предела, с пометкой в конце.
         const MARK: &str = " (копия)";
         let base: String = name
             .chars()
             .take(MAX_NAME_CHARS - MARK.chars().count())
             .collect();
-        let copy = self
-            .doc
-            .duplicate_page(id, &format!("{}{MARK}", base.trim_end()))?;
+        let copy = self.doc.duplicate_page(
+            id,
+            &format!("{}{MARK}", base.trim_end()),
+            self.page,
+            self.selection.to_vec(),
+        )?;
+        self.out.steps += 1;
         self.set_page(copy)?;
         Ok(copy)
+    }
+
+    /// Перестановка в списке: страница встаёт на место `to`. Один шаг отмены (спека
+    /// подсистемы 2, раздел 10); то же место — ни шага, ни правки.
+    pub fn move_page(&mut self, id: PageId, to: usize) -> DocResult<()> {
+        self.begin_doc_edit();
+        let before = self.doc.last_step();
+        self.doc
+            .move_page(id, to, self.page, self.selection.to_vec())?;
+        if self.doc.last_step() != before {
+            self.out.steps += 1;
+            self.out.events.push(EditorEvent::PagesChanged);
+            self.out.events.push(EditorEvent::DocumentChanged);
+        }
+        self.emit();
+        Ok(())
     }
 
     /// Переименование; пустое имя ничего не меняет.

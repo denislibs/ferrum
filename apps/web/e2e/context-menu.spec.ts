@@ -101,7 +101,7 @@ test('пустое место холста: выделение снимаетс�
   const box = (await menu.boundingBox())!;
   expect(Math.abs(box.x - empty.x)).toBeLessThanOrEqual(1);
   expect(Math.min(Math.abs(box.y - (empty.y + 4)), Math.abs(box.y + box.height - (empty.y - 4)))).toBeLessThanOrEqual(2);
-  expect(await labels(page, 'Действия с выделением')).toEqual(['Вставить', 'Вставить поверх', 'Выделить всё', 'Показать всё']);
+  expect(await labels(page, 'Действия с выделением')).toEqual(['Вставить', 'Вставить поверх', 'Выделить всё', 'Показать всё', 'Линейки']);
   await menu.getByRole('menuitem', { name: /^Выделить всё/ }).click();
   await liveWhen(page, 'l.selectionCount === 10');
   expect(await warnings(page)).toEqual([]);

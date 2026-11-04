@@ -190,6 +190,10 @@ export function FillsSection() {
   const replace = (b: FillBase, i: number, f: Partial<FillDto>, phase: EditPhase = 'commit') =>
     send(b, b.list.map((x, j) => (j === i ? { ...x, ...f } : x)), phase);
   closeOnSelection(ed, () => !!picker(), () => setPicker(null), () => picker()?.anchor);
+  // Секцию свернули (клавиатурой) при открытой палитре: якорь исчезает вместе с ней.
+  createEffect(() => {
+    if (ed.sectionCollapsed?.('Заливка')) setPicker(null);
+  });
   // Список стал короче, чем индекс открытой палитры (удалили заливку).
   createEffect(() => {
     const pk = picker();
@@ -347,6 +351,9 @@ export function StrokesSection() {
     send(b, b.list.map((x, j) => (j === i ? { ...x, ...s } : x)), phase);
   closeOnSelection(ed, () => !!picker(), () => setPicker(null), () => picker()?.anchor);
   createEffect(() => {
+    if (ed.sectionCollapsed?.('Обводка')) setPicker(null);
+  });
+  createEffect(() => {
     const pk = picker();
     if (pk && !list()[pk.index]) setPicker(null);
   });
@@ -489,6 +496,9 @@ export function PageSection(props: { theme: 'dark' | 'light' }) {
   const ed = useEditor();
   const [picker, setPicker] = createSignal<HTMLElement | null>(null);
   const bg = () => ed.store.state.pages.background;
+  createEffect(() => {
+    if (ed.sectionCollapsed?.('Страница')) setPicker(null);
+  });
   const c = () => shown(bg() ?? THEME_CANVAS[props.theme], 1);
   const set = (rgb: Rgb, alpha: number, phase: EditPhase) =>
     ed.send({ type: 'setPageBackground', color: toHex({ ...rgb, a: Math.round(alpha * 255) }), phase });
