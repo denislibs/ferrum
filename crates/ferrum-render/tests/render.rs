@@ -1093,3 +1093,37 @@ fn guides_page_spans_the_canvas_and_frame_only_its_segment() {
         "дальше края фрейма нет"
     );
 }
+
+#[test]
+fn rulers_with_fractional_dpr_and_huge_coordinates_stay_bounded() {
+    use ferrum_render::{Overlay, OverlayTheme, RulersOverlay};
+    let ruler = OverlayTheme::dark().ruler.to_rgba8();
+    let bg = (ruler.r, ruler.g, ruler.b);
+    for (dpr, center, origin) in [
+        (1.5, Point::new(200.0, 150.0), Point::ZERO),
+        (1.25, Point::new(1e300, -1e300), Point::new(1e300, 1e300)),
+        (2.0, Point::new(1e15, 1e15), Point::new(-1e15, 0.0)),
+    ] {
+        let mut cam = Camera::new(Size::new(400.0, 300.0), dpr);
+        cam.set_center(center);
+        let overlay = Overlay {
+            rulers: Some(RulersOverlay { origin, band: None }),
+            ..Default::default()
+        };
+        let img = overlay_frame(&cam, &overlay);
+        assert_eq!(rgb(&img, 1, 1), bg, "угол, dpr {dpr}");
+        // Угловой квадрат 20×20 CSS-пикселей чист: подписи слева в него не заходят.
+        // На осмысленных числах; при 1e300 вид — мусор, там проверяется лишь
+        // отсутствие паники и ограниченность.
+        let corner = if center.x.abs() < 1e10 {
+            (20.0 * dpr) as u16
+        } else {
+            2
+        };
+        for y in 0..corner - 2 {
+            for x in 0..corner - 2 {
+                assert_eq!(rgb(&img, x, y), bg, "({x}, {y}) при dpr {dpr}");
+            }
+        }
+    }
+}

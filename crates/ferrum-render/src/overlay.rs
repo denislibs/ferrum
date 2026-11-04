@@ -465,7 +465,7 @@ fn ticks(lo: f64, hi: f64, step: f64) -> (f64, usize) {
     let first = (lo / step).ceil() * step;
     let n = ((hi - first) / step).floor();
     let n = if n.is_finite() && n >= 0.0 {
-        (n as usize + 1).min(RULER_MAX_TICKS)
+        (n.min(RULER_MAX_TICKS as f64) as usize + 1).min(RULER_MAX_TICKS)
     } else {
         0
     };
@@ -574,7 +574,11 @@ fn rulers(
     for i in 0..ny {
         let v = first_y + i as f64 * step;
         if let Some(l) = text.label(&tick_label(v), label_size, 400, room) {
-            // Слева подписи идут снизу вверх, как в Figma.
+            // Слева подписи идут снизу вверх, как в Figma; не дошедшая до угла
+            // верхней линейки — пропускается, а не заходит в угловой квадрат.
+            if to_y(v) - gap - l.width < size {
+                continue;
+            }
             l.draw_rotated(
                 backend,
                 Point::new(size - 8.0 * dpr, to_y(v) - gap),
@@ -1422,6 +1426,18 @@ mod tests {
         assert!(dashes(Point::new(0.0, 500.0), Point::new(90.0, 500.0), 1.0, screen).is_empty());
         assert!(dashes(Point::new(5.0, 5.0), Point::new(5.0, 5.0), 1.0, screen).is_empty());
         assert!(dashes(Point::new(f64::NAN, 5.0), Point::new(5.0, 5.0), 1.0, screen).is_empty());
+    }
+
+    #[test]
+    fn ticks_survive_extreme_numbers_and_stop_at_the_cap() {
+        assert_eq!(ticks(0.0, 1e300, 1.0), (0.0, RULER_MAX_TICKS));
+        assert_eq!(ticks(-1e300, 1e300, 1.0).1, RULER_MAX_TICKS);
+        assert_eq!(ticks(0.0, 2.0, 1.0), (0.0, 3));
+        assert_eq!(ticks(0.0, f64::INFINITY, 1.0).1, 0);
+        assert_eq!(ticks(0.0, f64::NAN, 1.0).1, 0);
+        assert_eq!(ticks(5.0, 1.0, 1.0).1, 0, "пустой промежуток");
+        assert_eq!(ruler_steps(f64::INFINITY), (1.0, None));
+        assert_eq!(ruler_steps(-3.0), (1.0, None));
     }
 
     #[test]

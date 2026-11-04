@@ -637,14 +637,16 @@ fn boolean_section(report: &mut Report) {
     );
 }
 
-/// Экспорт SVG и PDF (подсистема 3, этап 5): SVG страницы из 10 000 узлов
-/// (фреймы по 100: фрейм + 99 фигур) и PDF страницы с текстом и вектором в
-/// 100 000 точек — в worker'е, без замирания интерфейса; цель — секунда.
 /// Кадр с линейками и без них (спека подсистемы 2, раздел 12): вид каждый кадр
 /// сдвигается, поэтому подписи делений меняются; замеры чередуются, чтобы загрузка
 /// машины легла на обе стороны поровну. Самый тяжёлый случай — экран 2×.
 fn rulers_section(report: &mut Report, scene: &Scene, base: &Camera) {
     const RUNS: usize = 41;
+    // Холодный кадр — раз при смене шага зума или выборе другого фрейма; кадр с
+    // тёплым кэшем держит ≤ 0.5 мс. Формовка ~30 подписей по ~12 мкс — до 0.6 мс на
+    // экране 2× (замер), поэтому предел вдвое мягче: один такой кадр ≪ 16 мс.
+    const COLD_LIMIT_MS: f64 = 1.0;
+    const COLD_LIMIT: &str = "≤ 1.0 мс (раз при смене шага)";
     for dpr in [1.0, 2.0] {
         let mut camera = Camera::new(VIEWPORT, dpr);
         camera.set_zoom(base.zoom());
@@ -705,6 +707,42 @@ fn rulers_section(report: &mut Report, scene: &Scene, base: &Camera) {
             },
             ms(extra),
         );
+        // Холодные подписи: камера уходит на 100 000 px за кадр, значения делений
+        // каждый раз новые, и каждая подпись формуется заново (в кэше её нет).
+        // Так бывает раз при смене шага зума или выборе другого фрейма. Второй зум
+        // — самые частые деления: шаг ровно на пороге подписи, мелкие рядом.
+        let mut cold_worst = Duration::ZERO;
+        for zoom in [base.zoom(), 0.72] {
+            let mut cam = Camera::new(VIEWPORT, dpr);
+            cam.set_zoom(zoom);
+            cam.set_center(base.center());
+            let (mut off, mut on) = (Vec::new(), Vec::new());
+            for i in 0..RUNS {
+                cam.pan_by(kurbo::Vec2::new(100_000.0 + i as f64 * 13.0, 2.0));
+                for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                    backend.reset(w, h);
+                    let t = Instant::now();
+                    renderer.render(&mut backend, scene, &cam, overlay, &NoImages, None);
+                    runs.push(t.elapsed());
+                }
+            }
+            let extra = median(on).saturating_sub(median(off));
+            report.info(
+                &format!("Кадр с линейками, подписи холодные, зум {zoom:.2}, dpr {dpr}: прибавка"),
+                ms(extra),
+            );
+            cold_worst = cold_worst.max(extra);
+        }
+        report.gate(
+            if dpr == 1.0 {
+                "Кадр с линейками, холодные подписи (худший зум): прибавка, 1920×1080"
+            } else {
+                "Кадр с линейками, холодные подписи (худший зум): прибавка, 3840×2160 (2×)"
+            },
+            cold_worst,
+            COLD_LIMIT_MS,
+            COLD_LIMIT,
+        );
         // 2000 направляющих на экране — справочно.
         with.guides = (0..2000)
             .map(|i| GuideMark {
@@ -728,6 +766,9 @@ fn rulers_section(report: &mut Report, scene: &Scene, base: &Camera) {
     }
 }
 
+/// Экспорт SVG и PDF (подсистема 3, этап 5): SVG страницы из 10 000 узлов
+/// (фреймы по 100: фрейм + 99 фигур) и PDF страницы с текстом и вектором в
+/// 100 000 точек — в worker'е, без замирания интерфейса; цель — секунда.
 fn export_section(report: &mut Report) {
     use ferrum_render::{ExportBudget, SvgOptions};
     use std::sync::Arc;
