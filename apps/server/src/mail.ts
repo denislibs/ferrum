@@ -22,6 +22,13 @@ export function smtpMailer(url: string, from: string): Mailer {
   };
 }
 
+/** Причина отказа для журнала: только коды. Текст ошибки nodemailer содержит ответ SMTP, а в нём
+ * часто адрес получателя. */
+export function mailFailure(e: unknown): string {
+  const { code, responseCode } = (typeof e === 'object' && e !== null ? e : {}) as { code?: unknown; responseCode?: unknown };
+  return `код ${typeof code === 'string' ? code : 'неизвестен'}, ответ ${typeof responseCode === 'number' ? responseCode : 'неизвестен'}`;
+}
+
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ESCAPES[c]);
 

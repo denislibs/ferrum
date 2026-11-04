@@ -145,7 +145,16 @@ export function authRoutes(deps: AuthRoutesDeps) {
     // к базе, поэтому клиент при 5xx предлагает и повтор, и новую ссылку.
     if (r.status >= 500) throw new Error(`Better Auth: подтверждение вернуло ${r.status}`);
     if (!r.ok) return fail(400, 'INVALID_TOKEN');
+    await dropPreviousSession(req, ip);
     return respond([r], { ok: true });
+  }
+
+  /** Вход поверх прежнего входа в этом браузере: cookie заменится, и снять прежнюю сессию из
+   * интерфейса будет уже нельзя. Её cookie из ответа в браузер не идёт. Сбой входу не мешает. */
+  async function dropPreviousSession(req: Request, ip: string): Promise<void> {
+    if (!req.headers.get('cookie')) return;
+    const out = await inner(req, ip, '/sign-out', { method: 'POST', body: {} }).catch(() => null);
+    if (!out?.ok) console.error('Не удалось снять прежнюю сессию при входе:', out?.status ?? 'сбой запроса');
   }
 
   async function name(req: Request, ip: string): Promise<Response> {

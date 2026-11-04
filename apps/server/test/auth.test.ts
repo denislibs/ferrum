@@ -74,6 +74,12 @@ async function waitMails(count: number): Promise<void> {
   expect(mails.length).toBeGreaterThanOrEqual(count);
 }
 
+/** Ровно столько писем и новых не будет: отправка начинается после ответа, поэтому сначала пауза. */
+async function noExtraMails(count: number): Promise<void> {
+  await Bun.sleep(30);
+  expect(mails).toHaveLength(count);
+}
+
 async function requestLink(s: Stand, email = 'ivan@example.com', next?: string): Promise<string> {
   const before = mails.length;
   const res = await s.post('/api/auth/sign-in/magic-link', { email, next });
@@ -246,7 +252,7 @@ test('изменяющие запросы: чужой Origin и его отсу�
   });
   expect(bare.status).toBe(403);
   expect(await bare.json()).toEqual({ error: 'BAD_ORIGIN' });
-  expect(mails).toEqual([]);
+  await noExtraMails(0);
   const token = await requestLink(s);
   expect((await s.post('/api/auth/confirm', { token }, { origin: 'https://evil.example' })).status).toBe(403);
   expect((await s.post('/api/auth/confirm', { token })).status).toBe(200);
@@ -268,7 +274,7 @@ test('неверные данные — 400: схема из protocol, лишн�
     expect(await res.json()).toEqual({ error: 'BAD_REQUEST' });
   }
   expect((await s.post('/api/auth/confirm', { token: 'short' })).status).toBe(400);
-  expect(mails).toEqual([]);
+  await noExtraMails(0);
   await s.post('/api/auth/sign-in/magic-link', { email: 'a@b.ru', callbackURL: 'https://evil.example', name: 'Чужое имя' });
   await waitMails(1);
   const cookie = cookieOf(await s.post('/api/auth/confirm', { token: tokenOf(mails[0]) }));
@@ -295,7 +301,7 @@ test('ALLOWED_EMAILS: адрес и домен; остальным ответ т
   const denied = await s.post('/api/auth/sign-in/magic-link', { email: 'petr@example.com' });
   expect(denied.status).toBe(200);
   expect(await denied.json()).toEqual({ ok: true });
-  expect(mails).toEqual([]);
+  await noExtraMails(0);
   await s.post('/api/auth/sign-in/magic-link', { email: 'ivan@example.com' });
   await s.post('/api/auth/sign-in/magic-link', { email: 'any@team.org' });
   await waitMails(2);
@@ -311,6 +317,63 @@ test('ALLOWED_EMAILS: шесть запросов дают 429 на шестом
   }
   await waitMails(MAILS_PER_ADDRESS);
   expect(mails.every((m) => m.to === 'ivan@example.com')).toBe(true);
+});
+
+test('письмо начинает уходить после ответа: время SMTP не отличает адрес из списка', async () => {
+  let started = false;
+  const publicUrl = 'http://localhost:1';
+  const auth = createAuth({
+    publicUrl,
+    secret: TEST_SECRET,
+    pool,
+    valkey,
+    allowedEmails: [],
+    mailer: {
+      send: async () => {
+        started = true;
+      },
+    },
+  });
+  const res = await auth.handler(
+    new Request(`${publicUrl}/api/auth/sign-in/magic-link`, {
+      method: 'POST',
+      headers: { origin: publicUrl, 'content-type': 'application/json', 'x-ferrum-client-ip': '192.0.2.1' },
+      body: JSON.stringify({ email: 'ivan@example.com' }),
+    }),
+  );
+  expect(res.status).toBe(200);
+  expect(started).toBe(false);
+  await Bun.sleep(20);
+  expect(started).toBe(true);
+});
+
+test('отказ SMTP: в журнале код и ответ сервера, а адреса получателя нет', async () => {
+  // Настоящий nodemailer против своего SMTP, отвергающего получателя с адресом в тексте ответа.
+  const smtp = Bun.listen({
+    hostname: '127.0.0.1',
+    port: 0,
+    socket: {
+      open: (socket) => void socket.write('220 test\r\n'),
+      data: (socket, d) => {
+        const line = d.toString();
+        if (line.startsWith('RCPT')) socket.write('550 5.1.1 <private.person@example.com>: Recipient address rejected\r\n');
+        else if (line.startsWith('QUIT')) socket.end('221 bye\r\n');
+        else socket.write('250 ok\r\n');
+      },
+    },
+  });
+  stops.push(() => smtp.stop(true));
+  const logged: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void logged.push(args);
+  try {
+    const s = stand({ mailer: smtpMailer(`smtp://127.0.0.1:${smtp.port}`, 'Ferrum <ferrum@localhost>') });
+    expect((await s.post('/api/auth/sign-in/magic-link', { email: 'private.person@example.com' })).status).toBe(200);
+    for (let i = 0; i < 100 && logged.length === 0; i++) await Bun.sleep(20);
+  } finally {
+    console.error = original;
+  }
+  expect(logged).toEqual([['Не удалось отправить письмо входа:', 'код EENVELOPE, ответ 550']]);
 });
 
 test('сбой отправки письма не раскрывается ответом и не роняет сервер, в журнал — без ссылки', async () => {
@@ -331,7 +394,8 @@ test('сбой отправки письма не раскрывается от�
   } finally {
     console.error = original;
   }
-  expect(logged).toEqual([['Не удалось отправить письмо входа:', 'SMTP недоступен']]);
+  // Текст ошибки в журнал не идёт: в нём может быть адрес получателя.
+  expect(logged).toEqual([['Не удалось отправить письмо входа:', 'код неизвестен, ответ неизвестен']]);
 });
 
 test('ограничение: не больше 5 писем на адрес в час, другому адресу можно, счётчик истекает', async () => {
@@ -341,7 +405,7 @@ test('ограничение: не больше 5 писем на адрес в 
   const over = await send('IVAN@example.com');
   expect(over.status).toBe(429);
   expect(await over.json()).toEqual({ error: 'TOO_MANY_REQUESTS' });
-  expect(mails).toHaveLength(MAILS_PER_ADDRESS);
+  await noExtraMails(MAILS_PER_ADDRESS);
   expect((await send('petr@example.com')).status).toBe(200);
   const ttl = await valkey.ttl('mail-to:ivan@example.com');
   expect(ttl).toBeGreaterThan(3500);
@@ -361,7 +425,7 @@ test('ограничение: не больше 20 писем на IP в час,
   const over = await s.post('/api/auth/sign-in/magic-link', { email: 'last@example.com' }, { 'x-forwarded-for': '10.9.9.9' });
   expect(over.status).toBe(429);
   expect(over.headers.get('retry-after')).toBe('3600');
-  expect(mails).toHaveLength(MAILS_PER_IP);
+  await noExtraMails(MAILS_PER_IP);
 });
 
 /** Этот тест ходит на `localhost`: соединение придёт с одного из этих адресов. */
@@ -429,6 +493,29 @@ test('повторный вход тем же адресом — тот же п�
   const b = await signIn(s, 'IVAN@example.com');
   expect((await sessionOf(s, a)).user?.id).toBe((await sessionOf(s, b)).user!.id);
   expect((await pool.query('SELECT count(*)::int AS n FROM "user"')).rows[0].n).toBe(1);
+});
+
+test('вход другим адресом снимает прежнюю сессию этого браузера, чужие целы', async () => {
+  const s = stand();
+  const bob = await signIn(s, 'bob@example.com');
+  const bobOther = await signIn(s, 'bob@example.com');
+  const token = await requestLink(s, 'carol@example.com');
+  const res = await s.post('/api/auth/confirm', { token }, { cookie: bob });
+  expect(res.status).toBe(200);
+  // Браузер получает только новую cookie, а не снятие прежней.
+  const cookies = res.headers.getSetCookie().filter((c) => c.startsWith('ferrum.session_token='));
+  expect(cookies).toHaveLength(1);
+  expect(cookies[0]).toContain('Max-Age=2592000');
+  expect((await sessionOf(s, cookieOf(res))).user?.email).toBe('carol@example.com');
+  expect((await sessionOf(s, bob)).user).toBeNull();
+  expect((await sessionOf(s, bobOther)).user?.email).toBe('bob@example.com');
+});
+
+test('неверный токен прежнюю сессию не трогает', async () => {
+  const s = stand();
+  const bob = await signIn(s, 'bob@example.com');
+  expect((await s.post('/api/auth/confirm', { token: 'a'.repeat(32) }, { cookie: bob })).status).toBe(400);
+  expect((await sessionOf(s, bob)).user?.email).toBe('bob@example.com');
 });
 
 test('выход на этом устройстве: другая сессия жива, cookie снята', async () => {
