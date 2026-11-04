@@ -877,6 +877,10 @@ impl Core {
                     self.dirty = true;
                 }
                 EditorEvent::PagesChanged => self.ui.pages = true,
+                EditorEvent::UndoNotice { text, step } => self.events.push(CoreEvent::UndoNotice {
+                    text: text.to_string(),
+                    step: step as f64,
+                }),
                 EditorEvent::ViewChanged { rulers, guides } => {
                     self.events.push(CoreEvent::View { rulers, guides })
                 }

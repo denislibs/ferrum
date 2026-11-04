@@ -24,6 +24,8 @@ export interface Toast {
   id: number;
   text: string;
   kind: 'error' | 'info';
+  /** Шаг, который отменяет кнопка «Отменить» (`undoStep`): только у `undoNotice`. */
+  undoStep?: number;
 }
 
 export interface UiState {
@@ -111,7 +113,7 @@ const initial: UiState = {
 
 /** Сколько уведомлений видно одновременно и сколько секунд живёт каждое. */
 export const MAX_TOASTS = 3;
-export const TOAST_MS = 6000;
+export const TOAST_MS = 4000;
 
 export function createUiStore() {
   const [state, setState] = createStore<UiState>(structuredClone(initial));
@@ -119,12 +121,45 @@ export function createUiStore() {
   /** Сохранённая раскладка при запуске: ждём её ответа (`keymapImported` или `error`). */
   let quiet: { onDone?: () => void; onFail?: () => void } | null = null;
 
+  /** Часы уведомлений; пока над уведомлением курсор, его часов нет. */
+  const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+  function dismissToast(id: number): void {
+    clearTimeout(toastTimers.get(id));
+    toastTimers.delete(id);
+    setState('toasts', (list) => list.filter((t) => t.id !== id));
+  }
+
+  /** Часы заново: уведомление живёт `TOAST_MS` с этой минуты. */
+  function startToast(id: number): void {
+    clearTimeout(toastTimers.get(id));
+    toastTimers.set(id, setTimeout(() => dismissToast(id), TOAST_MS));
+  }
+
+  function pauseToast(id: number): void {
+    clearTimeout(toastTimers.get(id));
+    toastTimers.delete(id);
+  }
+
+  function addToast(item: Omit<Toast, 'id'>): void {
+    const id = ++toastId;
+    const list = [...state.toasts, { ...item, id }];
+    // Вытесненные старые — с их часами.
+    for (const t of list.slice(0, -MAX_TOASTS)) pauseToast(t.id);
+    setState('toasts', list.slice(-MAX_TOASTS));
+    startToast(id);
+  }
+
   function toast(text: string, kind: Toast['kind'] = 'info'): void {
     // То же сообщение подряд — одно уведомление, а не стопка.
     if (state.toasts.some((t) => t.text === text)) return;
-    const id = ++toastId;
-    setState('toasts', (list) => [...list, { id, text, kind }].slice(-MAX_TOASTS));
-    setTimeout(() => setState('toasts', (list) => list.filter((t) => t.id !== id)), TOAST_MS);
+    addToast({ text, kind });
+  }
+
+  /** Уведомление с «Отменить»: тот же текст подряд — про новый шаг, прежнее уходит. */
+  function undoToast(text: string, step: number): void {
+    for (const t of state.toasts) if (t.text === text) dismissToast(t.id);
+    addToast({ text, kind: 'info', undoStep: step });
   }
 
   /** Событие ядра → состояние. Вызывается внутри `batch()` планировщика. */
@@ -216,6 +251,9 @@ export function createUiStore() {
         // Только изменившиеся команды: остальные остаются как были.
         for (const c of e.changed) setState('commands', c.key, { enabled: c.enabled, checked: c.checked ?? undefined });
         break;
+      case 'undoNotice':
+        undoToast(e.text, e.step);
+        break;
       case 'error':
         // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.
         if (quiet && e.message.startsWith('Не удалось импортировать раскладку')) {
@@ -255,7 +293,7 @@ export function createUiStore() {
     quiet = { onDone, onFail };
   }
 
-  return { state, setState, apply, applyLive, toast, quietKeymapImport };
+  return { state, setState, apply, applyLive, toast, dismissToast, pauseToast, startToast, quietKeymapImport };
 }
 
 export type UiStore = ReturnType<typeof createUiStore>;

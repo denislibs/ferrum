@@ -245,6 +245,34 @@ select {
   pointer-events: auto;
   animation: fe-pop 120ms ease-out;
 }
+.fe-toast__action {
+  flex: none;
+  padding: 2px var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--select, var(--ink));
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.fe-toast__close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.fe-toast__action:hover,
+.fe-toast__close:hover {
+  background: var(--surface-hover);
+}
 .fe-toast--error .fe-ico {
   color: var(--danger);
 }

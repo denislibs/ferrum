@@ -122,6 +122,11 @@ pub enum EditorEvent {
     SaveRequested,
     /// Вызвана команда интерфейса (`ui.*`): её выполняет основной поток.
     UiCommand(CommandId),
+    /// Шаг, у которого уведомление предлагает «Отменить» (`Editor::undo_step`).
+    UndoNotice {
+        text: &'static str,
+        step: u64,
+    },
     /// Команда сменила показ линеек или направляющих: интерфейс сохраняет настройку.
     ViewChanged {
         rulers: bool,

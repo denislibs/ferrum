@@ -681,6 +681,12 @@ impl Core {
                 s.pixel_snap = pixel_snap;
                 self.editor.set_settings(s);
             }
+            Command::UndoStep { step } => {
+                // Номер из события: только неотрицательные целые в точности f64.
+                if step.is_finite() && step >= 0.0 && step.fract() == 0.0 {
+                    self.editor.undo_step(step as u64);
+                }
+            }
             Command::SetView { rulers, guides } => self.editor.set_view(rulers, guides),
             Command::SetGuides {
                 owner,

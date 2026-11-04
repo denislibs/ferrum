@@ -764,7 +764,7 @@ export function App(props: AppProps) {
           />
         )}
       </Show>
-      <Toasts store={store} />
+      <Toasts store={store} onUndo={(step) => editor()?.send({ type: 'undoStep', step })} />
     </div>
     </ErrorBoundary>
   );
