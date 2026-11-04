@@ -7,7 +7,7 @@ import { mainMenu, openApp } from './helpers';
 /** Контраст двух цветов `#rgb` / `#rrggbb` по WCAG (сборка сокращает `#ffffff`). */
 function contrast(a: string, b: string): number {
   const lum = (text: string) => {
-    const hex = text.length === 4 ? `#${[...text.slice(1)].map((c) => c + c).join('')}` : text;
+    const hex = text.length === 4 ? `#${Array.from(text.slice(1)).map((c) => c + c).join('')}` : text;
     const [r, g, bl] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
     const f = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(bl);

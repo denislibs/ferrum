@@ -69,7 +69,7 @@ test('openWithJournal: файл и журнал вместе — не больш
   expect(commandSizeError({ type: 'openWithJournal', bytes: file, journal: 'x' as unknown as Uint8Array[] })).toBe(
     'Неверная команда: данные не в виде байтов',
   );
-  const many = new Array<Uint8Array>(MAX_JOURNAL_ENTRIES + 1).fill(new Uint8Array(1));
+  const many = Array.from({ length: MAX_JOURNAL_ENTRIES + 1 }, () => new Uint8Array(1));
   expect(commandSizeError({ type: 'openWithJournal', bytes: file, journal: many })).toBe(
     'Неверная команда: в журнале изменений больше 100000 записей',
   );

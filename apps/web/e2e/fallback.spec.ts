@@ -620,7 +620,7 @@ test('редактор: WebGPU потерян навсегда, WebGL2 не за
   expect(await page.evaluate(() => window.__ferrum!.core!.backend)).toBe('cpu');
   await liveWhen(page, 'l.nodes === 1');
   // Причина потери — в консоли (предупреждение о потере, до попыток пересоздать).
-  expect(warnings.some((t) => /^Устройство WebGPU потеряно/.test(t))).toBe(true);
+  expect(warnings.some((t) => t.startsWith('Устройство WebGPU потеряно'))).toBe(true);
 });
 
 // --- 8. Сбои самого worker'а ----------------------------------------------------

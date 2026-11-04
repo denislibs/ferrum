@@ -10,7 +10,6 @@ import { commandSizeError, MAX_COMMAND_BYTES, prepareCommand, type FromWorker, t
 import { addSaturating, drainRing, holdInput, LIVE_READ_RETRIES, LiveReader, writeLive, type Held } from '../src/core/shared';
 import { MessageTransport, SabTransport } from '../src/core/transport';
 
-const MiB = 1024 * 1024;
 
 function sharedParts() {
   const sab = new SharedArrayBuffer(SAB_BYTES);

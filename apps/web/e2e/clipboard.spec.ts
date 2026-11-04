@@ -263,8 +263,8 @@ test('огромная картинка отклоняется по заголо
   const before = await live(page);
   // JPEG в несколько байт объявляет 60 000 × 60 000: декодировать его нельзя.
   await page.evaluate(() => {
-    const app0 = [0xff, 0xe0, 0, 16, ...new Array(14).fill(0)];
-    const sof = [0xff, 0xc0, 0, 17, 8, 0xea, 0x60, 0xea, 0x60, 3, ...new Array(9).fill(0)];
+    const app0 = [0xff, 0xe0, 0, 16, ...Array.from({ length: 14 }, () => 0)];
+    const sof = [0xff, 0xc0, 0, 17, 8, 0xea, 0x60, 0xea, 0x60, 3, ...Array.from({ length: 9 }, () => 0)];
     const bytes = new Uint8Array([0xff, 0xd8, ...app0, ...sof, 0xff, 0xd9]);
     window.__ferrum!.core!.send({ type: 'pasteImage', bytes });
   });

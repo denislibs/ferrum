@@ -1,0 +1,15 @@
+{
+  "ignorePatterns": [
+    "target/**",
+    "docs/**",
+    "**/dist/**",
+    "apps/web/src/wasm/**",
+    "apps/web/src/core/layout.gen.ts",
+    "apps/web/public/**",
+    "apps/desktop/src-tauri/gen/**"
+  ],
+  "rules": {
+    // Ссылка на элемент в SolidJS присваивается разметкой (`ref={el}`), правило этого не видит (бэклог).
+    "no-unassigned-vars": "off"
+  }
+}
