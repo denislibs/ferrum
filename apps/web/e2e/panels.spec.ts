@@ -21,6 +21,12 @@ test('@firefox заголовок секции сворачивает её, св
   const toggle = exportSection.getByRole('button', { name: 'Экспорт', exact: true });
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await expect(exportSection.locator('[data-export-run]')).toBeVisible();
+  // Заголовок остаётся заголовком (h2), кнопка — внутри него.
+  await expect(exportSection.getByRole('heading', { name: 'Экспорт' }).getByRole('button')).toHaveCount(1);
+  await exportSection.getByRole('heading', { name: 'Экспорт' }).getByRole('button').click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await expect(exportSection.locator('[data-export-run]')).toHaveCount(0);
@@ -112,4 +118,73 @@ test('@firefox правая панель сворачивается и помн�
   await page.getByRole('button', { name: 'Развернуть правую панель' }).click();
   await expect(page.getByRole('tabpanel')).toBeVisible();
   await expect.poll(async () => (await page.locator('canvas').boundingBox())!.width).toBe(before.width);
+});
+
+test('@firefox фокус остаётся на кнопке правой панели и на заголовке секции', async ({ page }) => {
+  await openApp(page);
+  await page.getByRole('button', { name: 'Свернуть правую панель' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Развернуть правую панель' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Свернуть правую панель' })).toBeFocused();
+  const toggle = page.getByRole('region', { name: 'Экспорт' }).getByRole('button', { name: 'Экспорт', exact: true });
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await expect(toggle).toBeFocused();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('@firefox Ctrl+\\ при свёрнутых панелях прячет и возвращает интерфейс', async ({ page }) => {
+  await openApp(page);
+  await page.getByRole('button', { name: 'Свернуть левую панель' }).click();
+  await page.getByRole('button', { name: 'Свернуть правую панель' }).click();
+  await liveWhen(page, 'l.viewportW === 1280 - 2 * 48');
+  await page.locator('canvas').click({ position: { x: 600, y: 40 } });
+  await page.keyboard.press('ControlOrMeta+Backslash');
+  await expect(page.getByRole('complementary', { name: 'Страницы и слои' })).toBeHidden();
+  await liveWhen(page, 'l.viewportW === 1280');
+  await page.keyboard.press('ControlOrMeta+Backslash');
+  await expect(page.getByRole('button', { name: 'Развернуть левую панель' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Развернуть правую панель' })).toBeVisible();
+  await liveWhen(page, 'l.viewportW === 1280 - 2 * 48');
+});
+
+test('@firefox вид не прыгает: точка мира остаётся на месте экрана при сворачивании и разворачивании', async ({ page }) => {
+  await openApp(page);
+  const where = async () => appScreen(page, await live(page), 100, 100);
+  const same = async (a: { x: number; y: number }, w: number) => {
+    await liveWhen(page, `l.viewportW === ${w}`);
+    await expect.poll(async () => Math.abs((await where()).x - a.x) + Math.abs((await where()).y - a.y)).toBeLessThan(1);
+  };
+  const a = await where();
+  const full = (await live(page)).viewportW;
+  await page.getByRole('button', { name: 'Свернуть левую панель' }).click();
+  await same(a, full + 200);
+  await page.getByRole('button', { name: 'Свернуть правую панель' }).click();
+  await same(a, full + 400);
+  await page.getByRole('button', { name: 'Развернуть левую панель' }).click();
+  await same(a, full + 200);
+  await page.getByRole('button', { name: 'Развернуть правую панель' }).click();
+  await same(a, full);
+});
+
+test('@firefox кнопка правой панели не налезает на «Масштаб» и «Поделиться» при минимальной ширине', async ({ page }) => {
+  await openApp(page);
+  const edge = page.getByRole('separator', { name: 'Ширина правой панели' });
+  await edge.focus();
+  const aside = page.getByRole('complementary', { name: 'Свойства' });
+  const width = async () => (await aside.boundingBox())!.width;
+  // У правой панели стрелка вправо сужает: до упора (200).
+  for (let w = 240; w >= 200; w -= 8) {
+    await page.keyboard.press('ArrowRight');
+    await expect.poll(width).toBe(w);
+  }
+  const toggle = (await page.getByRole('button', { name: 'Свернуть правую панель' }).boundingBox())!;
+  for (const name of ['Масштаб', 'Поделиться']) {
+    const b = (await page.getByRole('complementary', { name: 'Свойства' }).getByRole('button', { name, exact: true }).boundingBox())!;
+    const apart = b.x >= toggle.x + toggle.width || b.x + b.width <= toggle.x;
+    expect(apart, `${name} пересекает кнопку панели`).toBe(true);
+    const panel = (await aside.boundingBox())!;
+    expect(b.x + b.width, `${name} вылезает за панель`).toBeLessThanOrEqual(panel.x + panel.width);
+  }
 });

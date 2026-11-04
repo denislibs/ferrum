@@ -88,6 +88,10 @@
 .fe-panel-head__spacer {
   flex: 1;
 }
+/* Место под кнопку сворачивания правой панели (она лежит поверх шапки). */
+.fe-panel-head__spacer--toggle {
+  flex: 1 0 calc(var(--panel-rail) / 2);
+}
 .fe-rename {
   width: 100%;
   height: 20px;
@@ -286,6 +290,8 @@
   border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
   cursor: pointer;
 }
 .fe-section__toggle:hover {

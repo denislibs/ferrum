@@ -81,7 +81,7 @@ export function storage(): Storage | null {
 /** Свёрнутых секций не больше стольких, имя секции — не длиннее; их мало и они короткие. */
 const MAX_SECTIONS = 32;
 const MAX_SECTION_NAME = 64;
-const MAX_SECTIONS_BYTES = 2048;
+const MAX_SECTIONS_CHARS = 2048;
 
 /** Имена свёрнутых секций из настройки: значение не доверенное — пустые, длинные и
  * повторы отбрасываются, лишние не читаются. */
@@ -114,7 +114,7 @@ const FIELDS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined }
   guides: (v) => (typeof v === 'boolean' ? v : undefined),
   leftCollapsed: (v) => (typeof v === 'boolean' ? v : undefined),
   rightCollapsed: (v) => (typeof v === 'boolean' ? v : undefined),
-  collapsedSections: (v) => (typeof v === 'string' && v.length <= MAX_SECTIONS_BYTES ? parseSections(v).join('\n') : undefined),
+  collapsedSections: (v) => (typeof v === 'string' && v.length <= MAX_SECTIONS_CHARS ? parseSections(v).join('\n') : undefined),
 };
 
 /** Только верные известные поля (чужое изменение из другой вкладки, запись базы). */

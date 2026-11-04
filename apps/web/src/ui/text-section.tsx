@@ -139,6 +139,9 @@ export function TextSection() {
   const ed = useEditor();
   const s = () => ed.store.state.textStyle!;
   const [picking, setPicking] = createSignal(false);
+  createEffect(() => {
+    if (ed.sectionCollapsed?.('Текст')) setPicking(false);
+  });
   const styles = () => ed.store.state.fontCatalog.find((c) => c.family === s().family.value)?.styles ?? [];
   // Текущее начертание, которого нет в списке (шрифт не найден), показывается как есть.
   const styleOptions = () => {

@@ -4,7 +4,7 @@
 // файл из хранилища (`file`): байты читает worker ввода-вывода, сохраняет `saver`;
 // уход к экрану файлов или другому файлу сначала сохраняет текущий (`onLeave`).
 
-import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { detectPlatform } from '../core/core';
 import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
 import { boot, dismissSplash, isTestMode } from './boot';
@@ -135,6 +135,27 @@ export function App(props: AppProps) {
   });
   createEffect(() => editor()?.send({ type: 'setSettings', pixelSnap: pixelSnap() }));
   createEffect(() => editor()?.send({ type: 'setView', rulers: rulers(), guides: guides() }));
+  // Холст держит в центре одну и ту же точку мира: сменилась ширина колонки панели —
+  // центр холста ушёл на половину разницы, и содержимое поехало бы. Возвращаем его на
+  // экранное место прокруткой на эту половину (как колесо); край, перетянутый мышью,
+  // ведёт себя как прежде. 48 — `--panel-rail`.
+  const RAIL = 48;
+  let railL = leftCollapsed();
+  let railR = rightCollapsed();
+  createEffect(() => {
+    const l = leftCollapsed();
+    const r = rightCollapsed();
+    untrack(() => {
+      const dL = (l ? RAIL : left()) - (railL ? RAIL : left());
+      const dR = (r ? RAIL : right()) - (railR ? RAIL : right());
+      railL = l;
+      railR = r;
+      const dx = (dL - dR) / 2;
+      if (dx !== 0 && canvas && !store.state.uiHidden) {
+        canvas.dispatchEvent(new WheelEvent('wheel', { deltaX: dx, deltaY: 0, cancelable: true }));
+      }
+    });
+  });
   // Запись — не чаще раза в четверть секунды (края панелей тянутся каждый кадр), и
   // сразу при уходе со страницы.
   let pending: Settings | null = null;
@@ -153,7 +174,8 @@ export function App(props: AppProps) {
     pending = null;
   };
   // Настройки, изменённые в другой вкладке: тема, привязка и раскладка — на лету
-  // (ширина панелей у каждой вкладки своя).
+  // (ширина и свёрнутость панелей и секций у каждой вкладки свои: последняя
+  // записавшая вкладка выигрывает при следующем запуске).
   const offRemote = props.settings.onChange((p) => {
     // Принятое от другой вкладки — уже в базе: обратно не пишется.
     if (p.theme) {
