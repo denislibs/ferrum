@@ -2,7 +2,7 @@
 // остаётся в адресной строке и уходит в письмо. Приложение монтируется только при живой сессии.
 // Весь этот код есть только в рабочей сборке (см. `main.tsx`, `scripts/check-dist.mjs`).
 
-import { createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
+import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
 import { MAX_NAME_CHARS, parseConfirmHash, parseEmail, parseNext, type SessionUser } from '@ferrum/protocol';
 import { dismissSplash } from '../boot';
 import { editorHooks } from '../extensions';
@@ -13,9 +13,31 @@ import { announceAuthChange, currentUser, onAuthChange, setCurrentUser } from '.
 export function AuthGate(props: { children: JSX.Element }) {
   const [screen, setScreen] = createSignal<AuthScreen | null>(null);
   const [failure, setFailure] = createSignal<AuthFailure | null>(null);
+  // Экран не пересоздаётся от новой загрузки: новая ссылка — новая страница подтверждения, а тот же
+  // адрес или тот же человек — прежний экран с набранным текстом.
+  const confirm = createMemo(
+    () => {
+      const s = screen();
+      return s?.kind === 'confirm' ? s : null;
+    },
+    null,
+    { equals: (a, b) => a?.token === b?.token && a?.next === b?.next },
+  );
+  const naming = createMemo(
+    () => {
+      const s = screen();
+      return s?.kind === 'name' ? s.user : null;
+    },
+    null,
+    { equals: (a, b) => a?.id === b?.id },
+  );
 
-  /** Ошибка остаётся на экране, пока повтор не удался: карточка не мигает пустой страницей. */
-  const load = async () => {
+  /** Поколение загрузки: ответ для прежнего адреса не заменяет то, что уже открылось по новому. */
+  let generation = 0;
+  /** Ошибка остаётся на экране, пока повтор не удался: карточка не мигает пустой страницей.
+   * `keepShown` — фоновое обновление показанного экрана: его сбой этот экран не снимает. */
+  const load = async (keepShown = false) => {
+    const my = ++generation;
     const hash = location.hash;
     // Страница подтверждения не спрашивает сессию: открытие ссылки ни к чему не обращается.
     const first = screenFor(hash, null);
@@ -24,25 +46,23 @@ export function AuthGate(props: { children: JSX.Element }) {
       setScreen(first);
       return;
     }
+    let r: Awaited<ReturnType<typeof getSession>>;
     try {
-      const r = await getSession();
-      if (!r.ok) {
-        setFailure(r.failure);
-        return;
-      }
-      const s = screenFor(hash, r.value.user);
-      setCurrentUser(r.value.user);
-      setFailure(null);
-      setScreen(s);
+      r = await getSession();
     } catch {
       // Разбор ответа уже сводит всё к `NETWORK`; сюда попадает только невозможное, но заставка
-      // не должна остаться навсегда ни при каком исходе.
-      setFailure('NETWORK');
+      // не должна остаться навсегда ни при каком исходе. Сбой монтирования экрана здесь не ловится:
+      // он не «сервер недоступен».
+      r = { ok: false, failure: 'NETWORK' };
     }
-  };
-  const loginNext = () => {
-    const s = screen();
-    return s?.kind === 'login' ? s.next : undefined;
+    if (my !== generation) return;
+    if (!r.ok) {
+      if (!keepShown) setFailure(r.failure);
+      return;
+    }
+    setCurrentUser(r.value.user);
+    setFailure(null);
+    setScreen(screenFor(hash, r.value.user));
   };
   const [retrying, setRetrying] = createSignal(false);
   const retry = () => {
@@ -60,6 +80,7 @@ export function AuthGate(props: { children: JSX.Element }) {
     go(next ?? '#/');
   };
   const named = (user: SessionUser) => {
+    generation++;
     announceAuthChange();
     setCurrentUser(user);
     setScreen({ kind: 'app', user });
@@ -67,12 +88,14 @@ export function AuthGate(props: { children: JSX.Element }) {
 
   void load();
   // Ссылка из письма вставлена в эту же вкладку: сменился только адрес после `#`, страница не
-  // перезагружается. Внутри приложения адресом ведает оно само (адреса `#/auth/` оно пропускает),
-  // а ссылку подтверждения открывает страница заново: приложение не снимается посреди записи,
-  // сначала редактор дописывает файл. Не вышло и человек остался — адрес возвращается.
+  // перезагружается. Внутри приложения адресом ведает оно само (ссылку из письма оно пропускает,
+  // см. `extensions.ownsHash`), а ссылку подтверждения открывает страница заново: приложение не
+  // снимается посреди записи, сначала редактор дописывает файл. Не вышло и человек остался — адрес
+  // возвращается.
   const onHash = (e: HashChangeEvent) => {
-    if (screen()?.kind !== 'app') {
-      void load();
+    const kind = screen()?.kind;
+    if (kind !== 'app') {
+      void load(kind === 'login' || kind === 'name');
       return;
     }
     if (!parseConfirmHash(location.hash)) return;
@@ -94,7 +117,7 @@ export function AuthGate(props: { children: JSX.Element }) {
         const was = currentUser();
         const now = r.value.user;
         if (was?.id === now?.id && was?.name === now?.name) return;
-        // Спросить человека некому (он в другой вкладке): журнал дописывается молча.
+        // Спросить человека некому (он в другой вкладке): файл записывается молча.
         await editorHooks.flush?.().catch(() => {});
         location.reload();
       });
@@ -116,20 +139,15 @@ export function AuthGate(props: { children: JSX.Element }) {
         )}
       </Match>
       <Match when={screen()?.kind === 'app'}>{props.children}</Match>
-      {/* Вход не пересоздаётся при смене адреса (новая загрузка): «Проверьте почту» и набранный
-          адрес остаются, меняется только запрошенный `next`. */}
-      <Match when={loginNext() !== undefined}>
-        <LoginScreen next={loginNext() ?? null} />
+      {/* Вход не пересоздаётся при смене адреса: «Проверьте почту» и набранный адрес остаются. */}
+      <Match when={screen()?.kind === 'login'}>
+        <LoginScreen />
       </Match>
-      <Match when={screen()} keyed>
-        {(s) => (
-          <>
-            {s.kind === 'confirm' && (
-              <ConfirmScreen token={s.token} next={s.next} onDone={signedIn} onNewLink={(next) => go(next ?? '#/')} />
-            )}
-            {s.kind === 'name' && <NameScreen user={s.user} onDone={named} />}
-          </>
-        )}
+      <Match when={confirm()} keyed>
+        {(c) => <ConfirmScreen token={c.token} next={c.next} onDone={signedIn} onNewLink={(next) => go(next ?? '#/')} />}
+      </Match>
+      <Match when={naming()} keyed>
+        {(user) => <NameScreen user={user} onDone={named} />}
       </Match>
     </Switch>
   );
@@ -162,7 +180,7 @@ function AuthCard(props: { title: string; children: JSX.Element }) {
 
 const PROVIDERS = ['Войти через Google', 'Войти через GitHub'];
 
-function LoginScreen(props: { next: string | null }) {
+function LoginScreen() {
   const [email, setEmail] = createSignal('');
   const [sentTo, setSentTo] = createSignal<string | null>(null);
   const [sentAt, setSentAt] = createSignal(0);
@@ -178,7 +196,8 @@ function LoginScreen(props: { next: string | null }) {
     setBusy(true);
     setError(null);
     setInvalid(false);
-    const r = await requestLink(address, props.next);
+    // Адрес на момент отправки: он мог смениться, пока экран открыт.
+    const r = await requestLink(address, parseNext(location.hash));
     setBusy(false);
     if (!r.ok) {
       setError(failureText(r.failure));
@@ -282,9 +301,10 @@ function LoginScreen(props: { next: string | null }) {
 }
 
 /** Ссылка из письма: кнопка вместо входа по GET, почтовые сканеры открывают ссылки и сожгли бы
- * одноразовый токен. Токен тратится только по нажатию. Ссылка мертва только при отказе
- * `INVALID_TOKEN` (или если токена нет): любой другой сбой не тратит токен, поэтому «Войти»
- * остаётся повтором, а токен в адресе не трогается. */
+ * одноразовый токен. Токен тратится только по нажатию. Ссылка точно мертва только при отказе
+ * `INVALID_TOKEN` (или если токена нет). При любом другом сбое «Войти» остаётся повтором, а токен в
+ * адресе не трогается. Но при сбое сервера токен мог быть уже потрачен (Better Auth снимает его до
+ * обращения к базе): тогда рядом и «Запросить новую ссылку». */
 function ConfirmScreen(props: {
   token: string | null;
   next: string | null;
@@ -293,10 +313,12 @@ function ConfirmScreen(props: {
 }) {
   const [busy, setBusy] = createSignal(false);
   const [dead, setDead] = createSignal(!props.token);
+  const [serverDown, setServerDown] = createSignal(false);
   const [error, setError] = createSignal<string | null>(props.token ? null : failureText('INVALID_TOKEN'));
   const enter = async () => {
     setBusy(true);
     setError(null);
+    setServerDown(false);
     const r = await confirmLink(props.token!);
     if (r.ok) {
       props.onDone(props.next);
@@ -305,6 +327,7 @@ function ConfirmScreen(props: {
     setBusy(false);
     setError(failureText(r.failure));
     if (r.failure === 'INVALID_TOKEN') setDead(true);
+    if (r.failure === 'UNAVAILABLE') setServerDown(true);
   };
   return (
     <AuthCard title="Вход в Ferrum">
@@ -313,19 +336,20 @@ function ConfirmScreen(props: {
           {error()}
         </p>
       </Show>
-      <Show
-        when={!dead()}
-        fallback={
-          <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => props.onNewLink(parseNext(props.next))}>
-            Запросить новую ссылку
-          </button>
-        }
-      >
+      <Show when={!dead()}>
         <Show when={!error()}>
           <p class="fe-auth__text">Нажмите кнопку, чтобы завершить вход.</p>
         </Show>
         <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy()} onClick={() => void enter()}>
           Войти
+        </button>
+      </Show>
+      <Show when={dead() || serverDown()}>
+        <button
+          class={`fe-btn ${dead() ? 'fe-btn--primary' : 'fe-btn--secondary'} fe-auth__wide`}
+          onClick={() => props.onNewLink(parseNext(props.next))}
+        >
+          Запросить новую ссылку
         </button>
       </Show>
     </AuthCard>

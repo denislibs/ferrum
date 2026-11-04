@@ -304,7 +304,8 @@ export function App(props: AppProps) {
     return new Promise<boolean>((answer) => setAskLeave({ reason, answer }));
   });
   props.onFlush?.(async () => {
-    if (saver) await withTimeout(saver.flushJournal(), SETTLE_MS, false);
+    // Не только журнал: у нового файла ещё нет записи, и журнал правку не сохранит.
+    if (saver) await withTimeout(saver.save(), SETTLE_MS, false);
   });
   const answerLeave = (go: boolean) => {
     const a = askLeave();

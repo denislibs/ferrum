@@ -7,6 +7,7 @@ import {
   API_SIGN_IN,
   API_SIGN_OUT,
   API_SIGN_OUT_EVERYWHERE,
+  AUTH_ERROR_CODES,
   type AuthErrorCode,
   type SessionResponse,
   type SessionUser,
@@ -18,7 +19,7 @@ export type ApiResult<T> = { ok: true; value: T } | { ok: false; failure: AuthFa
 /** Дольше этого запрос не ждём (поведение): зависший сервер — та же ошибка, что и недоступный. */
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-const ERROR_CODES: readonly string[] = ['BAD_REQUEST', 'BAD_ORIGIN', 'INVALID_TOKEN', 'TOO_MANY_REQUESTS', 'UNAUTHORIZED', 'NOT_FOUND'];
+const isErrorCode = (v: unknown): v is AuthErrorCode => (AUTH_ERROR_CODES as readonly unknown[]).includes(v);
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isUser = (v: unknown): v is SessionUser =>
@@ -28,14 +29,16 @@ const isUserReply = (v: unknown): v is { user: SessionUser } => isRecord(v) && i
 const isSession = (v: unknown): v is SessionResponse => isRecord(v) && (v.user === null || isUser(v.user));
 
 /** Тело разбирается здесь: ответ не того вида (страница сети, чужой JSON, неизвестный код) —
- * это `NETWORK`, а не успех и не `undefined` в тексте ошибки. */
+ * это `NETWORK`, а не успех и не `undefined` в тексте ошибки. Любой 5xx — `UNAVAILABLE`, что бы ни
+ * было в теле: сервер или прокси перед ним запрос получили, в отличие от обрыва сети. */
 async function call<T>(path: string, valid: (body: unknown) => body is T, init?: RequestInit): Promise<ApiResult<T>> {
   try {
     const res = await fetch(path, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (res.status >= 500) return { ok: false, failure: 'UNAVAILABLE' };
     const body = (await res.json()) as unknown;
     if (res.ok) return valid(body) ? { ok: true, value: body } : { ok: false, failure: 'NETWORK' };
     const code = isRecord(body) ? body.error : undefined;
-    return { ok: false, failure: typeof code === 'string' && ERROR_CODES.includes(code) ? (code as AuthErrorCode) : 'NETWORK' };
+    return { ok: false, failure: isErrorCode(code) ? code : 'NETWORK' };
   } catch {
     return { ok: false, failure: 'NETWORK' };
   }

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { confirmHash, RESEND_SECONDS } from '@ferrum/protocol';
+import { AUTH_ERROR_CODES, confirmHash, parseConfirmHash, RESEND_SECONDS } from '@ferrum/protocol';
 import { avatarHue, failureText, initials, resendLeft, screenFor } from '../src/ui/auth/auth-logic';
 
 const USER = { id: 'u1', email: 'ivan@example.com', name: 'Иван' };
@@ -47,4 +47,19 @@ test('инициалы и оттенок кружка', () => {
   expect(avatarHue('u1')).toBe(avatarHue('u1'));
   expect(avatarHue('u1')).not.toBe(avatarHue('u2'));
   expect(avatarHue('длинный-идентификатор')).toBeLessThan(360);
+});
+
+test('служебные адреса кроме страницы подтверждения: ничем не отличаются от остальных', () => {
+  const user = { id: 'u1', email: 'x@y.ru', name: 'Иван' };
+  for (const hash of ['#/auth/', '#/auth/foo', '#/auth/confirmX', '#/auth']) {
+    expect(parseConfirmHash(hash)).toBeNull();
+    expect(screenFor(hash, null)).toEqual({ kind: 'login', next: hash === '#/auth' ? '#/auth' : null });
+    expect(screenFor(hash, user)).toEqual({ kind: 'app', user });
+  }
+  expect(screenFor('#/auth/confirm', null)).toEqual({ kind: 'confirm', token: null, next: null });
+});
+
+test('сбой сервера показывается как сбой сервера', () => {
+  expect(failureText('UNAVAILABLE')).toContain('Сервер недоступен');
+  for (const code of AUTH_ERROR_CODES) expect(failureText(code).length).toBeGreaterThan(0);
 });

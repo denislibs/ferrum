@@ -12,3 +12,18 @@ test('автономная сборка открывается без входа
   expect(await page.evaluate(() => document.documentElement.dataset.ferrumLocal)).toBe('1');
   expect(api).toEqual([]);
 });
+
+test('автономная сборка: адреса `#/auth/…` ей не принадлежат, они ведут на экран файлов', async ({ page }) => {
+  await page.goto('/#/auth/foo');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.evaluate(() => void (location.hash = '#/trash'));
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Корзина');
+  // Адрес, набранный при открытом приложении, тот же: экран и адрес не расходятся.
+  await page.evaluate(() => void (location.hash = '#/auth/foo'));
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.evaluate(() => void (location.hash = '#/trash'));
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Корзина');
+  await page.evaluate(() => void (location.hash = '#/auth/confirm?token=abc'));
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await expect(page.getByRole('button', { name: 'Войти', exact: true })).toHaveCount(0);
+});

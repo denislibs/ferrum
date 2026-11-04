@@ -16,7 +16,7 @@ import { storage } from './settings';
 import { openSettings, type SettingsBackend, type SettingsStore } from './settings-store';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { allowRestart, type Restart } from './restart';
-import { editorHooks } from './extensions';
+import { editorHooks, extensions } from './extensions';
 import { historyIndex, parseRoute, routeHash, routeUrl, type Route } from './router';
 
 type View =
@@ -237,8 +237,8 @@ export function Root() {
   const navigate = (r: Route) => void go(r, true);
   // «Назад», «вперёд» и адрес, набранный вручную.
   const onPop = (e: PopStateEvent) => {
-    // Служебные адреса (`#/auth/…`, ссылка из письма) ведает не приложение.
-    if (location.hash.startsWith('#/auth/')) return;
+    // Ссылкой из письма ведает не приложение (см. `extensions.ownsHash`).
+    if (extensions.ownsHash?.(location.hash)) return;
     if (restoring) {
       restoring = false;
       return;

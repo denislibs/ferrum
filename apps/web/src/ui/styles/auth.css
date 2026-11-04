@@ -26,6 +26,10 @@
   line-height: 20px;
   font-weight: 600;
 }
+/* Фокус ставит скрипт при смене экрана (для экранных дикторов), а заголовок не элемент управления. */
+.fe-auth__title:focus-visible {
+  outline: none;
+}
 .fe-auth__text {
   margin: 0;
   font-size: 13px;

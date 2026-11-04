@@ -12,6 +12,7 @@ import './ui/styles/layers.css';
 import './ui/styles/properties.css';
 import './ui/styles/files.css';
 import './ui/styles/auth.css';
+import { parseConfirmHash } from '@ferrum/protocol';
 import { render } from 'solid-js/web';
 import { AccountRow, AccountTab } from './ui/auth/account';
 import { AuthGate } from './ui/auth/auth-gate';
@@ -27,6 +28,7 @@ if (import.meta.env.VITE_FERRUM_LOCAL === '1') {
 } else {
   extensions.accountTab = AccountTab;
   extensions.accountRow = AccountRow;
+  extensions.ownsHash = (hash) => parseConfirmHash(hash) !== null;
   render(
     () => (
       <AuthGate>

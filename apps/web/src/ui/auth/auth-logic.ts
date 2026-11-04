@@ -34,6 +34,8 @@ export function failureText(f: AuthFailure): string {
       return 'Слишком много запросов. Попробуйте позже';
     case 'NETWORK':
       return 'Сервер недоступен. Проверьте соединение и попробуйте ещё раз';
+    case 'UNAVAILABLE':
+      return 'Сервер недоступен. Попробуйте ещё раз через минуту';
     case 'BAD_ORIGIN':
     case 'UNAUTHORIZED':
     case 'NOT_FOUND':

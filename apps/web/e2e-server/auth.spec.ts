@@ -5,12 +5,12 @@ import { linksFor, mailCount, newEmail, resetStand, valkey } from './stand';
 
 test.beforeEach(resetStand);
 
-/** Ошибки загрузки и нарушения CSP видны как ошибки консоли: на всех экранах их нет. */
+/** Ошибки загрузки и нарушения CSP видны как ошибки консоли: на этих экранах их нет. Потерянный
+ * wasm или шрифт тест заметит; значка сайта у приложения нет, браузер просит его сам. */
 function watchConsole(page: Page): string[] {
   const errors: string[] = [];
   page.on('console', (m) => {
-    // Ответ 401/404 браузер пишет сам, это не ошибка страницы.
-    if (m.type() === 'error' && !m.text().includes('Failed to load resource')) errors.push(m.text());
+    if (m.type() === 'error' && !m.location().url.endsWith('/favicon.ico')) errors.push(`${m.text()} ${m.location().url}`);
   });
   page.on('pageerror', (e) => errors.push(e.message));
   return errors;
@@ -25,8 +25,10 @@ async function requestLink(page: Page, email: string): Promise<void> {
 
 /** Вход целиком: от экрана входа до приложения. */
 async function signIn(page: Page, email: string, name = 'Иван Петров'): Promise<void> {
+  // Новое письмо, а не одно из прежних: оно уходит после ответа сервера и приходит не сразу.
+  const before = await mailCount(email);
   await requestLink(page, email);
-  const [link] = await linksFor(email);
+  const [link] = await linksFor(email, before + 1);
   await page.goto(link);
   await page.getByRole('button', { name: 'Войти', exact: true }).click();
   if (name) {
@@ -169,6 +171,10 @@ test('испорченная ссылка: сообщение сразу, зап
   await page.goto('/#/auth/confirm?token=short');
   await expect(page.getByRole('alert')).toHaveText('Ссылка недействительна или устарела. Запросите новую');
   await expect(page.getByRole('button', { name: 'Войти', exact: true })).toHaveCount(0);
+  // Фокус скриптом на открытии страницы: кольца на заголовке нет.
+  const title = page.getByRole('heading', { name: 'Вход в Ferrum' });
+  await expect(title).toBeFocused();
+  await expect(title).toHaveCSS('outline-style', 'none');
 });
 
 test('возврат на запрошенный адрес: раздел из другого браузера и файл в этом', async ({ page, browser }, info) => {
@@ -210,6 +216,9 @@ test('повторная отправка — через 60 с', async ({ page }
   const email = newEmail(info.project.name);
   await page.clock.install();
   await page.goto('/');
+  await expect(page.getByLabel('Электронная почта')).toBeVisible();
+  // Часы стоят с этого момента: задержка машины не меняет показанные секунды.
+  await page.clock.pauseAt(Date.now() + 1000);
   await requestLink(page, email);
   const again = page.getByRole('button', { name: /Отправить ещё раз/ });
   await expect(again).toBeDisabled();
@@ -337,6 +346,9 @@ async function drawRect(page: Page): Promise<void> {
   const l = await live(page);
   await drag(page, await appScreen(page, l, l.cameraX - 50, l.cameraY - 40), 100, 80);
   await nodesAre(page, l.nodes + 1);
+  // Живое число узлов идёт через общую память и обгоняет событие `modified`, а запись видит правку
+  // только по нему: человек не успеет уйти быстрее одного кадра (B-200).
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
 }
 
 /** Вторая ссылка для уже вошедшего человека: письмо запрашивается в обход интерфейса. */
@@ -370,9 +382,11 @@ test('ссылка из письма в той же вкладке в редак
   await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
   await editorReady(page);
   const url = page.url();
+  // Ссылка заранее: письмо ждётся дольше, чем идёт запись журнала, и правка успела бы записаться сама.
+  const link = await secondLink(page, email);
   await drawRect(page);
   // Сразу, не дожидаясь журнала: приложение должно записать правку само.
-  await pasteHash(page, await secondLink(page, email));
+  await pasteHash(page, link);
   await expect(enter(page)).toBeVisible();
   await enter(page).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
@@ -499,6 +513,8 @@ test('смена экрана: фокус на заголовке, а с пол�
   await page.goto('/');
   await requestLink(page, newEmail(info.project.name));
   await expect(page.getByRole('heading', { name: 'Проверьте почту' })).toBeFocused();
+  // Заголовок получает фокус скриптом, а не с клавиатуры: кольца на нём нет.
+  await expect(page.getByRole('heading', { name: 'Проверьте почту' })).toHaveCSS('outline-style', 'none');
   await page.getByRole('button', { name: 'Другой адрес' }).click();
   await expect(page.getByLabel('Электронная почта')).toBeFocused();
 });
@@ -506,9 +522,148 @@ test('смена экрана: фокус на заголовке, а с пол�
 test('смена адреса на экране входа не сбрасывает «Проверьте почту»', async ({ page }, info) => {
   await page.goto('/');
   await requestLink(page, newEmail(info.project.name));
-  await page.evaluate(() => void (location.hash = '#/trash'));
-  // Загрузка по новому адресу идёт к серверу: ждём её окончания.
-  await page.waitForResponse((r) => r.url().endsWith('/api/auth/session'));
-  await page.waitForTimeout(300);
+  await sessionRefresh(page, () => page.evaluate(() => void (location.hash = '#/trash')));
   await expect(page.getByRole('heading', { name: 'Проверьте почту' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Отправить ещё раз через/ })).toBeDisabled();
+});
+
+/** Действие меняет адрес, и страница заново спрашивает сессию: дожидаемся, пока она применит ответ. */
+async function sessionRefresh(page: Page, act: () => Promise<unknown>): Promise<void> {
+  const reply = page.waitForResponse((r) => r.url().endsWith('/api/auth/session'));
+  await act();
+  await (await reply).finished();
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve)));
+}
+
+test('сбой обновления при смене адреса не снимает показанный экран входа', async ({ page }, info) => {
+  await page.goto('/');
+  await requestLink(page, newEmail(info.project.name));
+  await page.route('**/api/auth/session', (r) =>
+    r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' }),
+  );
+  await sessionRefresh(page, () => page.evaluate(() => void (location.hash = '#/trash')));
+  await expect(page.getByRole('heading', { name: 'Проверьте почту' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Не удалось открыть Ferrum' })).toHaveCount(0);
+});
+
+test('экран имени: смена адреса и сбой обновления не стирают набранное', async ({ page }, info) => {
+  await page.goto('/');
+  await signIn(page, newEmail(info.project.name), '');
+  await page.getByLabel('Имя').fill('Анна');
+  await sessionRefresh(page, () => page.evaluate(() => void (location.hash = '#/trash')));
+  await expect(page.getByLabel('Имя')).toHaveValue('Анна');
+  await page.route('**/api/auth/session', (r) => r.abort());
+  await page.evaluate(() => void (location.hash = '#/drafts'));
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 50)));
+  await expect(page.getByLabel('Имя')).toHaveValue('Анна');
+  await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+});
+
+test('запоздавший ответ сессии не снимает страницу подтверждения', async ({ page }, info) => {
+  const email = newEmail(info.project.name);
+  await page.goto('/');
+  await requestLink(page, email);
+  const [link] = await linksFor(email);
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/auth/session', async (r) => {
+    await hold;
+    await r.continue();
+  });
+  const reply = page.waitForResponse((r) => r.url().endsWith('/api/auth/session'));
+  await page.reload();
+  await pasteHash(page, link);
+  await expect(enter(page)).toBeVisible();
+  release();
+  await (await reply).finished();
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve)));
+  await expect(enter(page)).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+  await expect(page.getByLabel('Электронная почта')).toHaveCount(0);
+});
+
+test('в письмо уходит адрес на момент отправки, а не на момент загрузки', async ({ page }, info) => {
+  const email = newEmail(info.project.name);
+  await page.goto('/#/drafts');
+  await expect(page.getByLabel('Электронная почта')).toBeVisible();
+  // Обновление по новому адресу ещё не ответило, а человек уже отправляет форму.
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/auth/session', async (r) => {
+    await hold;
+    await r.continue();
+  });
+  await page.evaluate(() => void (location.hash = '#/trash'));
+  await requestLink(page, email);
+  release();
+  const [link] = await linksFor(email);
+  expect(new URLSearchParams(new URL(link).hash.split('?')[1]).get('next')).toBe('#/trash');
+});
+
+test('другая ссылка в той же вкладке: страница подтверждения начинает заново', async ({ page }, info) => {
+  await page.goto('/#/auth/confirm?token=short');
+  await expect(page.getByRole('alert')).toContainText('Ссылка недействительна');
+  const email = newEmail(info.project.name);
+  const res = await page.request.post('/api/auth/sign-in/magic-link', { data: { email }, headers: { origin: STAND_URL } });
+  expect(res.status()).toBe(200);
+  const [link] = await linksFor(email);
+  await pasteHash(page, link);
+  await enter(page).click();
+  await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+});
+
+test('сбой сервера при подтверждении: и «Войти» как повтор, и новая ссылка', async ({ page }, info) => {
+  const email = newEmail(info.project.name);
+  await page.goto('/');
+  await requestLink(page, email);
+  const [link] = await linksFor(email);
+  await page.goto(link);
+  const newLink = page.getByRole('button', { name: 'Запросить новую ссылку' });
+  // Срок сервера вышел (503 с кодом) или обработчик упал (500 текстом): для человека одно и то же.
+  const replies = [
+    { status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' },
+    { status: 500, contentType: 'text/plain', body: 'Внутренняя ошибка сервера' },
+  ];
+  for (const reply of replies) {
+    await page.route('**/api/auth/confirm', (r) => r.fulfill(reply));
+    await enter(page).click();
+    await expect(page.getByRole('alert')).toContainText('Сервер недоступен');
+    await expect(enter(page)).toBeEnabled();
+    await expect(newLink).toBeVisible();
+    await page.unroute('**/api/auth/confirm');
+  }
+  // Повтор: токен здесь цел, вход удаётся.
+  await enter(page).click();
+  await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+  await expect(newLink).toHaveCount(0);
+});
+
+test('сбой сервера при подтверждении: новая ссылка ведёт на экран входа', async ({ page }) => {
+  await page.goto(`/#/auth/confirm?token=${'a'.repeat(32)}&next=%23%2Ftrash`);
+  await page.route('**/api/auth/confirm', (r) => r.fulfill({ status: 500, contentType: 'text/plain', body: 'сбой' }));
+  await enter(page).click();
+  await page.getByRole('button', { name: 'Запросить новую ссылку' }).click();
+  await expect(page.getByLabel('Электронная почта')).toBeVisible();
+  await expect(page).toHaveURL(/#\/trash$/);
+});
+
+test('выход в другой вкладке: новый файл успевает записаться, правка не теряется', async ({ page, context }, info) => {
+  const email = newEmail(info.project.name);
+  await testMode(page);
+  await page.goto('/?nodes=0');
+  await signIn(page, email);
+  await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
+  await editorReady(page);
+  const url = page.url();
+  const tab = await context.newPage();
+  await tab.goto('/');
+  await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible();
+  await drawRect(page);
+  // Сразу: у нового файла ещё нет записи, журнал ему не поможет.
+  await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+  await signIn(page, email, '');
+  await expect(page).toHaveURL(url);
+  await editorReady(page);
+  await nodesAre(page, 1);
 });
