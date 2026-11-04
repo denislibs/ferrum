@@ -83,13 +83,7 @@ export function commandSizeError(cmd: Command): string | null {
     return size > MAX_COMMAND_BYTES.paste ? tooLarge(MAX_COMMAND_BYTES.paste, size) : null;
   }
   if (cmd.type === 'loadFont' && (cmd as { bytes?: unknown }).bytes === undefined) return null;
-  if (
-    cmd.type !== 'open' &&
-    cmd.type !== 'paste' &&
-    cmd.type !== 'placeImage' &&
-    cmd.type !== 'pasteImage' &&
-    cmd.type !== 'loadFont'
-  )
+  if (cmd.type !== 'open' && cmd.type !== 'paste' && cmd.type !== 'placeImage' && cmd.type !== 'pasteImage' && cmd.type !== 'loadFont')
     return null;
   const bytes = (cmd as { bytes: unknown }).bytes;
   const kind = bytesKindError(bytes);
@@ -176,7 +170,16 @@ export function prepareCommand(cmd: Command): { cmd: Command; transfer: Transfer
 /** Команды правки текста (и вставка, копирование, вырезание — `execute`): идут после ввода, положенного в кольцо до них
  * (щелчок в тексте, затем набор), — основной поток досылает ввод, worker вычитывает
  * кольцо перед такой командой. */
-const TEXT_COMMANDS: ReadonlySet<string> = new Set(['textEditStart', 'textEditEnd', 'textInput', 'textKey', 'setTextStyle', 'setTextProps', 'paste', 'execute']);
+const TEXT_COMMANDS: ReadonlySet<string> = new Set([
+  'textEditStart',
+  'textEditEnd',
+  'textInput',
+  'textKey',
+  'setTextStyle',
+  'setTextProps',
+  'paste',
+  'execute',
+]);
 
 export function isTextCommand(cmd: Command): boolean {
   return typeof cmd === 'object' && cmd !== null && TEXT_COMMANDS.has(cmd.type);

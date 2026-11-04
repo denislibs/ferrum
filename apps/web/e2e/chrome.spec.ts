@@ -103,7 +103,10 @@ test('зум из шапки и меню масштабов', async ({ page }) =
   const zoom = page.getByRole('button', { name: 'Масштаб', exact: true });
   await expect(zoom).toHaveText('50%');
   await zoom.click();
-  await page.getByRole('menu', { name: 'Масштаб' }).getByRole('menuitemcheckbox', { name: /Масштаб 100%/ }).click();
+  await page
+    .getByRole('menu', { name: 'Масштаб' })
+    .getByRole('menuitemcheckbox', { name: /Масштаб 100%/ })
+    .click();
   await liveWhen(page, 'l.zoom === 1');
   await expect(zoom).toHaveText('100%');
   // Клавиатура: меню открывается Enter, стрелки ходят по пунктам, Esc закрывает.
@@ -255,7 +258,12 @@ test('стрелки в открытом меню не доходят до хо�
   for (const key of ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp']) await page.keyboard.press(key);
   await page.waitForTimeout(200);
   const after = await live(page);
-  expect([after.steps, after.cameraX, after.cameraY, after.selectionW]).toEqual([before.steps, before.cameraX, before.cameraY, before.selectionW]);
+  expect([after.steps, after.cameraX, after.cameraY, after.selectionW]).toEqual([
+    before.steps,
+    before.cameraX,
+    before.cameraY,
+    before.selectionW,
+  ]);
   expect(await page.evaluate(() => window.__ferrum!.uiEvents!.filter((e) => e.type === 'error').length)).toBe(0);
   // Esc закрывает и возвращает фокус на холст.
   await page.keyboard.press('Escape');
@@ -549,10 +557,10 @@ test('край панели: потеря захвата и движение б�
   const box = (await edge.boundingBox())!;
   const x = box.x + box.width / 2;
   const move = (clientX: number, buttons: number) =>
-    edge.evaluate(
-      (el, a) => el.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, isPrimary: true, bubbles: true, ...a })),
-      { clientX, buttons },
-    );
+    edge.evaluate((el, a) => el.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, isPrimary: true, bubbles: true, ...a })), {
+      clientX,
+      buttons,
+    });
   for (const stop of ['lost', 'buttons'] as const) {
     await page.mouse.move(x, 400);
     await page.mouse.down();

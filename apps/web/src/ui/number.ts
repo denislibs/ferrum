@@ -122,7 +122,8 @@ function parseUnsafe(text: string, opts: ParseOptions): FieldInput | null {
     // У «Смешанных» результат, зависящий от текущего значения (`*2`, `/2`, `50%`),
     // считался бы от первого узла и ставил всем одно число: отклоняем. «+N» и «-N» —
     // прибавка к каждому; проценты от заданной базы (прозрачность) от узла не зависят.
-    const fromCurrent = (first.t === 'op' && (first.v === '*' || first.v === '/')) ||
+    const fromCurrent =
+      (first.t === 'op' && (first.v === '*' || first.v === '/')) ||
       (opts.percentOf === undefined && tokens.some((t) => t.t === 'op' && t.v === '%'));
     if (fromCurrent) return null;
     if (first.t === 'op' && (first.v === '+' || first.v === '-')) {

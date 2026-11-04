@@ -193,7 +193,7 @@ for (const backend of ['auto', 'webgpu', 'webgl', 'cpu'] as const) {
       expect(s.atlasImages, 'атлас GPU пуст: растры фреймов не дошли до GPU').toBeGreaterThan(0);
     }
     if (s.backend === 'cpu' || s.backend === 'webgl') {
-      expect(s.workerP95, 'p95 кадра worker\'а').toBeLessThanOrEqual(WORKER_P95_MS);
+      expect(s.workerP95, "p95 кадра worker'а").toBeLessThanOrEqual(WORKER_P95_MS);
     }
   });
 }
@@ -321,8 +321,13 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   }, start);
   const out = path.join(info.project.outputDir, 'perf-ui.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify({ ...sample, maxRows, minRows, layerStarts: starts.size, liveX: liveX.size, shownX: shownX.size }, null, 2));
-  console.log(`perf ui: ${JSON.stringify({ ...sample, maxRows, minRows, layerStarts: starts.size, liveX: liveX.size, shownX: [...shownX].slice(0, 5) })}`);
+  fs.writeFileSync(
+    out,
+    JSON.stringify({ ...sample, maxRows, minRows, layerStarts: starts.size, liveX: liveX.size, shownX: shownX.size }, null, 2),
+  );
+  console.log(
+    `perf ui: ${JSON.stringify({ ...sample, maxRows, minRows, layerStarts: starts.size, liveX: liveX.size, shownX: [...shownX].slice(0, 5) })}`,
+  );
   expect(after.nodes).toBe(NODES);
   expect(sample.mainFrames).toBeGreaterThan(100);
   expect(sample.longTasks, 'длинные задачи в основном потоке').toEqual([]);
@@ -331,7 +336,7 @@ test('интерфейс на 100 000 узлах: перетаскивание 1
   expect(maxRows, 'строк дерева в DOM').toBeLessThanOrEqual(MAX_TREE_ROWS);
   // Прокрутка не вхолостую: строки были, окно сменилось много раз, запросы ушли ядру.
   expect(minRows, 'дерево во время прокрутки не пустело').toBeGreaterThan(0);
-  expect(starts.size, 'разных окон строк от worker\'а').toBeGreaterThanOrEqual(10);
+  expect(starts.size, "разных окон строк от worker'а").toBeGreaterThanOrEqual(10);
   expect(sample.windowRequests, 'запросов окна строк за жест').toBeGreaterThan(10);
   // Панель свойств всё время жеста — в состоянии выделения тысячи: поле X «Смешанные».
   // Живые значения жеста панель показывает только для одного узла (`liveOne`), поэтому
@@ -390,5 +395,5 @@ test('10 000 текстов: открытие и панорамирование 
   expect((await live(page)).nodes).toBe(TEXTS + TEXTS / 100);
   expect(openMs, 'открытие 10 000 текстов').toBeLessThan(2000);
   expect(frames.length, 'worker рисовал кадры').toBeGreaterThan(30);
-  expect(p95, 'p95 кадра worker\'а').toBeLessThanOrEqual(WORKER_P95_MS);
+  expect(p95, "p95 кадра worker'а").toBeLessThanOrEqual(WORKER_P95_MS);
 });

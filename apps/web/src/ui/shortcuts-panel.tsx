@@ -53,11 +53,15 @@ export function ShortcutsPanel(props: ShortcutsPanelProps): JSX.Element {
     const list = groups();
     const i = list.findIndex((g) => g.id === tab());
     const next =
-      e.key === 'ArrowRight' ? (i + 1) % list.length
-      : e.key === 'ArrowLeft' ? (i - 1 + list.length) % list.length
-      : e.key === 'Home' ? 0
-      : e.key === 'End' ? list.length - 1
-      : -1;
+      e.key === 'ArrowRight'
+        ? (i + 1) % list.length
+        : e.key === 'ArrowLeft'
+          ? (i - 1 + list.length) % list.length
+          : e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? list.length - 1
+              : -1;
     if (next < 0) return;
     e.preventDefault();
     setTab(list[next].id);

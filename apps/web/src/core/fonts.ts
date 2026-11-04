@@ -108,15 +108,16 @@ export function desktopFamilies(json: unknown): { families: FontFamilyDto[]; dro
 
 /** Ключ начертания как в ядре (`style_key`): без разделителей и регистра. */
 export function styleKey(s: string): string {
-  return [...s].filter((c) => /[\p{L}\p{N}]/u.test(c)).join('').toLowerCase();
+  return [...s]
+    .filter((c) => /[\p{L}\p{N}]/u.test(c))
+    .join('')
+    .toLowerCase();
 }
 
 /** Начертание замены по умолчанию: то же имя, иначе Regular, иначе первое. */
 export function defaultStyle(choice: FontChoice | undefined, wanted: string): string {
   if (!choice || choice.styles.length === 0) return '';
   return (
-    choice.styles.find((s) => styleKey(s) === styleKey(wanted)) ??
-    choice.styles.find((s) => styleKey(s) === 'regular') ??
-    choice.styles[0]
+    choice.styles.find((s) => styleKey(s) === styleKey(wanted)) ?? choice.styles.find((s) => styleKey(s) === 'regular') ?? choice.styles[0]
   );
 }

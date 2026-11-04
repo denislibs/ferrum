@@ -432,10 +432,10 @@ export function App(props: AppProps) {
             if (props.restart) {
               // После потери GPU — рендер, который новое ядро действительно получило:
               // принудительный бэкенд, не запустившись, уступает CPU.
-              const r = props.restart.reason === 'gpu' ? { ...props.restart, backend: ed.core.backend ?? props.restart.backend } : props.restart;
+              const r =
+                props.restart.reason === 'gpu' ? { ...props.restart, backend: ed.core.backend ?? props.restart.backend } : props.restart;
               store.toast(restartText(r), r.lost ? 'error' : 'info');
-            }
-            else if (recovered) store.toast('Восстановлены изменения, не записанные в файл');
+            } else if (recovered) store.toast('Восстановлены изменения, не записанные в файл');
             void props.files.touch(id).catch(() => {});
             // Имя файла — из хранилища (его могли переименовать на экране файлов);
             // тихо: открытие — не правка, файл из-за него не пересохраняется.
@@ -445,7 +445,11 @@ export function App(props: AppProps) {
             props.onOpenFailed(e.message);
           } else if (e.type === 'documentName') {
             // Переименовали в редакторе — запись в хранилище тоже (без ожидания снимка).
-            props.files.rename(id, e.name).catch((err: unknown) => store.toast(`Не удалось переименовать файл: ${err instanceof Error ? err.message : String(err)}`, 'error'));
+            props.files
+              .rename(id, e.name)
+              .catch((err: unknown) =>
+                store.toast(`Не удалось переименовать файл: ${err instanceof Error ? err.message : String(err)}`, 'error'),
+              );
           }
           if (!opening && e.type === 'error' && e.message.startsWith('Ядро остановлено:')) {
             // Сбой ядра после открытия (паника, исключение в worker'е): тот же файл — в
@@ -669,113 +673,123 @@ export function App(props: AppProps) {
 
   return (
     <ErrorBoundary
-      fallback={(err: unknown) => (dismissSplash(true),
-        <div class="fe-boot fe-boot--error" role="alert">
-          Ошибка интерфейса: {err instanceof Error ? err.message : String(err)}. Перезагрузите страницу
-        </div>
+      fallback={(err: unknown) => (
+        dismissSplash(true),
+        (
+          <div class="fe-boot fe-boot--error" role="alert">
+            Ошибка интерфейса: {err instanceof Error ? err.message : String(err)}. Перезагрузите страницу
+          </div>
+        )
       )}
     >
-    <div
-      class="fe-app"
-      classList={{ 'fe-app--bare': store.state.uiHidden }}
-      style={{ '--left-w': leftCollapsed() ? 'var(--panel-rail)' : `${left()}px`, '--right-w': rightCollapsed() ? 'var(--panel-rail)' : `${right()}px` }}
-    >
-      <main class="fe-stage">
-        <canvas
-          ref={canvas}
-          class="fe-canvas"
-          tabindex="0"
-          aria-label="Холст"
-          onContextMenu={(e) => {
-            // Точка холста — `offset*` (не чтение layout); окна — для меню.
-            editor()?.contextMenu?.({ kind: 'canvas', x: e.offsetX, y: e.offsetY }, { x: e.clientX, y: e.clientY }, 'Действия с выделением');
-          }}
-        />
-        <Show when={!store.state.ready && failure()}>
-          <div class="fe-boot fe-boot--error" role="alert">
-            {failure()}
-          </div>
-        </Show>
-        <Show when={store.state.stopped}>
-          {(message) => (
-            <div class="fe-boot fe-boot--error fe-boot--stopped" role="alert">
-              {message()}. Правки больше не принимаются — перезагрузите страницу
+      <div
+        class="fe-app"
+        classList={{ 'fe-app--bare': store.state.uiHidden }}
+        style={{
+          '--left-w': leftCollapsed() ? 'var(--panel-rail)' : `${left()}px`,
+          '--right-w': rightCollapsed() ? 'var(--panel-rail)' : `${right()}px`,
+        }}
+      >
+        <main class="fe-stage">
+          <canvas
+            ref={canvas}
+            class="fe-canvas"
+            tabindex="0"
+            aria-label="Холст"
+            onContextMenu={(e) => {
+              // Точка холста — `offset*` (не чтение layout); окна — для меню.
+              editor()?.contextMenu?.(
+                { kind: 'canvas', x: e.offsetX, y: e.offsetY },
+                { x: e.clientX, y: e.clientY },
+                'Действия с выделением',
+              );
+            }}
+          />
+          <Show when={!store.state.ready && failure()}>
+            <div class="fe-boot fe-boot--error" role="alert">
+              {failure()}
             </div>
-          )}
-        </Show>
+          </Show>
+          <Show when={store.state.stopped}>
+            {(message) => (
+              <div class="fe-boot fe-boot--error fe-boot--stopped" role="alert">
+                {message()}. Правки больше не принимаются — перезагрузите страницу
+              </div>
+            )}
+          </Show>
+          <Show when={editor()}>
+            {(ed) => (
+              <EditorContext.Provider value={ed()}>
+                <Toolbar />
+                <Show when={palette()}>
+                  <QuickActions hidden={hidden()} recent={recent()} onClose={() => setPalette(false)} />
+                </Show>
+              </EditorContext.Provider>
+            )}
+          </Show>
+        </main>
         <Show when={editor()}>
           {(ed) => (
             <EditorContext.Provider value={ed()}>
-              <Toolbar />
-              <Show when={palette()}>
-                <QuickActions hidden={hidden()} recent={recent()} onClose={() => setPalette(false)} />
+              <aside class="fe-side fe-side--left" aria-label="Страницы и слои">
+                <FileHeader
+                  menu={mainItems}
+                  search={search}
+                  open={mainMenu()}
+                  onOpen={setMainMenu}
+                  onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
+                  collapsed={leftCollapsed()}
+                  onCollapse={setLeftCollapsed}
+                />
+                <Show when={!leftCollapsed()}>
+                  <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
+                  <LayersPanel />
+                  <ResizeEdge side="left" width={left()} onWidth={setLeft} />
+                </Show>
+              </aside>
+              <aside class="fe-side fe-side--right" aria-label="Свойства">
+                <div class="fe-side__toggle">
+                  <PanelToggle side="right" collapsed={rightCollapsed()} onToggle={setRightCollapsed} />
+                </div>
+                <Show when={!rightCollapsed()}>
+                  <DesignHeader />
+                  <PropertiesPanel theme={theme()} />
+                  <ResizeEdge side="right" width={right()} onWidth={setRight} />
+                </Show>
+              </aside>
+              <TooltipLayer />
+              <Show when={shortcuts()}>
+                <ShortcutsPanel used={usedCommands()} onSettings={() => setSettingsOpen(true)} onClose={() => setShortcuts(false)} />
+              </Show>
+              <Show when={settingsOpen()}>
+                <SettingsDialog
+                  theme={themeChoice()}
+                  onTheme={setThemeChoice}
+                  pixelSnap={pixelSnap()}
+                  onPixelSnap={setPixelSnap}
+                  onClose={() => setSettingsOpen(false)}
+                />
+              </Show>
+              <Show when={context()}>
+                {(m) => <Menu label={m().label} items={m().items} anchor={m().at} recents onClose={() => setContext(null)} />}
               </Show>
             </EditorContext.Provider>
           )}
         </Show>
-      </main>
-      <Show when={editor()}>
-        {(ed) => (
-          <EditorContext.Provider value={ed()}>
-            <aside class="fe-side fe-side--left" aria-label="Страницы и слои">
-              <FileHeader
-                menu={mainItems}
-                search={search}
-                open={mainMenu()}
-                onOpen={setMainMenu}
-                onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
-                collapsed={leftCollapsed()}
-                onCollapse={setLeftCollapsed}
-              />
-              <Show when={!leftCollapsed()}>
-                <PagesPanel open={pagesOpen()} onToggle={setPagesOpen} fileId={id} />
-                <LayersPanel />
-                <ResizeEdge side="left" width={left()} onWidth={setLeft} />
-              </Show>
-            </aside>
-            <aside class="fe-side fe-side--right" aria-label="Свойства">
-              <div class="fe-side__toggle">
-                <PanelToggle side="right" collapsed={rightCollapsed()} onToggle={setRightCollapsed} />
-              </div>
-              <Show when={!rightCollapsed()}>
-                <DesignHeader />
-                <PropertiesPanel theme={theme()} />
-                <ResizeEdge side="right" width={right()} onWidth={setRight} />
-              </Show>
-            </aside>
-            <TooltipLayer />
-            <Show when={shortcuts()}>
-              <ShortcutsPanel used={usedCommands()} onSettings={() => setSettingsOpen(true)} onClose={() => setShortcuts(false)} />
-            </Show>
-            <Show when={settingsOpen()}>
-              <SettingsDialog
-                theme={themeChoice()}
-                onTheme={setThemeChoice}
-                pixelSnap={pixelSnap()}
-                onPixelSnap={setPixelSnap}
-                onClose={() => setSettingsOpen(false)}
-              />
-            </Show>
-            <Show when={context()}>
-              {(m) => <Menu label={m().label} items={m().items} anchor={m().at} recents onClose={() => setContext(null)} />}
-            </Show>
-          </EditorContext.Provider>
-        )}
-      </Show>
-      <Show when={askLeave()}>
-        {(a) => (
-          <ConfirmDialog
-            title="Изменения не сохранены — уйти?"
-            text={a().reason}
-            confirm="Уйти"
-            cancel="Остаться"
-            onCancel={() => answerLeave(false)}
-            onConfirm={() => answerLeave(true)}
-          />
-        )}
-      </Show>
-      <Toasts store={store} onUndo={(step) => editor()?.send({ type: 'undoStep', step })} />
-    </div>
+        <Show when={askLeave()}>
+          {(a) => (
+            <ConfirmDialog
+              title="Изменения не сохранены — уйти?"
+              text={a().reason}
+              confirm="Уйти"
+              cancel="Остаться"
+              onCancel={() => answerLeave(false)}
+              onConfirm={() => answerLeave(true)}
+            />
+          )}
+        </Show>
+        <Toasts store={store} onUndo={(step) => editor()?.send({ type: 'undoStep', step })} />
+      </div>
     </ErrorBoundary>
   );
 }

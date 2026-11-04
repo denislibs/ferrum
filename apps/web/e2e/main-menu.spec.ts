@@ -26,7 +26,17 @@ test('логотип открывает меню с подменю Figma; кла
   await expect(logo).toHaveAttribute('aria-expanded', 'true');
   const menu = root(page);
   await expect(menu.getByRole('searchbox', { name: 'Поиск по командам' })).toBeFocused();
-  await expect(menu.getByRole('menuitem')).toHaveText(['Файл', 'Правка', 'Вид', 'Объект', 'Текст', 'Расставить', 'Вектор', 'Настройки', 'Справка']);
+  await expect(menu.getByRole('menuitem')).toHaveText([
+    'Файл',
+    'Правка',
+    'Вид',
+    'Объект',
+    'Текст',
+    'Расставить',
+    'Вектор',
+    'Настройки',
+    'Справка',
+  ]);
   // Вниз — к первому пункту, вправо — в подменю на первый пункт.
   await page.keyboard.press('ArrowDown');
   const file = menu.getByRole('menuitem', { name: 'Файл' });
@@ -177,7 +187,8 @@ test('подменю у нижнего края окна поднимается 
   const object = submenu(page, 'Объект');
   await expect(object).toBeVisible();
   // Появление меню анимировано масштабом: размеры — после анимации.
-  const settled = (m: ReturnType<typeof submenu>) => m.evaluate((el) => Promise.all(el.getAnimations().map((x) => x.finished)).then(() => true));
+  const settled = (m: ReturnType<typeof submenu>) =>
+    m.evaluate((el) => Promise.all(el.getAnimations().map((x) => x.finished)).then(() => true));
   await settled(object);
   await settled(root(page));
   const box = (await object.boundingBox())!;

@@ -103,9 +103,7 @@ export function TooltipLayer() {
         >
           {/* «Название  Клавиша»: два пробела — часть текста (white-space: pre). */}
           <span>{t().text}</span>
-          <Show when={keyOf(t().command) || t().key}>
-            {(key) => <span class="fe-tooltip__key">{tipText('', key())}</span>}
-          </Show>
+          <Show when={keyOf(t().command) || t().key}>{(key) => <span class="fe-tooltip__key">{tipText('', key())}</span>}</Show>
         </div>
       )}
     </Show>

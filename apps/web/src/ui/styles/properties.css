@@ -278,9 +278,7 @@
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background:
-    linear-gradient(to top, #000, transparent),
-    linear-gradient(to right, #fff, transparent);
+  background: linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent);
 }
 .fe-picker__thumb {
   position: absolute;
@@ -288,7 +286,9 @@
   height: 12px;
   margin: -6px 0 0 -6px;
   border-radius: 50%;
-  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0, 0, 0, 0.35);
+  box-shadow:
+    0 0 0 2px #fff,
+    0 0 0 3px rgba(0, 0, 0, 0.35);
   pointer-events: none;
 }
 .fe-picker__sliders {
@@ -323,7 +323,9 @@
   height: 14px;
   margin: -7px 0 0 -7px;
   border-radius: 50%;
-  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0, 0, 0, 0.35);
+  box-shadow:
+    0 0 0 2px #fff,
+    0 0 0 3px rgba(0, 0, 0, 0.35);
   pointer-events: none;
 }
 .fe-picker__opacity {

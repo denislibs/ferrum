@@ -122,7 +122,12 @@ export function FilesScreen(props: FilesScreenProps) {
       { defer: true },
     ),
   );
-  createEffect(on(() => props.notice, (n) => n && ui.toast(n.text, 'error')));
+  createEffect(
+    on(
+      () => props.notice,
+      (n) => n && ui.toast(n.text, 'error'),
+    ),
+  );
   // Изменение в хранилище (здесь или в другой вкладке): перечитать окно, не чаще кадра.
   let refresh = 0;
   const offChange = props.files.onChange(() => {
@@ -385,7 +390,13 @@ export function FilesScreen(props: FilesScreenProps) {
       : `${f.disk ? 'На диске · ' : ''}Изменён ${relativeTime(f.editedAt, now())}`;
 
   const empty = () =>
-    loaded() && total() === 0 ? (query().trim() ? 'Ничего не найдено' : props.section === 'trash' ? 'Корзина пуста' : 'Здесь пока нет файлов') : '';
+    loaded() && total() === 0
+      ? query().trim()
+        ? 'Ничего не найдено'
+        : props.section === 'trash'
+          ? 'Корзина пуста'
+          : 'Здесь пока нет файлов'
+      : '';
 
   const Thumb = (p: { file: FileMeta }): JSX.Element => (
     <div class="fe-card__thumb">
@@ -514,7 +525,12 @@ export function FilesScreen(props: FilesScreenProps) {
             </button>
           </Show>
           <div class="fe-files__views" role="radiogroup" aria-label="Вид">
-            <For each={[{ v: 'grid' as const, label: 'Сетка', icon: 'grid' as const }, { v: 'list' as const, label: 'Список', icon: 'list' as const }]}>
+            <For
+              each={[
+                { v: 'grid' as const, label: 'Сетка', icon: 'grid' as const },
+                { v: 'list' as const, label: 'Список', icon: 'list' as const },
+              ]}
+            >
               {(o) => (
                 <button
                   class="fe-tool"
@@ -529,7 +545,11 @@ export function FilesScreen(props: FilesScreenProps) {
                     e.preventDefault();
                     const next = view() === 'grid' ? 'list' : 'grid';
                     chooseView(next);
-                    (e.currentTarget.parentElement?.querySelector(`[aria-label="${next === 'grid' ? 'Сетка' : 'Список'}"]`) as HTMLElement | null)?.focus();
+                    (
+                      e.currentTarget.parentElement?.querySelector(
+                        `[aria-label="${next === 'grid' ? 'Сетка' : 'Список'}"]`,
+                      ) as HTMLElement | null
+                    )?.focus();
                   }}
                 >
                   <Icon name={o.icon} />

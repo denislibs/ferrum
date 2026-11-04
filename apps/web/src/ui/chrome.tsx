@@ -78,15 +78,18 @@ export function FileHeader(props: {
         </div>
         <Show when={props.onBack}>
           {(back) => (
-            <button class="fe-tool fe-tool--small fe-tool--muted" aria-label="Назад к файлам" data-tip="Назад к файлам" onClick={() => back()()}>
+            <button
+              class="fe-tool fe-tool--small fe-tool--muted"
+              aria-label="Назад к файлам"
+              data-tip="Назад к файлам"
+              onClick={() => back()()}
+            >
               <Icon name="back" />
             </button>
           )}
         </Show>
       </Show>
-      <Show when={props.onCollapse}>
-        {(toggle) => <PanelToggle side="left" collapsed={!!props.collapsed} onToggle={toggle()} />}
-      </Show>
+      <Show when={props.onCollapse}>{(toggle) => <PanelToggle side="left" collapsed={!!props.collapsed} onToggle={toggle()} />}</Show>
       <Show when={props.open}>
         <Menu label="Главное меню" items={props.menu()} anchor={logo} search={props.search} recents onClose={() => props.onOpen(false)} />
       </Show>
@@ -130,16 +133,10 @@ export function DesignHeader() {
           <span class="t-num">{Math.round(ed.store.state.live.zoom * 100)}%</span>
           <Caret />
         </button>
-        <button
-          class="fe-btn fe-btn--primary"
-          aria-disabled="true"
-          data-tip="Совместная работа появится в подсистеме 4"
-        >
+        <button class="fe-btn fe-btn--primary" aria-disabled="true" data-tip="Совместная работа появится в подсистеме 4">
           Поделиться
         </button>
-        <Show when={menu()}>
-          {(a) => <Menu label="Масштаб" items={zoomItems()} anchor={a()} onClose={() => setMenu(null)} />}
-        </Show>
+        <Show when={menu()}>{(a) => <Menu label="Масштаб" items={zoomItems()} anchor={a()} onClose={() => setMenu(null)} />}</Show>
       </div>
       <div ref={tabs} class="fe-tabs" role="tablist" aria-label="Режим панели">
         <button class="fe-tab" role="tab" aria-selected="true" id="tab-design">

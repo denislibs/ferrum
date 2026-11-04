@@ -12,10 +12,8 @@ test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
 const ui = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__ferrum!.ui!)));
 /** События ядра в редакторе — из журнала тестового режима (`uiEvents`). */
-const events = (page: Page, type: string) =>
-  page.evaluate((t) => window.__ferrum!.uiEvents!.filter((e) => e.type === t).length, type);
-const errors = (page: Page) =>
-  page.evaluate(() => window.__ferrum!.uiEvents!.filter((e) => e.type === 'error').map((e) => e.message));
+const events = (page: Page, type: string) => page.evaluate((t) => window.__ferrum!.uiEvents!.filter((e) => e.type === t).length, type);
+const errors = (page: Page) => page.evaluate(() => window.__ferrum!.uiEvents!.filter((e) => e.type === 'error').map((e) => e.message));
 
 /** Выделить «Слой 1» первого фрейма щелчком на холсте. */
 async function selectShape(page: Page) {
@@ -87,7 +85,10 @@ test('вырезать удаляет и кладёт в буфер одним �
 test('картинка из другого приложения вставляется узлом-изображением', async ({ page }) => {
   await openApp(page, 100);
   // PNG 3 × 2 и JPEG 5 × 4 — как их кладёт в буфер другое приложение.
-  for (const [type, w, h] of [['image/png', 3, 2], ['image/jpeg', 5, 4]] as const) {
+  for (const [type, w, h] of [
+    ['image/png', 3, 2],
+    ['image/jpeg', 5, 4],
+  ] as const) {
     await page.evaluate(
       async ({ type, w, h }) => {
         const c = new OffscreenCanvas(w, h);
@@ -140,7 +141,10 @@ test('копировать как SVG: текст и image/svg+xml из меню
   await page.mouse.click(at.x, at.y, { button: 'right' });
   // Как в Figma: «Копировать как ▸ SVG» — подменю контекстного меню.
   await page.getByRole('menu', { name: 'Действия с выделением' }).getByRole('menuitem', { name: 'Копировать как', exact: true }).click();
-  await page.getByRole('menu', { name: 'Копировать как' }).getByRole('menuitem', { name: /Копировать как SVG/ }).click();
+  await page
+    .getByRole('menu', { name: 'Копировать как' })
+    .getByRole('menuitem', { name: /Копировать как SVG/ })
+    .click();
   await expect(page.getByRole('status').filter({ hasText: 'Скопировано как SVG' })).toBeVisible();
   const got = await page.evaluate(async () => {
     const item = (await navigator.clipboard.read())[0];
@@ -152,7 +156,9 @@ test('копировать как SVG: текст и image/svg+xml из меню
   expect(got.text).toMatch(/^<svg width="120" height="80" viewBox="0 0 120 80"/);
   const size = await page.evaluate((t) => {
     const doc = new DOMParser().parseFromString(t, 'image/svg+xml');
-    return doc.querySelector('parsererror') ? null : [doc.documentElement.getAttribute('width'), doc.documentElement.getAttribute('height')];
+    return doc.querySelector('parsererror')
+      ? null
+      : [doc.documentElement.getAttribute('width'), doc.documentElement.getAttribute('height')];
   }, got.text);
   expect(size).toEqual(['120', '80']);
   expect(got.types).toContain('text/plain');
@@ -337,7 +343,9 @@ for (const transport of ['sab', 'message'] as const) {
     });
     await liveWhen(page, `l.canRedo === 1 && l.steps === ${a.steps + 1}`);
     const after = await live(page);
-    console.log(`перекодировка 3000 × 2000: ${(size / 1024 / 1024).toFixed(1)} МБ, до отмены ${Math.round((await page.evaluate(() => performance.now())) - t)} мс`);
+    console.log(
+      `перекодировка 3000 × 2000: ${(size / 1024 / 1024).toFixed(1)} МБ, до отмены ${Math.round((await page.evaluate(() => performance.now())) - t)} мс`,
+    );
     // Отменена вставка: узлов — как после правки A, A ещё можно отменить, повтор вернёт картинку.
     expect([after.nodes, after.canUndo, after.canRedo]).toEqual([a.nodes, 1, 1]);
     await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'edit.redo' }));
@@ -372,9 +380,7 @@ test('запасной путь: большое выделение кодиру�
   const t0 = await watchLongTasks(page);
   await page.keyboard.press('ControlOrMeta+c');
   await expect.poll(() => events(page, 'clipboard')).toBe(1);
-  await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText().then((t) => t.startsWith('ferrum-clipboard:v1:'))))
-    .toBe(true);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText().then((t) => t.startsWith('ferrum-clipboard:v1:')))).toBe(true);
   await page.waitForTimeout(300);
   const long = await longTasks(page, t0);
   const bytes = await page.evaluate(() => window.__ferrum!.uiEvents!.find((e) => e.type === 'clipboard')!.size!);
@@ -546,7 +552,14 @@ test.describe('без доступа на чтение буфера', () => {
     await page.addInitScript(noCustomFormat);
     await openApp(page);
     // Чтение действительно запрещено.
-    expect(await page.evaluate(() => navigator.clipboard.read().then(() => 'ok', (e: Error) => e.name))).not.toBe('ok');
+    expect(
+      await page.evaluate(() =>
+        navigator.clipboard.read().then(
+          () => 'ok',
+          (e: Error) => e.name,
+        ),
+      ),
+    ).not.toBe('ok');
     await copyToNewPage(page);
     // Пустое событие вставки: асинхронное чтение отказано — молча.
     await page.evaluate(() =>
@@ -564,7 +577,10 @@ test.describe('без доступа на чтение буфера', () => {
     // «Вставить» из меню читает только асинхронно: без доступа — одно уведомление.
     const at = await appScreen(page, await live(page), 0, 0);
     await page.mouse.click(at.x, at.y, { button: 'right' });
-    await page.getByRole('menuitem', { name: /^Вставить/ }).first().click();
+    await page
+      .getByRole('menuitem', { name: /^Вставить/ })
+      .first()
+      .click();
     await expect(page.getByRole('status').filter({ hasText: 'Нет доступа к буферу обмена' })).toHaveCount(1);
   });
 });

@@ -11,12 +11,7 @@ const encoder = new TextEncoder();
 const scratch = new Uint8Array(Field.TEXT_MAX * 4);
 
 function flags(e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): number {
-  return (
-    (e.shiftKey ? Flag.SHIFT : 0) |
-    (e.altKey ? Flag.ALT : 0) |
-    (e.ctrlKey ? Flag.CTRL : 0) |
-    (e.metaKey ? Flag.META : 0)
-  );
+  return (e.shiftKey ? Flag.SHIFT : 0) | (e.altKey ? Flag.ALT : 0) | (e.ctrlKey ? Flag.CTRL : 0) | (e.metaKey ? Flag.META : 0);
 }
 
 function clear(view: DataView, at: number): void {

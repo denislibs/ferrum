@@ -67,7 +67,7 @@ test('postMessage можно выбрать и на изолированной �
   await dragMovesAndUndoReturns(page);
 });
 
-test('в режиме postMessage ресайз и ввод доходят до worker\'а', async ({ page }) => {
+test("в режиме postMessage ресайз и ввод доходят до worker'а", async ({ page }) => {
   await open(page, '', 'http://localhost:4174');
   expect(await page.evaluate(() => window.__ferrum!.core!.mode)).toBe('message');
   const before = await live(page);
@@ -168,9 +168,7 @@ test('неверная команда не роняет worker', async ({ page }
   await open(page);
   // Команды из основного потока не доверенные: форма проверяется в worker'е.
   await page.evaluate(() => window.__ferrum!.core!.send(JSON.parse('{"type":"formatDisk"}')));
-  await page.waitForFunction(() =>
-    window.__ferrum!.events.some((e) => e.type === 'error' && e.message.startsWith('Неверная команда')),
-  );
+  await page.waitForFunction(() => window.__ferrum!.events.some((e) => e.type === 'error' && e.message.startsWith('Неверная команда')));
   await page.evaluate(() => window.__ferrum!.core!.send({ type: 'execute', command: 'view.zoom_in' }));
   const l = await liveWhen(page, 'l.zoom > 0.5');
   expect(l.nodes).toBe(1000);
@@ -184,8 +182,7 @@ test('неверный конверт сообщения не роняет worke
     const worker = (window.__ferrum!.core! as unknown as { worker: Worker }).worker;
     for (const m of [null, { t: 'cmd', cmd: null }, { t: 'cmd', cmd: 42 }, {}, { t: 'init' }]) worker.postMessage(m);
   });
-  const errors = () =>
-    page.evaluate(() => window.__ferrum!.events.flatMap((e) => (e.type === 'error' ? [e.message] : [])));
+  const errors = () => page.evaluate(() => window.__ferrum!.events.flatMap((e) => (e.type === 'error' ? [e.message] : [])));
   await expect.poll(async () => (await errors()).length).toBe(5);
   const [nul, cmdNull, cmd42, empty, init] = await errors();
   expect(nul).toBe('Неверное сообщение для ядра');
@@ -201,7 +198,7 @@ test('неверный конверт сообщения не роняет worke
 });
 
 // Сбои worker'а не должны вешать запуск и не должны быть тихими.
-test.describe('сбои worker\'а', () => {
+test.describe("сбои worker'а", () => {
   test('ядро не загрузилось: плашка показывает причину, start не висит', async ({ page }) => {
     await page.route('**/*.wasm', (route) => route.fulfill({ status: 200, contentType: 'application/wasm', body: 'не wasm' }));
     await gotoDebug(page, '/debug.html?nodes=10');
@@ -212,12 +209,12 @@ test.describe('сбои worker\'а', () => {
     expect(await page.evaluate(() => window.__ferrum === undefined)).toBe(true);
   });
 
-  test('скрипт worker\'а не загрузился: onerror отклоняет start', async ({ page }) => {
+  test("скрипт worker'а не загрузился: onerror отклоняет start", async ({ page }) => {
     await page.route('**/assets/core.worker-*.js', (route) =>
       route.fulfill({ status: 200, contentType: 'text/javascript', body: 'это не javascript (' }),
     );
     await gotoDebug(page, '/debug.html?nodes=10');
-    await expect(page.locator('#hud')).toHaveText('Ядро не запустилось: скрипт worker\'а не загрузился', {
+    await expect(page.locator('#hud')).toHaveText("Ядро не запустилось: скрипт worker'а не загрузился", {
       timeout: 20_000,
     });
   });

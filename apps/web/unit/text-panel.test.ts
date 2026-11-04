@@ -3,7 +3,17 @@
 
 import { expect, test } from '@playwright/test';
 import { MAX_FONT_SIZE, MAX_LETTER_SPACING_PERCENT, MAX_LINE_HEIGHT_PERCENT, MIN_FONT_SIZE } from '../src/core/limits';
-import { clampSpacing, fieldValue, fontRows, formatSpacing, parseSpacing, isImeKey, rowWindow, stepRow, styleFor } from '../src/ui/text-panel';
+import {
+  clampSpacing,
+  fieldValue,
+  fontRows,
+  formatSpacing,
+  parseSpacing,
+  isImeKey,
+  rowWindow,
+  stepRow,
+  styleFor,
+} from '../src/ui/text-panel';
 
 test('интерлиньяж и трекинг: авто, проценты, пиксели', () => {
   expect(parseSpacing('Авто', true)).toEqual({ unit: 'auto', value: 0 });
@@ -36,7 +46,10 @@ test('группы шрифтов и поиск', () => {
     'Arial',
   ]);
   const found = fontRows(catalog, [], 'rob');
-  expect(found).toEqual([{ kind: 'heading', label: 'Вшитые' }, { kind: 'font', family: 'Roboto', source: 'bundled' }]);
+  expect(found).toEqual([
+    { kind: 'heading', label: 'Вшитые' },
+    { kind: 'font', family: 'Roboto', source: 'bundled' },
+  ]);
   expect(fontRows(catalog, [], 'zzz')).toEqual([]);
 });
 

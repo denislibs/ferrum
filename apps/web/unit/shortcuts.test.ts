@@ -3,15 +3,7 @@
 // физической клавише, сочетания буфера обмена.
 
 import { expect, test } from '@playwright/test';
-import {
-  clipboardAction,
-  eventShortcut,
-  formatShortcut,
-  keyLabel,
-  parseShortcut,
-  shortcutLabel,
-  tipText,
-} from '../src/ui/shortcuts';
+import { clipboardAction, eventShortcut, formatShortcut, keyLabel, parseShortcut, shortcutLabel, tipText } from '../src/ui/shortcuts';
 
 test('разбор и каноническая запись', () => {
   expect(parseShortcut('Shift+Ctrl+KeyZ')).toEqual({ code: 'KeyZ', ctrl: true, alt: false, shift: true, meta: false });

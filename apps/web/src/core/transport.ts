@@ -53,7 +53,7 @@ let warned = false;
 function warnMalformed(m: unknown): void {
   if (warned) return;
   warned = true;
-  console.warn('ferrum: неверное сообщение worker\'а', m);
+  console.warn("ferrum: неверное сообщение worker'а", m);
 }
 
 /** Запись из «черновика» нужного вида можно потерять при переполнении. */
@@ -117,7 +117,7 @@ export class SabTransport implements Transport {
     const w = Atomics.load(this.ctrl, Ctrl.INPUT_WRITE);
     const r = Atomics.load(this.ctrl, Ctrl.INPUT_READ);
     // Беззнаково: счётчики — int32 по модулю 2^32, разность не должна уходить в минус.
-    if (((w - r) >>> 0) >= RING_CAPACITY) return false;
+    if ((w - r) >>> 0 >= RING_CAPACITY) return false;
     this.ring.set(record, ((w >>> 0) % RING_CAPACITY) * RECORD_SIZE);
     // Запись видна worker'у не раньше нового значения счётчика.
     Atomics.store(this.ctrl, Ctrl.INPUT_WRITE, (w + 1) | 0);

@@ -174,9 +174,7 @@ test('экран запуска виден до загрузки приложе�
   await expect(splash).toBeVisible();
   await expect(splash).toHaveAttribute('role', 'status');
   await expect(splash).toContainText('Запуск редактора');
-  const running = await page.evaluate(() =>
-    document.querySelector('.fe-splash__frame')!.getAnimations().length,
-  );
+  const running = await page.evaluate(() => document.querySelector('.fe-splash__frame')!.getAnimations().length);
   expect(running).toBeGreaterThan(0);
 
   // С бандлом: после готовности ядра заставки в DOM нет.

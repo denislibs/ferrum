@@ -196,9 +196,9 @@ test('«Сохранить на диск…» в файл другой запи�
   await drawRect(page);
   await drawRect(page, 150);
   await fileMenu(page, 'Сохранить на диск…');
-  await expect(
-    toast(page, 'Не удалось сохранить на диск: Этот файл принадлежит другой записи Ferrum — выберите другое имя'),
-  ).toHaveCount(1);
+  await expect(toast(page, 'Не удалось сохранить на диск: Этот файл принадлежит другой записи Ferrum — выберите другое имя')).toHaveCount(
+    1,
+  );
   expect(await diskSize(page, 'Без названия.ferrum')).toBe(size);
   expect((await meta(page, second))!.disk).toBeUndefined();
   expect((await meta(page, first))!.disk).toBe('Без названия.ferrum');
@@ -295,7 +295,16 @@ test('база версии 3 обновляется до 4: файлы, бай�
           const id = crypto.randomUUID();
           const now = Date.now();
           const tx = d.transaction(['meta', 'bytes', 'thumbs', 'journal', 'settings'], 'readwrite');
-          tx.objectStore('meta').put({ id, name: 'Файл третьей версии', createdAt: now, editedAt: now, openedAt: now, size: 8, thumbVersion: 1, version: 1 });
+          tx.objectStore('meta').put({
+            id,
+            name: 'Файл третьей версии',
+            createdAt: now,
+            editedAt: now,
+            openedAt: now,
+            size: 8,
+            thumbVersion: 1,
+            version: 1,
+          });
           tx.objectStore('bytes').put(new Uint8Array(8).fill(7).buffer, id);
           tx.objectStore('thumbs').put(new Blob([new Uint8Array(5)], { type: 'image/png' }), id);
           tx.objectStore('journal').put(new Uint8Array(3).buffer, [id, 1, 0]);
@@ -310,7 +319,10 @@ test('база версии 3 обновляется до 4: файлы, бай�
   await page.goto('/');
   await expect(page.getByText('Файл третьей версии')).toBeVisible();
   // Настройка из базы версии 3 — на экране: вид «Список».
-  await expect(page.getByRole('radiogroup', { name: 'Вид' }).getByRole('radio', { name: 'Список' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByRole('radiogroup', { name: 'Вид' }).getByRole('radio', { name: 'Список' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
   expect(await old.evaluate(() => (window as unknown as { yielded?: boolean }).yielded)).toBe(true);
   expect(await page.evaluate((i) => window.__ferrumFiles!.store.journalCount(i), id)).toBe(1);
   expect(await meta(page, id)).toMatchObject({ name: 'Файл третьей версии', size: 8, version: 1 });

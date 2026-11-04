@@ -52,13 +52,7 @@ function sendProps(ed: Editor, patch: TextPropsPatchDto, phase: EditPhase, t?: E
 
 /** Поле интерлиньяжа или трекинга: «Авто», «150%», «20» — Enter или уход применяют,
  * Esc возвращает показанное. */
-function SpacingField(props: {
-  label: string;
-  value: SpacingDto;
-  mixed: boolean;
-  auto: boolean;
-  onCommit: (v: SpacingDto) => void;
-}) {
+function SpacingField(props: { label: string; value: SpacingDto; mixed: boolean; auto: boolean; onCommit: (v: SpacingDto) => void }) {
   const ed = useEditor();
   let input!: HTMLInputElement;
   // Применяется только набранное: у «Смешанных» показанное пусто, и «пусто» — это «Авто».
@@ -199,7 +193,13 @@ export function TextSection() {
               {s().family.mixed ? 'Смешанное' : MIXED}
             </option>
           </Show>
-          <For each={styleOptions()}>{(st) => <option value={st} selected={!s().style.mixed && st === s().style.value}>{st}</option>}</For>
+          <For each={styleOptions()}>
+            {(st) => (
+              <option value={st} selected={!s().style.mixed && st === s().style.value}>
+                {st}
+              </option>
+            )}
+          </For>
         </select>
         <NumberField
           label="Aa"

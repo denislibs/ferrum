@@ -98,14 +98,7 @@ type Journal = CoreEvent & { type: 'journal' };
 
 /** `base` — поколение файла (`FileMeta.version`) на момент открытия; `stored` — у
  * файла есть байты в хранилище (журнал есть к чему применить). */
-export function createSaver(
-  ed: Editor,
-  files: FileStore,
-  id: string,
-  base: number,
-  stored: boolean,
-  opts: SaverOptions = {},
-): Saver {
+export function createSaver(ed: Editor, files: FileStore, id: string, base: number, stored: boolean, opts: SaverOptions = {}): Saver {
   const journalMs = opts.journalMs ?? JOURNAL_MS;
   const fullIdleMs = opts.fullIdleMs ?? FULL_IDLE_MS;
   const session = sessionAfter(opts.journalSession ?? null);
@@ -348,7 +341,12 @@ export function createSaver(
     save,
     flushJournal,
     pending: () => dirty || unjournaled() || (!stored && modified),
-    settled: () => withTimeout(appended.then(() => true), SETTLE_MS, false),
+    settled: () =>
+      withTimeout(
+        appended.then(() => true),
+        SETTLE_MS,
+        false,
+      ),
     failure: () => failure,
     dispose() {
       clearTimeout(journalTimer);

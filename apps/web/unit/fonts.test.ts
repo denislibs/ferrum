@@ -9,9 +9,17 @@ import { MAX_FAMILY_NAME, MAX_FONT_FACES, MAX_FONT_FAMILIES } from '../src/core/
 test('манифест сборки читается целиком, мусор пропускается', () => {
   const manifest = JSON.parse(readFileSync(new URL('../public/fonts/manifest.json', import.meta.url), 'utf8'));
   const families = manifestFamilies(manifest);
-  expect(families.map((f) => f.family)).toEqual(
-    ['Inter', 'JetBrains Mono', 'Montserrat', 'Noto Sans', 'Open Sans', 'PT Sans', 'PT Serif', 'Playfair Display', 'Roboto'],
-  );
+  expect(families.map((f) => f.family)).toEqual([
+    'Inter',
+    'JetBrains Mono',
+    'Montserrat',
+    'Noto Sans',
+    'Open Sans',
+    'PT Sans',
+    'PT Serif',
+    'Playfair Display',
+    'Roboto',
+  ]);
   const inter = families.find((f) => f.family === 'Inter')!;
   expect(inter.faces.find((f) => f.style === 'Bold')).toMatchObject({ weight: 700, italic: false, file: 'inter/Inter-Variable.ttf' });
   expect(manifestFamilies({ families: [{ family: 'X', faces: [{ style: 'R', file: '../../etc/passwd.ttf' }] }] })).toEqual([]);

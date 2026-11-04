@@ -7,7 +7,12 @@ import { mainMenu, openApp } from './helpers';
 /** Контраст двух цветов `#rgb` / `#rrggbb` по WCAG (сборка сокращает `#ffffff`). */
 function contrast(a: string, b: string): number {
   const lum = (text: string) => {
-    const hex = text.length === 4 ? `#${Array.from(text.slice(1)).map((c) => c + c).join('')}` : text;
+    const hex =
+      text.length === 4
+        ? `#${Array.from(text.slice(1))
+            .map((c) => c + c)
+            .join('')}`
+        : text;
     const [r, g, bl] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
     const f = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(bl);
@@ -36,9 +41,9 @@ test('у каждой кнопки есть имя', async ({ page }) => {
   await openApp(page);
   await page.getByRole('treeitem', { name: 'Экран 9', exact: true }).click();
   const unnamed = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('button')).filter(
-      (b) => !(b.getAttribute('aria-label') || b.textContent?.trim()),
-    ).map((b) => b.outerHTML.slice(0, 80)),
+    Array.from(document.querySelectorAll('button'))
+      .filter((b) => !(b.getAttribute('aria-label') || b.textContent?.trim()))
+      .map((b) => b.outerHTML.slice(0, 80)),
   );
   expect(unnamed).toEqual([]);
 });
@@ -81,7 +86,10 @@ test('prefers-reduced-motion: без анимаций', async ({ page }) => {
 
 test('тулбар и вкладки: одна точка Tab, стрелки переводят фокус', async ({ page }) => {
   await openApp(page);
-  for (const [role, name] of [['toolbar', 'Инструменты'], ['tablist', 'Режим панели']] as const) {
+  for (const [role, name] of [
+    ['toolbar', 'Инструменты'],
+    ['tablist', 'Режим панели'],
+  ] as const) {
     const widget = page.getByRole(role, { name });
     const items = widget.locator(role === 'toolbar' ? 'button' : '[role="tab"]');
     const stops = await items.evaluateAll((els) => els.filter((e) => (e as HTMLElement).tabIndex === 0).length);
@@ -124,7 +132,9 @@ test('дерево слоёв: одна точка Tab, множественны
   expect(bad).toEqual([]);
   await expect(tree.getByRole('treeitem', { name: 'Экран 9', exact: true })).toHaveAttribute('aria-expanded', 'false');
   // Кнопки строки вне порядка Tab: их достаёт мышь и клавиши дерева.
-  const rowButtons = await tree.locator('[role="treeitem"] button').evaluateAll((els) => els.filter((e) => (e as HTMLElement).tabIndex >= 0).length);
+  const rowButtons = await tree
+    .locator('[role="treeitem"] button')
+    .evaluateAll((els) => els.filter((e) => (e as HTMLElement).tabIndex >= 0).length);
   expect(rowButtons).toBe(0);
 });
 
@@ -142,9 +152,9 @@ test('диалог настроек: модальный, фокус внутри
   expect(await tabs.evaluateAll((els) => els.filter((e) => (e as HTMLElement).tabIndex === 0).length)).toBe(1);
   expect(await tabs.evaluateAll((els) => els.filter((e) => e.getAttribute('aria-selected') === 'true').length)).toBe(1);
   // Кнопки диалога тоже с именами.
-  const unnamed = await dialog.getByRole('button').evaluateAll((els) =>
-    els.filter((b) => !(b.getAttribute('aria-label') || b.textContent?.trim())).map((b) => b.outerHTML.slice(0, 80)),
-  );
+  const unnamed = await dialog
+    .getByRole('button')
+    .evaluateAll((els) => els.filter((b) => !(b.getAttribute('aria-label') || b.textContent?.trim())).map((b) => b.outerHTML.slice(0, 80)));
   expect(unnamed).toEqual([]);
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
@@ -164,9 +174,9 @@ test('палитра цвета: диалог без модальности, п�
     await expect(slider).toHaveAttribute('aria-valuemin', '0');
     expect(await slider.evaluate((e) => (e as HTMLElement).tabIndex)).toBe(0);
   }
-  const unnamed = await picker.getByRole('button').evaluateAll((els) =>
-    els.filter((b) => !(b.getAttribute('aria-label') || b.textContent?.trim())).map((b) => b.outerHTML.slice(0, 80)),
-  );
+  const unnamed = await picker
+    .getByRole('button')
+    .evaluateAll((els) => els.filter((b) => !(b.getAttribute('aria-label') || b.textContent?.trim())).map((b) => b.outerHTML.slice(0, 80)));
   expect(unnamed).toEqual([]);
   await page.keyboard.press('Escape');
   await expect(picker).toHaveCount(0);

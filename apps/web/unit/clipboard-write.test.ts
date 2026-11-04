@@ -3,15 +3,7 @@
 // нет, SVG уходит обычным текстом через `execCommand`, итог всегда виден уведомлением.
 
 import { expect, test } from '@playwright/test';
-import {
-  copyPng,
-  copySvg,
-  PNG_COPIED,
-  PNG_FAILED,
-  SVG_COPIED,
-  SVG_FAILED,
-  type ClipboardSink,
-} from '../src/ui/clipboard-write';
+import { copyPng, copySvg, PNG_COPIED, PNG_FAILED, SVG_COPIED, SVG_FAILED, type ClipboardSink } from '../src/ui/clipboard-write';
 
 const g = globalThis as Record<string, unknown>;
 const saved = { item: Object.getOwnPropertyDescriptor(g, 'ClipboardItem'), nav: Object.getOwnPropertyDescriptor(g, 'navigator') };

@@ -16,10 +16,12 @@ const ui = (page: Page) => page.evaluate(() => JSON.parse(JSON.stringify(window.
 /** Текст тестовой командой; ждёт узел (шрифт грузится асинхронно). */
 async function createText(page: Page, x: number, y: number, text: string, size: number): Promise<void> {
   const before = (await live(page)).nodes;
-  await page.evaluate(
-    ({ x, y, text, size }) => window.__ferrum!.core!.send({ type: 'testCreateText', x, y, text, size }),
-    { x, y, text, size },
-  );
+  await page.evaluate(({ x, y, text, size }) => window.__ferrum!.core!.send({ type: 'testCreateText', x, y, text, size }), {
+    x,
+    y,
+    text,
+    size,
+  });
   await liveWhen(page, `l.nodes === ${before + 1} && l.busy === 0`);
 }
 
@@ -50,7 +52,9 @@ test('сводка, размер полем одним шагом, «Смеша�
 test('выбор шрифта: поиск, группы, начертание того же имени', async ({ page }) => {
   await openApp(page, 0);
   await createText(page, 0, 0, 'Шрифт', 24);
-  await page.evaluate(() => window.__ferrum!.core!.send({ type: 'setTextStyle', patch: { family: 'Inter', style: 'Bold' }, phase: 'commit' }));
+  await page.evaluate(() =>
+    window.__ferrum!.core!.send({ type: 'setTextStyle', patch: { family: 'Inter', style: 'Bold' }, phase: 'commit' }),
+  );
   await expect.poll(async () => (await ui(page)).textStyle.style.value).toBe('Bold');
   await section(page).getByRole('button', { name: 'Шрифт', exact: true }).click();
   const list = section(page).getByRole('listbox', { name: 'Шрифты' });
@@ -149,7 +153,12 @@ async function mixedLineHeight(page: Page): Promise<string[]> {
   const ids: string[] = (await ui(page)).layers.rows.map((r: { id: string }) => r.id);
   await page.evaluate(
     (id) =>
-      window.__ferrum!.core!.send({ type: 'setTextStyle', patch: { lineHeight: { unit: 'percent', value: 150 } }, phase: 'commit', ids: [id] }),
+      window.__ferrum!.core!.send({
+        type: 'setTextStyle',
+        patch: { lineHeight: { unit: 'percent', value: 150 } },
+        phase: 'commit',
+        ids: [id],
+      }),
     ids[0],
   );
   await page.evaluate((ids) => window.__ferrum!.core!.send({ type: 'select', ids, mode: 'replace' }), ids);
@@ -176,7 +185,9 @@ test('«Смешанный» интерлиньяж: фокус и уход, Esc
   await lh.fill('120%');
   await lh.press('Enter');
   await liveWhen(page, `l.steps === ${steps + 1}`);
-  await expect.poll(async () => (await ui(page)).textStyle.lineHeight).toMatchObject({ mixed: false, value: { unit: 'percent', value: 120 } });
+  await expect
+    .poll(async () => (await ui(page)).textStyle.lineHeight)
+    .toMatchObject({ mixed: false, value: { unit: 'percent', value: 120 } });
 });
 
 test('Enter, подтверждающий вариант IME, не применяет поле и не выбирает шрифт', async ({ page }) => {
@@ -206,7 +217,8 @@ test('«Смешанное» семейство: начертание выклю
   await createText(page, 0, 200, 'Второй', 24);
   const ids: string[] = (await ui(page)).layers.rows.map((r: { id: string }) => r.id);
   await page.evaluate(
-    (id) => window.__ferrum!.core!.send({ type: 'setTextStyle', patch: { family: 'Roboto', style: 'Regular' }, phase: 'commit', ids: [id] }),
+    (id) =>
+      window.__ferrum!.core!.send({ type: 'setTextStyle', patch: { family: 'Roboto', style: 'Regular' }, phase: 'commit', ids: [id] }),
     ids[0],
   );
   await page.evaluate((ids) => window.__ferrum!.core!.send({ type: 'select', ids, mode: 'replace' }), ids);

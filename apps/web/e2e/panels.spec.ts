@@ -31,7 +31,10 @@ test('@firefox заголовок секции сворачивает её, св
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await expect(exportSection.locator('[data-export-run]')).toHaveCount(0);
   // Другие секции не тронуты.
-  await expect(page.getByRole('region', { name: 'Страница' }).getByRole('button', { name: 'Страница' })).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('region', { name: 'Страница' }).getByRole('button', { name: 'Страница' })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  );
   // С клавиатуры: Enter по заголовку.
   await toggle.focus();
   await page.keyboard.press('Enter');
@@ -53,7 +56,10 @@ test('@firefox заголовок секции сворачивает её, св
 
   await expect.poll(() => stored(page)).toMatchObject({ collapsedSections: 'Экспорт\nПоложение' });
   await reload(page);
-  await expect(page.getByRole('region', { name: 'Экспорт' }).getByRole('button', { name: 'Экспорт', exact: true })).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('region', { name: 'Экспорт' }).getByRole('button', { name: 'Экспорт', exact: true })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  );
   expect(await warnings(page)).toEqual([]);
 });
 
@@ -195,9 +201,7 @@ test('@firefox сворачивание панели не оставляет л�
   const full = (await live(page)).viewportW;
   await collapse.click();
   await liveWhen(page, `l.viewportW === ${full + 200}`);
-  await expect
-    .poll(async () => (await page.screenshot({ clip })).equals(quiet), { timeout: 5000 })
-    .toBe(true);
+  await expect.poll(async () => (await page.screenshot({ clip })).equals(quiet), { timeout: 5000 }).toBe(true);
 });
 
 test('@firefox кнопка правой панели не налезает на «Масштаб» и «Поделиться» при минимальной ширине', async ({ page }) => {

@@ -1,4 +1,3 @@
-
 // Настройки и таблица раскладки: чтение с умолчаниями при мусоре и отказе
 // хранилища, тема по системе, группы и поиск команд, браузерные сочетания,
 // конфликты, запись сочетания.
@@ -41,8 +40,18 @@ function memory(): Storage {
 
 test('старые настройки без вида экрана файлов читаются: вид — сетка; запись части не затирает остальное', () => {
   const s = memory();
-  s.setItem(SETTINGS_KEY, JSON.stringify({ theme: 'light', pixelSnap: false, keymap: '', leftWidth: 300, rightWidth: 248, pagesOpen: false }));
-  expect(loadSettings(s)).toEqual({ ...DEFAULT_SETTINGS, theme: 'light', pixelSnap: false, leftWidth: 300, pagesOpen: false, filesView: 'grid' });
+  s.setItem(
+    SETTINGS_KEY,
+    JSON.stringify({ theme: 'light', pixelSnap: false, keymap: '', leftWidth: 300, rightWidth: 248, pagesOpen: false }),
+  );
+  expect(loadSettings(s)).toEqual({
+    ...DEFAULT_SETTINGS,
+    theme: 'light',
+    pixelSnap: false,
+    leftWidth: 300,
+    pagesOpen: false,
+    filesView: 'grid',
+  });
   expect(updateSettings(s, { filesView: 'list' })).toBe(true);
   expect(loadSettings(s)).toMatchObject({ theme: 'light', leftWidth: 300, filesView: 'list' });
   s.setItem(SETTINGS_KEY, JSON.stringify({ filesView: 'плитка' }));
@@ -161,7 +170,15 @@ test('запись сочетания: AltGr на Windows/Linux отклоняе
 });
 
 test('запись сочетания: Tab и буфер обмена не сработают никогда', () => {
-  const k = (code: string, mods: object = {}) => ({ code, key: '', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });
+  const k = (code: string, mods: object = {}) => ({
+    code,
+    key: '',
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    metaKey: false,
+    ...mods,
+  });
   expect(recordKey(k('Tab'), 'windows')).toEqual({ kind: 'never' });
   expect(recordKey(k('Tab', { shiftKey: true }), 'mac')).toEqual({ kind: 'never' });
   expect(recordKey(k('KeyC', { ctrlKey: true }), 'windows')).toEqual({ kind: 'never' });
@@ -207,7 +224,9 @@ test('холст темы: одно значение в интерфейсе, т
   for (const theme of ['dark', 'light'] as const) {
     const block = css.slice(css.indexOf(theme === 'dark' ? ":root[data-theme='dark']" : ":root[data-theme='light']"));
     expect(block.match(/--canvas:\s*(#[0-9a-f]{6});/)![1] + 'ff').toBe(THEME_CANVAS[theme]);
-    const m = new RegExp(`CANVAS_${theme.toUpperCase()}: Rgba = Rgba::new\\(\\[(\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, 1\\.0\\]\\)`).exec(rs)!;
+    const m = new RegExp(
+      `CANVAS_${theme.toUpperCase()}: Rgba = Rgba::new\\(\\[(\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, (\\d+)\\.0 / 255\\.0, 1\\.0\\]\\)`,
+    ).exec(rs)!;
     expect(hex(+m[1], +m[2], +m[3])).toBe(THEME_CANVAS[theme]);
   }
 });
@@ -401,7 +420,7 @@ test('предел раскладки — в байтах UTF-8', () => {
 /** Запасная запись несохранённых полей в `localStorage`. */
 const PENDING = 'ferrum.settings.pending';
 
-test('запись настроек не дошла (вкладку закрыли раньше worker\'а) — поля из запасной записи при следующем запуске', async () => {
+test("запись настроек не дошла (вкладку закрыли раньше worker'а) — поля из запасной записи при следующем запуске", async () => {
   const legacy = memory();
   const f = fakeBackend({ theme: 'dark' });
   const s = await openSettings(f.backend, legacy);

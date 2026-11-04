@@ -265,8 +265,7 @@ function KeymapTab() {
     ed.send({ type: 'importKeymap', json });
   };
 
-  const focusAdd = (command: string) =>
-    root.querySelector<HTMLElement>(`[data-add="${CSS.escape(command)}"]`)?.focus();
+  const focusAdd = (command: string) => root.querySelector<HTMLElement>(`[data-add="${CSS.escape(command)}"]`)?.focus();
   // Убранное сочетание уносит кнопку с фокусом: фокус — соседнему сочетанию или на «+».
   const removeBinding = (c: KeymapEntry, b: string) => {
     const i = c.bindings.indexOf(b);
@@ -438,9 +437,7 @@ function KeymapTab() {
         </button>
         <button
           class="fe-btn fe-btn--secondary"
-          onClick={() =>
-            downloadBytes('ferrum-keymap.json', new TextEncoder().encode(km().overrides || EMPTY_KEYMAP), 'application/json')
-          }
+          onClick={() => downloadBytes('ferrum-keymap.json', new TextEncoder().encode(km().overrides || EMPTY_KEYMAP), 'application/json')}
         >
           <Icon name="download" />
           Экспорт

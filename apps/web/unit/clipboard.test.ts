@@ -59,7 +59,9 @@ test('вставка из асинхронного API: свой формат, �
   });
   const marked = encodeText(new Uint8Array([5]));
   expect(await fromClipboardItems([item({ 'text/plain': new Blob([marked]) })])).toEqual({ kind: 'text', text: marked });
-  expect(await fromClipboardItems([item({ 'text/plain': new Blob(['hello']), 'image/jpeg': new Blob([new Uint8Array([255])]) })])).toMatchObject({
+  expect(
+    await fromClipboardItems([item({ 'text/plain': new Blob(['hello']), 'image/jpeg': new Blob([new Uint8Array([255])]) })]),
+  ).toMatchObject({
     kind: 'image',
     type: 'image/jpeg',
   });

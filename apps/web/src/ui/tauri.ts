@@ -289,8 +289,7 @@ async function filesScreen(s: TauriFileStore): Promise<true | string> {
   const png = Uint8Array.from(atob(PNG_1PX), (c) => c.charCodeAt(0));
   await s.write(m.id, new Uint8Array([1, 2, 3]).buffer, png.buffer, m.version, null);
   location.hash = '#/';
-  const shown = () =>
-    [...document.querySelectorAll('img')].some((i) => i.src.startsWith('blob:') && i.complete && i.naturalWidth > 0);
+  const shown = () => [...document.querySelectorAll('img')].some((i) => i.src.startsWith('blob:') && i.complete && i.naturalWidth > 0);
   const t0 = performance.now();
   while (performance.now() - t0 < 15_000 && !shown()) await sleep(100);
   if (!shown()) return 'превью на экране файлов не показано';
@@ -349,6 +348,15 @@ export async function runSmoke(): Promise<void> {
   // События нарушений CSP приходят асинхронно — дать им дойти.
   await sleep(300);
   await invoke<null>('smoke_done', {
-    report: { ready: isReady, isolated: crossOriginIsolated, files, ...round, screen, csp, cspActive: cspActive(), ms: Math.round(performance.now() - t0) },
+    report: {
+      ready: isReady,
+      isolated: crossOriginIsolated,
+      files,
+      ...round,
+      screen,
+      csp,
+      cspActive: cspActive(),
+      ms: Math.round(performance.now() - t0),
+    },
   });
 }

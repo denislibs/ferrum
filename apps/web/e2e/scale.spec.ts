@@ -55,7 +55,10 @@ test('поле «Масштаб»: 50 % вокруг центра, точка р
   await styledRect(page);
   const toolbar = page.getByRole('toolbar', { name: 'Инструменты' });
   await toolbar.getByRole('button', { name: 'Инструменты перемещения' }).click();
-  await page.getByRole('menu', { name: 'Инструменты перемещения' }).getByRole('menuitemcheckbox', { name: /Масштабирование/ }).click();
+  await page
+    .getByRole('menu', { name: 'Инструменты перемещения' })
+    .getByRole('menuitemcheckbox', { name: /Масштабирование/ })
+    .click();
   await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.tool)).toBe('scale');
   const s0 = await summary(page);
   // Точка — центр: из левого верхнего угла стрелками вправо и вниз.

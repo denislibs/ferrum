@@ -24,20 +24,21 @@ const SIMD = ['-C', 'target-feature=+simd128'];
 // Каталог сборки — уже абсолютный: cargo считает относительный CARGO_TARGET_DIR от
 // корня репозитория (cwd ниже), а этот скрипт — от текущего каталога.
 const env = { ...process.env, CARGO_TARGET_DIR: target };
-for (const [name, sep] of [['CARGO_ENCODED_RUSTFLAGS', '\x1f'], ['RUSTFLAGS', ' ']]) {
+for (const [name, sep] of [
+  ['CARGO_ENCODED_RUSTFLAGS', '\x1f'],
+  ['RUSTFLAGS', ' '],
+]) {
   const value = env[name];
   if (value === undefined || value.includes('+simd128')) continue;
   console.warn(`${name} задан («${value}»): cargo не возьмёт флаги из .cargo/config.toml, SIMD128 дописан.`);
   env[name] = value.trim() === '' ? SIMD.join(sep) : [value, ...SIMD].join(sep);
 }
-execFileSync(
-  'cargo',
-  ['build', '--release', '--locked', '--target', 'wasm32-unknown-unknown', '-p', 'ferrum-wasm'],
-  { cwd: root, stdio: 'inherit', env },
-);
-execFileSync(
-  'wasm-bindgen',
-  ['--target', 'web', '--out-dir', out, path.join(target, 'wasm32-unknown-unknown/release/ferrum_wasm.wasm')],
-  { stdio: 'inherit' },
-);
+execFileSync('cargo', ['build', '--release', '--locked', '--target', 'wasm32-unknown-unknown', '-p', 'ferrum-wasm'], {
+  cwd: root,
+  stdio: 'inherit',
+  env,
+});
+execFileSync('wasm-bindgen', ['--target', 'web', '--out-dir', out, path.join(target, 'wasm32-unknown-unknown/release/ferrum_wasm.wasm')], {
+  stdio: 'inherit',
+});
 console.log(`ядро собрано: ${path.relative(process.cwd(), out)}`);

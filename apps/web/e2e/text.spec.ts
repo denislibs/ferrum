@@ -15,10 +15,12 @@ test.afterEach(async ({ page }) => {
 /** Текст в точке мира; ждёт узел в сцене (шрифты грузятся асинхронно). */
 async function createText(page: Page, x: number, y: number, text: string, font?: { family: string; style: string }): Promise<void> {
   const before = (await live(page)).nodes;
-  await page.evaluate(
-    ({ x, y, text, font }) => window.__ferrum!.core!.send({ type: 'testCreateText', x, y, text, size: 64, font }),
-    { x, y, text, font },
-  );
+  await page.evaluate(({ x, y, text, font }) => window.__ferrum!.core!.send({ type: 'testCreateText', x, y, text, size: 64, font }), {
+    x,
+    y,
+    text,
+    font,
+  });
   await liveWhen(page, `l.nodes === ${before + 1} && l.busy === 0`);
 }
 
@@ -38,7 +40,7 @@ async function darkPixels(page: Page, at: { x: number; y: number }, size: number
   }, png);
 }
 
-test('текст рисуется вшитым Inter, загруженным worker\'ом ядра @firefox', async ({ page }) => {
+test("текст рисуется вшитым Inter, загруженным worker'ом ядра @firefox", async ({ page }) => {
   const fonts: string[] = [];
   page.on('request', (r) => {
     if (r.url().includes('/fonts/')) fonts.push(new URL(r.url()).pathname);
@@ -99,7 +101,18 @@ test('системные шрифты Chrome: «Показать системн�
   await context.grantPermissions(['local-fonts']);
   const family = await page.evaluate(async () => {
     const all = await (window as unknown as { queryLocalFonts: () => Promise<{ family: string; style: string }[]> }).queryLocalFonts();
-    const bundled = ['Inter', 'Onest', 'Roboto', 'Open Sans', 'Montserrat', 'PT Sans', 'PT Serif', 'Noto Sans', 'JetBrains Mono', 'Playfair Display'];
+    const bundled = [
+      'Inter',
+      'Onest',
+      'Roboto',
+      'Open Sans',
+      'Montserrat',
+      'PT Sans',
+      'PT Serif',
+      'Noto Sans',
+      'JetBrains Mono',
+      'Playfair Display',
+    ];
     return all.find((f) => f.style === 'Regular' && !bundled.includes(f.family))?.family ?? null;
   });
   test.skip(family === null, 'в системе нет шрифтов, кроме вшитых');

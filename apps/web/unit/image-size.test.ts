@@ -26,7 +26,18 @@ test('WebP: VP8, VP8L, VP8X', () => {
   const w = 99;
   const h = 49;
   const bits = w | (h << 14);
-  const vp8l = new Uint8Array([...head('VP8L'), 0x2f, bits & 0xff, (bits >> 8) & 0xff, (bits >> 16) & 0xff, (bits >> 24) & 0xff, 0, 0, 0, 0]);
+  const vp8l = new Uint8Array([
+    ...head('VP8L'),
+    0x2f,
+    bits & 0xff,
+    (bits >> 8) & 0xff,
+    (bits >> 16) & 0xff,
+    (bits >> 24) & 0xff,
+    0,
+    0,
+    0,
+    0,
+  ]);
   expect(imageSize(vp8l)).toEqual({ width: 100, height: 50, type: 'webp' });
   const vp8x = new Uint8Array([...head('VP8X'), 0, 0, 0, 0, 0x3f, 0x1f, 0, 0x0f, 0x27, 0]);
   expect(imageSize(vp8x)).toEqual({ width: 8000, height: 10000, type: 'webp' });

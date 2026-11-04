@@ -31,7 +31,11 @@ const c = (key: string): MenuItemDto => ({ type: 'command', key });
 const sep: MenuItemDto = { type: 'separator' };
 const tree: MenuItemDto[] = [
   { type: 'submenu', title: 'Файл', items: [c('ui.new_file'), c('ui.open_disk'), sep, c('file.save'), c('ui.save_disk')] },
-  { type: 'submenu', title: 'Правка', items: [c('edit.duplicate'), { type: 'submenu', title: 'Копировать как', items: [c('edit.copy_png')] }] },
+  {
+    type: 'submenu',
+    title: 'Правка',
+    items: [c('edit.duplicate'), { type: 'submenu', title: 'Копировать как', items: [c('edit.copy_png')] }],
+  },
   { type: 'submenu', title: 'Расставить', items: [c('arrange.front')] },
   { type: 'submenu', title: 'Пусто', items: [c('ui.unknown')] },
 ];

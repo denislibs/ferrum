@@ -38,4 +38,3 @@ export function filesWindow(scrollTop: number, height: number, l: FilesLayout): 
   const last = Math.ceil((scrollTop + Math.max(height, l.rowH)) / l.rowH) + OVERSCAN;
   return { start: first * l.cols, count: Math.min(MAX_WINDOW, (last - first) * l.cols) };
 }
-

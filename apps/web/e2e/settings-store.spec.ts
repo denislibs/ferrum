@@ -16,7 +16,10 @@ test('перенос из localStorage: один раз, прежняя запи
   });
   await page.goto('/');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  await expect(page.getByRole('radiogroup', { name: 'Вид' }).getByRole('radio', { name: 'Список' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByRole('radiogroup', { name: 'Вид' }).getByRole('radio', { name: 'Список' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
   expect(await stored(page)).toMatchObject({ theme: 'light', filesView: 'list', pixelSnap: false });
   expect(await page.evaluate(() => [localStorage.getItem('ferrum.settings.v1'), localStorage.getItem('ferrum.theme')])).toEqual([
     null,
@@ -81,7 +84,16 @@ test('база версии 2 обновляется до 3: файлы, бай�
           const id = crypto.randomUUID();
           const now = Date.now();
           const tx = d.transaction(['meta', 'bytes', 'thumbs', 'journal'], 'readwrite');
-          tx.objectStore('meta').put({ id, name: 'Старый файл', createdAt: now, editedAt: now, openedAt: now, size: 8, thumbVersion: 1, version: 1 });
+          tx.objectStore('meta').put({
+            id,
+            name: 'Старый файл',
+            createdAt: now,
+            editedAt: now,
+            openedAt: now,
+            size: 8,
+            thumbVersion: 1,
+            version: 1,
+          });
           tx.objectStore('bytes').put(new Uint8Array(8).fill(7).buffer, id);
           tx.objectStore('thumbs').put(new Blob([new Uint8Array(5)], { type: 'image/png' }), id);
           tx.objectStore('journal').put(new Uint8Array(3).buffer, [id, 1, 0]);

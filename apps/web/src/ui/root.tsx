@@ -271,7 +271,13 @@ export function Root() {
 
   return (
     <Switch>
-      <Match when={(() => { const v = view(); return v.kind === 'access' ? v : null; })()} keyed>
+      <Match
+        when={(() => {
+          const v = view();
+          return v.kind === 'access' ? v : null;
+        })()}
+        keyed
+      >
         {(v) => (
           <ConfirmDialog
             title="Разрешить доступ к файлу на диске?"
@@ -292,7 +298,13 @@ export function Root() {
           navigate={navigate}
         />
       </Match>
-      <Match when={(() => { const v = view(); return v.kind === 'editor' ? v : null; })()} keyed>
+      <Match
+        when={(() => {
+          const v = view();
+          return v.kind === 'editor' ? v : null;
+        })()}
+        keyed
+      >
         {(v) => (
           <App
             file={v.file}

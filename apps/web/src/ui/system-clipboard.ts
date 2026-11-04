@@ -106,9 +106,7 @@ export function installClipboard(ed: Editor): () => void {
       else writeViaWorker(e.bytes, cut);
       return;
     }
-    writer({ [FERRUM_MIME]: new Blob([e.bytes as BlobPart], { type: FERRUM_MIME }) }).catch(() =>
-      writeViaWorker(e.bytes, cut),
-    );
+    writer({ [FERRUM_MIME]: new Blob([e.bytes as BlobPart], { type: FERRUM_MIME }) }).catch(() => writeViaWorker(e.bytes, cut));
   };
 
   /** Асинхронное чтение (Chromium может спросить разрешение). `quiet` — вставка
@@ -261,9 +259,7 @@ export function installClipboard(ed: Editor): () => void {
           }
           ed.send({ type: 'placeImage', bytes: await fileBytes(f) });
         })
-        .catch((err: unknown) =>
-          toast(`Не удалось выбрать изображение: ${err instanceof Error ? err.message : String(err)}`),
-        );
+        .catch((err: unknown) => toast(`Не удалось выбрать изображение: ${err instanceof Error ? err.message : String(err)}`));
     }
   });
   return () => {

@@ -1,4 +1,3 @@
-
 // Настройки: переназначить сочетание и пользоваться им (по физической клавише),
 // конфликт с заменой, сочетания браузера, сброс, импорт и экспорт, тема,
 // привязка к пикселям, сохранение между запусками.
@@ -61,7 +60,11 @@ test('импорт, экспорт и предупреждение о сочет
   await openApp(page);
   const mod = await page.evaluate(() => (navigator.platform.toLowerCase().startsWith('mac') ? 'Meta' : 'Ctrl'));
   const dialog = await openSettings(page);
-  const json = JSON.stringify({ format: 'ferrum-keymap', version: 1, overrides: { 'edit.duplicate': [`${mod}+KeyW`], 'tool.slice': ['KeyS'] } });
+  const json = JSON.stringify({
+    format: 'ferrum-keymap',
+    version: 1,
+    overrides: { 'edit.duplicate': [`${mod}+KeyW`], 'tool.slice': ['KeyS'] },
+  });
   await dialog.locator('input[type=file]').setInputFiles({ name: 'keys.json', mimeType: 'application/json', buffer: Buffer.from(json) });
   await expect(page.getByRole('status').filter({ hasText: /Раскладка импортирована, пропущено: 1/ })).toBeVisible();
   const row = dialog.getByRole('row').filter({ hasText: 'Дублировать' });
@@ -161,9 +164,7 @@ test('тема: светлая — токены, панели, холст и ф�
 });
 
 test('светлая тема: интерфейс и холст при запуске, без тёмной вспышки', async ({ page }) => {
-  await page.addInitScript(() =>
-    localStorage.setItem('ferrum.settings.v1', JSON.stringify({ theme: 'light', pixelSnap: true })),
-  );
+  await page.addInitScript(() => localStorage.setItem('ferrum.settings.v1', JSON.stringify({ theme: 'light', pixelSnap: true })));
   await openApp(page, 100);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   const at = await cornerPixel(page);
@@ -319,7 +320,10 @@ test('запись сочетания: все клавиши — записи, �
 });
 
 test('AltGr: на Windows сочетание с ним отклоняется, на macOS игнорируется', async ({ page }) => {
-  for (const [platform, accepted] of [['Win32', false], ['MacIntel', true]] as const) {
+  for (const [platform, accepted] of [
+    ['Win32', false],
+    ['MacIntel', true],
+  ] as const) {
     await page.addInitScript((p) => Object.defineProperty(navigator, 'platform', { get: () => p, configurable: true }), platform);
     await openApp(page);
     const dialog = await openSettings(page);
@@ -327,7 +331,15 @@ test('AltGr: на Windows сочетание с ним отклоняется, �
     await dialog.getByRole('button', { name: 'Добавить сочетание для «Эллипс»' }).click();
     await page.evaluate(() =>
       window.dispatchEvent(
-        new KeyboardEvent('keydown', { code: 'KeyQ', key: '@', ctrlKey: true, altKey: true, modifierAltGraph: true, bubbles: true, cancelable: true }),
+        new KeyboardEvent('keydown', {
+          code: 'KeyQ',
+          key: '@',
+          ctrlKey: true,
+          altKey: true,
+          modifierAltGraph: true,
+          bubbles: true,
+          cancelable: true,
+        }),
       ),
     );
     if (accepted) {
@@ -406,7 +418,9 @@ test('сохранённая раскладка применяется при з
 
   // Свой контекст: хранилище первой страницы (её отложенная запись) не должно подменить значение.
   const bad = await (await browser.newContext({ baseURL: 'http://localhost:4173', viewport: { width: 1280, height: 720 } })).newPage();
-  await bad.addInitScript(() => localStorage.setItem('ferrum.settings.v1', JSON.stringify({ keymap: '{"format":"чужой"}', theme: 'light' })));
+  await bad.addInitScript(() =>
+    localStorage.setItem('ferrum.settings.v1', JSON.stringify({ keymap: '{"format":"чужой"}', theme: 'light' })),
+  );
   await openApp(bad);
   await expect(bad.getByRole('status').filter({ hasText: 'Не удалось импортировать раскладку' })).toHaveCount(1);
   // Тема из того же значения не пострадала, а испорченная раскладка из хранилища ушла.
@@ -480,7 +494,7 @@ test('фокус остаётся на строке после записи, у�
   await expect(add).toBeFocused();
   // × у Q: фокус на соседнем сочетании (R), затем «+».
   await dialog.getByRole('button', { name: /Убрать Q у команды «Прямоугольник»/ }).click();
-  await expect(dialog.getByRole('button', { name: /Убрать Q /})).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: /Убрать Q / })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: /Убрать R у команды «Прямоугольник»/ })).toBeFocused();
   // Сбросить: «Сбросить» исчезает, фокус — на «+».
   await add.click();
