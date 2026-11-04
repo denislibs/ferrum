@@ -1,6 +1,8 @@
 // Настройки сервера из окружения (`.env`, образец — `.env.example`). Неверное — отказ при
 // запуске со всем списком сразу, а не ошибка на первом запросе.
 
+import { proxyProblem } from './client-ip';
+
 export interface Config {
   port: number;
   publicUrl: string;
@@ -15,8 +17,8 @@ export interface Config {
   dataDir: string;
   /** Собранный `apps/web`. */
   webDist: string;
-  /** За обратным прокси: адрес клиента из `X-Forwarded-For`, иначе — адрес соединения. */
-  trustProxy: boolean;
+  /** Адреса обратных прокси (точные и IPv4 CIDR): только от них верим `X-Forwarded-For`. */
+  trustedProxies: string[];
 }
 
 const MIN_SECRET_CHARS = 32;
@@ -34,6 +36,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (publicUrl && !/^https?:\/\/[^/]+$/.test(publicUrl)) problems.push('PUBLIC_URL должен быть вида https://адрес, без пути');
   const port = Number(env.FERRUM_PORT ?? 8090);
   if (!Number.isInteger(port) || port < 0 || port > 65535) problems.push('FERRUM_PORT — неверный порт');
+  const trustedProxies = (env.TRUSTED_PROXIES ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const entry of trustedProxies) {
+    const problem = proxyProblem(entry);
+    if (problem) problems.push(`TRUSTED_PROXIES: ${problem}`);
+  }
   const config: Config = {
     port,
     publicUrl,
@@ -48,7 +58,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .filter(Boolean),
     dataDir: env.FERRUM_DATA_DIR ?? '/data',
     webDist: env.FERRUM_WEB_DIST ?? '/app/web',
-    trustProxy: env.TRUST_PROXY === '1',
+    trustedProxies,
   };
   if (problems.length > 0) throw new Error(`Настройки сервера: ${problems.join('; ')}`);
   return config;

@@ -6,7 +6,8 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - '${FERRUM_PORT:-8090}:8090'
+      # Только эта машина: снаружи — через обратный прокси или `FERRUM_BIND`, см. docs/running.md.
+      - '${FERRUM_BIND:-127.0.0.1}:${FERRUM_PORT:-8090}:8090'
     environment:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?задайте BETTER_AUTH_SECRET в .env, образец — .env.example}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8090}
@@ -15,7 +16,7 @@ services:
       SMTP_URL: ${SMTP_URL:-smtp://mailpit:1025}
       MAIL_FROM: ${MAIL_FROM:-Ferrum <ferrum@localhost>}
       ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
-      TRUST_PROXY: ${TRUST_PROXY:-0}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     volumes:
       - ferrum-data:/data
     depends_on:

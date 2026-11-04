@@ -13,7 +13,7 @@ export interface AppDeps {
   webDist: string;
   auth: Auth;
   publicUrl: string;
-  trustProxy: boolean;
+  trustedProxies: readonly string[];
 }
 
 /** Проверка не должна висеть дольше проверки контейнера. */

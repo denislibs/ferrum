@@ -17,6 +17,7 @@ import {
   type SessionResponse,
 } from '@ferrum/protocol';
 import { CLIENT_IP_HEADER, type Auth } from './auth';
+import { clientIp, proxyMatcher } from './client-ip';
 
 /** Запросы входа маленькие: всё, что больше, отвергается, не дочитываясь. */
 const MAX_BODY_BYTES = 4096;
@@ -45,24 +46,16 @@ async function readJson(req: Request): Promise<unknown> {
   }
 }
 
-/** Адрес клиента для счётчиков частоты. Чужому заголовку верим только за своим прокси:
- * последний адрес в `X-Forwarded-For` дописал он, остальные мог прислать кто угодно. */
-export function clientIp(req: Request, peer: string | undefined, trustProxy: boolean): string {
-  if (trustProxy) {
-    const last = req.headers.get('x-forwarded-for')?.split(',').at(-1)?.trim();
-    if (last) return last;
-  }
-  return peer ?? 'unknown';
-}
-
 export interface AuthRoutesDeps {
   auth: Auth;
   publicUrl: string;
-  trustProxy: boolean;
+  /** Адреса обратных прокси, см. `client-ip.ts`. */
+  trustedProxies: readonly string[];
 }
 
 export function authRoutes(deps: AuthRoutesDeps) {
   const { auth, publicUrl } = deps;
+  const trusted = proxyMatcher(deps.trustedProxies);
 
   /** Запрос к Better Auth от имени клиента: только нужные заголовки и адрес, поставленный сервером. */
   function inner(req: Request, ip: string, path: string, init: { method: string; body?: unknown }): Promise<Response> {
@@ -164,7 +157,7 @@ export function authRoutes(deps: AuthRoutesDeps) {
   }
 
   return async function handle(req: Request, peer: string | undefined): Promise<Response> {
-    const ip = clientIp(req, peer, deps.trustProxy);
+    const ip = clientIp(req, peer, trusted);
     const path = new URL(req.url).pathname;
     if (req.method === 'GET' && path === API_SESSION) return session(req, ip);
     const post: Record<string, (req: Request, ip: string) => Promise<Response>> = {

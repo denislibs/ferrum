@@ -29,7 +29,7 @@ const auth = createAuth({
   allowedEmails: config.allowedEmails,
 });
 const server = startServer(
-  { pool, valkey, webDist: config.webDist, auth, publicUrl: config.publicUrl, trustProxy: config.trustProxy },
+  { pool, valkey, webDist: config.webDist, auth, publicUrl: config.publicUrl, trustedProxies: config.trustedProxies },
   config.port,
 );
 console.log(`Ferrum слушает порт ${server.port}`);

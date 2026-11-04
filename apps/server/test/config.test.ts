@@ -15,8 +15,13 @@ test('разбирает окружение: умолчания, список а
   expect(c.port).toBe(8090);
   expect(c.publicUrl).toBe('http://localhost:8090');
   expect(c.allowedEmails).toEqual(['ivan@x.ru', 'y.ru']);
-  expect(c.trustProxy).toBe(false);
-  expect(loadConfig({ ...ENV, TRUST_PROXY: '1', FERRUM_PORT: '0' })).toMatchObject({ trustProxy: true, port: 0 });
+  expect(c.trustedProxies).toEqual([]);
+  expect(loadConfig({ ...ENV, TRUSTED_PROXIES: ' 10.0.0.0/8, ::ffff:172.18.0.1 ,,', FERRUM_PORT: '0' })).toMatchObject({
+    trustedProxies: ['10.0.0.0/8', '::ffff:172.18.0.1'],
+    port: 0,
+  });
+  // Прежний флаг больше ни на что не влияет: заголовку верим только по списку.
+  expect(loadConfig({ ...ENV, TRUST_PROXY: '1' }).trustedProxies).toEqual([]);
   expect(loadConfig(ENV).allowedEmails).toEqual([]);
 });
 
@@ -27,4 +32,7 @@ test('неверные настройки: отказ со всем списко
   expect(() => loadConfig({ ...ENV, BETTER_AUTH_SECRET: 'short' })).toThrow('короче 32');
   expect(() => loadConfig({ ...ENV, PUBLIC_URL: 'http://x/path' })).toThrow('без пути');
   expect(() => loadConfig({ ...ENV, FERRUM_PORT: 'abc' })).toThrow('неверный порт');
+  expect(() => loadConfig({ ...ENV, TRUSTED_PROXIES: 'прокси,0.0.0.0/0' })).toThrow(
+    /TRUSTED_PROXIES: «прокси».*TRUSTED_PROXIES: «0\.0\.0\.0\/0»/,
+  );
 });

@@ -18,7 +18,7 @@ const pool = testPool();
 const valkey = await connectValkey(TEST_VALKEY_URL);
 const publicUrl = 'http://localhost:1';
 const auth = createAuth({ publicUrl, secret: TEST_SECRET, pool, valkey, mailer: { send: async () => {} }, allowedEmails: [] });
-const deps = { valkey, webDist: web, auth, publicUrl, trustProxy: false };
+const deps = { valkey, webDist: web, auth, publicUrl, trustedProxies: [] as string[] };
 const server = startServer({ ...deps, pool }, 0);
 const url = (p: string) => `http://127.0.0.1:${server.port}${p}`;
 afterAll(async () => {

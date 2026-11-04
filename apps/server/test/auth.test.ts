@@ -28,7 +28,7 @@ afterAll(async () => {
 });
 
 /** Настоящий сервер на свободном порту; `PUBLIC_URL` совпадает с его адресом, как на стенде. */
-function stand(over: Partial<AuthDeps> = {}, trustProxy = false) {
+function stand(over: Partial<AuthDeps> = {}, trustedProxies: string[] = []) {
   const server = Bun.serve({ port: 0, fetch: () => new Response() });
   const port = server.port!;
   server.stop(true);
@@ -43,7 +43,7 @@ function stand(over: Partial<AuthDeps> = {}, trustProxy = false) {
     ...over,
   };
   const auth = createAuth(deps);
-  const app = startServer({ pool, valkey, webDist: '/nonexistent', auth, publicUrl, trustProxy }, port);
+  const app = startServer({ pool, valkey, webDist: '/nonexistent', auth, publicUrl, trustedProxies }, port);
   stops.push(() => app.stop(true));
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     fetch(`${publicUrl}${path}`, {
@@ -329,8 +329,31 @@ test('ограничение: не больше 20 писем на IP в час,
   expect(mails).toHaveLength(MAILS_PER_IP);
 });
 
-test('за своим прокси адрес клиента — последний в X-Forwarded-For', async () => {
-  const s = stand({}, true);
+/** Этот тест ходит на `localhost`: соединение придёт с одного из этих адресов. */
+const LOOPBACK = ['127.0.0.1', '::1'];
+
+test('адрес не из TRUSTED_PROXIES: X-Forwarded-For не влияет на счётчик', async () => {
+  const s = stand({}, ['192.0.2.1']);
+  for (let i = 0; i < MAILS_PER_IP; i++) {
+    const res = await s.post('/api/auth/sign-in/magic-link', { email: `u${i}@example.com` }, { 'x-forwarded-for': `1.1.1.${i}` });
+    expect(res.status).toBe(200);
+  }
+  const over = await s.post('/api/auth/sign-in/magic-link', { email: 'x@example.com' }, { 'x-forwarded-for': '1.1.1.200' });
+  expect(over.status).toBe(429);
+});
+
+test('цепочка из двух прокси: у каждого клиента свой счётчик, подмена слева не помогает', async () => {
+  const s = stand({}, [...LOOPBACK, '10.0.0.0/8']);
+  const send = (i: number, xff: string) =>
+    s.post('/api/auth/sign-in/magic-link', { email: `u${i}@example.com` }, { 'x-forwarded-for': xff });
+  // Клиент каждый раз подставляет новый адрес слева: настоящий у него один.
+  for (let i = 0; i < MAILS_PER_IP; i++) expect((await send(i, `6.6.6.${i}, 1.1.1.1, 10.0.0.1`)).status).toBe(200);
+  expect((await send(100, '6.6.6.200, 1.1.1.1, 10.0.0.2')).status).toBe(429);
+  expect((await send(101, '1.1.1.2, 10.0.0.1')).status).toBe(200);
+});
+
+test('за своим прокси адрес клиента — первый справа не из списка', async () => {
+  const s = stand({}, LOOPBACK);
   for (let i = 0; i < MAILS_PER_IP; i++) {
     expect(
       (await s.post('/api/auth/sign-in/magic-link', { email: `u${i}@example.com` }, { 'x-forwarded-for': `1.1.1.${i}, 10.0.0.1` })).status,
