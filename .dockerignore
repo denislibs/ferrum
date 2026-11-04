@@ -4,7 +4,8 @@
 target
 docs
 .git
-.env
+**/.env*
+.claude
 .superpowers
 apps/web/src/wasm
 apps/web/test-results

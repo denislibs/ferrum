@@ -6,13 +6,15 @@ import { Pool } from 'pg';
 import { startServer } from '../src/app';
 import { createAuth } from '../src/auth';
 import { connectValkey, valkeyAlive } from '../src/valkey';
-import { TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
+import { TEST_DATABASE_URL, TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
 
 const web = mkdtempSync(join(tmpdir(), 'ferrum-web-'));
 mkdirSync(join(web, 'assets'));
 writeFileSync(join(web, 'index.html'), '<title>Ferrum</title>');
 writeFileSync(join(web, 'assets/main-abc.js'), 'export {}');
 writeFileSync(join(web, 'assets/core.wasm'), new Uint8Array([0, 97, 115, 109]));
+mkdirSync(join(web, 'fonts'));
+writeFileSync(join(web, 'fonts/inter.woff2'), new Uint8Array(1024));
 
 const pool = testPool();
 const valkey = await connectValkey(TEST_VALKEY_URL);
@@ -134,4 +136,117 @@ test('статика: чужой адрес — 404, за каталог не в
   const head = await fetch(url('/'), { method: 'HEAD' });
   expect(head.status).toBe(200);
   expect(await head.text()).toBe('');
+});
+
+test('статика: `\\0` в адресе — 404, а не сбой сервера', async () => {
+  for (const path of ['/%00', '/index.html%00', '/index.html%00.png', '/assets/%00']) {
+    const res = await fetch(url(path));
+    expect([path, res.status]).toEqual([path, 404]);
+    expectIsolated(res);
+  }
+});
+
+test('статика: «навсегда» только файлы каталога `assets`, какой бы путь ни прислали', async () => {
+  const res = await fetch(url('/assets/..%2findex.html'));
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain('<title>Ferrum</title>');
+  expect(res.headers.get('cache-control')).toBe('no-cache');
+  expect((await fetch(url('/assets%2fmain-abc.js'))).headers.get('cache-control')).toContain('immutable');
+});
+
+test('статика: файл не изменился — 304 без тела, шрифт не качается заново', async () => {
+  const first = await fetch(url('/fonts/inter.woff2'));
+  expect(first.status).toBe(200);
+  expect(first.headers.get('cache-control')).toBe('no-cache');
+  const etag = first.headers.get('etag')!;
+  const modified = first.headers.get('last-modified')!;
+  expect(etag).toMatch(/^"[0-9a-z-]+"$/);
+  expect(new Date(modified).getTime()).not.toBeNaN();
+  expect((await first.arrayBuffer()).byteLength).toBe(1024);
+
+  const asked: Record<string, string>[] = [
+    { 'if-none-match': etag },
+    { 'if-none-match': `"other", W/${etag}` },
+    { 'if-none-match': '*' },
+    { 'if-modified-since': modified },
+  ];
+  for (const headers of asked) {
+    const same = await fetch(url('/fonts/inter.woff2'), { headers });
+    expect([headers, same.status]).toEqual([headers, 304]);
+    expect(await same.text()).toBe('');
+    expect(same.headers.get('etag')).toBe(etag);
+    expect(same.headers.get('cache-control')).toBe('no-cache');
+    expectIsolated(same);
+  }
+  const head = await fetch(url('/fonts/inter.woff2'), { method: 'HEAD', headers: { 'if-none-match': etag } });
+  expect(head.status).toBe(304);
+
+  // Другая версия у браузера: файл целиком. `If-None-Match` главнее даты.
+  const stale: Record<string, string>[] = [
+    { 'if-none-match': '"other"' },
+    { 'if-none-match': '"other"', 'if-modified-since': modified },
+    { 'if-modified-since': 'Mon, 01 Jan 2001 00:00:00 GMT' },
+    { 'if-modified-since': 'garbage' },
+  ];
+  for (const headers of stale) {
+    const changed = await fetch(url('/fonts/inter.woff2'), { headers });
+    expect([headers, changed.status]).toEqual([headers, 200]);
+    expect((await changed.arrayBuffer()).byteLength).toBe(1024);
+  }
+});
+
+test('HSTS: только при https:// в PUBLIC_URL, на всех ответах', async () => {
+  const secureUrl = 'https://ferrum.example';
+  const secure = startServer(
+    {
+      ...deps,
+      pool,
+      publicUrl: secureUrl,
+      auth: createAuth({ publicUrl: secureUrl, secret: TEST_SECRET, pool, valkey, mailer: { send: async () => {} }, allowedEmails: [] }),
+    },
+    0,
+  );
+  try {
+    for (const path of ['/', '/nope', '/healthz', '/api/auth/nope']) {
+      const res = await fetch(`http://127.0.0.1:${secure.port}${path}`);
+      expect([path, res.headers.get('strict-transport-security')]).toEqual([path, 'max-age=31536000']);
+    }
+  } finally {
+    secure.stop(true);
+  }
+  for (const path of ['/', '/healthz']) expect((await fetch(url(path))).headers.get('strict-transport-security')).toBeNull();
+});
+
+test('Valkey при старте: недоступен — отказ в срок, а не вечное ожидание', async () => {
+  const started = Date.now();
+  await expect(connectValkey('redis://127.0.0.1:1', 200)).rejects.toThrow('Valkey не ответил');
+  expect(Date.now() - started).toBeLessThan(1500);
+});
+
+test('запуск: пока ждём Valkey, строка в журнале, а сигнал останавливает сразу', async () => {
+  const proc = Bun.spawn(['bun', 'run', join(import.meta.dir, '../src/index.ts')], {
+    env: {
+      ...process.env,
+      BETTER_AUTH_SECRET: TEST_SECRET,
+      PUBLIC_URL: 'http://localhost:1',
+      DATABASE_URL: TEST_DATABASE_URL,
+      VALKEY_URL: 'redis://127.0.0.1:1',
+      SMTP_URL: 'smtp://127.0.0.1:1',
+      MAIL_FROM: 'Ferrum <ferrum@localhost>',
+      FERRUM_PORT: '0',
+    },
+    stdout: 'pipe',
+    stderr: 'inherit',
+  });
+  let output = '';
+  const decoder = new TextDecoder();
+  for await (const chunk of proc.stdout) {
+    output += decoder.decode(chunk);
+    if (output.includes('Valkey')) break;
+  }
+  expect(output).toContain('Подключение к Valkey');
+  const signalled = Date.now();
+  proc.kill('SIGTERM');
+  expect(await proc.exited).toBe(0);
+  expect(Date.now() - signalled).toBeLessThan(1500);
 });

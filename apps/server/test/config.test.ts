@@ -36,3 +36,37 @@ test('неверные настройки: отказ со всем списко
     /TRUSTED_PROXIES: «прокси».*TRUSTED_PROXIES: «0\.0\.0\.0\/0»/,
   );
 });
+
+test('PUBLIC_URL сводится к origin: браузер пришлёт именно его', () => {
+  for (const [given, origin] of [
+    ['https://App.Example.com', 'https://app.example.com'],
+    ['https://x.ru:443', 'https://x.ru'],
+    ['http://x.ru:80/', 'http://x.ru'],
+    ['http://localhost:8090/', 'http://localhost:8090'],
+    ['  https://x.ru  ', 'https://x.ru'],
+  ]) {
+    expect([given, loadConfig({ ...ENV, PUBLIC_URL: given }).publicUrl]).toEqual([given, origin]);
+  }
+});
+
+test('PUBLIC_URL с чем-то кроме адреса: отказ при запуске', () => {
+  for (const bad of [
+    'x.ru',
+    'не адрес',
+    'ftp://x.ru',
+    'https://x.ru/app',
+    'https://x.ru//',
+    'https://x.ru/?a=1',
+    'https://x.ru/#a',
+    'https://user:pass@x.ru',
+    'https://user@x.ru',
+  ]) {
+    expect(() => loadConfig({ ...ENV, PUBLIC_URL: bad })).toThrow('PUBLIC_URL');
+  }
+});
+
+test('FERRUM_PORT пустой — 8090, а не случайный порт', () => {
+  expect(loadConfig({ ...ENV, FERRUM_PORT: '' }).port).toBe(8090);
+  expect(loadConfig({ ...ENV, FERRUM_PORT: '  ' }).port).toBe(8090);
+  expect(loadConfig({ ...ENV, FERRUM_PORT: '9000' }).port).toBe(9000);
+});

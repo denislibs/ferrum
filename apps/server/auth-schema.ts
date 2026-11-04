@@ -1,7 +1,7 @@
 // Только для генерации таблиц Better Auth (`apps/server/migrations/002_better_auth.sql`):
 // bun --bun x auth@1.7.16 generate --config ./auth-schema.ts --output schema.sql -y
-// Базы и Valkey этому файлу не нужны: схема зависит только от настроек. Запись `migrate.test.ts`
-// сверяет миграцию с той же схемой.
+// Базы и Valkey этому файлу не нужны: схема зависит только от настроек. Тест «миграция совпадает
+// со схемой» в `test/auth.test.ts` сверяет миграцию с той же схемой.
 
 import { betterAuth } from 'better-auth';
 import { Pool } from 'pg';

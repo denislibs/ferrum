@@ -11,16 +11,22 @@ import { smtpMailer } from './mail';
 import { migrate } from './migrate';
 import { connectValkey } from './valkey';
 
+// Сигналы — раньше всего: запуск может ждать базу и Valkey, а `docker stop` не должен ждать SIGKILL.
+// Пока запросы не принимаются, дожидаться нечего.
+let stop: () => void = () => process.exit(0);
+for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => stop());
+
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
 // Миграции — своим соединением, без сроков запросов: ожидание блокировки и долгий файл не сбой.
 const migrations = new Pool({ connectionString: config.databaseUrl, max: 1 });
 const applied = await migrate(migrations, join(import.meta.dir, '../migrations')).finally(() => migrations.end());
 if (applied.length > 0) console.log(`Миграции применены: ${applied.join(', ')}`);
+console.log('Подключение к Valkey…');
 const valkey = await connectValkey(config.valkeyUrl);
 // Хранилище байтов нужно с этапа 2; здесь — проверка, что том доступен для записи.
 await new FsBlobStore(config.dataDir).put('healthcheck', new Uint8Array([1]));
-// После миграций: Better Auth при создании сверяет схему базы.
+// Better Auth обращается к таблицам при первом запросе: к этому времени миграции уже применены.
 const auth = createAuth({
   publicUrl: config.publicUrl,
   secret: config.authSecret,
@@ -36,11 +42,8 @@ const server = startServer(
 console.log(`Ferrum слушает порт ${server.port}`);
 
 // Остановка контейнера: дождаться запросов и закрыть соединения, а не ждать SIGKILL.
-for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.on(signal, () => {
-    void server
-      .stop()
-      .then(() => pool.end())
-      .finally(() => process.exit(0));
-  });
-}
+stop = () =>
+  void server
+    .stop()
+    .then(() => pool.end())
+    .finally(() => process.exit(0));

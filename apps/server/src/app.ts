@@ -4,7 +4,7 @@
 import type { Pool } from 'pg';
 import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
-import { serveStatic, withHeaders } from './static';
+import { responseHeaders, serveStatic } from './static';
 import { valkeyAlive } from './valkey';
 
 export interface AppDeps {
@@ -34,6 +34,7 @@ async function health(deps: AppDeps): Promise<Response> {
 
 export function startServer(deps: AppDeps, port: number): Bun.Server<undefined> {
   const handleAuth = authRoutes(deps);
+  const withHeaders = responseHeaders(deps.publicUrl);
   return Bun.serve({
     port,
     routes: {
