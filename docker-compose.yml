@@ -39,7 +39,7 @@ services:
     volumes:
       - ferrum-postgres:/var/lib/postgresql
     healthcheck:
-      test: [CMD-SHELL, pg_isready -U ferrum -d ferrum]
+      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U ferrum -d ferrum]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -57,14 +57,15 @@ services:
       timeout: 3s
       retries: 30
 
-  # Перехватывает письма в разработке: http://localhost:8025. В рабочем развёртывании
+  # Перехватывает письма в разработке: http://localhost:8025 (только с этой машины: в письмах
+  # ссылки входа, пароля у Mailpit нет). В рабочем развёртывании
   # профиля `dev` нет, письма уходят на SMTP_URL.
   mailpit:
     image: axllent/mailpit:v1.33.0
     restart: unless-stopped
     profiles: [dev]
     ports:
-      - '${MAILPIT_PORT:-8025}:8025'
+      - '127.0.0.1:${MAILPIT_PORT:-8025}:8025'
 
 volumes:
   ferrum-data:

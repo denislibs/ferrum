@@ -1,16 +1,17 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { getMigrations } from 'better-auth/db/migration';
 import { join } from 'node:path';
+import { Pool } from 'pg';
 import { startServer } from '../src/app';
 import { authorizeUpgrade } from '../src/auth-routes';
 import { authOptions, createAuth, emailAllowed, MAILS_PER_ADDRESS, MAILS_PER_IP, type AuthDeps } from '../src/auth';
 import { magicLinkMail, smtpMailer, type Mail } from '../src/mail';
 import { migrate } from '../src/migrate';
 import { connectValkey } from '../src/valkey';
-import { resetDatabase, resetValkey, TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
+import { resetDatabase, resetValkey, TEST_DATABASE_URL, TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
 
 const pool = testPool();
-const valkey = connectValkey(TEST_VALKEY_URL);
+const valkey = await connectValkey(TEST_VALKEY_URL);
 const stops: (() => void)[] = [];
 let mails: Mail[] = [];
 
@@ -67,9 +68,17 @@ const cookieOf = (res: Response) =>
     .join('; ');
 const tokenOf = (mail: Mail) => new URLSearchParams(mail.text.split('#/auth/confirm?')[1].split('\n')[0]).get('token')!;
 
+/** Письмо уходит без ожидания ответа, поэтому его ждут опросом, а не полагаются на порядок. */
+async function waitMails(count: number): Promise<void> {
+  for (let i = 0; i < 100 && mails.length < count; i++) await Bun.sleep(20);
+  expect(mails.length).toBeGreaterThanOrEqual(count);
+}
+
 async function requestLink(s: Stand, email = 'ivan@example.com', next?: string): Promise<string> {
+  const before = mails.length;
   const res = await s.post('/api/auth/sign-in/magic-link', { email, next });
   expect(res.status).toBe(200);
+  await waitMails(before + 1);
   return tokenOf(mails.at(-1)!);
 }
 async function signIn(s: Stand, email?: string): Promise<string> {
@@ -85,6 +94,7 @@ test('круг: письмо → подтверждение → сессия в 
   const res = await s.post('/api/auth/sign-in/magic-link', { email: 'Ivan@Example.com', next: '#/file/abc' });
   expect(res.status).toBe(200);
   expect(await res.json()).toEqual({ ok: true });
+  await waitMails(1);
   expect(mails).toHaveLength(1);
   expect(mails[0].to).toBe('ivan@example.com');
   expect(mails[0].subject).toBe('Вход в Ferrum');
@@ -134,6 +144,21 @@ test('ссылка одноразовая, в том числе при одно�
   expect(again.status).toBe(400);
   expect(await again.json()).toEqual({ error: 'INVALID_TOKEN' });
   expect(again.headers.getSetCookie()).toEqual([]);
+});
+
+test('сбой Postgres при подтверждении — ошибка сервера, а не «ссылка недействительна»', async () => {
+  // Пул закрывается после выдачи ссылки: к нажатию «Войти» база уже недоступна.
+  const dead = new Pool({ connectionString: TEST_DATABASE_URL });
+  const s = stand({ pool: dead });
+  const token = await requestLink(s);
+  await dead.end();
+  const original = console.error;
+  console.error = () => {};
+  try {
+    expect((await s.post('/api/auth/confirm', { token })).status).toBe(500);
+  } finally {
+    console.error = original;
+  }
 });
 
 test('истёкшая ссылка не входит, срок задаётся в Valkey', async () => {
@@ -199,6 +224,8 @@ test('неверные данные — 400: схема из protocol, лишн�
     '{}',
     '{"email":"нет"}',
     '{"email":"a@b.ru","next":"https://evil.example"}',
+    // Проходит разбор протокола, но не `z.email()` Better Auth: 400, а не сбой сервера.
+    '{"email":"иван@почта.рф"}',
     `{"email":"a@b.ru","pad":"${'x'.repeat(5000)}"}`,
   ]) {
     const res = await s.post('/api/auth/sign-in/magic-link', body);
@@ -208,6 +235,7 @@ test('неверные данные — 400: схема из protocol, лишн�
   expect((await s.post('/api/auth/confirm', { token: 'short' })).status).toBe(400);
   expect(mails).toEqual([]);
   await s.post('/api/auth/sign-in/magic-link', { email: 'a@b.ru', callbackURL: 'https://evil.example', name: 'Чужое имя' });
+  await waitMails(1);
   const cookie = cookieOf(await s.post('/api/auth/confirm', { token: tokenOf(mails[0]) }));
   expect((await sessionOf(s, cookie)).user?.name).toBe('');
 });
@@ -235,7 +263,40 @@ test('ALLOWED_EMAILS: адрес и домен; остальным ответ т
   expect(mails).toEqual([]);
   await s.post('/api/auth/sign-in/magic-link', { email: 'ivan@example.com' });
   await s.post('/api/auth/sign-in/magic-link', { email: 'any@team.org' });
+  await waitMails(2);
   expect(mails.map((m) => m.to)).toEqual(['ivan@example.com', 'any@team.org']);
+});
+
+test('ALLOWED_EMAILS: шесть запросов дают 429 на шестом и для адреса вне списка, и для адреса из списка', async () => {
+  const s = stand({ allowedEmails: ['ivan@example.com'] });
+  for (const email of ['petr@example.com', 'ivan@example.com']) {
+    const codes: number[] = [];
+    for (let i = 0; i <= MAILS_PER_ADDRESS; i++) codes.push((await s.post('/api/auth/sign-in/magic-link', { email })).status);
+    expect([email, codes]).toEqual([email, [200, 200, 200, 200, 200, 429]]);
+  }
+  await waitMails(MAILS_PER_ADDRESS);
+  expect(mails.every((m) => m.to === 'ivan@example.com')).toBe(true);
+});
+
+test('сбой отправки письма не раскрывается ответом и не роняет сервер, в журнал — без ссылки', async () => {
+  const logged: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void logged.push(args);
+  try {
+    const s = stand({
+      mailer: {
+        send: async () => {
+          throw new Error('SMTP недоступен');
+        },
+      },
+    });
+    const res = await s.post('/api/auth/sign-in/magic-link', { email: 'ivan@example.com' });
+    expect(res.status).toBe(200);
+    for (let i = 0; i < 100 && logged.length === 0; i++) await Bun.sleep(20);
+  } finally {
+    console.error = original;
+  }
+  expect(logged).toEqual([['Не удалось отправить письмо входа:', 'SMTP недоступен']]);
 });
 
 test('ограничение: не больше 5 писем на адрес в час, другому адресу можно, счётчик истекает', async () => {
@@ -310,6 +371,13 @@ test('выход на этом устройстве: другая сессия �
   expect((await sessionOf(s, b)).user).not.toBeNull();
 });
 
+test('выход без сессии не падает: cookie снимается, ответ тот же', async () => {
+  const s = stand();
+  const out = await s.post('/api/auth/sign-out', {});
+  expect(out.status).toBe(200);
+  expect(await out.json()).toEqual({ ok: true });
+});
+
 test('выход на всех устройствах: все сессии человека сняты, чужие целы', async () => {
   const s = stand();
   const a = await signIn(s);
@@ -336,8 +404,7 @@ test('сессия продлевается: после updateAge новый с�
 });
 
 test('Valkey недоступен: сбой, а не «сессии нет», человека не выбрасывает на экран входа', async () => {
-  const dead = connectValkey(TEST_VALKEY_URL);
-  await dead.connect();
+  const dead = await connectValkey(TEST_VALKEY_URL);
   const s = stand({ valkey: dead });
   const cookie = await signIn(s);
   dead.close();

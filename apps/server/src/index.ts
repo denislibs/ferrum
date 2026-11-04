@@ -16,7 +16,7 @@ const pool = new Pool({ connectionString: config.databaseUrl });
 pool.on('error', (e) => console.error('Postgres:', e.message));
 const applied = await migrate(pool, join(import.meta.dir, '../migrations'));
 if (applied.length > 0) console.log(`Миграции применены: ${applied.join(', ')}`);
-const valkey = connectValkey(config.valkeyUrl);
+const valkey = await connectValkey(config.valkeyUrl);
 // Хранилище байтов нужно с этапа 2; здесь — проверка, что том доступен для записи.
 await new FsBlobStore(config.dataDir).put('healthcheck', new Uint8Array([1]));
 // После миграций: Better Auth при создании сверяет схему базы.

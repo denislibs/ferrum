@@ -66,14 +66,19 @@ export function authOptions(deps: AuthDeps) {
         expiresIn: deps.magicLinkSeconds ?? MAGIC_LINK_TTL_SECONDS,
         storeToken: 'hashed',
         sendMagicLink: async ({ email, token, metadata }) => {
-          // Адрес не из списка: ответ тот же, письма нет, ничего не раскрываем.
-          if (!emailAllowed(email, deps.allowedEmails)) return;
           // Встроенный `rateLimit` считает только по IP и пути; счётчик на адрес — рядом,
-          // в том же хранилище и после проверки IP.
+          // в том же хранилище и после проверки IP. Считаем до проверки списка: иначе по шестому
+          // ответу (429 или 200) видно, входит ли адрес в `ALLOWED_EMAILS`.
           const sent = await storage.increment(`mail-to:${email}`, HOUR);
           if (sent > MAILS_PER_ADDRESS) throw new APIError('TOO_MANY_REQUESTS');
+          // Адрес не из списка: ответ тот же, письма нет, ничего не раскрываем.
+          if (!emailAllowed(email, deps.allowedEmails)) return;
           const next = typeof metadata?.next === 'string' ? metadata.next : undefined;
-          await deps.mailer.send(magicLinkMail(email, `${deps.publicUrl}/${confirmHash(token, next)}`));
+          // Письмо уходит без ожидания: время SMTP не должно отличать адрес из списка по времени
+          // ответа. В журнал — только причина сбоя, без адреса, токена и ссылки.
+          deps.mailer.send(magicLinkMail(email, `${deps.publicUrl}/${confirmHash(token, next)}`)).catch((e: unknown) => {
+            console.error('Не удалось отправить письмо входа:', e instanceof Error ? e.message : 'неизвестная ошибка');
+          });
         },
       }),
     ],

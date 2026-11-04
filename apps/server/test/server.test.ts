@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Pool } from 'pg';
 import { startServer } from '../src/app';
 import { createAuth } from '../src/auth';
-import { connectValkey } from '../src/valkey';
+import { connectValkey, valkeyAlive } from '../src/valkey';
 import { TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
 
 const web = mkdtempSync(join(tmpdir(), 'ferrum-web-'));
@@ -15,7 +15,7 @@ writeFileSync(join(web, 'assets/main-abc.js'), 'export {}');
 writeFileSync(join(web, 'assets/core.wasm'), new Uint8Array([0, 97, 115, 109]));
 
 const pool = testPool();
-const valkey = connectValkey(TEST_VALKEY_URL);
+const valkey = await connectValkey(TEST_VALKEY_URL);
 const publicUrl = 'http://localhost:1';
 const auth = createAuth({ publicUrl, secret: TEST_SECRET, pool, valkey, mailer: { send: async () => {} }, allowedEmails: [] });
 const deps = { valkey, webDist: web, auth, publicUrl, trustProxy: false };
@@ -49,6 +49,65 @@ test('/healthz: база недоступна — 503 и что именно у�
   expect(await res.json()).toEqual({ ok: false, postgres: false, valkey: true });
   s.stop(true);
   await dead.end();
+});
+
+test('/healthz: Valkey недоступен — 503 сразу, а не зависание', async () => {
+  const gone = await connectValkey(TEST_VALKEY_URL);
+  gone.close();
+  const s = startServer({ ...deps, valkey: gone, pool }, 0);
+  const started = Date.now();
+  const res = await fetch(`http://127.0.0.1:${s.port}/healthz`);
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({ ok: false, postgres: true, valkey: false });
+  expect(Date.now() - started).toBeLessThan(1000);
+  s.stop(true);
+});
+
+test('Valkey: во время обрыва команда сразу получает ошибку, после возврата клиент работает сам', async () => {
+  // Прокси перед настоящим Valkey: его можно оборвать и вернуть на том же порту.
+  type Pipe = { peer?: Bun.Socket<Pipe>; early: Uint8Array[] };
+  const listen = (port: number) =>
+    Bun.listen<Pipe>({
+      hostname: '127.0.0.1',
+      port,
+      socket: {
+        open: async (client) => {
+          // Клиент пишет сразу после соединения, раньше, чем откроется соединение с Valkey.
+          client.data = { early: [] };
+          const peer = await Bun.connect<Pipe>({
+            hostname: '127.0.0.1',
+            port: Number(new URL(TEST_VALKEY_URL).port),
+            socket: { data: (_up, d) => void client.write(d), close: () => void client.end(), open: () => {}, error: () => {} },
+          });
+          for (const chunk of client.data.early) peer.write(chunk);
+          client.data.peer = peer;
+        },
+        data: (client, d) => (client.data.peer ? void client.data.peer.write(d) : void client.data.early.push(new Uint8Array(d))),
+        close: (client) => void client.data.peer?.end(),
+        error: () => {},
+      },
+    });
+  let proxy = listen(0);
+  const port = proxy.port;
+  const client = await connectValkey(`redis://127.0.0.1:${port}`);
+  try {
+    expect(await valkeyAlive(client)).toBe(true);
+    proxy.stop(true);
+    await Bun.sleep(300);
+    const started = Date.now();
+    await expect(valkeyAlive(client)).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(1000);
+    proxy = listen(port);
+    let alive = false;
+    for (let i = 0; i < 100 && !alive; i++) {
+      await Bun.sleep(100);
+      alive = await valkeyAlive(client).catch(() => false);
+    }
+    expect(alive).toBe(true);
+  } finally {
+    client.close();
+    proxy.stop(true);
+  }
 });
 
 test('статика: корень — index.html, изоляция, CSP, кэш по виду файла', async () => {

@@ -115,6 +115,8 @@ export function authRoutes(deps: AuthRoutesDeps) {
       body: { email: parsed.email, metadata: parsed.next ? { next: parsed.next } : undefined },
     });
     if (r.status === 429) return limited(r);
+    // Адрес прошёл разбор протокола, но не схему Better Auth (`иван@почта.рф`): это 400 клиенту, не сбой.
+    if (r.status === 400) return fail(400, 'BAD_REQUEST');
     if (!r.ok) throw new Error(`Better Auth: отправка ссылки вернула ${r.status}: ${await r.text()}`);
     return respond([r], { ok: true });
   }
@@ -126,7 +128,9 @@ export function authRoutes(deps: AuthRoutesDeps) {
     if (!parsed) return fail(400, 'BAD_REQUEST');
     const r = await inner(req, ip, `/magic-link/verify?token=${encodeURIComponent(parsed.token)}`, { method: 'GET' });
     if (r.status === 429) return limited(r);
-    // Better Auth сообщает о неверном токене перенаправлением с `?error=`.
+    // Сбой сервера (Postgres) — не «ссылка недействительна»: иначе человек запросит новую ссылку
+    // вместо того, чтобы дождаться починки. О неверном токене Better Auth сообщает не ошибкой сервера.
+    if (r.status >= 500) throw new Error(`Better Auth: подтверждение вернуло ${r.status}`);
     if (!r.ok) return fail(400, 'INVALID_TOKEN');
     return respond([r], { ok: true });
   }
@@ -144,6 +148,7 @@ export function authRoutes(deps: AuthRoutesDeps) {
   async function signOut(req: Request, ip: string): Promise<Response> {
     const r = await inner(req, ip, '/sign-out', { method: 'POST', body: {} });
     if (r.status === 429) return limited(r);
+    if (!r.ok) throw new Error(`Better Auth: выход вернул ${r.status}`);
     return respond([r], { ok: true });
   }
 
@@ -154,6 +159,7 @@ export function authRoutes(deps: AuthRoutesDeps) {
     if (revoked.status === 401) return fail(401, 'UNAUTHORIZED');
     if (!revoked.ok) throw new Error(`Better Auth: снятие сессий вернуло ${revoked.status}: ${await revoked.text()}`);
     const out = await inner(req, ip, '/sign-out', { method: 'POST', body: {} });
+    if (!out.ok) throw new Error(`Better Auth: выход вернул ${out.status}`);
     return respond([revoked, out], { ok: true });
   }
 
