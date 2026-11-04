@@ -53,8 +53,8 @@ test('текст рисуется вшитым Inter, загруженным wor
   await expect.poll(() => darkPixels(page, at, 120), { timeout: 10_000 }).toBeGreaterThan(200);
   expect(fonts).toContain('/fonts/manifest.json');
   expect(fonts).toContain('/fonts/inter/Inter-Variable.ttf');
-  // Строка слоя — «Текст» с иконкой текста.
-  await expect(page.getByRole('treeitem', { name: 'Текст', exact: true })).toBeVisible();
+  // Строка слоя называется содержимым текста, с иконкой текста.
+  await expect(page.getByRole('treeitem', { name: 'Ferrum', exact: true })).toBeVisible();
   // Системные шрифты в Firefox не предлагаются.
   if (test.info().project.name === 'firefox') {
     await page.evaluate(() => window.__ferrum!.core!.send({ type: 'select', ids: [], mode: 'replace' }));

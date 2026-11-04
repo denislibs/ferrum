@@ -70,7 +70,7 @@ test('инструмент T: щелчок, набор, Esc — текст на 
   await expect.poll(async () => (await ui(page)).text.editing).toBe(false);
   expect((await ui(page)).selectionCount).toBe(1);
   expect((await live(page)).steps).toBe(l.steps + 1);
-  await expect(page.getByRole('treeitem', { name: 'Текст', exact: true })).toBeVisible();
+  await expect(page.getByRole('treeitem', { name: 'Привет, мир', exact: true })).toBeVisible();
   const at = await appScreen(page, await live(page), 100, 300);
   await expect.poll(() => darkPixels(page, at, 60), { timeout: 10_000 }).toBeGreaterThan(20);
 });

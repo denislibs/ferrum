@@ -278,6 +278,10 @@ impl Editor {
         if let Some((w, h)) = fit_size(&mut self.fonts.borrow_mut(), &p)? {
             (p.w, p.h) = (w, h);
         }
+        // Новый текст называется своим содержимым (раздел 10 спеки подсистемы 2).
+        if let Some(t) = &p.text {
+            p.name = ferrum_doc::text_layer_name(&t.content);
+        }
         let (target, target_world, target_box) = self.paste_target();
         let center = target_box.map_or(self.view_center(), |b| b.center());
         let origin = target_world.inverse() * (center - Vec2::new(p.w / 2.0, p.h / 2.0));

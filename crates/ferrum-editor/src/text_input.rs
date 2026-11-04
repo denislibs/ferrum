@@ -403,6 +403,10 @@ impl Editor {
                 .transact_merging(page, selection, merge, |tx| {
                     let mut props = after.clone();
                     fit.apply_to(&mut props);
+                    // Новый текст называется своим содержимым (раздел 10 спеки подсистемы 2).
+                    if let Some(t) = &props.text {
+                        props.name = ferrum_doc::text_layer_name(&t.content);
+                    }
                     let id = tx.create_with_props(d.parent, None, &props)?;
                     Ok(vec![id])
                 })

@@ -49,7 +49,10 @@ fn new_text_node_has_figma_defaults() {
     let (mut doc, page, id) = doc_with_text();
     let p = doc.page(page).unwrap().props(id).unwrap();
     assert_eq!(p.kind, NodeKind::Text);
-    assert_eq!(p.name, "Текст");
+    assert_eq!(
+        p.name, "Привет, мир",
+        "новый текст называется своим содержимым"
+    );
     assert_eq!(p.fills, vec![Fill::solid(Color::BLACK)]);
     let t = p.text.unwrap();
     assert_eq!(t.props, TextProps::default());
@@ -620,4 +623,160 @@ fn fill_texts_counts() {
     let walk = p.walk();
     let count = |k| walk.iter().filter(|n| p.kind(**n).unwrap() == k).count();
     assert_eq!((count(NodeKind::Text), count(NodeKind::Frame)), (250, 3));
+}
+
+// ——— Имя слоя из содержимого (спека подсистемы 2, раздел 10; B-28) ———
+
+mod layer_name {
+    use super::*;
+    use ferrum_doc::{text_layer_name, Document, TextContent, TEXT_NAME_CHARS};
+
+    fn name_of(text: &str) -> String {
+        text_layer_name(&TextContent::plain(text))
+    }
+
+    #[test]
+    fn first_40_chars_of_the_first_line() {
+        assert_eq!(name_of("Заголовок"), "Заголовок");
+        assert_eq!(name_of("Первая\nВторая"), "Первая");
+        let long = "я".repeat(100);
+        assert_eq!(name_of(&long).chars().count(), TEXT_NAME_CHARS);
+        assert_eq!(name_of("  с пробелами \t"), "с пробелами");
+        assert_eq!(name_of("a\tb"), "a b");
+        // Пустая первая строка и пустой текст — имя по умолчанию.
+        assert_eq!(name_of("\nвторая"), "Текст");
+        assert_eq!(name_of(""), "Текст");
+        assert_eq!(name_of("   "), "Текст");
+    }
+
+    #[test]
+    fn first_line_spans_styled_runs() {
+        use ferrum_doc::{TextAttrs, TextRun};
+        let content = TextContent {
+            runs: vec![
+                TextRun {
+                    text: "Жир".into(),
+                    attrs: TextAttrs::default(),
+                },
+                TextRun {
+                    text: "ный\nдальше\n".into(),
+                    attrs: TextAttrs::default(),
+                },
+            ],
+        };
+        assert_eq!(text_layer_name(&content), "Жирный");
+    }
+
+    fn fresh() -> (Document, ferrum_doc::PageId, ferrum_doc::NodeId) {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let id = doc
+            .transact(page, vec![], |tx| {
+                Ok(vec![tx.create_node(None, None, NodeKind::Text)?])
+            })
+            .unwrap()[0];
+        doc.clear_history();
+        (doc, page, id)
+    }
+
+    fn name(doc: &mut Document, page: ferrum_doc::PageId, id: ferrum_doc::NodeId) -> String {
+        doc.page(page).unwrap().props(id).unwrap().name
+    }
+
+    #[test]
+    fn name_follows_edits_in_the_same_undo_step() {
+        let (mut doc, page, id) = fresh();
+        doc.transact(page, vec![], |tx| {
+            tx.insert_text(id, 0, "Привет", None)?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        assert_eq!(name(&mut doc, page, id), "Привет");
+        doc.transact(page, vec![], |tx| {
+            tx.delete_text(id, 0..3)?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        assert_eq!(name(&mut doc, page, id), "вет");
+        doc.undo().unwrap();
+        assert_eq!(
+            name(&mut doc, page, id),
+            "Привет",
+            "отмена — вместе с текстом"
+        );
+        doc.undo().unwrap();
+        assert_eq!(name(&mut doc, page, id), "Текст");
+        assert!(
+            !doc.can_undo(),
+            "по шагу на правку, имя отдельного шага не даёт"
+        );
+        doc.redo().unwrap();
+        assert_eq!(name(&mut doc, page, id), "Привет");
+    }
+
+    #[test]
+    fn manual_name_stays() {
+        let (mut doc, page, id) = fresh();
+        doc.transact(page, vec![], |tx| {
+            tx.insert_text(id, 0, "Привет", None)?;
+            tx.set_props(
+                id,
+                &PropsPatch {
+                    name: Some("Заголовок".into()),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        doc.transact(page, vec![], |tx| {
+            tx.insert_text(id, 0, "Ещё ", None)?;
+            tx.set_text_content(id, &TextContent::plain("Другое"))?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        assert_eq!(name(&mut doc, page, id), "Заголовок");
+    }
+
+    #[test]
+    fn edit_of_a_later_line_or_past_40_chars_makes_no_name_write() {
+        let (mut doc, page, id) = fresh();
+        let long = "я".repeat(50);
+        doc.transact(page, vec![], |tx| {
+            tx.insert_text(id, 0, &format!("{long}\nвторая"), None)?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        let before = name(&mut doc, page, id);
+        doc.transact(page, vec![], |tx| {
+            tx.insert_text(id, 45, "ё", None)?;
+            tx.insert_text(id, 52, "ё", None)?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        assert_eq!(name(&mut doc, page, id), before);
+    }
+
+    #[test]
+    fn name_survives_save_and_reopen_keeps_following() {
+        let (mut doc, page, id) = fresh();
+        doc.transact(page, vec![], |tx| {
+            tx.insert_text(id, 0, "Привет", None)?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        let bytes = ferrum_doc::container::encode(&doc).unwrap();
+        let mut d = ferrum_doc::container::decode(&bytes).unwrap().document;
+        assert_eq!(name(&mut d, page, id), "Привет");
+        d.transact(page, vec![], |tx| {
+            tx.insert_text(id, 6, "!", None)?;
+            Ok(vec![id])
+        })
+        .unwrap();
+        assert_eq!(
+            name(&mut d, page, id),
+            "Привет!",
+            "признак — само имя: хранить нечего"
+        );
+    }
 }
