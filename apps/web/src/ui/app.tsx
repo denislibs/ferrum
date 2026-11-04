@@ -85,6 +85,9 @@ export function App(props: AppProps) {
   const [pagesOpen, setPagesOpen] = createSignal(saved.pagesOpen);
   const [themeChoice, setThemeChoice] = createSignal<ThemeChoice>(saved.theme);
   const [pixelSnap, setPixelSnap] = createSignal(saved.pixelSnap);
+  // Настройка вида: команду выполняет ядро (событие `view`), хранит — интерфейс.
+  const [rulers, setRulers] = createSignal(saved.rulers);
+  const [guides, setGuides] = createSignal(saved.guides);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   /** Недавние команды «Быстрых действий»: новые первыми, общие для вкладок. */
   const [recent, setRecent] = createSignal(parseRecent(saved.recentCommands));
@@ -128,6 +131,7 @@ export function App(props: AppProps) {
     editor()?.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
   });
   createEffect(() => editor()?.send({ type: 'setSettings', pixelSnap: pixelSnap() }));
+  createEffect(() => editor()?.send({ type: 'setView', rulers: rulers(), guides: guides() }));
   // Запись — не чаще раза в четверть секунды (края панелей тянутся каждый кадр), и
   // сразу при уходе со страницы.
   let pending: Settings | null = null;
@@ -156,6 +160,14 @@ export function App(props: AppProps) {
     if (p.pixelSnap !== undefined) {
       written = { ...written, pixelSnap: p.pixelSnap };
       setPixelSnap(p.pixelSnap);
+    }
+    if (p.rulers !== undefined) {
+      written = { ...written, rulers: p.rulers };
+      setRulers(p.rulers);
+    }
+    if (p.guides !== undefined) {
+      written = { ...written, guides: p.guides };
+      setGuides(p.guides);
     }
     if (p.recentCommands !== undefined) {
       written = { ...written, recentCommands: p.recentCommands };
@@ -189,6 +201,8 @@ export function App(props: AppProps) {
       ...written,
       theme: themeChoice(),
       pixelSnap: pixelSnap(),
+      rulers: rulers(),
+      guides: guides(),
       keymap: keymap(),
       leftWidth: left(),
       rightWidth: right(),
@@ -266,6 +280,7 @@ export function App(props: AppProps) {
       beforeDocument: (ed) => {
         ed.send({ type: 'setTheme', theme: theme(), system: themeChoice() === 'system' });
         ed.send({ type: 'setSettings', pixelSnap: pixelSnap() });
+        ed.send({ type: 'setView', rulers: rulers(), guides: guides() });
         // Нынешняя раскладка: другая вкладка могла сменить её, пока ядро запускалось.
         const km = keymap();
         if (km) {
@@ -357,6 +372,10 @@ export function App(props: AppProps) {
         let linkedPage = props.page;
         ed.core.on((e) => {
           if (e.type === 'uiCommand') uiCommand(e.key);
+          if (e.type === 'view') {
+            setRulers(e.rulers);
+            setGuides(e.guides);
+          }
           if (!opening && linkedPage && e.type === 'pages') {
             const want = linkedPage;
             linkedPage = undefined;

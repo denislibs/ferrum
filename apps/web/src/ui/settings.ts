@@ -1,7 +1,7 @@
 
 // Настройки пользователя: тема, привязка к пикселям, отличия раскладки клавиш,
 // ширина панелей, вид экрана файлов (сетка или список), недавние команды
-// «Быстрых действий». С этапа 6 хранятся в
+// «Быстрых действий», линейки и направляющие. С этапа 6 хранятся в
 // IndexedDB по полю (`settings-store.ts`); здесь — поля, их разбор (значения из
 // хранилища не доверенные: неверное поле — умолчание) и прежняя запись
 // `localStorage`, из которой настройки переносятся при первом запуске.
@@ -22,6 +22,9 @@ export interface Settings {
   /** Недавние команды «Быстрых действий»: ключи через пробел, новые первыми (поле
    * появилось в подсистеме 2; в старых записях его нет — тогда пусто). */
   recentCommands: string;
+  /** Линейки и направляющие (спека подсистемы 2, раздел 9): настройка вида. */
+  rulers: boolean;
+  guides: boolean;
 }
 
 export type FilesView = 'grid' | 'list';
@@ -54,6 +57,8 @@ export const DEFAULT_SETTINGS: Settings = {
   pagesOpen: true,
   filesView: 'grid',
   recentCommands: '',
+  rulers: false,
+  guides: true,
 };
 
 /** Хранилище: `localStorage`, если доступ к нему не бросает. */
@@ -81,6 +86,8 @@ const FIELDS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined }
   filesView: (v) => (v === 'list' || v === 'grid' ? v : undefined),
   // Только верные ключи, не больше восьми; строка длиннее не бывает (предел — на разбор).
   recentCommands: (v) => (typeof v === 'string' && v.length <= 1024 ? parseRecent(v).join(' ') : undefined),
+  rulers: (v) => (typeof v === 'boolean' ? v : undefined),
+  guides: (v) => (typeof v === 'boolean' ? v : undefined),
 };
 
 /** Только верные известные поля (чужое изменение из другой вкладки, запись базы). */

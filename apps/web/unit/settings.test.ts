@@ -480,3 +480,11 @@ test('запасная запись при неудачном чтении — �
   legacy.setItem(PENDING, JSON.stringify({ theme: 'light', keymap: 'a'.repeat(90_000) }));
   expect((await openSettings(fakeBackend({ theme: 'dark' }).backend, legacy)).current.theme).toBe('dark');
 });
+
+test('линейки и направляющие: умолчания и проверка значений', () => {
+  expect(DEFAULT_SETTINGS.rulers).toBe(false);
+  expect(DEFAULT_SETTINGS.guides).toBe(true);
+  expect(parseSettingsPatch({ rulers: true, guides: false })).toEqual({ rulers: true, guides: false });
+  expect(parseSettingsPatch({ rulers: 'да', guides: 1 })).toEqual({});
+  expect(parseSettings({ rulers: 'да' }).rulers).toBe(false);
+});
