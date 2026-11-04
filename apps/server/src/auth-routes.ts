@@ -21,6 +21,9 @@ import { clientIp, proxyMatcher } from './client-ip';
 
 /** Запросы входа маленькие: всё, что больше, отвергается, не дочитываясь. */
 const MAX_BODY_BYTES = 4096;
+/** Срок на обработчик: зависшая база или Valkey дают честный 503. Меньше 15 с, которые ждёт клиент
+ * (`REQUEST_TIMEOUT_MS`), иначе человек видел бы сбой сети, а не ответ сервера. */
+export const AUTH_DEADLINE_MS = 10_000;
 
 export function originAllowed(req: Request, publicUrl: string): boolean {
   return req.headers.get('origin') === publicUrl;
@@ -46,11 +49,27 @@ async function readJson(req: Request): Promise<unknown> {
   }
 }
 
+/** Работа не отменяется, но ответ уходит вовремя. Что с ней стало дальше, уже никому не сообщить. */
+function withinDeadline(work: Promise<Response>, ms: number, path: string): Promise<Response> {
+  let timer: Timer;
+  const expired = new Promise<Response>((resolve) => {
+    timer = setTimeout(() => {
+      console.error('Запрос входа не уложился в срок:', path);
+      const res = fail(503, 'UNAVAILABLE');
+      res.headers.set('Cache-Control', 'no-store');
+      resolve(res);
+    }, ms);
+  });
+  return Promise.race([work, expired]).finally(() => clearTimeout(timer));
+}
+
 export interface AuthRoutesDeps {
   auth: Auth;
   publicUrl: string;
   /** Адреса обратных прокси, см. `client-ip.ts`. */
   trustedProxies: readonly string[];
+  /** Тесты сокращают срок; по умолчанию — `AUTH_DEADLINE_MS`. */
+  authDeadlineMs?: number;
 }
 
 export function authRoutes(deps: AuthRoutesDeps) {
@@ -121,8 +140,9 @@ export function authRoutes(deps: AuthRoutesDeps) {
     if (!parsed) return fail(400, 'BAD_REQUEST');
     const r = await inner(req, ip, `/magic-link/verify?token=${encodeURIComponent(parsed.token)}`, { method: 'GET' });
     if (r.status === 429) return limited(r);
-    // Сбой сервера (Postgres) — не «ссылка недействительна»: иначе человек запросит новую ссылку
-    // вместо того, чтобы дождаться починки. О неверном токене Better Auth сообщает не ошибкой сервера.
+    // Сбой сервера (Postgres) — не «ссылка недействительна»: о неверном токене Better Auth сообщает
+    // не ошибкой сервера. Токен при этом уже мог быть потрачен: Better Auth снимает его до обращения
+    // к базе, поэтому клиент при 5xx предлагает и повтор, и новую ссылку.
     if (r.status >= 500) throw new Error(`Better Auth: подтверждение вернуло ${r.status}`);
     if (!r.ok) return fail(400, 'INVALID_TOKEN');
     return respond([r], { ok: true });
@@ -156,9 +176,8 @@ export function authRoutes(deps: AuthRoutesDeps) {
     return respond([revoked, out], { ok: true });
   }
 
-  return async function handle(req: Request, peer: string | undefined): Promise<Response> {
+  async function route(req: Request, path: string, peer: string | undefined): Promise<Response> {
     const ip = clientIp(req, peer, trusted);
-    const path = new URL(req.url).pathname;
     if (req.method === 'GET' && path === API_SESSION) return session(req, ip);
     const post: Record<string, (req: Request, ip: string) => Promise<Response>> = {
       [API_SIGN_IN]: signIn,
@@ -167,10 +186,15 @@ export function authRoutes(deps: AuthRoutesDeps) {
       [API_SIGN_OUT]: signOut,
       [API_SIGN_OUT_EVERYWHERE]: signOutEverywhere,
     };
-    const route = req.method === 'POST' && Object.hasOwn(post, path) ? post[path] : null;
-    if (!route) return fail(404, 'NOT_FOUND');
+    const handler = req.method === 'POST' && Object.hasOwn(post, path) ? post[path] : null;
+    if (!handler) return fail(404, 'NOT_FOUND');
     if (!originAllowed(req, publicUrl)) return fail(403, 'BAD_ORIGIN');
-    return route(req, ip);
+    return handler(req, ip);
+  }
+
+  return function handle(req: Request, peer: string | undefined): Promise<Response> {
+    const path = new URL(req.url).pathname;
+    return withinDeadline(route(req, path, peer), deps.authDeadlineMs ?? AUTH_DEADLINE_MS, path);
   };
 }
 

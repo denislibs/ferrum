@@ -23,7 +23,19 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 
-export type AuthErrorCode = 'BAD_REQUEST' | 'BAD_ORIGIN' | 'INVALID_TOKEN' | 'TOO_MANY_REQUESTS' | 'UNAUTHORIZED' | 'NOT_FOUND';
+/** Все коды ошибок: клиент сверяет ответ с этим списком, поэтому новый код добавляется только здесь.
+ * `UNAVAILABLE` — сервер не уложился в срок (зависла база или Valkey). */
+export const AUTH_ERROR_CODES = [
+  'BAD_REQUEST',
+  'BAD_ORIGIN',
+  'INVALID_TOKEN',
+  'TOO_MANY_REQUESTS',
+  'UNAUTHORIZED',
+  'NOT_FOUND',
+  'UNAVAILABLE',
+] as const;
+
+export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];
 
 export interface AuthErrorBody {
   error: AuthErrorCode;

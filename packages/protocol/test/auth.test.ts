@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import {
+  AUTH_ERROR_CODES,
   confirmHash,
   MAX_NAME_CHARS,
   parseConfirmHash,
@@ -63,4 +64,9 @@ test('адрес подтверждения: туда и обратно, чуж�
   expect(parseConfirmHash('#/auth/confirm?token=short')).toEqual({ token: null, next: null });
   expect(parseConfirmHash('#/file/1')).toBeNull();
   expect(parseConfirmHash('')).toBeNull();
+});
+
+test('коды ошибок: список один, дублей нет', () => {
+  expect(new Set(AUTH_ERROR_CODES).size).toBe(AUTH_ERROR_CODES.length);
+  expect(AUTH_ERROR_CODES).toContain('UNAVAILABLE');
 });

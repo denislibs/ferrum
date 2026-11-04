@@ -3,12 +3,12 @@ import { getMigrations } from 'better-auth/db/migration';
 import { join } from 'node:path';
 import { Pool } from 'pg';
 import { startServer } from '../src/app';
-import { authorizeUpgrade } from '../src/auth-routes';
+import { AUTH_DEADLINE_MS, authorizeUpgrade } from '../src/auth-routes';
 import { authOptions, createAuth, emailAllowed, MAILS_PER_ADDRESS, MAILS_PER_IP, type AuthDeps } from '../src/auth';
 import { magicLinkMail, smtpMailer, type Mail } from '../src/mail';
 import { migrate } from '../src/migrate';
 import { connectValkey } from '../src/valkey';
-import { resetDatabase, resetValkey, TEST_DATABASE_URL, TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
+import { resetDatabase, resetValkey, tcpProxy, TEST_DATABASE_URL, TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
 
 const pool = testPool();
 const valkey = await connectValkey(TEST_VALKEY_URL);
@@ -159,6 +159,41 @@ test('сбой Postgres при подтверждении — ошибка се�
   } finally {
     console.error = original;
   }
+});
+
+test('зависший Valkey: 503 в формате ошибок входа по истечении срока, а не вечное ожидание', async () => {
+  const proxy = tcpProxy(Number(new URL(TEST_VALKEY_URL).port));
+  const hung = await connectValkey(`redis://127.0.0.1:${proxy.port}`);
+  const logged: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void logged.push(args);
+  const publicUrl = 'http://localhost:1';
+  const auth = createAuth({ publicUrl, secret: TEST_SECRET, pool, valkey: hung, allowedEmails: [], mailer: { send: async () => {} } });
+  const app = startServer({ pool, valkey: hung, webDist: '/nonexistent', auth, publicUrl, trustedProxies: [], authDeadlineMs: 150 }, 0);
+  try {
+    proxy.freeze();
+    const started = Date.now();
+    const res = await fetch(`http://127.0.0.1:${app.port}/api/auth/sign-in/magic-link`, {
+      method: 'POST',
+      headers: { origin: publicUrl, 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'ivan@example.com' }),
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'UNAVAILABLE' });
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(logged).toEqual([['Запрос входа не уложился в срок:', '/api/auth/sign-in/magic-link']]);
+  } finally {
+    console.error = original;
+    app.stop(true);
+    hung.close();
+    proxy.stop();
+  }
+});
+
+test('срок обработчика меньше 15 с, которые ждёт клиент', () => {
+  expect(AUTH_DEADLINE_MS).toBe(10_000);
 });
 
 test('истёкшая ссылка не входит, срок задаётся в Valkey', async () => {
@@ -361,6 +396,19 @@ test('за своим прокси адрес клиента — первый с
   }
   expect((await s.post('/api/auth/sign-in/magic-link', { email: 'x@example.com' }, { 'x-forwarded-for': '10.0.0.1' })).status).toBe(429);
   expect((await s.post('/api/auth/sign-in/magic-link', { email: 'y@example.com' }, { 'x-forwarded-for': '10.0.0.2' })).status).toBe(200);
+});
+
+test('проверка сессии без предела: общий IP не закрывает приложение вошедшим', async () => {
+  const s = stand();
+  const cookie = await signIn(s);
+  const replies = await Promise.all(Array.from({ length: 150 }, () => s.get('/api/auth/session', { cookie })));
+  expect(new Set(replies.map((r) => r.status))).toEqual(new Set([200]));
+});
+
+test('подтверждение: предел остаётся, 30 запросов в минуту', async () => {
+  const s = stand();
+  for (let i = 0; i < 30; i++) expect((await s.post('/api/auth/confirm', { token: 'a'.repeat(32) })).status).toBe(400);
+  expect((await s.post('/api/auth/confirm', { token: 'a'.repeat(32) })).status).toBe(429);
 });
 
 test('имя с первого входа сохраняется и видно в сессии; без сессии — 401', async () => {

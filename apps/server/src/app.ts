@@ -14,6 +14,7 @@ export interface AppDeps {
   auth: Auth;
   publicUrl: string;
   trustedProxies: readonly string[];
+  authDeadlineMs?: number;
 }
 
 /** Проверка не должна висеть дольше проверки контейнера. */

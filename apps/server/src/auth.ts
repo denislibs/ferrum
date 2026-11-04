@@ -52,6 +52,9 @@ export function authOptions(deps: AuthDeps) {
       window: 60,
       max: 100,
       customRules: {
+        // Проверка сессии только читает и нужна при каждом открытии: за общим IP (офис, шлюз) предел
+        // закрыл бы приложение всем, кто уже вошёл.
+        '/get-session': false,
         '/sign-in/magic-link': { window: HOUR, max: MAILS_PER_IP },
         '/magic-link/verify': { window: 60, max: 30 },
       },
