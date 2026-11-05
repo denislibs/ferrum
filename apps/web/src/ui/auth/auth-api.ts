@@ -2,6 +2,7 @@
 
 import {
   API_CONFIRM,
+  API_CONFIRM_INFO,
   API_NAME,
   API_SESSION,
   API_SIGN_IN,
@@ -9,6 +10,7 @@ import {
   API_SIGN_OUT_EVERYWHERE,
   AUTH_ERROR_CODES,
   type AuthErrorCode,
+  type ConfirmInfo,
   type SessionResponse,
   type SessionUser,
 } from '@ferrum/protocol';
@@ -50,6 +52,8 @@ const post = <T>(path: string, valid: (body: unknown) => body is T, body: unknow
 export const getSession = () => call<SessionResponse>(API_SESSION, isSession);
 export const requestLink = (email: string, next: string | null) => post(API_SIGN_IN, isOk, next ? { email, next } : { email });
 export const confirmLink = (token: string) => post(API_CONFIRM, isOk, { token });
+const isConfirmInfo = (v: unknown): v is ConfirmInfo => isRecord(v) && typeof v.email === 'string';
+export const confirmInfo = (token: string) => post(API_CONFIRM_INFO, isConfirmInfo, { token });
 export const saveName = (name: string) => post(API_NAME, isUserReply, { name });
 export const signOut = () => post(API_SIGN_OUT, isOk, {});
 export const signOutEverywhere = () => post(API_SIGN_OUT_EVERYWHERE, isOk, {});

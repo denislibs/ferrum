@@ -13,7 +13,7 @@ import { dismissSplash } from './boot';
 import { ConfirmDialog } from './dialog';
 import { downloadBlob, fileName, formatSize, relativeTime } from './files';
 import { importFromDisk, type FileMeta, type FileStore, type Section } from './file-store';
-import { extensions } from './extensions';
+import { extensions, type NavEntry } from './extensions';
 import { Icon, type IconName } from './icons';
 import { Menu, type MenuItem } from './menu';
 import { RenameInput } from './rename-input';
@@ -60,6 +60,8 @@ export function FilesScreen(props: FilesScreenProps) {
   const [query, setQuery] = createSignal('');
   const [total, setTotal] = createSignal(0);
   const [loaded, setLoaded] = createSignal(false);
+  /** Окно не пришло (сеть, сервер): вместо пустого списка — сообщение и «Повторить». */
+  const [failed, setFailed] = createSignal<string | null>(null);
   const [rows, setRows] = createStore<{ start: number; list: FileMeta[] }>({ start: 0, list: [] });
   const [width, setWidth] = createSignal(0);
   const [height, setHeight] = createSignal(0);
@@ -79,7 +81,14 @@ export function FilesScreen(props: FilesScreenProps) {
   let alive = true;
 
   const layout = createMemo(() => filesLayout(width(), view()));
-  const title = () => SECTIONS.find((s) => s.id === props.section)!.title;
+  const title = () => SECTIONS.find((s) => s.id === props.section)?.title ?? extensions.sectionTitle?.(props.section) ?? 'Файлы';
+  // Разделы, которые есть не у всех сборок, — между «Черновиками» и «Корзиной».
+  const navEntries = (): NavEntry[] => {
+    const own = (s: (typeof SECTIONS)[number]): NavEntry => ({ kind: 'section', id: s.id, title: s.title, icon: s.icon });
+    return [own(SECTIONS[0]), own(SECTIONS[1]), ...(extensions.filesNav?.() ?? []), own(SECTIONS[2])];
+  };
+  const navSections = () => navEntries().flatMap((e) => (e.kind === 'section' ? [e.id] : []));
+  const newFile = () => props.navigate(extensions.newFileRoute?.(props.section) ?? { kind: 'new' });
 
   // ——— Окно списка ———
   let asked = '';
@@ -94,6 +103,7 @@ export function FilesScreen(props: FilesScreenProps) {
       (r) => {
         if (!alive || my !== requestSeq) return;
         batch(() => {
+          setFailed(null);
           setTotal(r.total);
           setRows('start', w.start);
           setRows('list', reconcile(r.rows, { key: 'id' }));
@@ -103,7 +113,17 @@ export function FilesScreen(props: FilesScreenProps) {
         loadThumbs(r.rows);
       },
       (e: unknown) => {
-        if (alive) ui.toast(`Не удалось прочитать список файлов: ${e instanceof Error ? e.message : String(e)}`, 'error');
+        if (!alive || my !== requestSeq) return;
+        // Сессии больше нет: страница заново показывает вход (раздел 5: без сессии только экран входа).
+        if ((e as { code?: unknown } | null)?.code === 'UNAUTHORIZED') {
+          location.reload();
+          return;
+        }
+        const text = `Не удалось прочитать список файлов: ${e instanceof Error ? e.message : String(e)}`;
+        // Фоновое перечитывание повторяется: одно сообщение, пока оно не сменится.
+        if (failed() !== text) ui.toast(text, 'error');
+        setFailed(text);
+        asked = '';
       },
     );
   };
@@ -255,10 +275,16 @@ export function FilesScreen(props: FilesScreenProps) {
           // Десктоп: окно одно, вкладок нет.
           ...(isTauri() ? [] : [{ label: 'Открыть в новой вкладке', onSelect: () => openInNewTab(f) }]),
           { separator: true },
-          { label: 'Переименовать', onSelect: () => setRenaming(f.id) },
+          ...(f.role === 'viewer' ? [] : [{ label: 'Переименовать', onSelect: () => setRenaming(f.id) }]),
           { label: 'Скачать копию (.ferrum)', disabled: f.size === 0, onSelect: () => void download(f) },
-          { separator: true },
-          { label: 'Удалить', onSelect: () => void act('Не удалось удалить файл', props.files.trash(f.id)) },
+          ...(extensions.fileMenu?.(f) ?? []),
+          // Владелец у файла с ролями один: только он убирает файл в корзину.
+          ...(f.role === undefined || f.role === 'owner'
+            ? [
+                { separator: true as const },
+                { label: 'Удалить', onSelect: () => void act('Не удалось удалить файл', props.files.trash(f.id)) },
+              ]
+            : []),
         ];
 
   // ——— Клавиатура списка: одна точка Tab, стрелки по сетке ———
@@ -326,10 +352,10 @@ export function FilesScreen(props: FilesScreenProps) {
         if (f && props.section !== 'trash') open(f);
         break;
       case 'F2':
-        if (f && props.section !== 'trash') setRenaming(f.id);
+        if (f && props.section !== 'trash' && f.role !== 'viewer') setRenaming(f.id);
         break;
       case 'Delete':
-        if (f && props.section !== 'trash') {
+        if (f && props.section !== 'trash' && (f.role === undefined || f.role === 'owner')) {
           // Карточка уйдёт из списка: фокус — на ту, что встанет на её место.
           pendingFocus = at;
           void act('Не удалось удалить файл', props.files.trash(f.id));
@@ -350,15 +376,16 @@ export function FilesScreen(props: FilesScreenProps) {
 
   // Разделы — список с выбором (listbox): стрелки переходят к соседнему разделу.
   const onNavKey = (e: KeyboardEvent) => {
-    const i = SECTIONS.findIndex((s) => s.id === props.section);
+    const list = navSections();
+    const i = list.indexOf(props.section);
     let next = -1;
-    if (e.key === 'ArrowDown') next = (i + 1) % SECTIONS.length;
-    else if (e.key === 'ArrowUp') next = (i - 1 + SECTIONS.length) % SECTIONS.length;
+    if (e.key === 'ArrowDown') next = (i + 1) % list.length;
+    else if (e.key === 'ArrowUp') next = (i - 1 + list.length) % list.length;
     else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = SECTIONS.length - 1;
+    else if (e.key === 'End') next = list.length - 1;
     else return;
     e.preventDefault();
-    props.navigate({ kind: 'files', section: SECTIONS[next].id });
+    props.navigate({ kind: 'files', section: list[next] });
   };
   // Раздел сменили стрелками: фокус переходит к выбранному пункту.
   createEffect(
@@ -396,7 +423,9 @@ export function FilesScreen(props: FilesScreenProps) {
         ? 'Ничего не найдено'
         : props.section === 'trash'
           ? 'Корзина пуста'
-          : 'Здесь пока нет файлов'
+          : props.section === 'shared'
+            ? 'Вам пока ничего не открыли'
+            : 'Здесь пока нет файлов'
       : '';
 
   const Thumb = (p: { file: FileMeta }): JSX.Element => (
@@ -427,7 +456,7 @@ export function FilesScreen(props: FilesScreenProps) {
           onDblClick={(e) => {
             e.stopPropagation();
             clearTimeout(nameClick);
-            if (props.section !== 'trash') setRenaming(p.file.id);
+            if (props.section !== 'trash' && p.file.role !== 'viewer') setRenaming(p.file.id);
           }}
         >
           {p.file.name}
@@ -474,27 +503,34 @@ export function FilesScreen(props: FilesScreenProps) {
           />
         </label>
         <div ref={nav} class="fe-files__nav" role="listbox" aria-label="Разделы" onKeyDown={onNavKey}>
-          <For each={SECTIONS}>
-            {(s) => (
-              <div
-                class="fe-files__nav-item"
-                role="option"
-                aria-selected={props.section === s.id}
-                tabindex={props.section === s.id ? 0 : -1}
-                onClick={() => props.navigate({ kind: 'files', section: s.id })}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    props.navigate({ kind: 'files', section: s.id });
-                  }
-                }}
-              >
-                <Icon name={s.icon} />
-                <span>{s.title}</span>
-              </div>
-            )}
+          <For each={navEntries()}>
+            {(s) =>
+              s.kind === 'label' ? (
+                <div class="fe-files__nav-label t-muted" role="presentation" title={s.title}>
+                  {s.title}
+                </div>
+              ) : (
+                <div
+                  class="fe-files__nav-item"
+                  role="option"
+                  aria-selected={props.section === s.id}
+                  tabindex={props.section === s.id ? 0 : -1}
+                  onClick={() => props.navigate({ kind: 'files', section: s.id })}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      props.navigate({ kind: 'files', section: s.id });
+                    }
+                  }}
+                >
+                  <Icon name={s.icon} />
+                  <span>{s.title}</span>
+                </div>
+              )
+            }
           </For>
         </div>
+        {extensions.filesNavExtra && <extensions.filesNavExtra navigate={props.navigate} />}
         {extensions.accountRow && <extensions.accountRow />}
       </aside>
       <main class="fe-files__main">
@@ -507,7 +543,7 @@ export function FilesScreen(props: FilesScreenProps) {
               <>
                 <button class="fe-btn fe-btn--secondary" onClick={() => void importFile()}>
                   <Icon name="upload" />
-                  Импорт…
+                  {props.files.importLabel ?? 'Импорт…'}
                 </button>
                 <Show when={props.files.disk}>
                   <button class="fe-btn fe-btn--secondary" onClick={() => void openLinked()}>
@@ -515,7 +551,7 @@ export function FilesScreen(props: FilesScreenProps) {
                     Открыть с диска…
                   </button>
                 </Show>
-                <button class="fe-btn fe-btn--primary" onClick={() => props.navigate({ kind: 'new' })}>
+                <button class="fe-btn fe-btn--primary" onClick={newFile}>
                   <Icon name="plus" />
                   Новый файл
                 </button>
@@ -566,13 +602,21 @@ export function FilesScreen(props: FilesScreenProps) {
               <div class="fe-files__empty">
                 <p class="t-muted">{text()}</p>
                 <Show when={text() === 'Здесь пока нет файлов'}>
-                  <button class="fe-btn fe-btn--primary" onClick={() => props.navigate({ kind: 'new' })}>
+                  <button class="fe-btn fe-btn--primary" onClick={newFile}>
                     <Icon name="plus" />
                     Новый файл
                   </button>
                 </Show>
               </div>
             )}
+          </Show>
+          <Show when={failed() && !loaded()}>
+            <div class="fe-files__empty" role="alert">
+              <p class="t-muted">Не удалось загрузить список файлов</p>
+              <button class="fe-btn fe-btn--secondary" onClick={() => request(true)}>
+                Повторить
+              </button>
+            </div>
           </Show>
           <div
             ref={list}

@@ -4,6 +4,7 @@
 
 import {
   API_CONFIRM,
+  API_CONFIRM_INFO,
   API_NAME,
   API_SESSION,
   API_SIGN_IN,
@@ -14,8 +15,10 @@ import {
   parseSignInRequest,
   type AuthErrorBody,
   type AuthErrorCode,
+  type ConfirmInfo,
   type SessionResponse,
 } from '@ferrum/protocol';
+import { createHash } from 'node:crypto';
 import { CLIENT_IP_HEADER, type Auth } from './auth';
 import { clientIp, proxyMatcher } from './client-ip';
 
@@ -24,6 +27,19 @@ const MAX_BODY_BYTES = 4096;
 /** Срок на обработчик: зависшая база или Valkey дают честный 503. Меньше 15 с, которые ждёт клиент
  * (`REQUEST_TIMEOUT_MS`), иначе человек видел бы сбой сети, а не ответ сервера. */
 export const AUTH_DEADLINE_MS = 10_000;
+
+/** Как у подтверждения (`/magic-link/verify`): 30 в минуту с адреса. */
+const CONFIRM_INFO_PER_MINUTE = 30;
+
+function readEmail(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const email = (JSON.parse(value) as { email?: unknown }).email;
+    return typeof email === 'string' ? email : null;
+  } catch {
+    return null;
+  }
+}
 
 export function originAllowed(req: Request, publicUrl: string): boolean {
   return req.headers.get('origin') === publicUrl;
@@ -133,8 +149,24 @@ export function authRoutes(deps: AuthRoutesDeps) {
     return respond([r], { ok: true });
   }
 
-  /** Токен тратится только здесь, по нажатию «Войти»: сканер почты, открывший ссылку, увидит
-   * страницу подтверждения, а POST с верным `Origin` он не пришлёт. */
+  /** Куда ведёт ссылка (B-193): запись токена читается без траты. Иначе чужая ссылка, нажатая по
+   * неосторожности, молча вошла бы под чужим адресом, и работа попала бы в чужой аккаунт. Предел — как у
+   * подтверждения: перебирать токены здесь не легче. */
+  async function confirmInfo(req: Request, ip: string): Promise<Response> {
+    const parsed = parseConfirmRequest(await readJson(req));
+    if (!parsed) return fail(400, 'BAD_REQUEST');
+    const context = await auth.$context;
+    const used = await context.secondaryStorage!.increment!(`confirm-info:${ip}`, 60);
+    if (used > CONFIRM_INFO_PER_MINUTE) return fail(429, 'TOO_MANY_REQUESTS');
+    const hashed = createHash('sha256').update(parsed.token).digest('base64url');
+    const row = await context.internalAdapter.findVerificationValue(`magic-link:${hashed}`);
+    const email = readEmail(row?.value);
+    return email ? respond([], { email } satisfies ConfirmInfo) : fail(400, 'INVALID_TOKEN');
+  }
+
+  /** Токен тратится только здесь, по нажатию «Войти»: сканер почты, открывший ссылку, увидит страницу
+   * подтверждения. Сканер со скриптами пришлёт `confirm-info` с верным `Origin`, но тот токен не тратит,
+   * а кнопку он не нажмёт. */
   async function confirm(req: Request, ip: string): Promise<Response> {
     const parsed = parseConfirmRequest(await readJson(req));
     if (!parsed) return fail(400, 'BAD_REQUEST');
@@ -191,6 +223,7 @@ export function authRoutes(deps: AuthRoutesDeps) {
     const post: Record<string, (req: Request, ip: string) => Promise<Response>> = {
       [API_SIGN_IN]: signIn,
       [API_CONFIRM]: confirm,
+      [API_CONFIRM_INFO]: confirmInfo,
       [API_NAME]: name,
       [API_SIGN_OUT]: signOut,
       [API_SIGN_OUT_EVERYWHERE]: signOutEverywhere,

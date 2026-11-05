@@ -8,6 +8,7 @@ import type { Backend, CoreEvent } from '../wasm/ferrum_wasm';
 import { Core, detectPlatform } from '../core/core';
 import type { TransportMode } from '../core/transport';
 import type { Editor } from './context';
+import { extensions } from './extensions';
 import { supportsCustomFormat } from './clipboard';
 import { editableTarget, forwardKey, modalOpen, opensWindow } from './keys';
 import { createScheduler, guardLayout } from './scheduler';
@@ -51,7 +52,7 @@ const EVENT_LOG = 2000;
 
 /** Тестовый режим: E2E ставит `window.__ferrumTest` до загрузки или адрес с `?debug`. */
 function testMode(params: URLSearchParams): boolean {
-  return params.has('debug') || (window as { __ferrumTest?: boolean }).__ferrumTest === true;
+  return (!extensions.noDebugParam && params.has('debug')) || (window as { __ferrumTest?: boolean }).__ferrumTest === true;
 }
 
 /** Замер производительности (`window.__ferrumPerf` до загрузки): ядро и планировщик

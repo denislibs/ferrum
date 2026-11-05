@@ -499,3 +499,26 @@ fn overlay_shares_the_network_until_it_changes() {
     let c = h.ed.overlay().vector_edit.unwrap();
     assert!(!Arc::ptr_eq(&a.net, &c.net) && a.net != c.net);
 }
+
+/// Роль понизили посреди правки контура и посреди протяжки точки: протяжка отменена, сеанс закрыт, документ
+/// прежний и правок не принимает.
+#[test]
+fn view_only_cancels_point_drag_and_closes_vector_edit() {
+    let mut h = H::new();
+    let id = square(&mut h, true);
+    h.ed.start_vector_edit(id);
+    assert!(h.ed.is_editing_vector());
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.down(100.0, 100.0, Modifiers::NONE);
+    h.mv(150.0, 150.0, Modifiers::NONE);
+    h.ed.set_view_only(true);
+    assert!(!h.ed.is_editing_vector());
+    assert_eq!(h.ed.tool_kind(), ToolKind::Move);
+    h.mv(170.0, 170.0, Modifiers::NONE);
+    h.up(170.0, 170.0, Modifiers::NONE);
+    assert_eq!(h.state(), before);
+    assert_eq!(h.ed.step_count(), steps);
+    assert!(!h.ed.is_busy());
+    h.assert_scene_clean();
+}

@@ -6,7 +6,7 @@ import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch,
 import { MAX_NAME_CHARS, parseConfirmHash, parseEmail, parseNext, type SessionUser } from '@ferrum/protocol';
 import { dismissSplash } from '../boot';
 import { editorHooks } from '../extensions';
-import { confirmLink, getSession, requestLink, saveName } from './auth-api';
+import { confirmInfo, confirmLink, getSession, requestLink, saveName } from './auth-api';
 import { failureText, resendLeft, screenFor, type AuthFailure, type AuthScreen } from './auth-logic';
 import { announceAuthChange, currentUser, onAuthChange, setCurrentUser } from './session';
 
@@ -39,7 +39,7 @@ export function AuthGate(props: { children: JSX.Element }) {
   const load = async (keepShown = false) => {
     const my = ++generation;
     const hash = location.hash;
-    // Страница подтверждения не спрашивает сессию: открытие ссылки ни к чему не обращается.
+    // Страница подтверждения спрашивает адрес и сессию сама (`ConfirmScreen`), токен при этом не тратится.
     const first = screenFor(hash, null);
     if (first.kind === 'confirm') {
       setFailure(null);
@@ -116,9 +116,18 @@ export function AuthGate(props: { children: JSX.Element }) {
         const was = currentUser();
         const now = r.value.user;
         if (was?.id === now?.id && was?.name === now?.name) return;
-        // Спросить человека некому (он в другой вкладке): файл записывается молча.
-        await editorHooks.flush?.().catch(() => {});
-        location.reload();
+        // Спросить человека некому (он в другой вкладке): файл записывается молча. Пришёл другой человек —
+        // запись откажет сервер: запросы вкладки идут от прежнего (`USER_HEADER`), его правки остаются в его журнале.
+        const saved = await (editorHooks.flush?.() ?? Promise.resolve(true)).catch(() => false);
+        if (saved) {
+          location.reload();
+          return;
+        }
+        // Файл не записался. Пришёл другой человек, а правки в журнале: перезагрузка их не теряет. Сессии
+        // нет или правки только в памяти (новый файл): редактор остаётся и задаёт вопрос сам.
+        const unsaved = await (editorHooks.unsaved?.() ?? Promise.resolve(false)).catch(() => true);
+        if (now !== null && !unsaved) location.reload();
+        else editorHooks.sessionLost?.();
       });
     }),
   );
@@ -143,7 +152,9 @@ export function AuthGate(props: { children: JSX.Element }) {
         <LoginScreen />
       </Match>
       <Match when={confirm()} keyed>
-        {(c) => <ConfirmScreen token={c.token} next={c.next} onDone={signedIn} onNewLink={(next) => go(next ?? '#/')} />}
+        {(c) => (
+          <ConfirmScreen token={c.token} next={c.next} onDone={signedIn} onStay={() => go('#/')} onNewLink={(next) => go(next ?? '#/')} />
+        )}
       </Match>
       <Match when={naming()} keyed>
         {(user) => <NameScreen user={user} onDone={named} />}
@@ -303,17 +314,52 @@ function LoginScreen() {
  * одноразовый токен. Токен тратится только по нажатию. Ссылка точно мертва только при отказе
  * `INVALID_TOKEN` (или если токена нет). При любом другом сбое «Войти» остаётся повтором, а токен в
  * адресе не трогается. Но при сбое сервера токен мог быть уже потрачен (Better Auth снимает его до
- * обращения к базе): тогда рядом и «Запросить новую ссылку». */
+ * обращения к базе): тогда рядом и «Запросить новую ссылку».
+ * Страница показывает, в какой адрес идёт вход, и предупреждает, если человек уже вошёл под другим
+ * (B-193): чужая ссылка, нажатая по неосторожности, иначе молча сложила бы его работу в чужой аккаунт.
+ * Эти два запроса токен не тратят. Пока они идут (у них есть срок), «Войти» недоступна: нажатие заменило бы
+ * прежнюю сессию вслепую. Их сбой вход не блокирует, но на экране об этом сказано. «Остаться» отвергает
+ * ссылку целиком: её `next` не исполняется. */
 function ConfirmScreen(props: {
   token: string | null;
   next: string | null;
   onDone: (next: string | null) => void;
+  onStay: () => void;
   onNewLink: (next: string | null) => void;
 }) {
   const [busy, setBusy] = createSignal(false);
   const [dead, setDead] = createSignal(!props.token);
   const [serverDown, setServerDown] = createSignal(false);
   const [error, setError] = createSignal<string | null>(props.token ? null : failureText('INVALID_TOKEN'));
+  const [target, setTarget] = createSignal<string | null>(null);
+  const [signedIn, setSignedIn] = createSignal<string | null>(null);
+  const [infoDone, setInfoDone] = createSignal(!props.token);
+  const [sessionDone, setSessionDone] = createSignal(!props.token);
+  const [sessionFailed, setSessionFailed] = createSignal(false);
+  let closed = false;
+  onCleanup(() => (closed = true));
+  if (props.token) {
+    void confirmInfo(props.token).then((r) => {
+      if (closed) return;
+      setInfoDone(true);
+      if (r.ok) setTarget(r.value.email);
+      else if (r.failure === 'INVALID_TOKEN') {
+        setDead(true);
+        setError(failureText('INVALID_TOKEN'));
+      }
+    });
+    void getSession().then((r) => {
+      if (closed) return;
+      setSessionDone(true);
+      if (r.ok) setSignedIn(r.value.user?.email ?? null);
+      else setSessionFailed(true);
+    });
+  }
+  /** Уже вошёл под этим же адресом: токен незачем тратить. */
+  const same = () => signedIn() !== null && signedIn() === target();
+  /** Вошёл, и ссылка не про него (или неизвестно, про кого): вход заменит сессию. */
+  const replaces = () => signedIn() !== null && !same();
+  const checking = () => !infoDone() || !sessionDone();
   const enter = async () => {
     setBusy(true);
     setError(null);
@@ -336,12 +382,60 @@ function ConfirmScreen(props: {
         </p>
       </Show>
       <Show when={!dead()}>
-        <Show when={!error()}>
-          <p class="fe-auth__text">Нажмите кнопку, чтобы завершить вход.</p>
+        <Show
+          when={replaces()}
+          fallback={
+            <Show when={!error()}>
+              <p class="fe-auth__text">
+                <Show when={target()} fallback="Нажмите кнопку, чтобы завершить вход.">
+                  {(email) => (
+                    <>
+                      <Show when={same()} fallback="Вход как ">
+                        Вы уже вошли как{' '}
+                      </Show>
+                      <b>{email()}</b>.
+                    </>
+                  )}
+                </Show>
+              </p>
+              <Show when={sessionFailed()}>
+                <p class="fe-auth__text" role="status">
+                  Не удалось проверить, вошли ли вы. Если вы уже вошли под другим адресом, этот вход его заменит.
+                </p>
+              </Show>
+            </Show>
+          }
+        >
+          <p class="fe-auth__text" role="status">
+            Вы уже вошли как <b>{signedIn()}</b>.{' '}
+            <Show when={target()} fallback="Не удалось узнать, под каким адресом входит эта ссылка: вход может заменить текущий.">
+              {(email) => (
+                <>
+                  Эта ссылка входит как <b>{email()}</b>: новые файлы будут сохраняться в его аккаунте.
+                </>
+              )}
+            </Show>
+          </p>
         </Show>
-        <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy()} onClick={() => void enter()}>
-          Войти
-        </button>
+        <Show
+          when={same()}
+          fallback={
+            <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy() || checking()} onClick={() => void enter()}>
+              <Show when={signedIn() && target()} fallback="Войти">
+                Войти как {target()}
+              </Show>
+            </button>
+          }
+        >
+          <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => props.onDone(props.next)}>
+            Продолжить
+          </button>
+        </Show>
+        <Show when={replaces()}>
+          <button class="fe-btn fe-btn--secondary fe-auth__wide" disabled={busy()} onClick={props.onStay}>
+            Остаться как {signedIn()}
+          </button>
+        </Show>
       </Show>
       <Show when={dead() || serverDown()}>
         <button

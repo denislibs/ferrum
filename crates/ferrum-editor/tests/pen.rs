@@ -563,3 +563,23 @@ fn panel_commit_during_a_pen_handle_drag_keeps_the_shown_handle() {
     h.key("Escape", Modifiers::NONE);
     assert_eq!(h.children(None), vec![r], "вектора нет");
 }
+
+/// Роль понизили посреди пути (решение плана 23): начатый путь записан одним шагом раньше, чем документ
+/// перестал принимать правки, а не потерян. Инструмент — «Перемещение».
+#[test]
+fn view_only_finishes_an_open_path_as_one_step() {
+    let mut h = H::new();
+    let steps = h.ed.step_count();
+    h.key("KeyP", Modifiers::NONE);
+    h.click(100.0, 100.0, Modifiers::NONE);
+    h.click(200.0, 100.0, Modifiers::NONE);
+    assert!(h.children(None).is_empty());
+    h.ed.set_view_only(true);
+    let id = only_vector(&mut h);
+    assert_eq!(h.props(id).vector.as_deref().unwrap().points.len(), 2);
+    assert_eq!(h.ed.step_count(), steps + 1);
+    assert!(h.ed.document().is_read_only());
+    assert_eq!(h.ed.tool_kind(), ToolKind::Move);
+    assert!(!h.ed.is_editing_vector());
+    h.assert_scene_clean();
+}

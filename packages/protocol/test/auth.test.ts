@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import {
   AUTH_ERROR_CODES,
   confirmHash,
+  mailbox,
   MAX_NAME_CHARS,
   parseConfirmHash,
   parseConfirmRequest,
@@ -18,6 +19,46 @@ test('адрес приводится к нижнему регистру, мус
   for (const bad of ['', 'ivan', 'ivan@', '@x.ru', 'a b@x.ru', 'a@x', 5, null, `${'a'.repeat(250)}@x.ru`, 'a\n@x.ru']) {
     expect(parseEmail(bad)).toBeNull();
   }
+});
+
+test('варианты строки с тем же ящиком адресом не считаются, настоящие адреса проходят', () => {
+  for (const bad of [
+    'x<box@d.ru>',
+    'x <box@d.ru>',
+    'z,box@d.ru',
+    'box@d.ru,z@d.ru',
+    '(c)box@d.ru',
+    'box@(c)d.ru',
+    'q:box@d.ru;',
+    '"q"@d.ru',
+    'a;b@d.ru',
+    'a[b@d.ru',
+    'a\\b@d.ru',
+    'a@b@d.ru',
+    'r%box@d.ru',
+    'r!box@d.ru',
+    '.box@d.ru',
+    'box.@d.ru',
+    'b..ox@d.ru',
+    'box@d..ru',
+    'box@-d.ru',
+    'box@d-.ru',
+    'box@d.ru.',
+    'box\u200b@d.ru',
+    'box@d_e.ru',
+  ]) {
+    expect(parseEmail(bad)).toBeNull();
+  }
+  for (const good of ['box@d.ru', 'first.last+tag@sub.d-e.ru', "o'brien@d.ru", 'a_b-c@d.ru', 'иван@почта.рф', '1@2.ru']) {
+    expect(parseEmail(good)).toBe(good);
+  }
+  expect(parseEmail('ｂｏｘ@d.ru')).toBe('box@d.ru');
+});
+
+test('ящик для счётчиков: метка и точки не дают новый счётчик', () => {
+  expect(mailbox('box@d.ru')).toBe('box@d.ru');
+  expect(mailbox('b.o.x+tag@d.ru')).toBe('box@d.ru');
+  expect(mailbox('box+a+b@sub.d.ru')).toBe('box@sub.d.ru');
 });
 
 test('возврат после входа: только маршрут приложения', () => {

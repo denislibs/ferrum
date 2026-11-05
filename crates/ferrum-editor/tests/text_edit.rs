@@ -310,3 +310,19 @@ fn new_text_is_named_by_its_content_until_renamed() {
     let made = h.ed.selection()[0];
     assert_eq!(h.props(made).name, "Строка из буфера");
 }
+
+/// Роль понизили посреди правки текста (спека подсистемы 4, раздел 6.3): сеанс закрыт, начатое в
+/// документе, дальше правок нет, снятие режима возвращает их.
+#[test]
+fn view_only_closes_text_edit_and_lifts_cleanly() {
+    let mut h = text_h();
+    let id = add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    assert!(h.ed.start_text_edit(id, EnterAt::All));
+    h.ed.set_view_only(true);
+    assert!(!h.ed.is_editing_text());
+    assert!(h.ed.document().is_read_only());
+    assert!(!h.ed.start_text_edit(id, EnterAt::All));
+    h.ed.set_view_only(false);
+    assert!(!h.ed.document().is_read_only());
+    assert!(h.ed.start_text_edit(id, EnterAt::All));
+}

@@ -445,7 +445,10 @@ fn export_copy_and_thumbnail_do_not_leave_loading_text_out() {
         .iter()
         .any(|e| matches!(e, CoreEvent::ClipboardSvg { .. })));
     // Превью: прежнее остаётся.
-    c.command(Command::Snapshot { thumbnail: true });
+    c.command(Command::Snapshot {
+        thumbnail: true,
+        full: None,
+    });
     let ev = c.take_events();
     assert!(ev.iter().any(|e| matches!(
         e,
@@ -482,7 +485,10 @@ fn export_copy_and_thumbnail_do_not_leave_loading_text_out() {
         );
         assert!(ev.iter().any(|e| matches!(e, CoreEvent::Exported { .. })));
     }
-    c.command(Command::Snapshot { thumbnail: true });
+    c.command(Command::Snapshot {
+        thumbnail: true,
+        full: None,
+    });
     let ev = c.take_events();
     assert!(ev.iter().any(|e| matches!(
         e,

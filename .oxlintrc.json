@@ -11,5 +11,12 @@
   "rules": {
     // Ссылка на элемент в SolidJS присваивается разметкой (`ref={el}`), правило этого не видит (бэклог).
     "no-unassigned-vars": "off"
-  }
+  },
+  "overrides": [
+    {
+      // Здесь SolidJS нет: правило работает.
+      "files": ["apps/server/**", "packages/**"],
+      "rules": { "no-unassigned-vars": "error" }
+    }
+  ]
 }

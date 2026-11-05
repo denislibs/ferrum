@@ -68,6 +68,8 @@ pub struct Core {
     editor: Editor,
     renderer: Renderer,
     images: DocImages,
+    /// Режим просмотра по роли: переживает замену документа.
+    view_only: bool,
     backend: Backend,
     platform: Platform,
     theme: Theme,
@@ -198,6 +200,7 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::DemoText { .. }
             | Command::FlushJournal
             | Command::Snapshot { .. }
+            | Command::SetViewOnly { .. }
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements
@@ -243,6 +246,7 @@ impl Core {
             editor,
             renderer,
             images: DocImages::default(),
+            view_only: false,
             backend,
             platform,
             theme: Theme::Dark,
@@ -326,6 +330,7 @@ impl Core {
         editor.set_settings(self.editor.settings().clone());
         editor.set_fonts(self.fonts.clone());
         *editor.keymap_mut() = self.editor.keymap().clone();
+        editor.set_view_only(self.view_only);
         editor.take_events();
         self.editor = editor;
         // Состояния команд нового документа — интерфейсу целиком.
@@ -424,9 +429,14 @@ impl Core {
     /// Снимок для хранилища: байты, ревизия, имя и превью первой страницы. Сначала
     /// — пачка журнала с правками до снимка: не запишется снимок — они останутся в
     /// журнале, запишется — пачки до его номера больше не нужны.
-    fn snapshot(&mut self, thumbnail: bool) {
+    fn snapshot(&mut self, thumbnail: bool, full: bool) {
         self.flush_journal(false);
-        let bytes = match container::encode(self.editor.document()) {
+        let encode = if full {
+            container::encode_full
+        } else {
+            container::encode
+        };
+        let bytes = match encode(self.editor.document()) {
             Ok(b) => b,
             Err(e) => {
                 // Свой текст: интерфейс отличает отказ снимка от отказа копии на диск.
@@ -793,9 +803,14 @@ impl Core {
                 }),
                 Err(e) => self.error(format!("Не удалось сохранить: {e}")),
             },
-            Command::Snapshot { thumbnail } => {
+            Command::Snapshot { thumbnail, full } => {
                 self.settle_waiting_fonts();
-                self.snapshot(thumbnail);
+                self.snapshot(thumbnail, full.unwrap_or(false));
+            }
+            Command::SetViewOnly { on } => {
+                self.view_only = on;
+                self.editor.set_view_only(on);
+                self.dirty = true;
             }
             Command::MarkSaved { revision } => {
                 // Ревизия не доверенная: только точное совпадение с текущей.

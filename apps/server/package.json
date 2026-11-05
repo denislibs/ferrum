@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@ferrum/protocol": "file:../../packages/protocol",
+    "@noble/hashes": "2.4.0",
     "better-auth": "1.7.16",
     "nodemailer": "10.2.0",
     "pg": "8.23.1"

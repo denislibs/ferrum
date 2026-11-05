@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import solid from 'vite-plugin-solid';
 
@@ -19,6 +20,13 @@ export default defineConfig(({ mode }) => {
   if (mode === 'standalone') input.debug = 'debug.html';
   return {
     plugins: [solid()],
+    // Автономная сборка не видит кода сервера вовсе: условие в `main.tsx` убирает ветку, но не файл worker'а.
+    resolve: {
+      alias:
+        mode === 'standalone'
+          ? [{ find: /^.*\/ui\/server\/setup$/, replacement: fileURLToPath(new URL('./src/ui/server/setup.local.ts', import.meta.url)) }]
+          : [],
+    },
     // `npm run dev:server`: API — у сервера из Docker (PUBLIC_URL должен быть адресом vite).
     server: { headers, fs: { allow: ['../..'] }, proxy: { '/api': process.env.FERRUM_API ?? 'http://localhost:8090' } },
     preview: { headers },

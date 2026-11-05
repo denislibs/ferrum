@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { Pool } from 'pg';
 import { startServer } from '../src/app';
 import { AUTH_DEADLINE_MS, authorizeUpgrade } from '../src/auth-routes';
+import { FsBlobStore } from '../src/blob-store';
 import { authOptions, createAuth, emailAllowed, MAILS_PER_ADDRESS, MAILS_PER_IP, type AuthDeps } from '../src/auth';
 import { magicLinkMail, smtpMailer, type Mail } from '../src/mail';
 import { migrate } from '../src/migrate';
@@ -43,7 +44,20 @@ function stand(over: Partial<AuthDeps> = {}, trustedProxies: string[] = []) {
     ...over,
   };
   const auth = createAuth(deps);
-  const app = startServer({ pool, valkey, webDist: '/nonexistent', auth, publicUrl, trustedProxies }, port);
+  const app = startServer(
+    {
+      pool,
+      valkey,
+      webDist: '/nonexistent',
+      auth,
+      publicUrl,
+      trustedProxies,
+      blobs: new FsBlobStore('/nonexistent'),
+      mailer: deps.mailer,
+      secret: TEST_SECRET,
+    },
+    port,
+  );
   stops.push(() => app.stop(true));
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     fetch(`${publicUrl}${path}`, {
@@ -136,7 +150,9 @@ test('круг: письмо → подтверждение → сессия в 
   const tables = (await pool.query("SELECT table_name AS t FROM information_schema.tables WHERE table_schema = 'public'")).rows.map(
     (r) => r.t,
   );
-  expect(tables.sort()).toEqual(['account', 'schema_migration', 'user']);
+  expect(tables).toEqual(expect.arrayContaining(['account', 'user']));
+  expect(tables).not.toContain('session');
+  expect(tables).not.toContain('verification');
   const sessionToken = decodeURIComponent(cookieOf(ok).split('=')[1]).split('.')[0];
   expect(await valkey.get(sessionToken)).toContain('ivan@example.com');
 });
@@ -175,7 +191,21 @@ test('зависший Valkey: 503 в формате ошибок входа п�
   console.error = (...args: unknown[]) => void logged.push(args);
   const publicUrl = 'http://localhost:1';
   const auth = createAuth({ publicUrl, secret: TEST_SECRET, pool, valkey: hung, allowedEmails: [], mailer: { send: async () => {} } });
-  const app = startServer({ pool, valkey: hung, webDist: '/nonexistent', auth, publicUrl, trustedProxies: [], authDeadlineMs: 150 }, 0);
+  const app = startServer(
+    {
+      pool,
+      valkey: hung,
+      webDist: '/nonexistent',
+      auth,
+      publicUrl,
+      trustedProxies: [],
+      authDeadlineMs: 150,
+      blobs: new FsBlobStore('/nonexistent'),
+      mailer: { send: async () => {} },
+      secret: TEST_SECRET,
+    },
+    0,
+  );
   try {
     proxy.freeze();
     const started = Date.now();
@@ -660,4 +690,28 @@ test('настоящее письмо через SMTP в Mailpit', async () => {
   const full = (await (await fetch(`${api}/message/${list.messages[0].ID}`)).json()) as { Text: string; HTML: string };
   expect(full.Text).toContain(link);
   expect(full.HTML).toContain(link.replaceAll('&', '&amp;'));
+});
+
+test('куда ведёт ссылка: адрес без траты токена, неверный токен и чужой `Origin` — отказ (B-193)', async () => {
+  const s = stand();
+  const token = await requestLink(s, 'Ivan@Example.com');
+  const info = await s.post('/api/auth/confirm-info', { token });
+  expect(info.status).toBe(200);
+  expect(await info.json()).toEqual({ email: 'ivan@example.com' });
+  // Второй раз то же самое: токен не потрачен.
+  expect((await s.post('/api/auth/confirm-info', { token })).status).toBe(200);
+  expect((await s.post('/api/auth/confirm', { token })).status).toBe(200);
+  // Потрачен — той же ошибкой, что и подтверждение.
+  const dead = await s.post('/api/auth/confirm-info', { token });
+  expect(dead.status).toBe(400);
+  expect(await dead.json()).toEqual({ error: 'INVALID_TOKEN' });
+  expect((await s.post('/api/auth/confirm-info', { token: 'x' })).status).toBe(400);
+  expect((await s.post('/api/auth/confirm-info', { token: 'a'.repeat(32) }, { origin: 'https://evil.example' })).status).toBe(403);
+});
+
+test('куда ведёт ссылка: предел с одного адреса', async () => {
+  const s = stand();
+  const body = { token: 'a'.repeat(32) };
+  for (let i = 0; i < 30; i++) expect((await s.post('/api/auth/confirm-info', body)).status).toBe(400);
+  expect((await s.post('/api/auth/confirm-info', body)).status).toBe(429);
 });

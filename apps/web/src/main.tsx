@@ -12,31 +12,36 @@ import './ui/styles/layers.css';
 import './ui/styles/properties.css';
 import './ui/styles/files.css';
 import './ui/styles/auth.css';
+import './ui/styles/server.css';
 import { parseConfirmHash } from '@ferrum/protocol';
 import { render } from 'solid-js/web';
 import { AccountRow, AccountTab } from './ui/auth/account';
 import { AuthGate } from './ui/auth/auth-gate';
 import { extensions } from './ui/extensions';
+import { createLocalStore } from './ui/local-store';
 import { Root } from './ui/root';
+import { createServerStore, installServerUi } from './ui/server/setup';
 import { runSmoke } from './ui/tauri';
 
 // Условие — прямо по `import.meta.env`, без константы: сборщик выбрасывает ветку целиком,
 // `scripts/check-dist.mjs` проверяет, что в рабочей сборке её нет.
 if (import.meta.env.VITE_FERRUM_LOCAL === '1') {
   document.documentElement.dataset.ferrumLocal = '1';
-  render(() => <Root />, document.getElementById('app')!);
+  render(() => <Root createStore={createLocalStore} />, document.getElementById('app')!);
+  // Десктоп с `FERRUM_SMOKE=1`: проверка запуска (вне Tauri ничего не делает).
+  void runSmoke();
 } else {
+  extensions.noDebugParam = true;
+  installServerUi();
   extensions.accountTab = AccountTab;
   extensions.accountRow = AccountRow;
   extensions.ownsHash = (hash) => parseConfirmHash(hash) !== null;
   render(
     () => (
       <AuthGate>
-        <Root />
+        <Root createStore={createServerStore} />
       </AuthGate>
     ),
     document.getElementById('app')!,
   );
 }
-// Десктоп с `FERRUM_SMOKE=1`: проверка запуска (вне Tauri ничего не делает).
-void runSmoke();

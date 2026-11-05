@@ -30,7 +30,7 @@ export function mailFailure(e: unknown): string {
 }
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ESCAPES[c]);
+export const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ESCAPES[c]);
 
 export function magicLinkMail(to: string, link: string): Mail {
   const a = escapeHtml(link);

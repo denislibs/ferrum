@@ -7,16 +7,16 @@
 import { createSignal, Match, onCleanup, Switch } from 'solid-js';
 import { UNTITLED } from '../core/file-list';
 import { App } from './app';
-import { dismissSplash, isTestMode } from './boot';
+import { dismissSplash } from './boot';
 import { FilesScreen } from './files-screen';
 import { ConfirmDialog } from './dialog';
-import { IdbFileStore, type FileMeta, type FileStore, type Section } from './file-store';
-import { isTauri, TauriFileStore } from './tauri';
+import type { FileMeta, FileStore, Section } from './file-store';
 import { storage } from './settings';
 import { openSettings, type SettingsBackend, type SettingsStore } from './settings-store';
 import type { Backend } from '../wasm/ferrum_wasm';
 import { allowRestart, type Restart } from './restart';
 import { editorHooks, extensions } from './extensions';
+import { NoAccessScreen } from './no-access';
 import { historyIndex, parseRoute, routeHash, routeUrl, type Route } from './router';
 
 type View =
@@ -26,7 +26,9 @@ type View =
    * (после потери GPU — запасной, и для следующих перезапусков тоже). */
   | { kind: 'editor'; file: FileMeta; restart?: Restart; backend?: Backend; page?: string }
   /** Файл на диске без доступа (браузер перезапущен): вопрос, ответ — по щелчку. */
-  | { kind: 'access'; file: FileMeta; answer: (ok: boolean) => void };
+  | { kind: 'access'; file: FileMeta; answer: (ok: boolean) => void }
+  /** Файла нет или нет доступа к нему (хранилище с ролями их не различает). */
+  | { kind: 'denied'; id: string };
 
 /** Сколько ждать блокировку файла, прежде чем сказать «открыт в другой вкладке»:
  * своя прежняя блокировка (F5, файлы → тот же файл) снимается не мгновенно. */
@@ -63,15 +65,15 @@ async function lockFile(id: string): Promise<Lock> {
   }
 }
 
-export function Root() {
-  const test = isTestMode();
-  // Десктоп — хранилище на диске через Tauri; браузер — IndexedDB в worker'е.
-  const idb = isTauri() ? null : new IdbFileStore(test);
-  const files: FileStore & SettingsBackend = idb ?? new TauriFileStore();
-  if (test && idb) window.__ferrumFiles = { store: idb };
+/** `createStore` — откуда файлы: автономная сборка и десктоп берут их на месте, рабочая — с сервера
+ * (`main.tsx`). Корень этого не различает. */
+export function Root(props: { createStore: () => FileStore & SettingsBackend }) {
+  const files = props.createStore();
   const [view, setView] = createSignal<View>({ kind: 'wait' });
   let leave: (() => Promise<boolean>) | null = null;
-  let flushEditor: (() => Promise<void>) | null = null;
+  let flushEditor: (() => Promise<boolean>) | null = null;
+  let unsavedEditor: (() => Promise<boolean>) | null = null;
+  let markSessionLost: (() => void) | null = null;
   let unlock: (() => void) | null = null;
   let current: Route | null = null;
   let seq = 0;
@@ -217,13 +219,25 @@ export function Root() {
         current = route;
         showFiles(route.section);
       } else if (route.kind === 'new') {
-        const file = await files.create(UNTITLED);
+        const file = await files.create(UNTITLED, undefined, route.project);
         if (my !== seq) return;
         await edit(file, my);
       } else {
+        // Ссылка «Поделиться»: сначала право на файл. Токен в адресе дальше не нужен, неудача — та же «Нет доступа».
+        if (route.id && route.link && files.redeemLink) {
+          await files.redeemLink(route.id, route.link).catch(() => false);
+          if (my !== seq) return;
+          current = { kind: 'file', id: route.id };
+          replace(current);
+        }
         const file = route.id ? await files.get(route.id) : null;
         if (my !== seq) return;
-        if (!file) toFiles('Файл не найден');
+        if (!file && route.id && files.requestAccess) {
+          current = { kind: 'file', id: route.id };
+          replace(current);
+          dismissSplash(true);
+          setView({ kind: 'denied', id: route.id });
+        } else if (!file) toFiles('Файл не найден');
         // Файл из корзины для правки не открывается: сначала восстановить.
         else if (file.trashedAt !== undefined) toFiles('Файл в корзине — восстановите его, чтобы открыть');
         else await edit(file, my, route.page);
@@ -253,7 +267,9 @@ export function Root() {
   window.addEventListener('popstate', onPop);
   // Выход и смена входа спрашивают у редактора то же, что уход к экрану файлов.
   editorHooks.leave = () => (leave ? leave() : Promise.resolve(true));
-  editorHooks.flush = () => (leave && flushEditor ? flushEditor() : Promise.resolve());
+  editorHooks.flush = () => (leave && flushEditor ? flushEditor() : Promise.resolve(true));
+  editorHooks.unsaved = () => (leave && unsavedEditor ? unsavedEditor() : Promise.resolve(false));
+  editorHooks.sessionLost = () => markSessionLost?.();
   // Настройки — до первого экрана: тема, вид списка и раскладка нужны сразу (экраны
   // получают их готовыми). Хранилище настроек живёт у корня: перезапуск редактора
   // после сбоя ядра или потери GPU его не теряет.
@@ -273,6 +289,8 @@ export function Root() {
     window.removeEventListener('popstate', onPop);
     delete editorHooks.leave;
     delete editorHooks.flush;
+    delete editorHooks.unsaved;
+    delete editorHooks.sessionLost;
     release();
     settings?.dispose();
     files.dispose();
@@ -297,6 +315,15 @@ export function Root() {
             onCancel={() => v.answer(false)}
           />
         )}
+      </Match>
+      <Match
+        when={(() => {
+          const v = view();
+          return v.kind === 'denied' ? v : null;
+        })()}
+        keyed
+      >
+        {(v) => <NoAccessScreen id={v.id} files={files} navigate={navigate} />}
       </Match>
       <Match when={view().kind === 'files'}>
         <FilesScreen
@@ -326,6 +353,8 @@ export function Root() {
             navigate={navigate}
             onLeave={(fn) => (leave = fn)}
             onFlush={(fn) => (flushEditor = fn)}
+            onUnsaved={(fn) => (unsavedEditor = fn)}
+            onSessionLost={(fn) => (markSessionLost = fn)}
             onOpenFailed={(message) => {
               // Испорченный файл: запись не трогаем, сохранять нечего.
               leave = null;

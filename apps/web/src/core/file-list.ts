@@ -4,6 +4,7 @@
 // чистые функции, общие для него и модульных тестов. Всё, что пересекает границу
 // потоков, не доверенное: проверки — `requestError`.
 
+import type { FileRole } from '@ferrum/protocol';
 import { MAX_FONT_BYTES, MAX_NAME_CHARS, MAX_OPEN_BYTES, MAX_SETTINGS_BYTES, tooLarge } from './limits';
 
 /** Поля настроек пользователя в хранилище `settings` — по ключу на поле: вкладки
@@ -45,6 +46,10 @@ export interface FileMeta {
   /** Запись связана с файлом на диске (File System Access): его имя. Байты — в нём,
    * а не в базе. */
   disk?: string;
+  /** Действующая роль в файле на сервере; нет — файл свой, локальный, без ролей. */
+  role?: FileRole;
+  /** Файл лежит в проекте команды (файл на сервере). */
+  projectId?: string;
 }
 
 /** Файл на диске записала другая программа после нашего чтения или записи. */
@@ -59,6 +64,11 @@ export const DISK_ACCESS = 'Нет доступа к файлу на диске'
 
 /** Запись основана на устаревшем поколении: файл записали в другой вкладке. */
 export const CONFLICT = 'Файл изменён в другой вкладке — сохраните копию на диск или откройте файл заново';
+/** То же о файле на сервере: записать мог и другой человек, а при следующем открытии правки сольются. */
+export const SERVER_CONFLICT = 'Файл изменён в другом окне или другим человеком — откройте файл заново, ваши правки сольются с его версией';
+/** Новый файл без записи, а его записал другой человек: у двух независимых документов нет общего начала. */
+export const NEW_FILE_TAKEN =
+  'Этот файл уже записал другой человек. Ваши правки с ним не сольются и пропадут, если не сохранить их новым файлом или копией на диск';
 /** Записи нет: файл удалили навсегда (другая вкладка), пока он был открыт. */
 export const GONE = 'Файл удалён в другой вкладке — сохраните копию на диск';
 
@@ -72,7 +82,7 @@ export interface JournalMark {
 export const MAX_TEXT_BYTES = 4096;
 
 /** Разделы экрана файлов: недавние — по открытию, черновики — по изменению. */
-export type Section = 'recent' | 'drafts' | 'trash';
+export type Section = 'recent' | 'drafts' | 'trash' | 'shared' | `project:${string}`;
 export const SECTIONS: readonly Section[] = ['recent', 'drafts', 'trash'];
 
 /** Строк в одном окне списка не больше этого (виртуальный список просит видимые). */
@@ -184,9 +194,17 @@ export interface IoResults {
   create: FileMeta;
   /** `journal` — пачки, записанные после байтов файла, по порядку (без байтов — пусто);
    * `session` — наибольший сеанс среди всех пачек файла (`null` — пачек нет);
+   * `journalHeld` — журнал есть, но не применён (файл открыт читателем): вернули право — открыть заново.
    * `journalTooLarge` — журнал сверх пределов (больше `MAX_JOURNAL_ENTRIES` пачек или
    * файл вместе с ним больше `MAX_OPEN_BYTES`) не прочитан: файл открывается без него. */
-  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[]; session: number | null; journalTooLarge?: boolean };
+  read: {
+    meta: FileMeta;
+    bytes: ArrayBuffer | null;
+    journal: ArrayBuffer[];
+    session: number | null;
+    journalTooLarge?: boolean;
+    journalHeld?: boolean;
+  };
   write: FileMeta;
   appendJournal: null;
   journalCount: number;

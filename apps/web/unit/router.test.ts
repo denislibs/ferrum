@@ -1,4 +1,5 @@
 // Маршруты в адресе после `#`: экран файлов, разделы, файл, новый файл.
+import { extensions } from '../src/ui/extensions';
 
 import { expect, test } from '@playwright/test';
 import { parseRoute, routeHash, sameRoute } from '../src/ui/router';
@@ -42,4 +43,29 @@ test('ссылка на страницу: `?page=` разбирается, не�
     expect(parseRoute(`#/file/abc?page=${encodeURIComponent(bad)}`)).toEqual({ kind: 'file', id: 'abc' });
   }
   expect(parseRoute('#/file/abc?other=1')).toEqual({ kind: 'file', id: 'abc' });
+});
+
+test('чужие разделы — только если их знает сборка', () => {
+  expect(parseRoute('#/shared')).toEqual({ kind: 'files', section: 'recent' });
+  expect(parseRoute('#/project/abc')).toEqual({ kind: 'files', section: 'recent' });
+  extensions.parseSection = (path) => (path === 'shared' ? 'shared' : path === 'project/abc' ? 'project:abc' : null);
+  try {
+    expect(parseRoute('#/shared')).toEqual({ kind: 'files', section: 'shared' });
+    expect(parseRoute('#/project/abc')).toEqual({ kind: 'files', section: 'project:abc' });
+    expect(parseRoute('#/other')).toEqual({ kind: 'files', section: 'recent' });
+    expect(routeHash({ kind: 'files', section: 'shared' })).toBe('#/shared');
+    expect(routeHash({ kind: 'files', section: 'project:abc' })).toBe('#/project/abc');
+  } finally {
+    delete extensions.parseSection;
+  }
+});
+
+test('новый файл в проекте и токен ссылки — из адреса; мусор отбрасывается', () => {
+  expect(parseRoute('#/new?project=abc')).toEqual({ kind: 'new', project: 'abc' });
+  expect(parseRoute('#/new?project=../x')).toEqual({ kind: 'new' });
+  expect(routeHash({ kind: 'new', project: 'abc' })).toBe('#/new?project=abc');
+  expect(parseRoute('#/file/abc?link=Tok-en_1')).toEqual({ kind: 'file', id: 'abc', link: 'Tok-en_1' });
+  expect(parseRoute('#/file/abc?link=a%2Fb')).toEqual({ kind: 'file', id: 'abc' });
+  // Токен в запись истории не попадает: адрес файла — без него.
+  expect(routeHash({ kind: 'file', id: 'abc', link: 'x' })).toBe('#/file/abc');
 });

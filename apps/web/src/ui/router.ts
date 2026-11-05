@@ -2,15 +2,21 @@
 // - `#/` (и пустой) — экран файлов, «Недавние»; `#/drafts`, `#/trash` — другие разделы;
 // - `#/file/<id>` — редактор с файлом из хранилища; `#/file/<id>?page=<pageId>` —
 //   с этой страницей («Копировать ссылку на страницу»);
-// - `#/new` — создать файл в хранилище и открыть его (адрес заменяется на `#/file/<id>`).
+// - `#/new` — создать файл в хранилище и открыть его (адрес заменяется на `#/file/<id>`);
+//   `#/new?project=<id>` — в этом проекте, где проекты есть;
+// - `#/file/<id>?link=<токен>` — файл по ссылке «Поделиться», токен из адреса сразу убирается.
+// Другие разделы (проекты команды, «Доступные мне») — там, где они есть: `extensions.parseSection`.
 // Параметры поиска (`?nodes=`, `?backend=` — тесты) маршрутизатор не трогает.
 
 import type { Section } from '../core/file-list';
 import { MAX_ID_BYTES } from '../core/file-list';
+import { extensions } from './extensions';
 
-export type Route = { kind: 'files'; section: Section } | { kind: 'file'; id: string; page?: string } | { kind: 'new' };
+export type Route =
+  { kind: 'files'; section: Section } | { kind: 'file'; id: string; page?: string; link?: string } | { kind: 'new'; project?: string };
 
-const SECTION_PATH: Record<Section, string> = { recent: '', drafts: 'drafts', trash: 'trash' };
+const SECTION_PATH: Partial<Record<Section, string>> = { recent: '', drafts: 'drafts', trash: 'trash', shared: 'shared' };
+const sectionPath = (s: Section): string => SECTION_PATH[s] ?? s.replace(':', '/');
 
 /** Идентификатор файла из адреса — не доверенный: печатные ASCII без `/`, не длиннее предела. */
 function validId(id: string): boolean {
@@ -26,7 +32,10 @@ function validPage(id: string): boolean {
 export function parseRoute(hash: string): Route {
   const [rawPath, query = ''] = hash.replace(/^#/, '').split('?', 2);
   const path = rawPath.replace(/^\/+/, '').replace(/\/+$/, '');
-  if (path === 'new') return { kind: 'new' };
+  if (path === 'new') {
+    const project = new URLSearchParams(query).get('project');
+    return project !== null && validId(project) ? { kind: 'new', project } : { kind: 'new' };
+  }
   if (path === 'drafts') return { kind: 'files', section: 'drafts' };
   if (path === 'trash') return { kind: 'files', section: 'trash' };
   const m = /^file\/([^/]+)$/.exec(path);
@@ -42,19 +51,22 @@ export function parseRoute(hash: string): Route {
     // Неверная страница отбрасывается: файл откроется на первой.
     const page = new URLSearchParams(query).get('page');
     if (page !== null && validPage(page)) route.page = page;
+    const link = new URLSearchParams(query).get('link');
+    if (link !== null && /^[A-Za-z0-9_-]{1,64}$/.test(link)) route.link = link;
     return route;
   }
-  return { kind: 'files', section: 'recent' };
+  const other = extensions.parseSection?.(path);
+  return { kind: 'files', section: other ?? 'recent' };
 }
 
 export function routeHash(r: Route): string {
   switch (r.kind) {
     case 'new':
-      return '#/new';
+      return r.project ? `#/new?project=${encodeURIComponent(r.project)}` : '#/new';
     case 'file':
       return `#/file/${encodeURIComponent(r.id)}${r.page ? `?page=${encodeURIComponent(r.page)}` : ''}`;
     case 'files':
-      return `#/${SECTION_PATH[r.section]}`;
+      return `#/${sectionPath(r.section)}`;
   }
 }
 

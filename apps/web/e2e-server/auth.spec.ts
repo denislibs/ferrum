@@ -1,7 +1,7 @@
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import { appScreen, drag, editorReady, live, mainMenu, testMode } from '../e2e/helpers';
 import { STAND_URL } from '../playwright.server.config';
-import { linksFor, mailCount, newEmail, resetStand, valkey } from './stand';
+import { linksFor, mailCount, newEmail, requestLink, resetStand, signIn, valkey } from './stand';
 
 test.beforeEach(resetStand);
 
@@ -10,32 +10,12 @@ test.beforeEach(resetStand);
 function watchConsole(page: Page): string[] {
   const errors: string[] = [];
   page.on('console', (m) => {
-    if (m.type() === 'error' && !m.location().url.endsWith('/favicon.ico')) errors.push(`${m.text()} ${m.location().url}`);
+    // Firefox: шрифт, загрузку которого оборвал переход на другой адрес (NS_BINDING_ABORTED), — не потеря.
+    const aborted = m.text().includes('status=2152398850');
+    if (m.type() === 'error' && !aborted && !m.location().url.endsWith('/favicon.ico')) errors.push(`${m.text()} ${m.location().url}`);
   });
   page.on('pageerror', (e) => errors.push(e.message));
   return errors;
-}
-
-async function requestLink(page: Page, email: string): Promise<void> {
-  await page.getByLabel('Электронная почта').fill(email);
-  await page.getByRole('button', { name: 'Получить ссылку' }).click();
-  await expect(page.getByRole('heading', { name: 'Проверьте почту' })).toBeVisible();
-  await expect(page.getByText(email)).toBeVisible();
-}
-
-/** Вход целиком: от экрана входа до приложения. */
-async function signIn(page: Page, email: string, name = 'Иван Петров'): Promise<void> {
-  // Новое письмо, а не одно из прежних: оно уходит после ответа сервера и приходит не сразу.
-  const before = await mailCount(email);
-  await requestLink(page, email);
-  const [link] = await linksFor(email, before + 1);
-  await page.goto(link);
-  await page.getByRole('button', { name: 'Войти', exact: true }).click();
-  if (name) {
-    await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
-    await page.getByLabel('Имя').fill(name);
-    await page.getByRole('button', { name: 'Продолжить' }).click();
-  }
 }
 
 const newContext = async (browser: Browser) => (await browser.newContext({ baseURL: STAND_URL })).newPage();
@@ -126,7 +106,9 @@ test('открытие ссылки токен не тратит: сканер �
   });
   await scanner.goto(link);
   await expect(scanner.getByRole('button', { name: 'Войти', exact: true })).toBeVisible();
-  expect(asked).toEqual([]);
+  // Страница спрашивает, кому принадлежит ссылка: токен это не тратит (B-193), подтверждения нет.
+  await expect(scanner.getByText(email)).toBeVisible();
+  expect(asked.filter((u) => new URL(u).pathname === '/api/auth/confirm')).toEqual([]);
   await scanner.context().close();
   // Токен цел.
   await page.goto(link);
@@ -141,12 +123,142 @@ test('ссылка одноразовая: второе нажатие — со�
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   const [link] = await linksFor(email);
   const other = await newContext(browser);
+  // Потраченная ссылка видна сразу, нажимать нечего.
   await other.goto(link);
-  await other.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(other.getByRole('alert')).toHaveText('Ссылка недействительна или устарела. Запросите новую');
+  await expect(other.getByRole('button', { name: 'Войти', exact: true })).toHaveCount(0);
   await other.getByRole('button', { name: 'Запросить новую ссылку' }).click();
   await expect(other.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
   await other.context().close();
+});
+
+test('ссылку потратили, пока страница открыта: нажатие — то же сообщение', async ({ page, browser }, info) => {
+  const email = newEmail(info.project.name);
+  await page.goto('/');
+  await requestLink(page, email);
+  const [link] = await linksFor(email);
+  await page.goto(link);
+  await expect(page.getByText(email)).toBeVisible();
+  const other = await newContext(browser);
+  await other.goto(link);
+  await other.getByRole('button', { name: 'Войти', exact: true }).click();
+  await expect(other.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('Ссылка недействительна или устарела. Запросите новую');
+  await other.context().close();
+});
+
+test('страница подтверждения показывает адрес; вошедшему под другим адресом — выбор, ссылка цела (B-193)', async ({ page }, info) => {
+  const mine = newEmail(info.project.name);
+  const foreign = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, mine);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email: foreign }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(foreign);
+  await page.goto(link);
+  await expect(page.getByRole('status')).toContainText(`Вы уже вошли как ${mine}`);
+  await expect(page.getByRole('status')).toContainText(foreign);
+  // «Остаться» не тратит токен и оставляет прежний вход.
+  await page.getByRole('button', { name: `Остаться как ${mine}` }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  expect(((await (await page.request.get('/api/auth/session')).json()) as { user: { email: string } }).user.email).toBe(mine);
+  await page.goto(link);
+  await page.getByRole('button', { name: `Войти как ${foreign}` }).click();
+  await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+  expect(((await (await page.request.get('/api/auth/session')).json()) as { user: { email: string } }).user.email).toBe(foreign);
+});
+
+test('вошедшему: пока адрес неизвестен, «Войти» недоступна; сбой чтения адреса — предупреждение и выбор (T10-I1)', async ({
+  page,
+}, info) => {
+  const mine = newEmail(info.project.name);
+  const foreign = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, mine);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email: foreign }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(foreign);
+  // Ответ ещё в пути: нажать нельзя, сессия не заменится вслепую.
+  const { promise: letGo, resolve } = Promise.withResolvers<void>();
+  await page.route('**/api/auth/confirm-info', async (r) => {
+    await letGo;
+    await r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' });
+  });
+  await page.goto(link);
+  const enterButton = page.getByRole('button', { name: 'Войти', exact: true });
+  await expect(enterButton).toBeDisabled();
+  resolve();
+  // Сбой (503 или 429): адрес неизвестен, предупреждение всё равно есть, токен цел.
+  await expect(page.getByRole('status')).toContainText(`Вы уже вошли как ${mine}`);
+  await expect(page.getByRole('status')).toContainText('вход может заменить текущий');
+  await expect(page.getByRole('button', { name: `Остаться как ${mine}` })).toBeVisible();
+  await expect(enterButton).toBeEnabled();
+  await page.unroute('**/api/auth/confirm-info');
+  await page.getByRole('button', { name: `Остаться как ${mine}` }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  // Сессия неизвестна: нейтральное предупреждение.
+  await page.route('**/api/auth/session', (r) =>
+    r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' }),
+  );
+  await page.goto(link);
+  await expect(page.getByRole('status')).toContainText('Не удалось проверить, вошли ли вы');
+  await page.unroute('**/api/auth/session');
+  // Токен не потрачен: тот же адрес входит.
+  await page.goto('/#/');
+  await page.goto(link);
+  await page.reload();
+  await page.getByRole('button', { name: `Войти как ${foreign}` }).click();
+  await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+});
+
+test('«Остаться» отвергает ссылку: `next` не исполняется, другие вкладки не тревожатся (T10-I2)', async ({ page, context }, info) => {
+  const mine = newEmail(info.project.name);
+  const foreign = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, mine);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email: foreign }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(foreign);
+  const tab = await context.newPage();
+  await tab.goto('/');
+  await expect(tab.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await tab.evaluate(() => {
+    const w = window as unknown as { __auth: string[] };
+    w.__auth = [];
+    new BroadcastChannel('ferrum-auth').onmessage = (e) => w.__auth.push(String(e.data));
+  });
+  await page.goto(`${link}&next=${encodeURIComponent('#/new')}`);
+  await page.getByRole('button', { name: `Остаться как ${mine}` }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await expect(page).toHaveURL(/#\/$/);
+  const list = (await (await page.request.get('/api/files?section=recent&q=&start=0&count=10')).json()) as { total: number };
+  expect(list.total).toBe(0);
+  // Сообщения одного канала идут по порядку: метка пришла, смены входа перед ней не было.
+  await page.evaluate(() => {
+    const c = new BroadcastChannel('ferrum-auth');
+    c.postMessage('метка');
+    c.close();
+  });
+  await expect.poll(() => tab.evaluate(() => (window as unknown as { __auth: string[] }).__auth)).toEqual(['метка']);
+});
+
+test('ссылка на свой же адрес: токен не тратится, «Продолжить»', async ({ page }, info) => {
+  const email = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, email);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(email, 2);
+  await page.goto(link);
+  await expect(page.getByText('Вы уже вошли как')).toBeVisible();
+  const confirm: string[] = [];
+  page.on('request', (r) => {
+    if (new URL(r.url()).pathname === '/api/auth/confirm') confirm.push(r.url());
+  });
+  await page.getByRole('button', { name: 'Продолжить' }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  expect(confirm).toEqual([]);
 });
 
 test('истёкшая ссылка показывает то же сообщение', async ({ page }, info) => {
@@ -163,8 +275,8 @@ test('истёкшая ссылка показывает то же сообще�
   valkey('PEXPIRE', keys[0], '1');
   await expect.poll(() => valkey('EXISTS', keys[0]).trim()).toBe('0');
   await page.goto(link);
-  await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveText('Ссылка недействительна или устарела. Запросите новую');
+  await expect(page.getByRole('button', { name: 'Войти', exact: true })).toHaveCount(0);
 });
 
 test('испорченная ссылка: сообщение сразу, запросов нет', async ({ page }) => {
@@ -370,7 +482,7 @@ test('ссылка из письма в той же вкладке на экра
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   await pasteHash(page, await secondLink(page, email));
   await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
-  await enter(page).click();
+  await page.getByRole('button', { name: 'Продолжить' }).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
 });
 
@@ -387,8 +499,7 @@ test('ссылка из письма в той же вкладке в редак
   await drawRect(page);
   // Сразу, не дожидаясь журнала: приложение должно записать правку само.
   await pasteHash(page, link);
-  await expect(enter(page)).toBeVisible();
-  await enter(page).click();
+  await page.getByRole('button', { name: 'Продолжить' }).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   await page.goto(url);
   await page.reload();
@@ -495,7 +606,8 @@ test('выход, когда запись не удалась: вопрос, «�
   await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
   await editorReady(page);
   await drawRect(page);
-  await page.evaluate(() => window.__ferrumFiles!.store.failWrites(true));
+  // Запись на сервер не проходит: и в worker'е файлов, и из любой вкладки контекста.
+  await page.context().route('**/api/files/*/content', (r) => r.abort());
   await mainMenu(page, 'Настройки', 'Настройки…');
   await page.getByRole('tab', { name: 'Аккаунт' }).click();
   await page.getByRole('tabpanel', { name: 'Аккаунт' }).getByRole('button', { name: 'Выйти', exact: true }).click();
@@ -639,6 +751,10 @@ test('сбой сервера при подтверждении: и «Войти
 });
 
 test('сбой сервера при подтверждении: новая ссылка ведёт на экран входа', async ({ page }) => {
+  // Сбой чтения адреса входа не блокирует: на экране просто нет адреса.
+  await page.route('**/api/auth/confirm-info', (r) =>
+    r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' }),
+  );
   await page.goto(`/#/auth/confirm?token=${'a'.repeat(32)}&next=%23%2Ftrash`);
   await page.route('**/api/auth/confirm', (r) => r.fulfill({ status: 500, contentType: 'text/plain', body: 'сбой' }));
   await enter(page).click();
@@ -647,7 +763,32 @@ test('сбой сервера при подтверждении: новая сс
   await expect(page).toHaveURL(/#\/trash$/);
 });
 
-test('выход в другой вкладке: новый файл успевает записаться, правка не теряется', async ({ page, context }, info) => {
+test('выход в другой вкладке: новый файл не записан, редактор остаётся и предлагает копию', async ({ page, context }, info) => {
+  const email = newEmail(info.project.name);
+  await testMode(page);
+  await page.goto('/?nodes=0');
+  await signIn(page, email);
+  await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
+  await editorReady(page);
+  const tab = await context.newPage();
+  await tab.goto('/');
+  await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible();
+  await drawRect(page);
+  // Сразу: у нового файла ещё нет записи, а сессии уже нет, сервер её не примет.
+  await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(page.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  await nodesAre(page, 1);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Сохранить копию на диск' }).click();
+  expect((await download).suggestedFilename()).toMatch(/\.ferrum$/);
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  const ask = page.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' });
+  await expect(ask).toContainText('ещё ни разу не записан');
+  await ask.getByRole('button', { name: 'Уйти' }).click();
+  await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+});
+
+test('выход в другой вкладке: записанный файл, правка возвращается из журнала после входа', async ({ page, context }, info) => {
   const email = newEmail(info.project.name);
   await testMode(page);
   await page.goto('/?nodes=0');
@@ -655,15 +796,19 @@ test('выход в другой вкладке: новый файл успев�
   await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
   await editorReady(page);
   const url = page.url();
+  await drawRect(page);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
   const tab = await context.newPage();
   await tab.goto('/');
   await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible();
   await drawRect(page);
-  // Сразу: у нового файла ещё нет записи, журнал ему не поможет.
   await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(page.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
   await signIn(page, email, '');
   await expect(page).toHaveURL(url);
   await editorReady(page);
-  await nodesAre(page, 1);
+  await nodesAre(page, 2);
 });

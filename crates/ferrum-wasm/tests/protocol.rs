@@ -69,7 +69,10 @@ fn commands() -> Vec<Command> {
             limit: 50,
         },
         Command::RevealLayer { id: "1@2".into() },
-        Command::Snapshot { thumbnail: true },
+        Command::Snapshot {
+            thumbnail: true,
+            full: None,
+        },
         Command::MarkSaved { revision: 3.0 },
         Command::ReadPixels { reference: true },
         Command::ReadMeasurements,

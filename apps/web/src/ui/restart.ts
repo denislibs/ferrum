@@ -8,7 +8,8 @@
 import type { Backend } from '../wasm/ferrum_wasm';
 
 export interface Restart {
-  reason: 'crash' | 'gpu';
+  /** `role`: файл открывали читателем, право вернули, и журнал нужно применить. */
+  reason: 'crash' | 'gpu' | 'role';
   /** Были правки ни в журнале, ни в файле — они потеряны. */
   lost: boolean;
   /** Бэкенд нового ядра (после потери GPU — запасной). */
@@ -32,6 +33,7 @@ const LOST = 'Правки последних секунд не сохранил
 
 /** Уведомление в новом редакторе. */
 export function restartText(r: Restart): string {
+  if (r.reason === 'role') return 'Теперь вы можете редактировать файл. Ваши несохранённые правки восстановлены';
   if (r.reason === 'gpu') {
     const name = r.backend === 'webgl' ? 'WebGL2' : r.backend === 'webgpu' ? 'WebGPU' : 'на процессоре';
     return `Видеокарта недоступна — редактор перезапущен с рендером ${name}${r.lost ? `. ${LOST}` : ''}`;

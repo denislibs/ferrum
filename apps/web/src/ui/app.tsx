@@ -6,6 +6,7 @@
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { detectPlatform } from '../core/core';
+import { NEW_FILE_TAKEN } from '../core/file-list';
 import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
 import { boot, dismissSplash, isTestMode } from './boot';
 import { DesignHeader, FileHeader, PanelToggle, ResizeEdge } from './chrome';
@@ -47,7 +48,11 @@ export interface AppProps {
   /** Уход с редактора: сохранить и остановить ядро; `false` — запись не удалась, остаться. */
   onLeave: (leave: () => Promise<boolean>) => void;
   /** Дописать журнал без вопросов: вкладка сейчас перезагрузится (смена входа в другой вкладке). */
-  onFlush?: (flush: () => Promise<void>) => void;
+  onFlush?: (flush: () => Promise<boolean>) => void;
+  /** Есть ли правки, которых нет ни в файле, ни в журнале: перезагрузка их потеряет. */
+  onUnsaved?: (unsaved: () => Promise<boolean>) => void;
+  /** Сессии больше нет (выход в другой вкладке), а файл не записался: как показать это человеку. */
+  onSessionLost?: (mark: () => void) => void;
   /** Файл из хранилища не открылся (испорчен): к экрану файлов с этим сообщением. */
   onOpenFailed: (message: string) => void;
   /** Редактор запущен заново после сбоя ядра или потери GPU: что сказать пользователю. */
@@ -257,6 +262,12 @@ export function App(props: AppProps) {
   });
 
   const id = props.file.id;
+  /** Доступ к файлу потерян, пока он открыт (файл на сервере): снят или сессия кончилась. */
+  const [lost, setLost] = createSignal<'none' | 'session' | 'diverged' | null>(null);
+  /** Просьба о доступе из плашки «Нет доступа». */
+  const [asked, setAsked] = createSignal(false);
+  store.setState('fileRole', props.file.role ?? null);
+  let offWatch: (() => void) | undefined;
   let saver: Saver | undefined;
   let offSaveKey: (() => void) | undefined;
   let disposed = false;
@@ -266,11 +277,15 @@ export function App(props: AppProps) {
   let version = props.file.version;
   /** Наибольший сеанс пачек журнала файла: сеанс этого редактора — после него. */
   let journalSession: number | null = null;
+  /** Журнал есть, но не применён (открыт читателем): вернули право — файл открывается заново. */
+  let journalHeld = false;
   const bytes = props.files.read(id).then(
     (r) => {
       stored = r.bytes !== null;
       version = r.meta.version;
       journalSession = r.session;
+      journalHeld = r.journalHeld === true;
+      store.setState('fileRole', r.meta.role ?? null);
       if (!r.bytes) return null;
       let journal = r.journal;
       const total = journal.reduce((n, b) => n + b.byteLength, r.bytes.byteLength);
@@ -305,11 +320,40 @@ export function App(props: AppProps) {
   });
   props.onFlush?.(async () => {
     // Не только журнал: у нового файла ещё нет записи, и журнал правку не сохранит.
-    if (saver) await withTimeout(saver.save(), SETTLE_MS, false);
+    return saver ? withTimeout(saver.save(), SETTLE_MS, false) : true;
   });
+  props.onUnsaved?.(async () => {
+    if (!saver) return false;
+    await withTimeout(saver.flushJournal(), SETTLE_MS, false);
+    return saver.pending();
+  });
+  props.onSessionLost?.(() => {
+    editor()?.send({ type: 'setViewOnly', on: true });
+    setLost('session');
+  });
+  const [rescuing, setRescuing] = createSignal(false);
+  /** Снова войти — это перезагрузка. Что не в журнале (новый файл без записи), с ней пропало бы. */
+  const signInAgain = async () => {
+    const s = saver;
+    if (s) await withTimeout(s.flushJournal(), SETTLE_MS, false);
+    if (s?.pending()) {
+      setAskLeave({
+        reason: 'Этот файл ещё ни разу не записан. Сначала сохраните копию на диск',
+        answer: (go) => {
+          if (!go) return;
+          s?.release();
+          location.reload();
+        },
+      });
+      return;
+    }
+    location.reload();
+  };
   const answerLeave = (go: boolean) => {
     const a = askLeave();
     setAskLeave(null);
+    // Человек уже ответил: браузер не спрашивает второй раз, если за уходом идёт перезагрузка.
+    if (go) saver?.release();
     a?.answer(go);
   };
 
@@ -401,7 +445,57 @@ export function App(props: AppProps) {
           offText();
           offClipboard();
         };
-        saver = createSaver(ed, props.files, id, version, stored, { ...testIntervals(), journalSession });
+        let diverged = false;
+        saver = createSaver(ed, props.files, id, version, stored, {
+          ...testIntervals(),
+          journalSession,
+          onDiverged: () => {
+            diverged = true;
+            ed.send({ type: 'setViewOnly', on: true });
+            setLost('diverged');
+          },
+        });
+        // Роль известна из чтения файла: читатель не правит и пока ответ опроса в пути.
+        if (store.state.fileRole === 'viewer') ed.send({ type: 'setViewOnly', on: true });
+        // Доступ к файлу меняется, пока он открыт. Этап 3 пришлёт то же событие по соединению файла.
+        let toldNewer = false;
+        let toldReopen = false;
+        offWatch = props.files.watch?.(id, (state) => {
+          // Этот документ в файл уже не ляжет, какими бы ни стали права: плашку снимает только уход.
+          if (diverged) return;
+          if (state.kind !== 'role') {
+            // Правки — в журнале браузера, плашка предлагает копию на диск; уход спросит о несохранённом.
+            ed.send({ type: 'setViewOnly', on: true });
+            store.setState('fileCanShare', false);
+            setLost(state.kind);
+            return;
+          }
+          const before = store.state.fileRole;
+          setLost(null);
+          // Читателю вернули право, а его прежние правки ещё не в документе: первая запись прошла бы мимо
+          // них. Файл открывается заново, журнал сливается. До этого режим просмотра.
+          if (journalHeld && state.role !== 'viewer') {
+            if (props.onRestart({ reason: 'role', lost: false, message: 'право правки вернули' })) return;
+            if (!toldReopen) store.toast('Теперь вы можете редактировать файл. Откройте его заново, чтобы продолжить');
+            toldReopen = true;
+            return;
+          }
+          store.setState('fileRole', state.role);
+          store.setState('fileCanShare', state.canShare);
+          ed.send({ type: 'setViewOnly', on: state.role === 'viewer' });
+          if (before !== state.role && state.role === 'viewer') {
+            store.toast(
+              store.state.modified
+                ? 'Теперь вы только смотрите файл. Правки не записаны — сохраните копию на диск'
+                : 'Теперь вы только смотрите файл',
+            );
+          } else if (before === 'viewer' && state.role !== 'viewer') store.toast('Теперь вы можете редактировать файл');
+          // Своя запись, ответ на которую ещё в пути или потерян, — не «другой человек».
+          if (saver && !state.own && state.version > saver.version() && !toldNewer) {
+            toldNewer = true;
+            store.toast('Файл изменён в другом окне или другим человеком. Откройте его заново, чтобы увидеть новую версию');
+          }
+        });
         // Ctrl/Cmd+S, пока фокус в поле панели (клавиша не ушла ядру): тоже
         // «Сохранить», и браузер не открывает диалог сохранения страницы.
         const onSaveKey = (e: KeyboardEvent) => {
@@ -445,7 +539,11 @@ export function App(props: AppProps) {
             void props.files.touch(id).catch(() => {});
             // Имя файла — из хранилища (его могли переименовать на экране файлов);
             // тихо: открытие — не правка, файл из-за него не пересохраняется.
-            if (e.name !== props.file.name) ed.send({ type: 'setDocumentName', name: props.file.name, quiet: true });
+            if (e.name !== props.file.name) {
+              // Читатель документ не меняет, даже тихо: имя — только для показа.
+              if (store.state.fileRole === 'viewer') store.setState('documentName', props.file.name);
+              else ed.send({ type: 'setDocumentName', name: props.file.name, quiet: true });
+            }
           } else if (opening && stored && e.type === 'error' && e.message.startsWith('Не удалось открыть файл')) {
             opening = false;
             props.onOpenFailed(e.message);
@@ -543,6 +641,7 @@ export function App(props: AppProps) {
   });
   onCleanup(() => {
     disposed = true;
+    offWatch?.();
     // Открытый вопрос об уходе (редактор снят перезапуском) — «Остаться».
     answerLeave(false);
     offSaveKey?.();
@@ -716,6 +815,61 @@ export function App(props: AppProps) {
               {failure()}
             </div>
           </Show>
+          <Show when={lost()}>
+            {(kind) => (
+              <div class="fe-boot fe-boot--error fe-boot--stopped fe-lost" role="alert">
+                <strong>{kind() === 'none' ? 'Нет доступа' : kind() === 'diverged' ? 'Файл уже записан' : 'Сессия завершена'}</strong>
+                <span>
+                  {kind() === 'none'
+                    ? 'Вам больше не открыт этот файл. Несохранённые правки можно сохранить копией на диск'
+                    : kind() === 'diverged'
+                      ? NEW_FILE_TAKEN
+                      : 'Войдите снова, правки останутся в этом браузере'}
+                </span>
+                <span class="fe-lost__actions">
+                  <button class="fe-btn fe-btn--secondary" onClick={() => editor()?.send({ type: 'save' })}>
+                    Сохранить копию на диск
+                  </button>
+                  {kind() === 'diverged' ? (
+                    <button
+                      class="fe-btn fe-btn--primary"
+                      disabled={rescuing()}
+                      onClick={() => {
+                        setRescuing(true);
+                        void saver?.saveAsNew(`${store.state.documentName} (копия)`).then((meta) => {
+                          setRescuing(false);
+                          if (meta) props.navigate({ kind: 'file', id: meta.id });
+                        });
+                      }}
+                    >
+                      Сохранить новым файлом
+                    </button>
+                  ) : kind() === 'none' ? (
+                    <>
+                      <Show when={props.files.requestAccess && !asked()}>
+                        <button
+                          class="fe-btn fe-btn--secondary"
+                          onClick={() => {
+                            setAsked(true);
+                            void props.files.requestAccess?.(id).catch(() => setAsked(false));
+                          }}
+                        >
+                          Запросить доступ
+                        </button>
+                      </Show>
+                      <button class="fe-btn fe-btn--primary" onClick={() => props.navigate({ kind: 'files', section: 'recent' })}>
+                        К файлам
+                      </button>
+                    </>
+                  ) : (
+                    <button class="fe-btn fe-btn--primary" onClick={() => void signInAgain()}>
+                      Войти
+                    </button>
+                  )}
+                </span>
+              </div>
+            )}
+          </Show>
           <Show when={store.state.stopped}>
             {(message) => (
               <div class="fe-boot fe-boot--error fe-boot--stopped" role="alert">
@@ -744,6 +898,7 @@ export function App(props: AppProps) {
                   open={mainMenu()}
                   onOpen={setMainMenu}
                   onBack={() => props.navigate({ kind: 'files', section: 'recent' })}
+                  location={props.file.projectId ? 'Проект' : props.file.role && props.file.role !== 'owner' ? 'Доступные мне' : undefined}
                   collapsed={leftCollapsed()}
                   onCollapse={setLeftCollapsed}
                 />
@@ -758,7 +913,7 @@ export function App(props: AppProps) {
                   <PanelToggle side="right" collapsed={rightCollapsed()} onToggle={setRightCollapsed} />
                 </div>
                 <Show when={!rightCollapsed()}>
-                  <DesignHeader />
+                  <DesignHeader file={props.file} />
                   <PropertiesPanel theme={theme()} />
                   <ResizeEdge side="right" width={right()} onWidth={setRight} />
                 </Show>

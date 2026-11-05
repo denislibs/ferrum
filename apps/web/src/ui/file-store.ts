@@ -5,6 +5,7 @@
 // Следующие реализации того же интерфейса — File System Access и Tauri (этап 6).
 
 import type { FileMeta, FromIo, IoOp, IoResults, JournalMark, Section, ToIo } from '../core/file-list';
+import type { AccessState } from '../core/server-files';
 import { nameFromFile } from '../core/file-list';
 import { mb } from '../core/limits';
 import { MAX_COMMAND_BYTES } from '../core/messages';
@@ -20,8 +21,8 @@ export interface FileStore {
   list(section: Section, query: string, start: number, count: number): Promise<IoResults['list']>;
   get(id: string): Promise<FileMeta | null>;
   /** Новая запись (сразу видна в списке); `bytes` — содержимое импортированного
-   * файла (`File` с диска читает worker). */
-  create(name: string, bytes?: Blob): Promise<FileMeta>;
+   * файла (`File` с диска читает worker); `project` — папка на сервере, где они есть. */
+  create(name: string, bytes?: Blob, project?: string): Promise<FileMeta>;
   /** Байты файла (`null` — новый файл, ещё не сохранённый) и пачки журнала,
    * записанные после них, по порядку записи; `session` — наибольший сеанс среди
    * пачек файла (`null` — пачек нет): новый сеанс берётся после него.
@@ -60,6 +61,20 @@ export interface FileStore {
   onChange(listener: () => void): () => void;
   /** Файлы на диске (File System Access, Tauri); нет — пунктов «с диска» нет. */
   readonly disk?: DiskFiles;
+  /** Снимок с полной историей правок: файл на сервере (журнал отставшей вкладки сольётся с ним). */
+  readonly fullHistory?: boolean;
+  /** Запись зависит от сети: неудачная повторяется сама, закрытие вкладки спрашивает о незаписанном. */
+  readonly remote?: boolean;
+  /** Новый файл из снимка ядра (буфер передаётся); нет — спасать правки в новый файл негде. */
+  createFrom?(name: string, bytes: ArrayBuffer): Promise<FileMeta>;
+  /** Подпись кнопки импорта, если она не «Импорт…». */
+  readonly importLabel?: string;
+  /** Доступ к открытому файлу (файл на сервере); возвращает отписку. Нет — доступ не меняется. */
+  watch?(id: string, listener: (state: AccessState) => void): () => void;
+  /** Открыть файл по ссылке «Поделиться»; `false` — ссылка не действует. */
+  redeemLink?(id: string, token: string): Promise<boolean>;
+  /** Попросить доступ к файлу. Есть у хранилища с ролями: файла без доступа там отличить нельзя. */
+  requestAccess?(id: string): Promise<boolean>;
   /** Байты системного шрифта Chrome (`FontData.blob()`) — читает worker
    * ввода-вывода; нет — системных шрифтов браузера нет. */
   fontBytes?(blob: Blob): Promise<ArrayBuffer>;

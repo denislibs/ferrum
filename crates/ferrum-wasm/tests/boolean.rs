@@ -248,7 +248,10 @@ fn font_arrival_recomputes_boolean_with_text_and_refreshes_summary() {
     // Документ с булевой группой «прямоугольник + текст» (шрифт загружен).
     let mut a = core_with_boolean_text();
     let full_area = boolean_area(&a);
-    a.command(Command::Snapshot { thumbnail: false });
+    a.command(Command::Snapshot {
+        thumbnail: false,
+        full: None,
+    });
     let bytes = a
         .take_events()
         .into_iter()
@@ -305,7 +308,10 @@ fn font_arrival_recomputes_boolean_with_text_and_refreshes_summary() {
 }
 
 fn thumbnail(c: &mut Core) -> Vec<u8> {
-    c.command(Command::Snapshot { thumbnail: true });
+    c.command(Command::Snapshot {
+        thumbnail: true,
+        full: None,
+    });
     c.take_events()
         .into_iter()
         .find_map(|e| match e {

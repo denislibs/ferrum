@@ -10,7 +10,10 @@
     "src/core/image-size.ts",
     "src/core/clipboard-text.ts",
     "src/core/fonts.ts",
-    "src/core/limits.ts"
+    "src/core/limits.ts",
+    "src/core/file-list.ts",
+    "src/core/server-files.ts",
+    "src/core/server-messages.ts"
   ],
   "exclude": []
 }

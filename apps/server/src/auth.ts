@@ -5,6 +5,7 @@ import { confirmHash, MAGIC_LINK_TTL_SECONDS } from '@ferrum/protocol';
 import { APIError, betterAuth, type BetterAuthOptions } from 'better-auth';
 import { magicLink } from 'better-auth/plugins';
 import type { Pool } from 'pg';
+import { claimInvites } from './invites';
 import { magicLinkMail, mailFailure, type Mailer } from './mail';
 import { valkeyStorage } from './secondary-storage';
 
@@ -45,6 +46,19 @@ export function authOptions(deps: AuthDeps) {
     secondaryStorage: storage,
     verification: { storeInDatabase: false },
     telemetry: { enabled: false },
+    // Приглашения на этот адрес становятся доступом при каждом входе, в том числе первом: сессия
+    // создаётся всегда. Сбой не мешает войти: запись приглашения остаётся до следующего входа.
+    databaseHooks: {
+      session: {
+        create: {
+          after: async (session) => {
+            await claimInvites(deps.pool, session.userId).catch((e: unknown) =>
+              console.error('Приглашения не перешли при входе:', e instanceof Error ? e.message : e),
+            );
+          },
+        },
+      },
+    },
     session: { expiresIn: SESSION_SECONDS, updateAge: deps.sessionUpdateAgeSeconds ?? 24 * HOUR },
     rateLimit: {
       enabled: true,
