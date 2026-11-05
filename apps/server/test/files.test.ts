@@ -259,38 +259,15 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 test('файл большого размера идёт потоком: память сервера не растёт на размер файла', async () => {
-  const f = await s.newFile(owner);
-  const MB = 1024 * 1024;
-  const whole = container([], 200 * MB);
-  const chunk = 256 * 1024;
-  let at = 0;
-  // Клиент в этом же процессе: его байты уже в памяти (`whole`), а куски — окна в них же.
-  const body = new ReadableStream<Uint8Array>({
-    pull(c) {
-      if (at >= whole.length) return c.close();
-      c.enqueue(whole.subarray(at, at + chunk));
-      at += chunk;
-    },
-  });
-  Bun.gc(true);
-  const before = process.memoryUsage().rss;
-  let peak = before;
-  const probe = setInterval(() => (peak = Math.max(peak, process.memoryUsage().rss)), 5);
-  const res = await fetch(`${s.publicUrl}/api/files/${f.id}/content`, {
-    method: 'PUT',
-    headers: { origin: s.publicUrl, cookie: owner.cookie, 'if-match': '"0"', 'x-ferrum-write': crypto.randomUUID() },
-    body,
-  });
-  expect(res.status).toBe(200);
-  expect((await json(res)).size).toBe(whole.length);
-  const got = await s.call(owner, 'GET', `/api/files/${f.id}/content`);
-  const reader = got.body!.getReader();
-  let read = 0;
-  for (let r = await reader.read(); !r.done; r = await reader.read()) read += r.value.length;
-  clearInterval(probe);
-  expect(read).toBe(whole.length);
-  // Предел — половина файла: сервер, собирающий тело в памяти, сразу его превысит.
-  expect((peak - before) / MB).toBeLessThan(100);
+  const MB = 200;
+  const child = Bun.spawn(['bun', 'run', join(import.meta.dir, 'memory-probe.ts'), String(MB)], { stdout: 'pipe', stderr: 'inherit' });
+  const out = await new Response(child.stdout).text();
+  expect(await child.exited).toBe(0);
+  const r = JSON.parse(out.trim().split('\n').at(-1)!) as { status: number; read: number; growthMb: number };
+  expect(r.status).toBe(200);
+  expect(r.read).toBe(MB * 1024 * 1024 + 16 + 5 + 40);
+  // Клиент и сервер здесь в одном процессе: потоком прирост около 110 МБ, сборка тела в памяти — больше 500.
+  expect(r.growthMb).toBeLessThan(MB);
 });
 
 test('JSON сверх предела — 400, неверный JSON — 400', async () => {

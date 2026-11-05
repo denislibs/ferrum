@@ -31,7 +31,7 @@ export const UPLOAD_IDLE_MS = 60_000;
 /** Байты заменённого файла удаляются не сразу: читатель, начавший раньше, успевает дочитать. */
 export const BLOB_GRACE_SECONDS = 120;
 /** Одновременных загрузок: на человека и на сервер. Памяти загрузка не занимает, занимает диск и поток. */
-export const MAX_UPLOADS_PER_USER = 4;
+export const MAX_UPLOADS_PER_USER = 8;
 export const MAX_UPLOADS = 32;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 

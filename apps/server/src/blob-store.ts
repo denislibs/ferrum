@@ -1,7 +1,7 @@
 // Байты снимков, журналов-архивов и картинок (спека, раздел 4). Переход на S3 — новая
 // реализация этого интерфейса.
 
-import { mkdir, open, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readdir, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 export class BlobTooLarge extends Error {}
@@ -68,6 +68,18 @@ export class FsBlobStore implements BlobStore {
     } finally {
       await folder.close();
     }
+  }
+
+  /** Временные файлы, оставшиеся от сбоя процесса: при запуске их никто уже не допишет. */
+  async sweep(): Promise<number> {
+    let removed = 0;
+    const entries = await readdir(this.dir, { recursive: true, withFileTypes: true }).catch(() => []);
+    for (const e of entries) {
+      if (!e.isFile() || !e.name.endsWith('.tmp')) continue;
+      await rm(join(e.parentPath, e.name), { force: true });
+      removed++;
+    }
+    return removed;
   }
 
   async put(key: string, bytes: Uint8Array): Promise<void> {

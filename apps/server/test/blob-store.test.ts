@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BlobStalled, BlobTooLarge, FsBlobStore } from '../src/blob-store';
@@ -79,4 +79,12 @@ test('клиент молчит дольше срока: запись отмен
   await expect(s.putStream('files/a', silent, { maxBytes: 8, idleMs: 20 })).rejects.toBeInstanceOf(BlobStalled);
   expect(cancelled).toBe(true);
   expect(readdirSync(join(dir, 'files'))).toEqual([]);
+});
+
+test('при запуске временные файлы от сбоя убираются, остальное цело', async () => {
+  const { s, dir } = store();
+  await s.put('files/a', new Uint8Array([1]));
+  writeFileSync(join(dir, 'files', 'a.1.1.tmp'), 'обрыв');
+  expect(await s.sweep()).toBe(1);
+  expect(readdirSync(join(dir, 'files'))).toEqual(['a']);
 });
