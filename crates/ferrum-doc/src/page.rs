@@ -844,12 +844,17 @@ impl PageDoc {
                 self.create_with(n.id, n.parent, Some(n.index), n.props.clone())
                     .map(|_| ())
             }),
-            // Дельта перенесена через чужие правки (`History::transform_text`). Не легла всё равно —
-            // шаг не блокирует отмену навсегда из-за одного текста.
-            Inverse::Text(id, delta) => {
-                let _ = self.apply_text_delta(*id, delta);
-                Ok(())
-            }
+            // Дельта приведена к нынешнему тексту (`History::transform_text`): мимо текста она ляжет
+            // только из-за дефекта преобразования, и шаг не блокирует из-за него отмену навсегда.
+            // Остальное — настоящая ошибка: предел текста (другой увеличил текст), сбой Loro. Шаг
+            // откатывается и остаётся в стеке, человек видит причину, нижние шаги не сдвигаются.
+            Inverse::Text(id, delta) => match self.apply_text_delta(*id, delta) {
+                Err(DocError::TextRange(at, len)) => {
+                    debug_assert!(false, "дельта отмены вне текста: {at} из {len}");
+                    Ok(())
+                }
+                other => other,
+            },
             op => self.replay(std::slice::from_ref(op)),
         });
         let redo = self.take_journal();

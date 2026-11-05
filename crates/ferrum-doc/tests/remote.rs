@@ -494,6 +494,45 @@ fn foreign_typing_in_the_same_node_breaks_own_typing_step() {
 }
 
 #[test]
+fn undo_over_the_text_limit_is_an_error_and_keeps_the_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    insert(&mut b, page, id, 0, &"п".repeat(10));
+    sync(&mut a, &mut b);
+    a.transact(page, vec![id], |tx| {
+        tx.set_props(
+            id,
+            &PropsPatch {
+                name: Some("новое".into()),
+                ..Default::default()
+            },
+        )?;
+        tx.delete_text(id, 0..10)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    // Другой заполнил текст до предела: вернуть удалённые символы некуда.
+    insert(&mut b, page, id, 0, &"я".repeat(MAX_TEXT_CHARS));
+    sync(&mut a, &mut b);
+    let name = a.page(page).unwrap().props(id).unwrap().name.clone();
+    assert!(matches!(a.undo(), Err(DocError::TextTooLong)));
+    assert!(a.can_undo(), "шаг не потерян");
+    assert_eq!(
+        a.page(page).unwrap().props(id).unwrap().name,
+        name,
+        "шаг применён целиком или никак"
+    );
+    assert_mirror(&mut a, page);
+    // Место появилось: тот же шаг применяется.
+    delete(&mut b, page, id, 0..100);
+    sync(&mut a, &mut b);
+    a.undo().unwrap();
+    assert!(text_of(&mut a, page, id).contains(&"п".repeat(10)));
+    assert_mirror(&mut a, page);
+}
+
+#[test]
 fn text_shift_moves_caret_with_foreign_edits() {
     let (mut a, mut b, page) = pair();
     let id = a
