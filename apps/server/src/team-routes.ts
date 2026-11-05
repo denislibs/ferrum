@@ -27,10 +27,11 @@ async function members(deps: ApiDeps, teamId: string): Promise<TeamMembersDto> {
   return { members: rows };
 }
 
-/** Файлы ушедшего из проектов команды остаются у команды: владелец — владелец команды. */
+/** Файлы ушедшего из проектов команды остаются у команды: владелец — владелец команды. Файл в корзине
+ * тоже: иначе отметка «убрал» оставила бы ушедшему права владельца. */
 async function handOverFiles(c: PoolClient, teamId: string, from: string, to: string): Promise<void> {
   const { rows } = await c.query<{ id: string }>(
-    `UPDATE file f SET owner_id = $3 FROM project p
+    `UPDATE file f SET owner_id = $3, trashed_by = CASE WHEN f.trashed_by = $2 THEN $3 ELSE f.trashed_by END FROM project p
      WHERE f.project_id = p.id AND p.team_id = $1 AND f.owner_id = $2 RETURNING f.id`,
     [teamId, from, to],
   );
@@ -125,10 +126,15 @@ export function teamRoutes(deps: ApiDeps): Route[] {
         if (!body) return apiError(400, 'BAD_REQUEST');
         const { rows } = await pool.query<{ id: string }>('SELECT id FROM "user" WHERE email = $1', [body.email]);
         if (rows[0]) {
-          await pool.query(
-            `INSERT INTO team_member (team_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT (team_id, user_id) DO NOTHING`,
-            [ctx.teamId, rows[0].id],
-          );
+          const user = rows[0].id;
+          // Приглашение могло остаться от гонки с первым входом: иначе в списке будет две записи.
+          await inTransaction(pool, async (c) => {
+            await c.query(
+              `INSERT INTO team_member (team_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT (team_id, user_id) DO NOTHING`,
+              [ctx.teamId, user],
+            );
+            await c.query('DELETE FROM team_invite WHERE team_id = $1 AND email = $2', [ctx.teamId, body.email]);
+          });
         } else {
           await pool.query(
             'INSERT INTO team_invite (team_id, email, invited_by) VALUES ($1, $2, $3) ON CONFLICT (team_id, email) DO NOTHING',

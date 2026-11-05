@@ -222,3 +222,155 @@ test('роль после смены видна и через запись со�
   await invite(owner, f.id, viewer.email, 'viewer');
   expect((await s.writeContent(viewer, f.id, 0, container())).status).toBe(403);
 });
+
+const newLink = async (id: string, linkRole = 'editor') =>
+  (await json(await s.call(owner, 'PUT', `/api/files/${id}/share/link`, { enabled: true, role: linkRole }))).link.token as string;
+const redeem = (who: Person, id: string, token: string) => s.call(who, 'POST', `/api/files/${id}/redeem`, { token });
+
+test('пришедший только по ссылке: людей не видит и не зовёт, себе доступ не закрепить', async () => {
+  const f = await s.newFile(owner);
+  await invite(owner, f.id, viewer.email, 'viewer');
+  const token = await newLink(f.id);
+  expect((await redeem(guest, f.id, token)).status).toBe(200);
+  expect(await role(guest, f.id)).toBe('editor');
+  expect((await json(await s.call(guest, 'GET', `/api/files/${f.id}/access`))).canShare).toBe(false);
+  // Редактировать может, это его роль по ссылке.
+  expect((await s.writeContent(guest, f.id, 0)).status).toBe(200);
+
+  const list = await s.call(guest, 'GET', `/api/files/${f.id}/share`);
+  expect(list.status).toBe(403);
+  const body = await list.text();
+  expect(JSON.parse(body)).toEqual({ error: 'FORBIDDEN' });
+  expect(body).not.toContain(owner.email);
+  for (const email of [guest.email, 'friend@example.com']) {
+    const res = await invite(guest, f.id, email, 'editor');
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'FORBIDDEN' });
+  }
+  expect((await s.pool.query('SELECT 1 FROM file_access WHERE file_id = $1 AND user_id = $2', [f.id, guest.id])).rowCount).toBe(0);
+  expect((await s.pool.query('SELECT 1 FROM file_invite')).rowCount).toBe(0);
+
+  // Выключение и новая ссылка закрывают доступ целиком.
+  await s.call(owner, 'PUT', `/api/files/${f.id}/share/link`, { enabled: false, role: 'editor' });
+  expect(await role(guest, f.id)).toBe(404);
+  expect((await invite(guest, f.id, guest.email)).status).toBe(404);
+  await s.call(owner, 'PUT', `/api/files/${f.id}/share/link`, { enabled: true, role: 'editor' });
+  expect(await role(guest, f.id)).toBe('editor');
+  await s.call(owner, 'POST', `/api/files/${f.id}/share/link/reset`);
+  expect(await role(guest, f.id)).toBe(404);
+});
+
+test('прямая роль и ссылка: действует большая, звать людей по ссылке нельзя, прямая переживает ссылку', async () => {
+  const f = await s.newFile(owner);
+  await invite(owner, f.id, viewer.email, 'viewer');
+  const token = await newLink(f.id);
+  await redeem(viewer, f.id, token);
+  expect(await role(viewer, f.id)).toBe('editor');
+  expect((await s.writeContent(viewer, f.id, 0)).status).toBe(200);
+  // Редактор по ссылке и читатель сам по себе: адреса ему не положены.
+  expect((await s.call(viewer, 'GET', `/api/files/${f.id}/share`)).status).toBe(403);
+  expect((await invite(viewer, f.id, viewer.email, 'editor')).status).toBe(403);
+  await s.call(owner, 'PUT', `/api/files/${f.id}/share/link`, { enabled: false, role: 'editor' });
+  expect(await role(viewer, f.id)).toBe('viewer');
+  expect((await s.writeContent(viewer, f.id, 1)).status).toBe(403);
+  // Прямой редактор с той же ссылкой людей видит: меньшая роль по ссылке ему не мешает.
+  await invite(owner, f.id, editor.email, 'editor');
+  await s.call(owner, 'PUT', `/api/files/${f.id}/share/link`, { enabled: true, role: 'viewer' });
+  await redeem(editor, f.id, token);
+  expect(await role(editor, f.id)).toBe('editor');
+  expect((await s.call(editor, 'GET', `/api/files/${f.id}/share`)).status).toBe(200);
+  expect((await json(await s.call(editor, 'GET', `/api/files/${f.id}/access`))).canShare).toBe(true);
+});
+
+test('файл в корзине по ссылке не даёт доступа и после возврата', async () => {
+  const f = await s.newFile(owner);
+  const token = await newLink(f.id, 'viewer');
+  await s.call(owner, 'POST', `/api/files/${f.id}/trash`);
+  expect((await redeem(guest, f.id, token)).status).toBe(404);
+  await s.call(owner, 'POST', `/api/files/${f.id}/restore`);
+  expect(await role(guest, f.id)).toBe(404);
+});
+
+test('новая ссылка — одна транзакция: сбой оставляет прежнюю ссылку и пришедших целиком', async () => {
+  const f = await s.newFile(owner);
+  const token = await newLink(f.id, 'viewer');
+  await redeem(guest, f.id, token);
+  const res = await s.failing('file_link_user', 'DELETE', () => s.call(owner, 'POST', `/api/files/${f.id}/share/link/reset`));
+  expect(res.status).toBe(503);
+  expect((await share(owner, f.id)).link.token).toBe(token);
+  expect(await role(guest, f.id)).toBe('viewer');
+});
+
+test('снятие доступа — одна транзакция: сбой не оставляет человека без записи, но с приходом по ссылке', async () => {
+  const f = await s.newFile(owner);
+  await invite(owner, f.id, viewer.email, 'viewer');
+  const token = await newLink(f.id, 'viewer');
+  await redeem(viewer, f.id, token);
+  const id = await entry(f.id, viewer.email);
+  const res = await s.failing('file_link_user', 'DELETE', () => s.call(owner, 'DELETE', `/api/files/${f.id}/share/people/${id}`));
+  expect(res.status).toBe(503);
+  expect(await entry(f.id, viewer.email)).toBe(id);
+  expect((await s.call(owner, 'DELETE', `/api/files/${f.id}/share/people/${id}`)).status).toBe(200);
+  expect(await role(viewer, f.id)).toBe(404);
+});
+
+test('`redeem` не переживает новую ссылку: вставка ждёт её транзакцию и видит новый токен', async () => {
+  const f = await s.newFile(owner);
+  const token = await newLink(f.id, 'viewer');
+  // Новая ссылка посреди транзакции: старый токен ещё виден, запись о пришедшем уже удалена.
+  const reset = await s.pool.connect();
+  await reset.query('BEGIN');
+  await reset.query(`UPDATE share_link SET token_hash = 'новый', nonce = 'новый' WHERE file_id = $1`, [f.id]);
+  await reset.query('DELETE FROM file_link_user WHERE file_id = $1', [f.id]);
+  let finished = false;
+  const pendingRedeem = redeem(guest, f.id, token).finally(() => (finished = true));
+  const waiting = async () => {
+    const { rowCount } = await s.pool.query(
+      `SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO file_link_user%'`,
+    );
+    return rowCount! > 0;
+  };
+  while (!finished && !(await waiting())) await Bun.sleep(5);
+  await reset.query('COMMIT');
+  reset.release();
+  const res = await pendingRedeem;
+  expect(res.status).toBe(404);
+  expect((await s.pool.query('SELECT 1 FROM file_link_user')).rowCount).toBe(0);
+});
+
+test('приглашение не теряется при сбое первого входа: перейдёт при следующем', async () => {
+  const f = await s.newFile(owner);
+  await invite(owner, f.id, 'unlucky@example.com', 'editor');
+  const fresh = await s.failing('file_access', 'INSERT', () => s.signIn('unlucky@example.com'));
+  expect(await role(fresh, f.id)).toBe(404);
+  expect((await s.pool.query('SELECT 1 FROM file_invite')).rowCount).toBe(1);
+  const again = await s.signIn('unlucky@example.com');
+  expect(await role(again, f.id)).toBe('editor');
+  expect((await s.pool.query('SELECT 1 FROM file_invite')).rowCount).toBe(0);
+});
+
+test('приглашение из гонки с первым входом: запись на существующий адрес становится доступом при новом входе', async () => {
+  const f = await s.newFile(owner);
+  await s.pool.query(`INSERT INTO file_invite (file_id, email, role, invited_by) VALUES ($1, $2, 'viewer', $3)`, [
+    f.id,
+    guest.email,
+    owner.id,
+  ]);
+  expect(await role(guest, f.id)).toBe(404);
+  const again = await s.signIn(guest.email);
+  expect(await role(again, f.id)).toBe('viewer');
+  expect((await s.pool.query('SELECT 1 FROM file_invite')).rowCount).toBe(0);
+});
+
+test('повторное приглашение существующего убирает запись из гонки: в списке одна строка', async () => {
+  const f = await s.newFile(owner);
+  await s.pool.query(`INSERT INTO file_invite (file_id, email, role, invited_by) VALUES ($1, $2, 'viewer', $3)`, [
+    f.id,
+    guest.email,
+    owner.id,
+  ]);
+  const { people } = await json(await invite(owner, f.id, guest.email, 'viewer'));
+  expect((people as { email: string }[]).filter((p) => p.email === guest.email)).toHaveLength(1);
+  expect((await s.pool.query('SELECT 1 FROM file_invite')).rowCount).toBe(0);
+  expect(await role(guest, f.id)).toBe('viewer');
+});

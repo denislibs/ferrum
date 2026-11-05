@@ -81,6 +81,9 @@ export interface FileListDto {
 export interface FileAccessDto {
   role: FileRole;
   version: number;
+  /** Можно звать людей и видеть их адреса: прямая роль или через команду не ниже редактора.
+   * Пришедшему только по ссылке — нет, даже редактору. Сервер шлёт всегда. */
+  canShare?: boolean;
 }
 
 export interface SharePersonDto {
@@ -279,7 +282,7 @@ export function isFileList(v: unknown): v is FileListDto {
 
 export function isFileAccess(v: unknown): v is FileAccessDto {
   const m = record(v);
-  return !!m && isFileRole(m.role) && isNum(m.version);
+  return !!m && isFileRole(m.role) && isNum(m.version) && (m.canShare === undefined || typeof m.canShare === 'boolean');
 }
 
 function isSharePerson(v: unknown): v is SharePersonDto {

@@ -213,9 +213,9 @@ test('проверка доступа: роль и поколение', async ()
   const f = await s.newFile(owner);
   await giveAccess(f.id, other, 'viewer');
   await s.writeContent(owner, f.id, 0);
-  expect(await json(await s.call(other, 'GET', `/api/files/${f.id}/access`))).toEqual({ role: 'viewer', version: 1 });
+  expect(await json(await s.call(other, 'GET', `/api/files/${f.id}/access`))).toEqual({ role: 'viewer', version: 1, canShare: false });
   await s.pool.query(`UPDATE file_access SET role = 'editor' WHERE file_id = $1 AND user_id = $2`, [f.id, other.id]);
-  expect(await json(await s.call(other, 'GET', `/api/files/${f.id}/access`))).toEqual({ role: 'editor', version: 1 });
+  expect(await json(await s.call(other, 'GET', `/api/files/${f.id}/access`))).toEqual({ role: 'editor', version: 1, canShare: true });
   await s.pool.query('DELETE FROM file_access WHERE file_id = $1 AND user_id = $2', [f.id, other.id]);
   expect((await s.call(other, 'GET', `/api/files/${f.id}/access`)).status).toBe(404);
 });
@@ -516,6 +516,18 @@ test('превью: файл удалён посреди загрузки — 40
   b.release();
   expect((await b.done).status).toBe(404);
   expect((await s.pool.query('SELECT thumb_key FROM file WHERE id = $1', [f.id])).rows[0].thumb_key).toBeNull();
+});
+
+test('файл в корзине без роли владельца: не в списке, счётчик честный, очистка корзины его не удаляет', async () => {
+  const f = await s.newFile(other, 'Чужое');
+  await s.call(other, 'POST', `/api/files/${f.id}/trash`);
+  // Владелец по записи файла без действующей роли: ранг 0 не показывается и не даёт удалить.
+  await s.pool.query('DELETE FROM file_access WHERE file_id = $1', [f.id]);
+  await s.pool.query('UPDATE file SET trashed_by = $2 WHERE id = $1', [f.id, owner.id]);
+  const trash = await list(other, 'trash');
+  expect([trash.total, trash.rows]).toEqual([0, []]);
+  expect((await s.call(other, 'POST', '/api/files/empty-trash')).status).toBe(200);
+  expect((await s.pool.query('SELECT 1 FROM file WHERE id = $1', [f.id])).rowCount).toBe(1);
 });
 
 test('предел одновременных загрузок: девятая — 429 `BUSY`, у другого своё место, освободившееся снова доступно', async () => {

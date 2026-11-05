@@ -154,7 +154,7 @@ function sectionWhere(q: ListQuery): { from: string; where: string; order: strin
     case 'trash':
       return {
         from: 'file f',
-        where: 'f.trashed_at IS NOT NULL AND (f.owner_id = $1 OR f.trashed_by = $1)',
+        where: 'f.trashed_at IS NOT NULL AND (f.owner_id = $1 OR f.trashed_by = $1) AND file_role_rank(f.id, $1) = 3',
         order: 'f.trashed_at DESC',
         project,
       };
@@ -279,7 +279,8 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       handle: async (ctx) => {
         await inTransaction(pool, async (c) => {
           const { rows } = await c.query<{ id: string; content_key: string | null; thumb_key: string | null }>(
-            'SELECT id, content_key, thumb_key FROM file WHERE trashed_at IS NOT NULL AND (owner_id = $1 OR trashed_by = $1) FOR UPDATE',
+            `SELECT id, content_key, thumb_key FROM file
+             WHERE trashed_at IS NOT NULL AND (owner_id = $1 OR trashed_by = $1) AND file_role_rank(id, $1) = 3 FOR UPDATE`,
             [ctx.user.id],
           );
           for (const r of rows) {
@@ -383,9 +384,16 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       access: { kind: 'file', min: 'viewer' },
       limit: 'poll',
       handle: async (ctx) => {
-        const { rows } = await pool.query<{ version: string }>('SELECT version FROM file WHERE id = $1', [ctx.params.id]);
+        const { rows } = await pool.query<{ version: string; member: number }>(
+          'SELECT version, file_member_rank(id, $2) AS member FROM file WHERE id = $1',
+          [ctx.params.id, ctx.user.id],
+        );
         if (!rows[0]) return apiError(404, 'NOT_FOUND');
-        return ok({ role: ctx.role, version: Number(rows[0].version) } satisfies FileAccessDto);
+        return ok({
+          role: ctx.role,
+          version: Number(rows[0].version),
+          canShare: rows[0].member >= ROLE_RANK.editor,
+        } satisfies FileAccessDto);
       },
     },
     {

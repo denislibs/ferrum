@@ -46,13 +46,14 @@ export function authOptions(deps: AuthDeps) {
     secondaryStorage: storage,
     verification: { storeInDatabase: false },
     telemetry: { enabled: false },
-    // Приглашения на этот адрес становятся доступом. Сбой не мешает войти: запись приглашения остаётся.
+    // Приглашения на этот адрес становятся доступом при каждом входе, в том числе первом: сессия
+    // создаётся всегда. Сбой не мешает войти: запись приглашения остаётся до следующего входа.
     databaseHooks: {
-      user: {
+      session: {
         create: {
-          after: async (user) => {
-            await claimInvites(deps.pool, user.id, user.email).catch((e: unknown) =>
-              console.error('Приглашения не перешли при первом входе:', e instanceof Error ? e.message : e),
+          after: async (session) => {
+            await claimInvites(deps.pool, session.userId).catch((e: unknown) =>
+              console.error('Приглашения не перешли при входе:', e instanceof Error ? e.message : e),
             );
           },
         },

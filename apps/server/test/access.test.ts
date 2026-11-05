@@ -14,6 +14,8 @@ const owner = await s.signIn('owner@example.com');
 const editor = await s.signIn('editor@example.com');
 const viewer = await s.signIn('viewer@example.com');
 const stranger = await s.signIn('stranger@example.com');
+/** Редактор только по ссылке: звать людей и видеть их адреса ему нельзя. */
+const linked = await s.signIn('linked@example.com');
 beforeEach(s.reset);
 
 const ROUTES = apiRoutes({
@@ -50,6 +52,11 @@ async function world(): Promise<World> {
     editor.id,
     viewer.id,
   ]);
+  await s.pool.query(`INSERT INTO share_link (file_id, token_hash, nonce, role, enabled) VALUES ($1, $2, 'nonce', 'editor', true)`, [
+    f.id,
+    'b'.repeat(64),
+  ]);
+  await s.pool.query('INSERT INTO file_link_user (file_id, user_id) VALUES ($1, $2)', [f.id, linked.id]);
   const entry = await s.pool.query<{ id: string }>('SELECT id FROM file_access WHERE file_id = $1 AND user_id = $2', [f.id, viewer.id]);
   const team = await s.pool.query<{ id: string }>(`INSERT INTO team (name) VALUES ('Команда') RETURNING id`);
   const t = team.rows[0].id;
@@ -113,22 +120,27 @@ const SAMPLES: Record<string, Sample> = {
   'POST /api/teams/:teamId/projects': { params: team, body: { name: 'Новый' }, allowed: editor, status: 201 },
   'PATCH /api/projects/:projectId': { params: project, body: { name: 'Имя' }, allowed: editor },
   'DELETE /api/projects/:projectId': { params: project, allowed: owner, denied: [editor] },
-  'GET /api/files/:id/share': { params: file, allowed: editor, denied: [viewer] },
+  'GET /api/files/:id/share': { params: file, allowed: editor, denied: [viewer, linked] },
   'POST /api/files/:id/share/invite': {
     params: file,
     body: { email: 'new@example.com', role: 'viewer' },
     allowed: editor,
-    denied: [viewer],
+    denied: [viewer, linked],
   },
   'PATCH /api/files/:id/share/people/:entryId': {
     params: (w) => ({ id: w.file, entryId: w.entry }),
     body: { role: 'editor' },
     allowed: owner,
-    denied: [viewer, editor],
+    denied: [viewer, editor, linked],
   },
   'DELETE /api/files/:id/share/people/:entryId': { params: (w) => ({ id: w.file, entryId: w.entry }), allowed: owner },
-  'PUT /api/files/:id/share/link': { params: file, body: { enabled: true, role: 'viewer' }, allowed: owner, denied: [viewer, editor] },
-  'POST /api/files/:id/share/link/reset': { params: file, allowed: owner, denied: [viewer, editor] },
+  'PUT /api/files/:id/share/link': {
+    params: file,
+    body: { enabled: true, role: 'viewer' },
+    allowed: owner,
+    denied: [viewer, editor, linked],
+  },
+  'POST /api/files/:id/share/link/reset': { params: file, allowed: owner, denied: [viewer, editor, linked] },
   // Прав на файл здесь ещё нет: чужой файл, неверный токен и выключенная ссылка неотличимы.
   'POST /api/files/:id/redeem': { params: file, body: { token: 'x'.repeat(43) }, allowed: stranger, status: 404 },
   'POST /api/files/:id/request-access': { params: file, allowed: stranger },

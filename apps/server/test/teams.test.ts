@@ -142,3 +142,80 @@ test('пустое и управляющие символы в именах — 
   }
   expect((await s.call(owner, 'POST', `/api/teams/${t.id}/invite`, { email: 'нет' })).status).toBe(400);
 });
+
+test('участник убрал файл в корзину и ушёл: прав нет, файл у владельца команды', async () => {
+  const t = await newTeam(owner);
+  const p = await newProject(owner, t.id);
+  await invite(owner, t.id, member.email);
+  const f = await s.newFile(member, 'Его файл', p.id);
+  expect((await s.call(member, 'POST', `/api/files/${f.id}/trash`)).status).toBe(200);
+  const entry = (await entries(owner, t.id)).find((m) => m.email === member.email)!;
+  expect((await s.call(member, 'DELETE', `/api/teams/${t.id}/members/${entry.id}`)).status).toBe(200);
+
+  for (const [method, path] of [
+    ['GET', `/api/files/${f.id}`],
+    ['GET', `/api/files/${f.id}/content`],
+    ['POST', `/api/files/${f.id}/restore`],
+    ['DELETE', `/api/files/${f.id}`],
+    ['PUT', `/api/files/${f.id}/share/link`],
+  ]) {
+    expect((await s.call(member, method, path, method === 'PUT' ? { enabled: true, role: 'editor' } : undefined)).status).toBe(404);
+  }
+  expect((await s.call(member, 'POST', `/api/files/${f.id}/share/invite`, { email: member.email, role: 'editor' })).status).toBe(404);
+  expect((await list(member, 'trash')).total).toBe(0);
+  expect((await s.call(member, 'POST', '/api/files/empty-trash')).status).toBe(200);
+  expect((await s.pool.query('SELECT owner_id, trashed_by FROM file WHERE id = $1', [f.id])).rows[0]).toEqual({
+    owner_id: owner.id,
+    trashed_by: owner.id,
+  });
+  expect((await list(owner, 'trash')).rows.map((r: { id: string }) => r.id)).toEqual([f.id]);
+  expect((await s.call(owner, 'POST', `/api/files/${f.id}/restore`)).status).toBe(200);
+});
+
+test('владелец команды убрал файл участника: после удаления проекта может вернуть, рядовой участник файла не видит', async () => {
+  const t = await newTeam(owner);
+  const p = await newProject(owner, t.id);
+  await invite(owner, t.id, member.email);
+  await invite(owner, t.id, outsider.email);
+  const f = await s.newFile(member, 'Файл участника', p.id);
+  expect((await role(outsider, f.id)).role).toBe('editor');
+  expect((await s.call(owner, 'POST', `/api/files/${f.id}/trash`)).status).toBe(200);
+  // Участник команды на файле в корзине: 404, хотя через команду он редактор.
+  expect((await s.call(outsider, 'GET', `/api/files/${f.id}`)).status).toBe(404);
+  expect((await list(outsider, 'trash')).total).toBe(0);
+  expect((await s.call(owner, 'DELETE', `/api/projects/${p.id}`)).status).toBe(200);
+  // Команда больше ничего не даёт: в корзине его держит только отметка «убрал».
+  expect((await role(owner, f.id)).role).toBe('owner');
+  expect((await list(owner, 'trash')).total).toBe(1);
+  // Звать людей отметка не даёт: это не прямая роль и не роль через команду.
+  expect((await s.call(owner, 'GET', `/api/files/${f.id}/share`)).status).toBe(403);
+  expect((await s.call(owner, 'PUT', `/api/files/${f.id}/share/link`, { enabled: true, role: 'editor' })).status).toBe(403);
+  expect((await s.call(outsider, 'POST', `/api/files/${f.id}/restore`)).status).toBe(404);
+  expect((await s.call(owner, 'POST', `/api/files/${f.id}/restore`)).status).toBe(200);
+  // Вернули: файл в черновиках владельца файла, убравший больше ни при чём.
+  expect((await s.call(owner, 'GET', `/api/files/${f.id}`)).status).toBe(404);
+  expect((await list(member, 'drafts')).total).toBe(1);
+});
+
+test('участник команды видит людей файла проекта и может звать, это роль через команду', async () => {
+  const t = await newTeam(owner);
+  const p = await newProject(owner, t.id);
+  await invite(owner, t.id, member.email);
+  const f = await s.newFile(owner, 'Файл', p.id);
+  expect((await role(member, f.id)).canShare).toBe(true);
+  expect((await s.call(member, 'GET', `/api/files/${f.id}/share`)).status).toBe(200);
+  expect((await s.call(member, 'POST', `/api/files/${f.id}/share/invite`, { email: outsider.email, role: 'viewer' })).status).toBe(200);
+});
+
+test('приглашение в команду из гонки с первым входом: повторное убирает запись, новый вход принимает', async () => {
+  const t = await newTeam(owner);
+  await s.pool.query('INSERT INTO team_invite (team_id, email, invited_by) VALUES ($1, $2, $3)', [t.id, member.email, owner.id]);
+  const again = await s.signIn(member.email);
+  expect((await json(await s.call(again, 'GET', '/api/teams'))).teams.map((x: { id: string }) => x.id)).toEqual([t.id]);
+  expect((await s.pool.query('SELECT 1 FROM team_invite')).rowCount).toBe(0);
+  const u = await newTeam(owner, 'Вторая');
+  await s.pool.query('INSERT INTO team_invite (team_id, email, invited_by) VALUES ($1, $2, $3)', [u.id, member.email, owner.id]);
+  const res = await json(await invite(owner, u.id, member.email));
+  expect(res.members.filter((m: { email: string }) => m.email === member.email)).toHaveLength(1);
+  expect((await s.pool.query('SELECT 1 FROM team_invite')).rowCount).toBe(0);
+});

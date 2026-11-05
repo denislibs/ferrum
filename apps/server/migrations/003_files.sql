@@ -137,8 +137,22 @@ CREATE TABLE blob_pending (
   started_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Роль самого человека в файле: прямая или через команду, без ссылки и корзины. Её требует всё, что
+-- переживает отмену ссылки: звать людей и видеть их адреса. Участник команды — редактор на файлах её
+-- проектов, владелец команды — владелец.
+CREATE FUNCTION file_member_rank(p_file uuid, p_user text) RETURNS integer
+LANGUAGE sql STABLE AS $$
+  SELECT GREATEST(
+    COALESCE((SELECT CASE a.role WHEN 'owner' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END
+              FROM file_access a WHERE a.file_id = f.id AND a.user_id = p_user), 0),
+    COALESCE((SELECT CASE m.role WHEN 'owner' THEN 3 ELSE 2 END
+              FROM project p JOIN team_member m ON m.team_id = p.team_id AND m.user_id = p_user
+              WHERE p.id = f.project_id), 0)
+  )
+  FROM file f WHERE f.id = p_file
+$$;
+
 -- Действующая роль (раздел 6.1): наибольшая из прямой, по ссылке и через команду. 0 — нет доступа.
--- Участник команды — редактор на файлах её проектов, владелец команды — владелец.
 -- Файл в корзине виден только владельцу и тому, кто его туда убрал.
 CREATE FUNCTION file_role_rank(p_file uuid, p_user text) RETURNS integer
 LANGUAGE sql STABLE AS $$
@@ -146,11 +160,7 @@ LANGUAGE sql STABLE AS $$
     WHEN f.trashed_at IS NOT NULL AND f.trashed_by = p_user THEN 3
     WHEN f.trashed_at IS NOT NULL AND f.owner_id <> p_user THEN 0
     ELSE GREATEST(
-      COALESCE((SELECT CASE a.role WHEN 'owner' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END
-                FROM file_access a WHERE a.file_id = f.id AND a.user_id = p_user), 0),
-      COALESCE((SELECT CASE m.role WHEN 'owner' THEN 3 ELSE 2 END
-                FROM project p JOIN team_member m ON m.team_id = p.team_id AND m.user_id = p_user
-                WHERE p.id = f.project_id), 0),
+      file_member_rank(f.id, p_user),
       COALESCE((SELECT CASE l.role WHEN 'editor' THEN 2 ELSE 1 END
                 FROM share_link l JOIN file_link_user u ON u.file_id = l.file_id AND u.user_id = p_user
                 WHERE l.file_id = f.id AND l.enabled), 0)

@@ -47,12 +47,14 @@ export const teamInviteMail = (to: string, from: string, team: string, link: str
 export const accessRequestMail = (to: string, from: string, file: string, link: string): Mail =>
   letter(to, 'Запрос доступа к файлу в Ferrum', [`${from} просит доступ к файлу «${file}».`], link, 'Открыть файл');
 
-/** Первый вход: приглашения на этот адрес становятся доступом. Сбой не мешает входу: запись
- * приглашения остаётся и перейдёт при следующем обращении этой функции. */
-export async function claimInvites(pool: Pool, user: string, email: string): Promise<void> {
+/** Каждый вход: приглашения на этот адрес становятся доступом. Сбой не мешает входу, а приглашение,
+ * вставленное в гонке с прошлым входом, не теряется: запись остаётся и перейдёт при следующем входе. */
+export async function claimInvites(pool: Pool, user: string): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const { rows } = await client.query<{ email: string }>('SELECT email FROM "user" WHERE id = $1', [user]);
+    const email = rows[0]?.email ?? '';
     await client.query(
       `INSERT INTO file_access (file_id, user_id, role) SELECT file_id, $1, role FROM file_invite WHERE email = $2
        ON CONFLICT (file_id, user_id) DO NOTHING`,

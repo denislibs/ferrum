@@ -58,10 +58,11 @@ export interface ApiUser {
 }
 
 /** Что нужно маршруту. `user` — только вход; остальные берут id из адреса и проверяют доступ:
- * нет доступа совсем — 404, как у несуществующего, не хватает роли — 403. */
+ * нет доступа совсем — 404, как у несуществующего, не хватает роли — 403.
+ * `member` — нужной роли мало получить по ссылке или за убранный в корзину файл: нужна прямая или через команду. */
 export type Access =
   | { kind: 'user' }
-  | { kind: 'file'; min: FileRole }
+  | { kind: 'file'; min: FileRole; member?: boolean }
   | { kind: 'team'; min: 'member' | 'owner' }
   | { kind: 'project'; min: 'member' | 'owner' };
 
@@ -184,6 +185,10 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
       const role = RANK_ROLE[rows[0]?.rank ?? 0];
       if (!role) refuse(404, 'NOT_FOUND');
       if (ROLE_RANK[role] < ROLE_RANK[access.min]) refuse(403, 'FORBIDDEN');
+      if (access.member) {
+        const member = await deps.pool.query<{ rank: number }>('SELECT file_member_rank($1, $2) AS rank', [params.id, user.id]);
+        if (member.rows[0].rank < ROLE_RANK[access.min]) refuse(403, 'FORBIDDEN');
+      }
       ctx.role = role;
     } else if (access.kind === 'team' || access.kind === 'project') {
       const { rows } =

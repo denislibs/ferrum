@@ -1,6 +1,8 @@
 // «Поделиться» (спека, раздел 6.3): приглашение по email с ролью, список людей, смена и снятие роли,
 // ссылка с ролью и выключателем. Токен ссылки в базе — хэшем; его можно показать снова, потому что он
 // выводится из секрета сервера и случайной `nonce`: утечка базы токенов не раскрывает.
+// **(поведение)** Звать людей и видеть их адреса может только прямая роль или роль через команду: иначе
+// пришедший по ссылке пригласил бы себя и пережил её отмену, а опубликованная ссылка раздавала бы адреса.
 
 import {
   parseInvite,
@@ -14,7 +16,7 @@ import {
 } from '@ferrum/protocol';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { apiError, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
-import { loadFile } from './file-routes';
+import { inTransaction, loadFile } from './file-routes';
 import { accessRequestMail, fileInviteMail, sendInvite } from './invites';
 import { valkeyStorage } from './secondary-storage';
 
@@ -62,14 +64,14 @@ export function shareRoutes(deps: ApiDeps): Route[] {
     {
       method: 'GET',
       path: '/api/files/:id/share',
-      access: { kind: 'file', min: 'editor' },
+      access: { kind: 'file', min: 'editor', member: true },
       limit: 'read',
       handle: async (ctx) => ok(await shareOf(ctx)),
     },
     {
       method: 'POST',
       path: '/api/files/:id/share/invite',
-      access: { kind: 'file', min: 'editor' },
+      access: { kind: 'file', min: 'editor', member: true },
       limit: 'mail',
       handle: async (ctx) => {
         const body = parseInvite(await readJson(ctx.req));
@@ -77,13 +79,18 @@ export function shareRoutes(deps: ApiDeps): Route[] {
         const file = ctx.params.id;
         const { rows } = await pool.query<{ id: string }>('SELECT id FROM "user" WHERE email = $1', [body.email]);
         if (rows[0]) {
-          // Редактор может только добавить доступ, поменять чужой — владелец. Владельца это не касается.
-          await pool.query(
-            `INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, $3)
-             ON CONFLICT (file_id, user_id) DO UPDATE SET role = EXCLUDED.role
-             WHERE file_access.role <> 'owner' AND ($4 OR file_access.role = 'viewer')`,
-            [file, rows[0].id, body.role, ctx.role === 'owner'],
-          );
+          const user = rows[0].id;
+          await inTransaction(pool, async (c) => {
+            // Редактор может только добавить доступ, поменять чужой — владелец. Владельца это не касается.
+            await c.query(
+              `INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, $3)
+               ON CONFLICT (file_id, user_id) DO UPDATE SET role = EXCLUDED.role
+               WHERE file_access.role <> 'owner' AND ($4 OR file_access.role = 'viewer')`,
+              [file, user, body.role, ctx.role === 'owner'],
+            );
+            // Приглашение могло остаться от гонки с первым входом: иначе в списке будет две записи.
+            await c.query('DELETE FROM file_invite WHERE file_id = $1 AND email = $2', [file, body.email]);
+          });
         } else {
           await pool.query(
             `INSERT INTO file_invite (file_id, email, role, invited_by) VALUES ($1, $2, $3, $4)
@@ -100,7 +107,7 @@ export function shareRoutes(deps: ApiDeps): Route[] {
     {
       method: 'PATCH',
       path: '/api/files/:id/share/people/:entryId',
-      access: { kind: 'file', min: 'owner' },
+      access: { kind: 'file', min: 'owner', member: true },
       limit: 'write',
       handle: async (ctx) => {
         const body = parseRoleChange(await readJson(ctx.req));
@@ -130,8 +137,10 @@ export function shareRoutes(deps: ApiDeps): Route[] {
         if (row) {
           // Сам себе может снять доступ каждый, кроме владельца; другому — только владелец.
           if (row.role === 'owner' || (!manage && row.user_id !== ctx.user.id)) return apiError(403, 'FORBIDDEN');
-          await pool.query('DELETE FROM file_access WHERE id = $1', [entry]);
-          await pool.query('DELETE FROM file_link_user WHERE file_id = $1 AND user_id = $2', [file, row.user_id]);
+          await inTransaction(pool, async (c) => {
+            await c.query('DELETE FROM file_access WHERE id = $1', [entry]);
+            await c.query('DELETE FROM file_link_user WHERE file_id = $1 AND user_id = $2', [file, row.user_id]);
+          });
         } else {
           const invite = await pool.query('SELECT 1 FROM file_invite WHERE id = $1 AND file_id = $2', [entry, file]);
           if (invite.rowCount === 0) return apiError(404, 'NOT_FOUND');
@@ -145,7 +154,7 @@ export function shareRoutes(deps: ApiDeps): Route[] {
     {
       method: 'PUT',
       path: '/api/files/:id/share/link',
-      access: { kind: 'file', min: 'owner' },
+      access: { kind: 'file', min: 'owner', member: true },
       limit: 'write',
       handle: async (ctx) => {
         const body = parseLinkUpdate(await readJson(ctx.req));
@@ -163,14 +172,17 @@ export function shareRoutes(deps: ApiDeps): Route[] {
     {
       method: 'POST',
       path: '/api/files/:id/share/link/reset',
-      access: { kind: 'file', min: 'owner' },
+      access: { kind: 'file', min: 'owner', member: true },
       limit: 'write',
       handle: async (ctx) => {
         const file = ctx.params.id;
         const { nonce, tokenHash } = newLink(file);
-        await pool.query('UPDATE share_link SET token_hash = $2, nonce = $3 WHERE file_id = $1', [file, tokenHash, nonce]);
-        // Новая ссылка отменяет старую целиком: и у тех, кто уже пришёл по ней.
-        await pool.query('DELETE FROM file_link_user WHERE file_id = $1', [file]);
+        // Новая ссылка отменяет старую целиком: и у тех, кто уже пришёл по ней. Одной транзакцией:
+        // сбой не оставит пришедших, а `redeem` ждёт её на строке ссылки.
+        await inTransaction(pool, async (c) => {
+          await c.query('UPDATE share_link SET token_hash = $2, nonce = $3 WHERE file_id = $1', [file, tokenHash, nonce]);
+          await c.query('DELETE FROM file_link_user WHERE file_id = $1', [file]);
+        });
         return ok(await shareOf(ctx));
       },
     },
@@ -190,9 +202,18 @@ export function shareRoutes(deps: ApiDeps): Route[] {
           [file],
         );
         const want = Buffer.from(rows[0]?.token_hash ?? '0'.repeat(64));
-        const got = Buffer.from(sha256(body.token));
-        if (!rows[0]?.enabled || !timingSafeEqual(want, got)) return apiError(404, 'NOT_FOUND');
-        await pool.query('INSERT INTO file_link_user (file_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [file, ctx.user.id]);
+        const hash = sha256(body.token);
+        if (!rows[0]?.enabled || !timingSafeEqual(want, Buffer.from(hash))) return apiError(404, 'NOT_FOUND');
+        // Условия повторяются в самой вставке под блокировкой строки ссылки: одновременная новая ссылка
+        // либо уже отменила токен, либо удалит и эту запись. Файл в корзине не даёт доступа и после возврата.
+        await pool.query(
+          `INSERT INTO file_link_user (file_id, user_id)
+           SELECT l.file_id, $2 FROM share_link l JOIN file f ON f.id = l.file_id
+           WHERE l.file_id = $1 AND l.token_hash = $3 AND l.enabled AND f.trashed_at IS NULL
+           FOR SHARE OF l
+           ON CONFLICT DO NOTHING`,
+          [file, ctx.user.id, hash],
+        );
         const meta = await loadFile(pool, file, ctx.user.id);
         return meta ? ok(meta) : apiError(404, 'NOT_FOUND');
       },
