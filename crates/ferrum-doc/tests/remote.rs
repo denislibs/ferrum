@@ -397,6 +397,103 @@ fn foreign_delete_across_two_own_steps_transforms_the_whole_stack() {
 }
 
 #[test]
+fn foreign_typing_in_other_node_keeps_own_typing_one_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    let other = text_node(&mut b, page);
+    sync(&mut a, &mut b);
+    let mark = |before, after, at_ms| TextMerge {
+        node: id,
+        before,
+        after,
+        style: 0,
+        at_ms,
+    };
+    a.transact_merging(page, vec![id], mark(0, 1, 0.0), |tx| {
+        tx.insert_text(id, 0, "п", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    insert(&mut b, page, other, 0, "Z");
+    sync(&mut a, &mut b);
+    a.transact_merging(page, vec![id], mark(1, 2, 10.0), |tx| {
+        tx.insert_text(id, 1, "р", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "\n", "один шаг ввода");
+    assert_eq!(text_of(&mut a, page, other), "Z\n");
+}
+
+#[test]
+fn foreign_typing_on_other_page_keeps_own_typing_one_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    let second = b.add_page("Вторая").unwrap();
+    sync(&mut a, &mut b);
+    for d in [&mut a, &mut b] {
+        for (k, v) in d.take_sync_subscribes() {
+            d.sync_subscribed(k, v);
+        }
+    }
+    let other = text_node(&mut b, second);
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, second, other), "\n", "вторая страница доходит");
+    let mark = |before, after, at_ms| TextMerge {
+        node: id,
+        before,
+        after,
+        style: 0,
+        at_ms,
+    };
+    a.transact_merging(page, vec![id], mark(0, 1, 0.0), |tx| {
+        tx.insert_text(id, 0, "п", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    insert(&mut b, second, other, 0, "Z");
+    sync(&mut a, &mut b);
+    a.transact_merging(page, vec![id], mark(1, 2, 10.0), |tx| {
+        tx.insert_text(id, 1, "р", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "\n", "один шаг ввода");
+}
+
+#[test]
+fn foreign_typing_in_the_same_node_breaks_own_typing_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    sync(&mut a, &mut b);
+    let mark = |before, after, at_ms| TextMerge {
+        node: id,
+        before,
+        after,
+        style: 0,
+        at_ms,
+    };
+    a.transact_merging(page, vec![id], mark(0, 1, 0.0), |tx| {
+        tx.insert_text(id, 0, "п", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 0, "Z");
+    sync(&mut a, &mut b);
+    // Позиция та же, что в метке: без сброса склейки шаг слился бы, хотя текст уже другой.
+    a.transact_merging(page, vec![id], mark(1, 2, 10.0), |tx| {
+        tx.insert_text(id, 1, "р", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "Zп\n", "снят только второй шаг");
+}
+
+#[test]
 fn text_shift_moves_caret_with_foreign_edits() {
     let (mut a, mut b, page) = pair();
     let id = a
