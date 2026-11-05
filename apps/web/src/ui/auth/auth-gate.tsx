@@ -39,7 +39,7 @@ export function AuthGate(props: { children: JSX.Element }) {
   const load = async (keepShown = false) => {
     const my = ++generation;
     const hash = location.hash;
-    // Страница подтверждения не спрашивает сессию: открытие ссылки ни к чему не обращается.
+    // Страница подтверждения спрашивает адрес и сессию сама (`ConfirmScreen`), токен при этом не тратится.
     const first = screenFor(hash, null);
     if (first.kind === 'confirm') {
       setFailure(null);
@@ -151,7 +151,9 @@ export function AuthGate(props: { children: JSX.Element }) {
         <LoginScreen />
       </Match>
       <Match when={confirm()} keyed>
-        {(c) => <ConfirmScreen token={c.token} next={c.next} onDone={signedIn} onNewLink={(next) => go(next ?? '#/')} />}
+        {(c) => (
+          <ConfirmScreen token={c.token} next={c.next} onDone={signedIn} onStay={() => go('#/')} onNewLink={(next) => go(next ?? '#/')} />
+        )}
       </Match>
       <Match when={naming()} keyed>
         {(user) => <NameScreen user={user} onDone={named} />}
@@ -314,11 +316,14 @@ function LoginScreen() {
  * обращения к базе): тогда рядом и «Запросить новую ссылку».
  * Страница показывает, в какой адрес идёт вход, и предупреждает, если человек уже вошёл под другим
  * (B-193): чужая ссылка, нажатая по неосторожности, иначе молча сложила бы его работу в чужой аккаунт.
- * Эти два запроса токен не тратят; их сбой вход не блокирует, просто на экране нет адреса. */
+ * Эти два запроса токен не тратят. Пока они идут (у них есть срок), «Войти» недоступна: нажатие заменило бы
+ * прежнюю сессию вслепую. Их сбой вход не блокирует, но на экране об этом сказано. «Остаться» отвергает
+ * ссылку целиком: её `next` не исполняется. */
 function ConfirmScreen(props: {
   token: string | null;
   next: string | null;
   onDone: (next: string | null) => void;
+  onStay: () => void;
   onNewLink: (next: string | null) => void;
 }) {
   const [busy, setBusy] = createSignal(false);
@@ -327,11 +332,15 @@ function ConfirmScreen(props: {
   const [error, setError] = createSignal<string | null>(props.token ? null : failureText('INVALID_TOKEN'));
   const [target, setTarget] = createSignal<string | null>(null);
   const [signedIn, setSignedIn] = createSignal<string | null>(null);
+  const [infoDone, setInfoDone] = createSignal(!props.token);
+  const [sessionDone, setSessionDone] = createSignal(!props.token);
+  const [sessionFailed, setSessionFailed] = createSignal(false);
   let closed = false;
   onCleanup(() => (closed = true));
   if (props.token) {
     void confirmInfo(props.token).then((r) => {
-      if (closed || busy()) return;
+      if (closed) return;
+      setInfoDone(true);
       if (r.ok) setTarget(r.value.email);
       else if (r.failure === 'INVALID_TOKEN') {
         setDead(true);
@@ -339,11 +348,17 @@ function ConfirmScreen(props: {
       }
     });
     void getSession().then((r) => {
-      if (!closed && r.ok) setSignedIn(r.value.user?.email ?? null);
+      if (closed) return;
+      setSessionDone(true);
+      if (r.ok) setSignedIn(r.value.user?.email ?? null);
+      else setSessionFailed(true);
     });
   }
   /** Уже вошёл под этим же адресом: токен незачем тратить. */
   const same = () => signedIn() !== null && signedIn() === target();
+  /** Вошёл, и ссылка не про него (или неизвестно, про кого): вход заменит сессию. */
+  const replaces = () => signedIn() !== null && !same();
+  const checking = () => !infoDone() || !sessionDone();
   const enter = async () => {
     setBusy(true);
     setError(null);
@@ -367,7 +382,7 @@ function ConfirmScreen(props: {
       </Show>
       <Show when={!dead()}>
         <Show
-          when={signedIn() && target() && !same()}
+          when={replaces()}
           fallback={
             <Show when={!error()}>
               <p class="fe-auth__text">
@@ -382,17 +397,29 @@ function ConfirmScreen(props: {
                   )}
                 </Show>
               </p>
+              <Show when={sessionFailed()}>
+                <p class="fe-auth__text" role="status">
+                  Не удалось проверить, вошли ли вы. Если вы уже вошли под другим адресом, этот вход его заменит.
+                </p>
+              </Show>
             </Show>
           }
         >
           <p class="fe-auth__text" role="status">
-            Вы уже вошли как <b>{signedIn()}</b>. Эта ссылка входит как <b>{target()}</b>: новые файлы будут сохраняться в его аккаунте.
+            Вы уже вошли как <b>{signedIn()}</b>.{' '}
+            <Show when={target()} fallback="Не удалось узнать, под каким адресом входит эта ссылка: вход может заменить текущий.">
+              {(email) => (
+                <>
+                  Эта ссылка входит как <b>{email()}</b>: новые файлы будут сохраняться в его аккаунте.
+                </>
+              )}
+            </Show>
           </p>
         </Show>
         <Show
           when={same()}
           fallback={
-            <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy()} onClick={() => void enter()}>
+            <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy() || checking()} onClick={() => void enter()}>
               <Show when={signedIn() && target()} fallback="Войти">
                 Войти как {target()}
               </Show>
@@ -403,8 +430,8 @@ function ConfirmScreen(props: {
             Продолжить
           </button>
         </Show>
-        <Show when={signedIn() && target() && !same()}>
-          <button class="fe-btn fe-btn--secondary fe-auth__wide" disabled={busy()} onClick={() => props.onDone(props.next)}>
+        <Show when={replaces()}>
+          <button class="fe-btn fe-btn--secondary fe-auth__wide" disabled={busy()} onClick={props.onStay}>
             Остаться как {signedIn()}
           </button>
         </Show>

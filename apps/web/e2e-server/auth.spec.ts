@@ -169,6 +169,80 @@ test('страница подтверждения показывает адре�
   expect(((await (await page.request.get('/api/auth/session')).json()) as { user: { email: string } }).user.email).toBe(foreign);
 });
 
+test('вошедшему: пока адрес неизвестен, «Войти» недоступна; сбой чтения адреса — предупреждение и выбор (T10-I1)', async ({
+  page,
+}, info) => {
+  const mine = newEmail(info.project.name);
+  const foreign = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, mine);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email: foreign }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(foreign);
+  // Ответ ещё в пути: нажать нельзя, сессия не заменится вслепую.
+  const { promise: letGo, resolve } = Promise.withResolvers<void>();
+  await page.route('**/api/auth/confirm-info', async (r) => {
+    await letGo;
+    await r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' });
+  });
+  await page.goto(link);
+  const enterButton = page.getByRole('button', { name: 'Войти', exact: true });
+  await expect(enterButton).toBeDisabled();
+  resolve();
+  // Сбой (503 или 429): адрес неизвестен, предупреждение всё равно есть, токен цел.
+  await expect(page.getByRole('status')).toContainText(`Вы уже вошли как ${mine}`);
+  await expect(page.getByRole('status')).toContainText('вход может заменить текущий');
+  await expect(page.getByRole('button', { name: `Остаться как ${mine}` })).toBeVisible();
+  await expect(enterButton).toBeEnabled();
+  await page.unroute('**/api/auth/confirm-info');
+  await page.getByRole('button', { name: `Остаться как ${mine}` }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  // Сессия неизвестна: нейтральное предупреждение.
+  await page.route('**/api/auth/session', (r) =>
+    r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' }),
+  );
+  await page.goto(link);
+  await expect(page.getByRole('status')).toContainText('Не удалось проверить, вошли ли вы');
+  await page.unroute('**/api/auth/session');
+  // Токен не потрачен: тот же адрес входит.
+  await page.goto('/#/');
+  await page.goto(link);
+  await page.reload();
+  await page.getByRole('button', { name: `Войти как ${foreign}` }).click();
+  await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+});
+
+test('«Остаться» отвергает ссылку: `next` не исполняется, другие вкладки не тревожатся (T10-I2)', async ({ page, context }, info) => {
+  const mine = newEmail(info.project.name);
+  const foreign = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, mine);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email: foreign }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(foreign);
+  const tab = await context.newPage();
+  await tab.goto('/');
+  await expect(tab.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await tab.evaluate(() => {
+    const w = window as unknown as { __auth: string[] };
+    w.__auth = [];
+    new BroadcastChannel('ferrum-auth').onmessage = (e) => w.__auth.push(String(e.data));
+  });
+  await page.goto(`${link}&next=${encodeURIComponent('#/new')}`);
+  await page.getByRole('button', { name: `Остаться как ${mine}` }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await expect(page).toHaveURL(/#\/$/);
+  const list = (await (await page.request.get('/api/files?section=recent&q=&start=0&count=10')).json()) as { total: number };
+  expect(list.total).toBe(0);
+  // Сообщения одного канала идут по порядку: метка пришла, смены входа перед ней не было.
+  await page.evaluate(() => {
+    const c = new BroadcastChannel('ferrum-auth');
+    c.postMessage('метка');
+    c.close();
+  });
+  await expect.poll(() => tab.evaluate(() => (window as unknown as { __auth: string[] }).__auth)).toEqual(['метка']);
+});
+
 test('ссылка на свой же адрес: токен не тратится, «Продолжить»', async ({ page }, info) => {
   const email = newEmail(info.project.name);
   await page.goto('/');

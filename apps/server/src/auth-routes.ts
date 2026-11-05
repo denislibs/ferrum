@@ -164,8 +164,9 @@ export function authRoutes(deps: AuthRoutesDeps) {
     return email ? respond([], { email } satisfies ConfirmInfo) : fail(400, 'INVALID_TOKEN');
   }
 
-  /** Токен тратится только здесь, по нажатию «Войти»: сканер почты, открывший ссылку, увидит
-   * страницу подтверждения, а POST с верным `Origin` он не пришлёт. */
+  /** Токен тратится только здесь, по нажатию «Войти»: сканер почты, открывший ссылку, увидит страницу
+   * подтверждения. Сканер со скриптами пришлёт `confirm-info` с верным `Origin`, но тот токен не тратит,
+   * а кнопку он не нажмёт. */
   async function confirm(req: Request, ip: string): Promise<Response> {
     const parsed = parseConfirmRequest(await readJson(req));
     if (!parsed) return fail(400, 'BAD_REQUEST');
