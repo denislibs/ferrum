@@ -381,10 +381,11 @@ test('смена входа в другой вкладке: правки X не 
   await tab.getByRole('button', { name: 'Выйти' }).click();
   await expect(tab.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
   await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  // Правки только в журнале X: вкладка перезагружается как Y, у которого право на файл есть.
+  const reloaded = a.waitForEvent('load', { timeout: 90_000 });
   await signIn(tab, yMail, 'Другой');
   await expect(tab.getByRole('heading', { level: 1 })).toHaveText('Недавние');
-  // Правки только в журнале X: вкладка перезагружается как Y, у которого право на файл есть.
-  await expect.poll(() => a.evaluate(() => (window.__ferrum?.ui ? 'готово' : 'нет')), { timeout: 90_000 }).toBe('готово');
+  await reloaded;
   await editorReady(a);
   await nodes(a, 1);
   const after = (await api(tab, 'GET', `/api/files/${id}/access`)).body as { version: number; role: string };
