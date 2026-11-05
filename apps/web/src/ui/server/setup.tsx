@@ -2,18 +2,23 @@
 // поэтому в автономную сборку ни запросы к серверу, ни его разделы не попадают.
 
 import { isUuid } from '@ferrum/protocol';
+import { createSignal } from 'solid-js';
 import { currentUser } from '../auth/session';
 import { extensions } from '../extensions';
+import { LocalFilesEntry } from './local-files';
 import { redeemLink, requestFileAccess } from './server-api';
 import { ServerFileStore } from './server-store';
 import { ShareButton } from './share-dialog';
 import { fileMenuItems, MoveDialog, refreshTeams, setOnMoved, teamNavEntries, TeamsEntry, teamSectionTitle } from './teams';
+
+const [store, setStore] = createSignal<ServerFileStore | null>(null);
 
 export function createServerStore(): ServerFileStore {
   // `Root` монтируется только при живой сессии (`AuthGate`).
   const s = new ServerFileStore(currentUser()!.id);
   s.redeemLink = async (id, token) => (await redeemLink(id, token)).ok;
   s.requestAccess = async (id) => (await requestFileAccess(id)).ok;
+  setStore(s);
   // Команды и проекты могли измениться у других: вместе со списком файлов.
   s.onChange(() => void refreshTeams());
   // Перемещение идёт мимо worker'а: список перечитывается как после любого изменения.
@@ -34,6 +39,7 @@ export function installServerUi(): void {
   extensions.filesNavExtra = () => (
     <>
       <TeamsEntry />
+      <LocalFilesEntry store={store} user={currentUser()?.id ?? ''} />
       <MoveDialog />
     </>
   );

@@ -519,6 +519,56 @@ test('импорт и экспорт `.ferrum`: копия в «Черновик
   await a.context().close();
 });
 
+test('файлы браузера прежней версии: «Локальные файлы (N)», перенос с журналом, оригинал остаётся', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  const id = await storedFile(a);
+  const bytes = await a.evaluate(async (i) => Array.from(new Uint8Array(await (await fetch(`/api/files/${i}/content`)).arrayBuffer())), id);
+  // Запись прежней версии — прямо в базу браузера, как её оставил этап 1.
+  await a.evaluate(
+    (data) =>
+      new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open('ferrum', 4);
+        req.onsuccess = () => {
+          const tx = req.result.transaction(['meta', 'bytes'], 'readwrite');
+          const now = Date.now();
+          tx.objectStore('meta').put({
+            id: 'old-file',
+            name: 'Старый',
+            createdAt: now,
+            editedAt: now,
+            openedAt: now,
+            size: data.length,
+            thumbVersion: 0,
+            version: 1,
+          });
+          tx.objectStore('bytes').put(new Uint8Array(data).buffer, 'old-file');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+    bytes,
+  );
+  await a.goto('/#/drafts');
+  await a.reload();
+  await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
+  await a.getByRole('button', { name: 'Перенести: Старый' }).click();
+  await expect(a.getByText('Перенесён в «Черновики»')).toBeVisible();
+  await a.getByRole('button', { name: 'Закрыть' }).click();
+  await expect(a.getByRole('option', { name: 'Старый' })).toBeVisible();
+  // Оригинал на месте.
+  await expect(a.getByRole('button', { name: 'Локальные файлы (1)' })).toBeVisible();
+  await a.getByRole('option', { name: 'Старый' }).click();
+  await editorReady(a);
+  await nodes(a, 1);
+  await a.goto('/#/drafts');
+  await a.reload();
+  await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
+  await expect(a.getByText('Перенесён в «Черновики»')).toBeVisible();
+  await a.getByRole('button', { name: 'Удалить из браузера: Старый' }).click();
+  await expect(a.getByRole('dialog').getByText('Старый')).toHaveCount(0);
+  await a.context().close();
+});
+
 test('`?debug` не открывает ядро и хранилище в рабочей сборке (B-205)', async ({ page }, info) => {
   await page.goto('/');
   await signIn(page, newEmail(info.project.name));
