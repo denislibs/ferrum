@@ -18,6 +18,7 @@ mod scene_cache;
 mod sync;
 mod text;
 mod text_codec;
+mod text_ot;
 mod types;
 mod vector;
 

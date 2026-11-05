@@ -328,23 +328,6 @@ impl PageDoc {
         let mut stack = self.tree.children(TreeParentId::Root).unwrap_or_default();
         while let Some(tid) = stack.pop() {
             let mut id = self.stable_id(tid);
-            // Два живых узла с одним `NodeId`: отмена удаления создала новый узел, а параллельный
-            // перенос оживил старый. Правило не зависит от порядка обхода, поэтому все участники
-            // видят одно и то же: имя остаётся у исходного узла, иначе у меньшего `TreeID`;
-            // другой узел живёт под своим `TreeID`, ничего не пропадает.
-            if let Some(&other) = state.by_id.get(&id) {
-                duplicates = true;
-                let order = |t: TreeID| (t.peer, t.counter);
-                let keeps = id.0 == other || (id.0 != tid && order(other) < order(tid));
-                if keeps {
-                    id = NodeId(tid);
-                } else {
-                    let props = state.props.remove(&id).expect("запись индекса");
-                    state.by_id.remove(&id);
-                    state.by_tree.remove(&other);
-                    state.insert(NodeId(other), other, props);
-                }
-            }
             let meta = self.tree.get_meta(tid)?;
             // Узел без типа — половина чужой транзакции (большая правка идёт кусками): остальное придёт,
             // а пока ни его, ни его детей для модели нет.
@@ -367,6 +350,24 @@ impl PageDoc {
                 }
                 Err(e) => return Err(e),
             };
+            // Два живых узла с одним `NodeId`: отмена удаления создала новый узел, а параллельный
+            // перенос оживил старый. Правило не зависит от порядка обхода, поэтому все участники
+            // видят одно и то же: имя остаётся у исходного узла, иначе у меньшего `TreeID`;
+            // другой узел живёт под своим `TreeID`, ничего не пропадает. Скрытые узлы выше в этом
+            // не участвуют: для модели их нет, и имя у живого они не отбирают.
+            if let Some(&other) = state.by_id.get(&id) {
+                duplicates = true;
+                let order = |t: TreeID| (t.peer, t.counter);
+                let keeps = id.0 == other || (id.0 != tid && order(other) < order(tid));
+                if keeps {
+                    id = NodeId(tid);
+                } else {
+                    let props = state.props.remove(&id).expect("запись индекса");
+                    state.by_id.remove(&id);
+                    state.by_tree.remove(&other);
+                    state.insert(NodeId(other), other, props);
+                }
+            }
             oversized |= props
                 .text
                 .as_ref()
@@ -399,6 +400,37 @@ impl PageDoc {
                     .children(TreeParentId::Node(tid))
                     .unwrap_or_default(),
             );
+        }
+        Ok(())
+    }
+
+    /// Имя двойника зависит от того, жив ли второй, поэтому после своей правки зеркало со двойниками
+    /// собирается заново, как и после чужой: иначе оставшийся узел так и жил бы под временным именем,
+    /// а полная сборка вернула бы ему `NodeId`. Без двойников это чтение одного флага.
+    ///
+    /// Сцене сообщается смена имён: старое исчезло, новое появилось со своими свойствами, а дети
+    /// перецепляются, иначе ушли бы вместе со старым именем.
+    pub(crate) fn settle_duplicates(&self, changes: &mut Changes) -> DocResult<()> {
+        if !self.duplicates.get() {
+            return Ok(());
+        }
+        let before = self.state.borrow().by_tree.clone();
+        self.rebuild_from_loro()?;
+        let state = self.state.borrow();
+        for (tid, old) in &before {
+            let Some(new) = state.by_tree.get(tid).filter(|new| *new != old) else {
+                continue;
+            };
+            changes.deleted.push(*old);
+            changes.created.push(*new);
+            changes.props.push(*new);
+            let kids = self
+                .tree
+                .children(TreeParentId::Node(*tid))
+                .unwrap_or_default();
+            changes
+                .moved
+                .extend(kids.iter().filter_map(|k| state.by_tree.get(k)));
         }
         Ok(())
     }
@@ -793,6 +825,71 @@ impl PageDoc {
         };
         self.commit();
         result
+    }
+
+    /// Шаг отмены или повтора рядом с чужими правками (спека подсистемы 4, раздел 8): операция над
+    /// узлом, которого больше нет, пропускается. Проверка — перед самой операцией: восстановление
+    /// узла раньше в обратном проходе оживляет следующие за ним правки того же шага. Возвращает
+    /// обратные к применённым; пусто — от шага ничего не осталось. Значения свойств возвращаются к
+    /// своим прежним, даже если их менял другой.
+    pub(crate) fn apply_step(&self, ops: &[Inverse]) -> DocResult<Vec<Inverse>> {
+        self.begin_journal();
+        let result = ops.iter().rev().try_for_each(|op| match op {
+            _ if !self.can_replay(op) => Ok(()),
+            Inverse::Restore(nodes) => nodes.iter().try_for_each(|n| {
+                // Потомка могли вынести из удалённого поддерева, а его родителя — убрать насовсем.
+                if self.contains(n.id) || n.parent.is_some_and(|p| !self.contains(p)) {
+                    return Ok(());
+                }
+                self.create_with(n.id, n.parent, Some(n.index), n.props.clone())
+                    .map(|_| ())
+            }),
+            // Дельта перенесена через чужие правки (`History::transform_text`). Не легла всё равно —
+            // шаг не блокирует отмену навсегда из-за одного текста.
+            Inverse::Text(id, delta) => {
+                let _ = self.apply_text_delta(*id, delta);
+                Ok(())
+            }
+            op => self.replay(std::slice::from_ref(op)),
+        });
+        let redo = self.take_journal();
+        let result = match result {
+            Ok(()) => Ok(redo),
+            Err(original) => Err(match self.replay(&redo) {
+                Ok(()) => original,
+                Err(rollback) => DocError::RollbackFailed {
+                    original: Box::new(original),
+                    rollback: Box::new(rollback),
+                },
+            }),
+        };
+        self.commit();
+        result
+    }
+
+    /// Осталось ли, к чему применить операцию.
+    fn can_replay(&self, op: &Inverse) -> bool {
+        match op {
+            Inverse::Delete(id)
+            | Inverse::Props(id, _)
+            | Inverse::Shape(id, _)
+            | Inverse::Text(id, _) => self.contains(*id),
+            Inverse::Restore(nodes) => match nodes.first() {
+                Some(root) => {
+                    !self.contains(root.id) && root.parent.is_none_or(|p| self.contains(p))
+                }
+                None => false,
+            },
+            Inverse::Move { id, parent, .. } => {
+                let Some(target) = parent else {
+                    return self.contains(*id);
+                };
+                // Другой участник убрал родителя или перенёс его внутрь этого узла: на прежнее место нельзя.
+                self.contains(*id)
+                    && self.contains(*target)
+                    && !std::iter::successors(Some(*target), |n| self.parent(*n)).any(|n| n == *id)
+            }
+        }
     }
 
     fn replay(&self, ops: &[Inverse]) -> DocResult<()> {
@@ -2028,6 +2125,28 @@ mod tests {
         assert!(!loaded.contains(star));
         assert_eq!(props_of(&loaded, &[f, a, r]), before);
         assert_eq!(loaded.scene_rows().unwrap().len(), 3);
+    }
+
+    /// Половина чужой транзакции с чужим именем не отбирает его у живого узла, в каком бы порядке
+    /// их ни обошла сборка: для модели такого узла нет.
+    #[test]
+    fn node_without_kind_does_not_take_name_from_live_twin() {
+        for half_first in [false, true] {
+            let page = PageDoc::new();
+            let first = page.create_node(None, None, NodeKind::Rect).unwrap();
+            let second = page.create_node(None, None, NodeKind::Rect).unwrap();
+            let (half, live) = if half_first {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let meta = page.tree.get_meta(page.tid(live).unwrap()).unwrap();
+            meta.insert(KEY_ID, half.to_string()).unwrap();
+            page.force_raw_kind_for_tests(half, None);
+            let loaded = PageDoc::from_snapshot(&page.export_snapshot().unwrap()).unwrap();
+            assert_eq!(loaded.walk(), vec![half], "живой узел с именем половины");
+            assert!(!loaded.contains(live));
+        }
     }
 
     /// Узел без типа — половина чужой транзакции: файл открывается, узла для модели пока нет.

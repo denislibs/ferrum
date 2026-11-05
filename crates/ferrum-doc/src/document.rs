@@ -692,7 +692,7 @@ impl Document {
         // И при ошибке: откат вернул эти узлы в прежнее состояние, а если сорвался —
         // сцене тем более нужно сверить их со страницей.
         self.changes.entry(page).or_default().record(&ops);
-        match result {
+        let out = match result {
             Ok(selection_after) => {
                 if !ops.is_empty() {
                     let entry = HistoryEntry {
@@ -714,7 +714,19 @@ impl Document {
             }
             // Откат: применяем обратные операции, в историю ничего не попадает.
             Err(e) => Err(rollback(p, &ops, e)),
-        }
+        };
+        self.settle_duplicates(page, out)
+    }
+
+    /// Зеркало после своей правки, если на странице есть двойники (`PageDoc::settle_duplicates`).
+    /// Ошибка самой правки важнее сбоя сборки и не заслоняется им.
+    fn settle_duplicates<T>(&mut self, page: PageId, out: DocResult<T>) -> DocResult<T> {
+        let settled = match self.loaded.get(&page) {
+            Some(p) => p.settle_duplicates(self.changes.entry(page).or_default()),
+            None => Ok(()),
+        };
+        let out = out?;
+        settled.map(|()| out)
     }
 
     /// Следующая `transact_merging` не сольётся с прошлой правкой, даже если та её
@@ -1150,6 +1162,9 @@ impl Document {
                 .collect();
             self.changes.entry(id).or_default().extend(applied.changes);
         }
+        for (node, delta) in &applied.text {
+            self.history.transform_text(id, *node, delta);
+        }
         Ok(out)
     }
 
@@ -1169,8 +1184,9 @@ impl Document {
         self.page(entry.page)?;
         self.writable()?;
         let p = self.loaded.get(&entry.page).expect("загружена");
-        // При сбое apply_inverse сам откатывает уже применённую часть шага.
-        let result = p.apply_inverse(&entry.ops);
+        // При сбое apply_inverse сам откатывает уже применённую часть шага. Узлы, которые успел
+        // убрать другой участник, шаг пропускает.
+        let result = p.apply_step(&entry.ops);
         // Применённые операции записывают обратные к себе — это и есть изменения.
         // При сбое сверяем все узлы шага: откат мог и не удаться.
         let changes = self.changes.entry(entry.page).or_default();
@@ -1178,7 +1194,7 @@ impl Document {
             Ok(done) => changes.record(done),
             Err(_) => changes.record(&entry.ops),
         }
-        let ops = result?;
+        let ops = self.settle_duplicates(entry.page, result)?;
         match self.apply_doc_ops(&entry.doc_ops) {
             Ok((doc_ops, remap)) => Ok(Replay {
                 ops,
@@ -1191,13 +1207,14 @@ impl Document {
                 let back = p.apply_inverse(&ops);
                 let changes = self.changes.entry(entry.page).or_default();
                 changes.record(&ops);
-                Err(match back {
+                let failed = Err(match back {
                     Ok(_) => e,
                     Err(rollback) => DocError::RollbackFailed {
                         original: Box::new(e),
                         rollback: Box::new(rollback),
                     },
-                })
+                });
+                self.settle_duplicates(entry.page, failed)
             }
         }
     }
@@ -1293,10 +1310,20 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> DocResult<Option<Restore>> {
-        let Some(entry) = self.history.pop_undo() else {
-            return Ok(None);
-        };
+        // Шаг, от которого чужие правки не оставили ничего, пропускается: отмена идёт к следующему.
+        while let Some(entry) = self.history.pop_undo() {
+            match self.undo_entry(entry)? {
+                Some(restore) => return Ok(Some(restore)),
+                None => continue,
+            }
+        }
+        Ok(None)
+    }
+
+    fn undo_entry(&mut self, entry: HistoryEntry) -> DocResult<Option<Restore>> {
+        let empty = entry.ops.is_empty() && entry.doc_ops.is_empty();
         match self.replay(&entry) {
+            Ok(r) if !empty && r.ops.is_empty() && r.doc_ops.is_empty() => Ok(None),
             Ok(r) => {
                 let restore = Restore {
                     page: entry.page,
@@ -1318,10 +1345,19 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> DocResult<Option<Restore>> {
-        let Some(entry) = self.history.pop_redo() else {
-            return Ok(None);
-        };
+        while let Some(entry) = self.history.pop_redo() {
+            match self.redo_entry(entry)? {
+                Some(restore) => return Ok(Some(restore)),
+                None => continue,
+            }
+        }
+        Ok(None)
+    }
+
+    fn redo_entry(&mut self, entry: HistoryEntry) -> DocResult<Option<Restore>> {
+        let empty = entry.ops.is_empty() && entry.doc_ops.is_empty();
         match self.replay(&entry) {
+            Ok(r) if !empty && r.ops.is_empty() && r.doc_ops.is_empty() => Ok(None),
             Ok(r) => {
                 let mut next = HistoryEntry {
                     ops: r.ops,
@@ -1576,8 +1612,9 @@ mod tests {
         assert!(d2.page(p1).is_ok());
     }
 
+    /// Шаг про узел, которого больше нет (убрал другой участник), пропускается, а не блокирует стек.
     #[test]
-    fn failed_undo_keeps_history_entry() {
+    fn undo_step_over_missing_node_is_skipped() {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         doc.history.push(HistoryEntry {
@@ -1589,13 +1626,13 @@ mod tests {
             selection_before: vec![],
             selection_after: vec![],
         });
-        assert!(doc.undo().is_err());
-        assert!(doc.can_undo());
+        assert_eq!(doc.undo().unwrap(), None);
+        assert!(!doc.can_undo());
         assert!(!doc.can_redo());
     }
 
     #[test]
-    fn failed_redo_keeps_history_entry() {
+    fn redo_step_over_missing_node_is_skipped() {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         doc.history.push_redo(HistoryEntry {
@@ -1607,8 +1644,8 @@ mod tests {
             selection_before: vec![],
             selection_after: vec![],
         });
-        assert!(doc.redo().is_err());
-        assert!(doc.can_redo());
+        assert_eq!(doc.redo().unwrap(), None);
+        assert!(!doc.can_redo());
     }
 
     #[test]

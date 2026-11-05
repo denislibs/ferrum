@@ -3,6 +3,7 @@
 
 use crate::guides::Guide;
 use crate::page::Inverse;
+use crate::text_ot;
 use crate::types::{Color, NodeId, PageId};
 
 /// Пауза, после которой ввод подряд начинает новый шаг отмены (как в Figma).
@@ -225,6 +226,28 @@ impl History {
         for e in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             e.remap_page(old, new);
         }
+    }
+
+    /// Другой участник правил текст `node`: дельты отмены и повтора этого текста сдвигаются. Верхний
+    /// шаг написан к нынешнему тексту, следующий — к тексту после его применения, поэтому чужая правка
+    /// проходит стек сверху вниз и сама преобразуется каждым шагом. Склейка ввода рвётся: позиции
+    /// курсора прошлой правки больше не те.
+    pub fn transform_text(&mut self, page: PageId, node: NodeId, delta: &[loro::TextDelta]) {
+        for stack in [&mut self.undo, &mut self.redo] {
+            let mut incoming = delta.to_vec();
+            for e in stack.iter_mut().rev().filter(|e| e.page == page) {
+                for op in e.ops.iter_mut().rev() {
+                    if let Inverse::Text(n, d) = op {
+                        if *n == node {
+                            let moved = text_ot::transform(d, &incoming);
+                            incoming = text_ot::transform(&incoming, d);
+                            *d = moved;
+                        }
+                    }
+                }
+            }
+        }
+        self.last_merge = None;
     }
 
     /// Шаги повтора ещё есть: припаркованная копия страницы может понадобиться.
