@@ -4,7 +4,7 @@ import { expect, test, type Browser, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { appScreen, drag, editorReady, fileId, live, testMode } from '../e2e/helpers';
 import { STAND_URL } from '../playwright.server.config';
-import { linksFor, mailCount, newEmail, resetStand, signIn } from './stand';
+import { linksFor, mailCount, mailsFor, newEmail, resetStand, signIn } from './stand';
 
 test.beforeEach(resetStand);
 
@@ -64,6 +64,23 @@ const api = (page: Page, method: string, path: string, body?: unknown) =>
     },
     { method, path, body },
   );
+
+const open = async (page: Page, id: string) => {
+  await page.goto(`/#/file/${id}`);
+  await editorReady(page);
+};
+
+/** Вернулись на вкладку: доступ проверяется сразу, а не к следующему опросу. */
+const checkAccessNow = (page: Page) => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+
+async function shareWith(page: Page, email: string, role: 'Может редактировать' | 'Может смотреть' = 'Может редактировать') {
+  await page.getByRole('button', { name: 'Поделиться' }).click();
+  await page.getByLabel('Адрес, кого пригласить').fill(email);
+  await page.getByLabel('Роль приглашённого').selectOption({ label: role });
+  await page.getByRole('button', { name: 'Пригласить' }).click();
+  await expect(page.getByRole('list', { name: 'Люди с доступом' }).getByText(email)).toBeVisible();
+  await page.getByRole('button', { name: 'Закрыть' }).click();
+}
 
 /** Сообщение внизу экрана. */
 const toast = (page: Page, text: string) => page.getByRole('status').filter({ hasText: text }).first();
@@ -141,6 +158,165 @@ test('разделы экрана файлов: черновики, корзин
   await a.context().close();
 });
 
+test('читатель: режим просмотра, правок нет, кнопки «Поделиться» нет, копию скачать можно', async ({ browser }, info) => {
+  const viewerMail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, viewerMail);
+  const id = await storedFile(a);
+  await shareWith(a, viewerMail, 'Может смотреть');
+  const puts: string[] = [];
+  b.on('request', (r) => {
+    if (r.method() === 'PUT') puts.push(r.url());
+  });
+  await open(b, id);
+  await nodes(b, 1);
+  await expect(b.getByText('Только просмотр')).toBeVisible();
+  await expect(b.getByRole('button', { name: 'Поделиться' })).toHaveCount(0);
+  // Прямоугольник инструментом не появляется, удаление не проходит, признака изменений нет.
+  await b.locator('canvas').click({ position: { x: 10, y: 10 } });
+  await b.keyboard.press('KeyR');
+  const l = await live(b);
+  await drag(b, await appScreen(b, l, l.cameraX, l.cameraY), 100, 80);
+  await nodes(b, 1);
+  await b.keyboard.press('ControlOrMeta+KeyA');
+  await b.keyboard.press('Delete');
+  await nodes(b, 1);
+  expect(await b.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  await saveKey(b);
+  expect(puts).toEqual([]);
+  // Панель свойств не принимает ввод, «Экспорт» остаётся.
+  await expect(b.locator('.fe-props__body')).toHaveAttribute('inert', '');
+  // Запись в обход интерфейса тоже не проходит.
+  const direct = await api(b, 'PATCH', `/api/files/${id}`, { name: 'Чужое' });
+  expect(direct.status).toBe(403);
+  await b.goto('/#/shared');
+  await expect(title(b)).toHaveText('Доступные мне');
+  const row = b.getByRole('option', { name: 'Без названия' });
+  await row.click({ button: 'right' });
+  await expect(b.getByRole('menuitem', { name: 'Переименовать' })).toHaveCount(0);
+  await expect(b.getByRole('menuitem', { name: 'Удалить' })).toHaveCount(0);
+  const download = b.waitForEvent('download');
+  await b.getByRole('menuitem', { name: 'Скачать копию (.ferrum)' }).click();
+  expect((await download).suggestedFilename()).toBe('Без названия.ferrum');
+  await a.context().close();
+  await b.context().close();
+});
+
+test('понижение и повышение роли открытого редактора без перезагрузки', async ({ browser }, info) => {
+  const editorMail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, editorMail);
+  const id = await storedFile(a);
+  await shareWith(a, editorMail);
+  const entry = async () =>
+    ((await api(a, 'GET', `/api/files/${id}/share`)).body as { people: { id: string; email: string }[] }).people.find(
+      (p) => p.email === editorMail,
+    )!.id;
+  await open(b, id);
+  await expect(b.getByRole('button', { name: 'Поделиться' })).toBeVisible();
+  const before = (await live(b)).nodes;
+  await api(a, 'PATCH', `/api/files/${id}/share/people/${await entry()}`, { role: 'viewer' });
+  await checkAccessNow(b);
+  await expect(b.getByText('Только просмотр')).toBeVisible();
+  await expect(b.getByRole('button', { name: 'Поделиться' })).toHaveCount(0);
+  await b.locator('canvas').click({ position: { x: 10, y: 10 } });
+  await b.keyboard.press('KeyR');
+  const l = await live(b);
+  await drag(b, await appScreen(b, l, l.cameraX, l.cameraY), 100, 80);
+  await nodes(b, before);
+  await api(a, 'PATCH', `/api/files/${id}/share/people/${await entry()}`, { role: 'editor' });
+  await checkAccessNow(b);
+  await expect(b.getByText('Только просмотр')).toHaveCount(0);
+  await drawRect(b);
+  await nodes(b, before + 1);
+  await saveKey(b);
+  await saved(b);
+  await a.context().close();
+  await b.context().close();
+});
+
+test('снятие роли: «Нет доступа» в открытом редакторе, правки — по протоколу ухода', async ({ browser }, info) => {
+  const editorMail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, editorMail);
+  const id = await storedFile(a);
+  await shareWith(a, editorMail);
+  await open(b, id);
+  await drawRect(b);
+  await nodes(b, 2);
+  const share = (await api(a, 'GET', `/api/files/${id}/share`)).body as { people: { id: string; email: string }[] };
+  const entry = share.people.find((p) => p.email === editorMail)!.id;
+  await api(a, 'DELETE', `/api/files/${id}/share/people/${entry}`);
+  // Отказ на сохранении — сразу, опрос тут не нужен.
+  await saveKey(b);
+  await expect(b.getByRole('alert').getByText('Нет доступа', { exact: true })).toBeVisible();
+  await expect(b.getByRole('button', { name: 'Сохранить копию на диск' })).toBeVisible();
+  // Правки не потерялись молча: уход спрашивает.
+  await b.getByRole('button', { name: 'К файлам', exact: true }).click();
+  await expect(b.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' })).toBeVisible();
+  await b.getByRole('button', { name: 'Остаться' }).click();
+  await nodes(b, 2);
+  const download = b.waitForEvent('download');
+  await b.getByRole('button', { name: 'Сохранить копию на диск' }).click();
+  expect((await download).suggestedFilename()).toMatch(/\.ferrum$/);
+  await b.getByRole('button', { name: 'К файлам', exact: true }).click();
+  await b.getByRole('button', { name: 'Уйти' }).click();
+  await expect(title(b)).toHaveText('Недавние');
+  // Файл закрыт и после этого: чтение — «Нет доступа», просьба уходит владельцу.
+  const ownerMail = (await a.evaluate(
+    async () => ((await (await fetch('/api/auth/session')).json()) as { user: { email: string } }).user.email,
+  )) as string;
+  await b.goto(`/#/file/${id}`);
+  await expect(b.getByRole('heading', { name: 'Нет доступа' })).toBeVisible();
+  await b.getByRole('button', { name: 'Запросить доступ' }).click();
+  await expect(b.getByText('Запрос отправлен владельцу файла')).toBeVisible();
+  await mailsFor(ownerMail, 'Запрос доступа к файлу в Ferrum');
+  await a.context().close();
+  await b.context().close();
+});
+
+test('CONFLICT: два окна с одного поколения; после открытия заново правки сливаются', async ({ browser }, info) => {
+  const editorMail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, editorMail);
+  const id = await storedFile(a);
+  await shareWith(a, editorMail);
+  await open(b, id);
+  // Оба правят от одного поколения: A записывает первым.
+  await drawRect(a, 200);
+  await saveKey(a);
+  await saved(a);
+  // Открытый редактор узнаёт о новой версии, не дожидаясь своей записи.
+  await checkAccessNow(b);
+  await expect(toast(b, 'Откройте его заново, чтобы увидеть новую версию')).toBeVisible();
+  await drawRect(b, -200);
+  await nodes(b, 2);
+  // Журнал успевает получить правку B: её и сольёт следующее открытие.
+  await b.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await saveKey(b);
+  await expect(toast(b, 'Файл изменён в другом окне или другим человеком')).toBeVisible();
+  expect(await b.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  // Поверх чужой записи ничего не легло: на сервере версия A.
+  const version = (await api(b, 'GET', `/api/files/${id}/access`)).body as { version: number };
+  expect(version.version).toBe(2);
+  // Уход — по протоколу: вопрос с причиной, правки остаются в журнале браузера.
+  await b.getByRole('button', { name: 'Назад к файлам' }).click();
+  const ask = b.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' });
+  await expect(ask).toContainText('Файл изменён');
+  await b.getByRole('button', { name: 'Уйти' }).click();
+  await expect(title(b)).toHaveText('Недавние');
+  await open(b, id);
+  await nodes(b, 3);
+  await expect(b.getByText('Восстановлены изменения, не записанные в файл')).toBeVisible();
+  await saveKey(b);
+  await saved(b);
+  await a.goto(`/#/file/${id}`);
+  await editorReady(a);
+  await nodes(a, 3);
+  await a.context().close();
+  await b.context().close();
+});
+
 test('две вкладки одного человека: файл занят, как раньше', async ({ browser }, info) => {
   const a = await person(browser, newEmail(info.project.name));
   const id = await storedFile(a);
@@ -149,6 +325,65 @@ test('две вкладки одного человека: файл занят, 
   await second.goto(`/#/file/${id}`);
   await expect(toast(second, 'Файл открыт в другой вкладке')).toBeVisible();
   await a.context().close();
+});
+
+test('ссылка: роль, выключатель, токена нет ни в адресе, ни в журнале истории', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, newEmail(info.project.name));
+  const id = await storedFile(a);
+  await a.getByRole('button', { name: 'Поделиться' }).click();
+  await a.getByRole('checkbox', { name: 'Доступ по ссылке' }).check();
+  await a.getByLabel('Роль по ссылке').selectOption({ label: 'Может смотреть' });
+  await expect(a.getByRole('button', { name: 'Копировать ссылку' })).toBeVisible();
+  const { token } = ((await api(a, 'GET', `/api/files/${id}/share`)).body as { link: { token: string } }).link;
+  await b.goto(`/#/file/${id}?link=${token}`);
+  await editorReady(b);
+  await expect(b.getByText('Только просмотр')).toBeVisible();
+  expect(b.url()).not.toContain(token);
+  expect(b.url()).toContain(`#/file/${id}`);
+  const off = a.waitForResponse((r) => r.url().endsWith('/share/link'));
+  await a.getByRole('checkbox', { name: 'Доступ по ссылке' }).uncheck();
+  await off;
+  await checkAccessNow(b);
+  await expect(b.getByRole('alert').getByText('Нет доступа', { exact: true })).toBeVisible();
+  // Выключенная ссылка не открывает файл и новому человеку; файл из адреса — та же «Нет доступа».
+  await b.goto(`/#/file/${id}?link=${token}`);
+  await expect(b.getByRole('heading', { name: 'Нет доступа' })).toBeVisible();
+  expect(b.url()).not.toContain(token);
+  await a.context().close();
+  await b.context().close();
+});
+
+test('приглашение адреса без учётной записи: письмо, первый вход, «Доступные мне»', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  const id = await storedFile(a);
+  const invited = newEmail(info.project.name);
+  await shareWith(a, invited);
+  const [text] = await mailsFor(invited, 'Вам открыли файл в Ferrum');
+  const link = new RegExp(`http\\S+#/file/${id}`).exec(text)![0];
+  expect(link).toContain(id);
+  const context = await browser.newContext({ baseURL: STAND_URL });
+  const page = await context.newPage();
+  await testMode(page);
+  await page.goto(link);
+  await signIn(page, invited, 'Новый');
+  await editorReady(page);
+  expect(fileId(page)).toBe(id);
+  await nodes(page, 1);
+  await page.goto('/#/shared');
+  await expect(page.getByRole('option', { name: 'Без названия' })).toBeVisible();
+  // Имя появилось в списке, потому что человек открыл файл.
+  await a.getByRole('button', { name: 'Поделиться' }).click();
+  await expect
+    .poll(
+      async () =>
+        ((await api(a, 'GET', `/api/files/${id}/share`)).body as { people: { email: string; name: string }[] }).people.find(
+          (p) => p.email === invited,
+        )?.name,
+    )
+    .toBe('Новый');
+  await a.context().close();
+  await context.close();
 });
 
 test('картинки: отдельными запросами, файл на сервере без них, после открытия они на месте', async ({ browser }, info) => {
@@ -294,6 +529,45 @@ test('сеть пропала: список — сообщение и «Повт
   await a.context().setOffline(false);
   await a.getByRole('button', { name: 'Повторить' }).click();
   await expect(a.getByRole('option', { name: 'Без названия' })).toBeVisible();
+  await a.context().close();
+});
+
+test('«Поделиться»: сбой, чужой ответ и запоздавший ответ не портят список', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await storedFile(a);
+  const invited = newEmail(info.project.name);
+  // Страница сети вместо ответа и обрыв: сообщение и «Повторить», а не вечная «Загрузка…».
+  await a.context().route('**/share', (r) => r.fulfill({ status: 200, contentType: 'text/html', body: '<html>вход в сеть</html>' }));
+  await a.getByRole('button', { name: 'Поделиться' }).click();
+  await expect(a.getByRole('dialog').getByRole('alert')).toContainText('Нет связи с сервером');
+  await a.context().unroute('**/share');
+  await a.context().route('**/share', (r) => r.abort());
+  await a.getByRole('button', { name: 'Повторить' }).click();
+  await expect(a.getByRole('dialog').getByRole('alert')).toContainText('Нет связи с сервером');
+  await a.context().unroute('**/share');
+  await a.getByRole('button', { name: 'Повторить' }).click();
+  await expect(a.getByRole('list', { name: 'Люди с доступом' })).toBeVisible();
+  await a.getByRole('button', { name: 'Закрыть' }).click();
+  // Закрыли, пока ответ в пути, открыли заново: запоздавший ответ не затирает новый список.
+  const { promise: release, resolve } = Promise.withResolvers<void>();
+  let calls = 0;
+  await a.context().route('**/share', async (r) => {
+    if (++calls === 1) await release;
+    await r.continue();
+  });
+  const held = a.waitForRequest('**/share');
+  await a.getByRole('button', { name: 'Поделиться' }).click();
+  await held;
+  await expect(a.getByText('Загрузка…')).toBeVisible();
+  await a.getByRole('button', { name: 'Закрыть' }).click();
+  await a.getByRole('button', { name: 'Поделиться' }).click();
+  await a.getByLabel('Адрес, кого пригласить').fill(invited);
+  await a.getByRole('button', { name: 'Пригласить' }).click();
+  await expect(a.getByRole('list', { name: 'Люди с доступом' }).getByText(invited)).toBeVisible();
+  const stale = a.waitForResponse('**/share');
+  resolve();
+  await stale;
+  await expect(a.getByRole('list', { name: 'Люди с доступом' }).getByText(invited)).toBeVisible();
   await a.context().close();
 });
 

@@ -6,6 +6,7 @@ import { currentUser } from '../auth/session';
 import { extensions } from '../extensions';
 import { redeemLink, requestFileAccess } from './server-api';
 import { ServerFileStore } from './server-store';
+import { ShareButton } from './share-dialog';
 
 export function createServerStore(): ServerFileStore {
   // `Root` монтируется только при живой сессии (`AuthGate`).
@@ -24,4 +25,5 @@ export function installServerUi(): void {
   extensions.sectionTitle = (section) => (section === 'shared' ? 'Доступные мне' : null);
   extensions.filesNav = () => [{ kind: 'section', id: 'shared', title: 'Доступные мне', icon: 'file' }];
   extensions.newFileRoute = (section) => (section.startsWith('project:') ? { kind: 'new', project: section.slice(8) } : { kind: 'new' });
+  extensions.shareButton = ShareButton;
 }
