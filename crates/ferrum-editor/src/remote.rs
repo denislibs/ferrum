@@ -1,10 +1,11 @@
 //! Чужие правки в редакторе (спека подсистемы 4, раздел 8): сцена обновляется обычным путём, выделение
 //! теряет удалённые узлы, жест над удалённым узлом отменяется, каретка следует за чужими вставками,
-//! сеанс правки вектора закрывается, если другой изменил его сеть. Чужая правка не шаг отмены и не
-//! делает документ изменённым.
+//! сеанс правки вектора закрывается, если другой изменил его сеть или удалил контур. Чужая правка не
+//! шаг отмены и не делает документ изменённым.
 
-use ferrum_doc::{DocKey, DocResult, NodeId, RemoteOutcome, SyncBatch, SyncVersion};
+use ferrum_doc::{DocKey, DocResult, NodeId, RemoteOutcome, SyncBatch, SyncVersion, VectorNetwork};
 use ferrum_scene::Scene;
+use std::sync::Arc;
 
 use crate::editor::{install_text_outlines, Editor, EditorEvent};
 use crate::tools::sync;
@@ -12,6 +13,9 @@ use crate::tools::sync;
 /// Текст уведомления: сеть вектора изменил другой участник (`VectorEdit` закрыт).
 pub const VECTOR_CHANGED_BY_OTHER: &str =
     "Другой участник изменил этот контур: правка контура закрыта";
+/// Незаписанный путь пера пропал: контур или фрейм, в котором он рисовался, удалил другой участник.
+pub const VECTOR_DELETED_BY_OTHER: &str =
+    "Другой участник удалил этот контур: незаписанные точки потеряны";
 /// Страницу, на которой вы были, удалил другой участник.
 pub const PAGE_REMOVED_BY_OTHER: &str = "Другой участник удалил эту страницу";
 
@@ -88,6 +92,7 @@ impl Editor {
     pub fn apply_remote(&mut self, doc: DocKey, batches: &[&[u8]]) -> DocResult<RemoteEffects> {
         let pages = self.doc.pages();
         let guides = self.doc.guides_revision();
+        let network = self.edited_network();
         let outcome = self.doc.apply_remote(doc, batches)?;
         self.follow_text(&outcome);
         // Писать уже нельзя: жест и сеанс кончаются, причину человеку скажет вызывающий.
@@ -98,7 +103,7 @@ impl Editor {
         }
         let on_this_page = outcome.page == Some(self.page);
         if on_this_page {
-            self.close_vector_edit_if_changed(&outcome);
+            self.close_vector_edit_if_changed(&outcome, network);
         }
         if on_this_page && outcome.rebuilt {
             self.rebuild_scene_after_remote();
@@ -214,16 +219,48 @@ impl Editor {
         self.out.events.push(EditorEvent::NeedsRedraw);
     }
 
+    /// Сеть узла правки в документе: при сборке заново зеркало не скажет, менялась ли она.
+    fn edited_network(&mut self) -> Option<Arc<VectorNetwork>> {
+        let id = self.vector_edit.as_ref()?.id?;
+        self.doc.page(self.page).ok()?.props(id).ok()?.vector
+    }
+
     /// Сеть — неделимое значение: последняя запись побеждает. Незаписанные точки сеанса пропадают,
-    /// и человек об этом узнаёт.
-    fn close_vector_edit_if_changed(&mut self, outcome: &RemoteOutcome) {
-        let edited = self.vector_edit.as_ref().and_then(|v| v.id);
-        if edited.is_some_and(|id| outcome.vectors.contains(&id)) {
-            self.vector_edit = None;
-            self.scene.clear_preview();
+    /// и человек об этом узнаёт. Контур или фрейм нового контура удалил другой: сеанс кончается; без
+    /// незаписанного это тихо, как снятие с выделения.
+    fn close_vector_edit_if_changed(
+        &mut self,
+        outcome: &RemoteOutcome,
+        network: Option<Arc<VectorNetwork>>,
+    ) {
+        let Some(v) = &self.vector_edit else {
+            return;
+        };
+        let (id, parent) = (v.id, v.new.as_ref().and_then(|n| n.parent));
+        let unwritten = v.pen.dirty || v.drag.is_some();
+        let Ok(page) = self.doc.page(self.page) else {
+            return;
+        };
+        let gone = id.or(parent).is_some_and(|n| !page.contains(n));
+        // Фигура без сети тоже правится: у неё сравнивать нечего, её сеть другой изменить не мог.
+        let changed = !gone
+            && id.is_some_and(|n| {
+                outcome.vectors.contains(&n)
+                    || (outcome.rebuilt && page.props(n).ok().and_then(|p| p.vector) != network)
+            });
+        if !gone && !changed {
+            return;
+        }
+        self.vector_edit = None;
+        self.scene.clear_preview();
+        if changed {
             self.out
                 .events
                 .push(EditorEvent::Notice(VECTOR_CHANGED_BY_OTHER));
+        } else if unwritten {
+            self.out
+                .events
+                .push(EditorEvent::Notice(VECTOR_DELETED_BY_OTHER));
         }
     }
 

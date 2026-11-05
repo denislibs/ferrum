@@ -55,7 +55,9 @@ pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,
 };
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
-pub use remote::{RemoteEffects, PAGE_REMOVED_BY_OTHER, VECTOR_CHANGED_BY_OTHER};
+pub use remote::{
+    RemoteEffects, PAGE_REMOVED_BY_OTHER, VECTOR_CHANGED_BY_OTHER, VECTOR_DELETED_BY_OTHER,
+};
 pub use text::{fit_size, MissingFont, TextError, TextPending};
 pub use text_edit::{EnterAt, TextEditInfo, CARET_BLINK_MS};
 pub use text_input::TextInputKind;

@@ -506,6 +506,92 @@ fn drawing_in_other_frame_survives_deletion_elsewhere() {
     b.assert_scene_clean();
 }
 
+fn triangle(h: &mut H) -> NodeId {
+    let net = VectorNetwork {
+        points: vec![
+            VectorPoint::new(0.0, 0.0),
+            VectorPoint::new(100.0, 0.0),
+            VectorPoint::new(100.0, 100.0),
+        ],
+        segments: (0..2).map(|i| VectorSegment::line(i, i + 1)).collect(),
+        regions: vec![],
+    };
+    h.add(
+        None,
+        NodeKind::Vector,
+        PropsPatch {
+            vector: Some(Arc::new(net)),
+            ..patch(100.0, 100.0, 100.0, 100.0)
+        },
+    )
+}
+
+#[test]
+fn unwritten_pen_path_on_vector_deleted_by_other_closes_with_notice() {
+    let (mut a, mut b) = pair();
+    let id = triangle(&mut a);
+    deliver(&mut a, &mut b);
+    assert!(b.ed.start_vector_edit(id));
+    b.ed.set_tool(ToolKind::Pen);
+    b.click(400.0, 400.0, none());
+    b.click(500.0, 400.0, none());
+    delete_node(&mut a, id);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(!b.ed.is_editing_vector(), "сеанс закрыт");
+    let events = b.ed.take_events();
+    assert!(
+        events.contains(&EditorEvent::Notice(VECTOR_DELETED_BY_OTHER)),
+        "{events:?}"
+    );
+    assert!(events.iter().all(|e| !matches!(e, EditorEvent::Error(_))));
+    b.ed.end_vector_edit();
+    no_error(&mut b);
+    b.assert_scene_clean();
+}
+
+#[test]
+fn vector_session_without_unwritten_work_closes_silently_when_deleted() {
+    let (mut a, mut b) = pair();
+    let id = triangle(&mut a);
+    deliver(&mut a, &mut b);
+    assert!(b.ed.start_vector_edit(id));
+    delete_node(&mut a, id);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(!b.ed.is_editing_vector());
+    let events = b.ed.take_events();
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, EditorEvent::Error(_) | EditorEvent::Notice(_))),
+        "{events:?}"
+    );
+    b.assert_scene_clean();
+}
+
+#[test]
+fn new_pen_path_inside_frame_deleted_by_other_closes_with_notice() {
+    let (mut a, mut b) = pair();
+    let f = a.frame(None, 100.0, 100.0, 600.0, 600.0);
+    deliver(&mut a, &mut b);
+    b.ed.set_tool(ToolKind::Pen);
+    b.click(200.0, 200.0, none());
+    b.click(300.0, 200.0, none());
+    assert!(b.ed.is_editing_vector());
+    delete_node(&mut a, f);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(!b.ed.is_editing_vector(), "сеанс закрыт");
+    let events = b.ed.take_events();
+    assert!(
+        events.contains(&EditorEvent::Notice(VECTOR_DELETED_BY_OTHER)),
+        "{events:?}"
+    );
+    assert!(events.iter().all(|e| !matches!(e, EditorEvent::Error(_))));
+    b.assert_scene_clean();
+}
+
 /// На странице два живых узла с одним `NodeId`: дальше каждая чужая правка идёт сборкой заново.
 fn with_twins(a: &mut H, b: &mut H) {
     let id = a.rect(None, 700.0, 700.0, 10.0, 10.0);
@@ -526,6 +612,54 @@ fn with_twins(a: &mut H, b: &mut H) {
     deliver(b, a);
     deliver(a, b);
     deliver(b, a);
+}
+
+#[test]
+fn vector_session_closes_when_rebuild_brings_new_network() {
+    let (mut a, mut b) = pair();
+    let id = triangle(&mut a);
+    deliver(&mut a, &mut b);
+    with_twins(&mut a, &mut b);
+    assert!(b.ed.start_vector_edit(id));
+    let mut bigger = (*b.props(id).vector.unwrap()).clone();
+    bigger.points.push(VectorPoint::new(0.0, 100.0));
+    a.set(
+        id,
+        PropsPatch {
+            vector: Some(Arc::new(bigger.clone())),
+            ..Default::default()
+        },
+    );
+    b.ed.take_events();
+    let fx = deliver(&mut a, &mut b);
+    assert!(fx.iter().any(|f| f.rebuilt), "{fx:?}");
+    assert!(!b.ed.is_editing_vector(), "сеанс закрыт");
+    let events = b.ed.take_events();
+    assert!(
+        events.contains(&EditorEvent::Notice(VECTOR_CHANGED_BY_OTHER)),
+        "{events:?}"
+    );
+    assert_eq!(b.props(id).vector.as_deref(), Some(&bigger));
+    b.assert_scene_clean();
+}
+
+#[test]
+fn vector_session_survives_rebuild_with_same_network() {
+    let (mut a, mut b) = pair();
+    let id = triangle(&mut a);
+    deliver(&mut a, &mut b);
+    with_twins(&mut a, &mut b);
+    assert!(b.ed.start_vector_edit(id));
+    a.set(
+        id,
+        PropsPatch {
+            name: Some("имя".into()),
+            ..Default::default()
+        },
+    );
+    let fx = deliver(&mut a, &mut b);
+    assert!(fx.iter().any(|f| f.rebuilt), "{fx:?}");
+    assert!(b.ed.is_editing_vector(), "сеть та же: сеанс идёт");
 }
 
 #[test]
