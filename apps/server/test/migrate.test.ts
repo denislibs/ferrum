@@ -51,7 +51,7 @@ test('имя без номера — отказ до всякой записи',
 
 test('миграции репозитория применяются на пустой базе', async () => {
   const applied = await migrate(pool, join(import.meta.dir, '../migrations'));
-  expect(applied).toEqual(['001_init.sql', '002_better_auth.sql', '003_files.sql']);
+  expect(applied).toEqual(['001_init.sql', '002_better_auth.sql', '003_files.sql', '004_sync.sql']);
 });
 
 test('файлы встают на базу этапа 1: люди целы, повторный запуск ничего не применяет', async () => {
@@ -60,7 +60,7 @@ test('файлы встают на базу этапа 1: люди целы, п�
   for (const f of ['001_init.sql', '002_better_auth.sql']) copyFileSync(join(all, f), join(stage1, f));
   await migrate(pool, stage1);
   await pool.query(`INSERT INTO "user" (id, name, email, "emailVerified") VALUES ('u1', 'Иван', 'ivan@example.com', true)`);
-  expect(await migrate(pool, all)).toEqual(['003_files.sql']);
+  expect(await migrate(pool, all)).toEqual(['003_files.sql', '004_sync.sql']);
   expect((await pool.query('SELECT email FROM "user"')).rows).toEqual([{ email: 'ivan@example.com' }]);
   const { rows } = await pool.query(`INSERT INTO file (owner_id, name) VALUES ('u1', 'Файл') RETURNING version`);
   expect(rows[0].version).toBe('0');
