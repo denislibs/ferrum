@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Pool } from 'pg';
@@ -234,7 +234,7 @@ test('Valkey при старте: недоступен — отказ в сро�
 });
 
 test('запуск: пока ждём Valkey, строка в журнале, а сигнал останавливает сразу', async () => {
-  const proc = Bun.spawn(['bun', 'run', join(import.meta.dir, '../src/index.ts')], {
+  const proc = Bun.spawn([process.execPath, 'run', join(import.meta.dir, '../src/index.ts')], {
     env: {
       ...process.env,
       BETTER_AUTH_SECRET: TEST_SECRET,
@@ -259,4 +259,38 @@ test('запуск: пока ждём Valkey, строка в журнале, а
   proc.kill('SIGTERM');
   expect(await proc.exited).toBe(0);
   expect(Date.now() - signalled).toBeLessThan(1500);
+});
+
+test('запуск: временные файлы от сбоя убраны до приёма запросов, в журнале сказано сколько', async () => {
+  const data = mkdtempSync(join(tmpdir(), 'ferrum-files-'));
+  mkdirSync(join(data, 'files'));
+  writeFileSync(join(data, 'files', 'a.1.1.tmp'), 'обрыв');
+  writeFileSync(join(data, 'files', 'a'), 'цел');
+  const proc = Bun.spawn([process.execPath, 'run', join(import.meta.dir, '../src/index.ts')], {
+    env: {
+      ...process.env,
+      BETTER_AUTH_SECRET: TEST_SECRET,
+      PUBLIC_URL: 'http://localhost:1',
+      DATABASE_URL: TEST_DATABASE_URL,
+      VALKEY_URL: TEST_VALKEY_URL,
+      SMTP_URL: 'smtp://127.0.0.1:1',
+      MAIL_FROM: 'Ferrum <ferrum@localhost>',
+      FERRUM_PORT: '0',
+      FERRUM_DATA_DIR: data,
+      FERRUM_WEB_DIST: web,
+    },
+    stdout: 'pipe',
+    stderr: 'inherit',
+  });
+  let output = '';
+  const decoder = new TextDecoder();
+  for await (const chunk of proc.stdout) {
+    output += decoder.decode(chunk);
+    if (output.includes('слушает порт')) break;
+  }
+  proc.kill('SIGTERM');
+  expect(await proc.exited).toBe(0);
+  expect(output).toContain('Убрано временных файлов от прошлого запуска: 1');
+  expect(existsSync(join(data, 'files', 'a.1.1.tmp'))).toBe(false);
+  expect(existsSync(join(data, 'files', 'a'))).toBe(true);
 });

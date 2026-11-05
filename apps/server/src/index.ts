@@ -28,7 +28,8 @@ const valkey = await connectValkey(config.valkeyUrl);
 const blobs = new FsBlobStore(config.dataDir);
 // Том доступен для записи: иначе отказ при запуске, а не на первом сохранении.
 await blobs.put('healthcheck', new Uint8Array([1]));
-await blobs.sweep();
+const swept = await blobs.sweep();
+if (swept > 0) console.log(`Убрано временных файлов от прошлого запуска: ${swept}`);
 // Better Auth обращается к таблицам при первом запросе: к этому времени миграции уже применены.
 const mailer = smtpMailer(config.smtpUrl, config.mailFrom);
 const auth = createAuth({

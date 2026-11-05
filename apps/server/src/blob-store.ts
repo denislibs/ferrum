@@ -2,7 +2,7 @@
 // реализация этого интерфейса.
 
 import { mkdir, open, readdir, rename, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 export class BlobTooLarge extends Error {}
 export class BlobStalled extends Error {}
@@ -34,8 +34,15 @@ const noEntry = (e: unknown) => (e as { code?: unknown } | null)?.code === 'ENOE
 
 export class FsBlobStore implements BlobStore {
   private seq = 0;
+  private readonly dir: string;
 
-  constructor(private readonly dir: string) {}
+  /** `openFile` подменяют тесты: короткая запись и `fsync` каталогов иначе не наблюдаемы. */
+  constructor(
+    dir: string,
+    private readonly openFile: typeof open = open,
+  ) {
+    this.dir = resolve(dir);
+  }
 
   private path(key: string): string {
     if (!KEY_RE.test(key)) throw new Error(`Неверный ключ хранилища: «${key}»`);
@@ -43,14 +50,15 @@ export class FsBlobStore implements BlobStore {
   }
 
   /** Запись через временный файл с `fsync` файла и каталога: читатель не увидит половину байтов,
-   * а сбой питания после подтверждения записи не потеряет её. Сбой записи не оставляет `.tmp`. */
+   * а сбой питания после подтверждения записи не потеряет её: синхронизируются все каталоги до корня
+   * хранилища, запись о новой папке лежит в её родителе. Сбой записи не оставляет `.tmp`. */
   private async atomically(key: string, write: (file: Awaited<ReturnType<typeof open>>) => Promise<void>): Promise<void> {
     const path = this.path(key);
     const parent = dirname(path);
     await mkdir(parent, { recursive: true });
     const tmp = `${path}.${process.pid}.${++this.seq}.tmp`;
     try {
-      const file = await open(tmp, 'w');
+      const file = await this.openFile(tmp, 'w');
       try {
         await write(file);
         await file.sync();
@@ -62,18 +70,25 @@ export class FsBlobStore implements BlobStore {
       await rm(tmp, { force: true });
       throw e;
     }
-    const folder = await open(parent, 'r');
-    try {
-      await folder.sync();
-    } finally {
-      await folder.close();
+    for (let folder = parent; ; folder = dirname(folder)) {
+      const handle = await this.openFile(folder, 'r');
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      if (folder === this.dir) break;
     }
   }
 
   /** Временные файлы, оставшиеся от сбоя процесса: при запуске их никто уже не допишет. */
   async sweep(): Promise<number> {
     let removed = 0;
-    const entries = await readdir(this.dir, { recursive: true, withFileTypes: true }).catch(() => []);
+    // Каталога нет — убирать нечего. Остальное (EACCES, EIO) — настоящий сбой: запуск должен его показать.
+    const entries = await readdir(this.dir, { recursive: true, withFileTypes: true }).catch((e: unknown) => {
+      if (noEntry(e)) return [];
+      throw e;
+    });
     for (const e of entries) {
       if (!e.isFile() || !e.name.endsWith('.tmp')) continue;
       await rm(join(e.parentPath, e.name), { force: true });
@@ -99,11 +114,21 @@ export class FsBlobStore implements BlobStore {
             timer = setTimeout(() => reject(new BlobStalled()), options.idleMs);
           });
           const next = await Promise.race([reader.read(), stalled]).finally(() => clearTimeout(timer));
-          if (next.done) return;
+          if (next.done) {
+            // Подтверждённая запись обязана быть полной: иначе старые байты уйдут в очистку.
+            const { size: written } = await file.stat();
+            if (written !== size) throw new Error(`Записано ${written} байт из ${size}`);
+            return;
+          }
           size += next.value.length;
           if (size > options.maxBytes) throw new BlobTooLarge();
           options.onChunk?.(next.value);
-          await file.write(next.value);
+          // `write` — один системный вызов и может записать только часть куска, например на почти полном диске.
+          for (let at = 0; at < next.value.length;) {
+            const { bytesWritten } = await file.write(next.value, at, next.value.length - at);
+            if (bytesWritten === 0) throw new Error('Запись на диск не продвигается');
+            at += bytesWritten;
+          }
         }
       } catch (e) {
         await reader.cancel().catch(() => {});
