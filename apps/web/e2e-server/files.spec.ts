@@ -564,8 +564,16 @@ test('файлы браузера прежней версии: «Локальн�
   await a.reload();
   await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
   await expect(a.getByText('Перенесён в «Черновики»')).toBeVisible();
+  // Перенесённый: кнопки «Перенести» больше нет, повтор не создаст копию.
+  await expect(a.getByRole('button', { name: 'Перенести: Старый' })).toBeDisabled();
   await a.getByRole('button', { name: 'Удалить из браузера: Старый' }).click();
-  await expect(a.getByRole('dialog').getByText('Старый')).toHaveCount(0);
+  const ask = a.getByRole('dialog', { name: 'Удалить файл из браузера?' });
+  await expect(ask).toContainText('есть в «Черновиках»');
+  await ask.getByRole('button', { name: 'Отмена' }).click();
+  await expect(a.getByRole('list', { name: 'Файлы в браузере' }).getByText('Старый')).toBeVisible();
+  await a.getByRole('button', { name: 'Удалить из браузера: Старый' }).click();
+  await a.getByRole('dialog', { name: 'Удалить файл из браузера?' }).getByRole('button', { name: 'Удалить' }).click();
+  await expect(a.getByRole('list', { name: 'Файлы в браузере' }).getByText('Старый')).toHaveCount(0);
   await a.context().close();
 });
 
@@ -1176,6 +1184,216 @@ test('раздел удалённого проекта: заголовок го�
   await expect(dialog.getByText('Проектов пока нет')).toBeVisible();
   await closeDialog(a);
   await expect(title(a)).toHaveText('Проект удалён или недоступен');
+  await a.context().close();
+});
+
+/** Файл прежней версии в базе браузера, с журналом, как его оставил этап 1. */
+async function seedLocal(page: Page, id: string, name: string, bytes: number[], journal: number[][] = [], extraEntries = 0): Promise<void> {
+  await page.evaluate(
+    ({ id, name, bytes, journal, extraEntries }) =>
+      new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open('ferrum', 4);
+        req.onsuccess = () => {
+          const tx = req.result.transaction(['meta', 'bytes', 'journal'], 'readwrite');
+          const now = Date.now();
+          tx.objectStore('meta').put({
+            id,
+            name,
+            createdAt: now,
+            editedAt: now,
+            openedAt: now,
+            size: bytes.length,
+            thumbVersion: 0,
+            version: 1,
+          });
+          tx.objectStore('bytes').put(new Uint8Array(bytes).buffer, id);
+          journal.forEach((b, i) => tx.objectStore('journal').put(new Uint8Array(b).buffer, [id, 1, i]));
+          const empty = new ArrayBuffer(0);
+          for (let i = 0; i < extraEntries; i++) tx.objectStore('journal').put(empty, [id, 2, i]);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+    { id, name, bytes, journal, extraEntries },
+  );
+}
+
+/** Содержимое файла с сервера и пачка журнала, которую ядро отдало поверх него. */
+async function fileAndJournal(a: Page): Promise<{ id: string; bytes: number[]; batch: number[] }> {
+  const id = await storedFile(a);
+  const bytes = await a.evaluate(async (i) => Array.from(new Uint8Array(await (await fetch(`/api/files/${i}/content`)).arrayBuffer())), id);
+  // Запись не проходит: правка только в журнале браузера, файл на сервере прежний.
+  await a.context().route('**/content', (r) => (r.request().method() === 'PUT' ? r.abort() : r.continue()));
+  await drawRect(a, 200);
+  await saveKey(a);
+  await expect(toast(a, 'Нет связи с сервером')).toBeVisible();
+  await a.context().unroute('**/content');
+  const batch = await a.evaluate(async () => {
+    const { user } = (await (await fetch('/api/auth/session')).json()) as { user: { id: string } };
+    return new Promise<number[]>((resolve, reject) => {
+      const req = indexedDB.open(`ferrum-user-${user.id}`);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const all = req.result.transaction('journal').objectStore('journal').getAll();
+        all.onsuccess = () => resolve(Array.from(new Uint8Array((all.result as ArrayBuffer[]).at(-1)!)));
+      };
+    });
+  });
+  return { id, bytes, batch };
+}
+
+test('перенос: журнал едет с файлом, «Перенести все» обходит всё, сбой одного не мешает другим (T9-I5)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  const { bytes, batch } = await fileAndJournal(a);
+  await seedLocal(a, 'with-journal', 'С журналом', bytes, [batch]);
+  await seedLocal(a, 'broken', 'Сбойный', bytes);
+  await seedLocal(a, 'plain', 'Простой', bytes);
+  await a.goto('/#/drafts');
+  await a.reload();
+  await a.getByRole('button', { name: 'Локальные файлы (3)' }).click();
+  // Один файл не создаётся на сервере: остальные идут дальше, у него — причина.
+  let posts = 0;
+  await a.context().route('**/api/files', async (r) => {
+    if (r.request().method() !== 'POST') return r.continue();
+    const name = (r.request().postDataJSON() as { name: string }).name;
+    posts++;
+    return name === 'Сбойный' ? r.fulfill({ status: 503, body: 'сбой' }) : r.continue();
+  });
+  const dialog = a.getByRole('dialog', { name: 'Локальные файлы (3)' });
+  await dialog.getByRole('button', { name: 'Перенести все' }).click();
+  const rowOf = (n: string) => dialog.getByRole('listitem').filter({ hasText: n });
+  await expect(rowOf('С журналом')).toContainText('Перенесён в «Черновики»');
+  await expect(rowOf('Простой')).toContainText('Перенесён в «Черновики»');
+  await expect(rowOf('Сбойный')).toContainText('Не перенесён');
+  expect(posts).toBe(3);
+  await a.context().unroute('**/api/files');
+  // Повтор только сбойного.
+  await dialog.getByRole('button', { name: 'Перенести все' }).click();
+  await expect(rowOf('Сбойный')).toContainText('Перенесён в «Черновики»');
+  await dialog.getByRole('button', { name: 'Закрыть' }).click();
+  // Правка из журнала на месте, и файл не задвоился.
+  await expect(a.getByRole('option', { name: 'Простой' })).toHaveCount(1);
+  await a.getByRole('option', { name: 'С журналом' }).click();
+  await editorReady(a);
+  await nodes(a, 2);
+  await a.context().close();
+});
+
+test('перенос: повторного нет ни при двойном нажатии, ни после закрытия диалога посреди переноса (T9-I2)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  const id = await storedFile(a);
+  const bytes = await a.evaluate(async (i) => Array.from(new Uint8Array(await (await fetch(`/api/files/${i}/content`)).arrayBuffer())), id);
+  await seedLocal(a, 'old', 'Старый', bytes);
+  await a.goto('/#/drafts');
+  await a.reload();
+  await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
+  const { promise: letGo, resolve } = Promise.withResolvers<void>();
+  let posts = 0;
+  await a.context().route('**/api/files', async (r) => {
+    if (r.request().method() !== 'POST') return r.continue();
+    posts++;
+    await letGo;
+    await r.continue();
+  });
+  const move = a.getByRole('button', { name: 'Перенести: Старый' });
+  await move.click();
+  await expect(move).toBeDisabled();
+  // Закрыли, пока файл идёт, открыли снова: строка знает, что он в пути.
+  await a.getByRole('button', { name: 'Закрыть' }).click();
+  await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
+  await expect(move).toBeDisabled();
+  await a.getByRole('button', { name: 'Закрыть' }).click();
+  const created = a.waitForResponse((r) => r.url().endsWith('/api/files') && r.request().method() === 'POST');
+  resolve();
+  await created;
+  await expect(a.getByRole('option', { name: 'Старый' })).toBeVisible();
+  // Отметка сохранена, хотя диалог был закрыт.
+  await a.reload();
+  await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
+  await expect(a.getByRole('dialog').getByText('Перенесён в «Черновики»')).toBeVisible();
+  await expect(move).toBeDisabled();
+  expect(posts).toBe(1);
+  await a.context().close();
+});
+
+test('перенос файла с картинкой: картинка отдельным запросом, в новом файле она есть (T9-I5)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await a.goto('/?nodes=0#/new');
+  await editorReady(a);
+  await a.evaluate(async () => {
+    const c = new OffscreenCanvas(4, 4);
+    c.getContext('2d')!.fillRect(0, 0, 4, 4);
+    const bytes = new Uint8Array(await (await c.convertToBlob({ type: 'image/png' })).arrayBuffer());
+    window.__ferrum!.core!.send({ type: 'placeImage', bytes });
+  });
+  await expect.poll(() => a.evaluate(() => window.__ferrum!.ui!.tool)).toBe('image');
+  const l = await live(a);
+  const at = await appScreen(a, l, l.cameraX, l.cameraY);
+  await a.mouse.click(at.x, at.y);
+  await nodes(a, 1);
+  // Контейнер с картинкой — снимком ядра: так он лежал бы в браузере.
+  const bytes = await a.evaluate(
+    () =>
+      new Promise<number[]>((resolve) => {
+        const core = window.__ferrum!.core!;
+        const off = core.on((e) => {
+          if (e.type === 'snapshot') {
+            off();
+            resolve(Array.from(e.bytes));
+          }
+        });
+        core.send({ type: 'snapshot', thumbnail: false });
+      }),
+  );
+  await saveKey(a);
+  await saved(a);
+  await seedLocal(a, 'pic', 'С картинкой', bytes);
+  await a.goto('/#/drafts');
+  await a.reload();
+  await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
+  const images: string[] = [];
+  a.on('request', (r) => {
+    if (r.url().includes('/images/') && r.method() === 'PUT') images.push(r.url());
+  });
+  await a.getByRole('button', { name: 'Перенести: С картинкой' }).click();
+  await expect(a.getByRole('dialog').getByText('Перенесён в «Черновики»')).toBeVisible();
+  expect(images).toHaveLength(1);
+  const fileOf = images[0].split('/images/')[0];
+  const got = await a.evaluate(async (u) => (await fetch(u)).status, images[0]);
+  expect(got).toBe(200);
+  const content = await a.evaluate(async (u) => (await fetch(`${u}/content`)).status, fileOf);
+  expect(content).toBe(200);
+  await a.context().close();
+});
+
+test('журнал сверх предела: без правок файл «Перенесён» не становится, причина на экране (T9-I1)', async ({ browser }, info) => {
+  test.setTimeout(240_000);
+  const a = await person(browser, newEmail(info.project.name));
+  const id = await storedFile(a);
+  const bytes = await a.evaluate(async (i) => Array.from(new Uint8Array(await (await fetch(`/api/files/${i}/content`)).arrayBuffer())), id);
+  await seedLocal(a, 'huge', 'Огромный', bytes, [], 100_001);
+  await a.goto('/#/drafts');
+  await a.reload();
+  await a.getByRole('button', { name: 'Локальные файлы (1)' }).click();
+  let posts = 0;
+  a.on('request', (r) => {
+    if (r.url().endsWith('/api/files') && r.method() === 'POST') posts++;
+  });
+  const dialog = a.getByRole('dialog', { name: 'Локальные файлы (1)' });
+  await dialog.getByRole('button', { name: 'Перенести: Огромный' }).click();
+  await expect(dialog).toContainText('несохранённых правок слишком много', { timeout: 60_000 });
+  expect(posts).toBe(0);
+  await expect(dialog.getByText('Перенесён в «Черновики»')).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Перенести: Огромный' })).toBeEnabled();
+  // Удаление такого файла предупреждает, что он только здесь.
+  await dialog.getByRole('button', { name: 'Удалить из браузера: Огромный' }).click();
+  await expect(a.getByRole('dialog', { name: 'Удалить файл из браузера?' })).toContainText('есть только в этом браузере');
+  await a.getByRole('dialog', { name: 'Удалить файл из браузера?' }).getByRole('button', { name: 'Отмена' }).click();
+  // Явный перенос без правок: копия есть, отметки «перенесён» нет.
+  await dialog.getByRole('button', { name: 'Перенести без правок: Огромный' }).click();
+  await expect(dialog).toContainText('Копия без несохранённых правок', { timeout: 60_000 });
+  expect(posts).toBe(1);
+  await expect(dialog.getByRole('button', { name: 'Перенести: Огромный' })).toBeEnabled();
   await a.context().close();
 });
 
