@@ -423,7 +423,11 @@ fn foreign_delete_across_two_own_steps_transforms_the_whole_stack() {
     a.redo().unwrap();
     assert_eq!(text_of(&mut a, page, id), "ab\n");
     a.redo().unwrap();
-    assert_eq!(text_of(&mut a, page, id), "abef\n", "повтор — без удалённого");
+    assert_eq!(
+        text_of(&mut a, page, id),
+        "abef\n",
+        "повтор — без удалённого"
+    );
     sync(&mut a, &mut b);
     assert_eq!(text_of(&mut a, page, id), text_of(&mut b, page, id));
 }
@@ -471,7 +475,11 @@ fn foreign_typing_on_other_page_keeps_own_typing_one_step() {
     }
     let other = text_node(&mut b, second);
     sync(&mut a, &mut b);
-    assert_eq!(text_of(&mut a, second, other), "\n", "вторая страница доходит");
+    assert_eq!(
+        text_of(&mut a, second, other),
+        "\n",
+        "вторая страница доходит"
+    );
     let mark = |before, after, at_ms| TextMerge {
         node: id,
         before,
@@ -683,7 +691,11 @@ fn unknown_kind_from_other_makes_read_only_with_rebuild() {
 }
 
 /// Правка узлов другим редактором прямо в Loro: то, что наш код сам не записывает.
-fn foreign_raw_edit(doc: &mut Document, page: PageId, edit: impl FnOnce(&loro::LoroTree)) -> Vec<u8> {
+fn foreign_raw_edit(
+    doc: &mut Document,
+    page: PageId,
+    edit: impl FnOnce(&loro::LoroTree),
+) -> Vec<u8> {
     let snapshot = doc.page(page).unwrap().export_full_snapshot().unwrap();
     let raw = loro::LoroDoc::from_snapshot(&snapshot).unwrap();
     let from = raw.oplog_vv();
@@ -707,9 +719,15 @@ fn non_string_type_hides_node_and_keeps_batch_and_file_whole() {
             .unwrap()
     };
     let blob = foreign_raw_edit(&mut b, page, |t| {
-        t.get_meta(tid(t, keep)).unwrap().insert("x", 777.0).unwrap();
+        t.get_meta(tid(t, keep))
+            .unwrap()
+            .insert("x", 777.0)
+            .unwrap();
         t.get_meta(tid(t, bad)).unwrap().insert("x", 777.0).unwrap();
-        t.get_meta(tid(t, bad)).unwrap().insert("type", 5i64).unwrap();
+        t.get_meta(tid(t, bad))
+            .unwrap()
+            .insert("type", 5i64)
+            .unwrap();
     });
     let o = b.apply_remote(DocKey::Page(page), &[&blob]).unwrap();
     assert!(o.rebuilt && o.became_read_only && !o.failed, "{o:?}");
@@ -719,7 +737,9 @@ fn non_string_type_hides_node_and_keeps_batch_and_file_whole() {
     assert!(b.is_read_only());
     assert_mirror(&mut b, page);
     assert!(
-        b.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap().is_empty(),
+        b.take_sync_updates(MAX_SYNC_BATCH_BYTES)
+            .unwrap()
+            .is_empty(),
         "чужое обратно не отправляется"
     );
     assert!(!b.sync_unacked(), "курсор сдвинут: чужое подтверждено");
@@ -755,7 +775,10 @@ fn grouping_by_other_does_not_rebuild_and_matches_mirror() {
     assert!(!o.rebuilt, "{o:?}");
     let c = b.take_changes(page);
     assert!(c.created.contains(&frame), "{c:?}");
-    assert!(c.moved.contains(&ids[0]) && c.moved.contains(&ids[1]), "{c:?}");
+    assert!(
+        c.moved.contains(&ids[0]) && c.moved.contains(&ids[1]),
+        "{c:?}"
+    );
     assert!(!c.created.contains(&ids[0]), "{c:?}");
     assert!(c.props.contains(&ids[0]), "{c:?}");
     assert_eq!(b.page(page).unwrap().props(ids[0]).unwrap().x, 55.0);
@@ -1239,6 +1262,213 @@ proptest! {
         for d in &mut docs {
             assert_mirror(d, page);
             prop_assert_eq!(&nodes(d, page), &want);
+        }
+    }
+}
+
+#[test]
+fn text_undo_works_on_a_page_rebuilt_on_every_foreign_edit() {
+    // Страница с двойником: каждая чужая правка идёт сборкой, дельта текста всё равно доходит до стека.
+    let (mut a, mut b, page, _, _) = twins(NodeKind::Rect);
+    let id = text_node(&mut a, page);
+    insert(&mut a, page, id, 0, "ab");
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 1, "F");
+    let got = deliver(&mut b, &mut [&mut a]);
+    let o = got.iter().find(|o| o.page == Some(page)).unwrap();
+    assert!(o.rebuilt && !o.text.is_empty(), "{o:?}");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "F\n");
+    assert_mirror(&mut a, page);
+}
+
+/// Операция случайного теста текста. Каждый участник вставляет символы своего класса и удаляет только
+/// свои и ничьи (начальный текст), поэтому отмена не вправе менять символы других классов.
+#[derive(Debug, Clone)]
+enum TextOp {
+    Insert {
+        who: usize,
+        at: usize,
+        n: usize,
+    },
+    Delete {
+        who: usize,
+        at: usize,
+        n: usize,
+    },
+    Format {
+        who: usize,
+        at: usize,
+        n: usize,
+        size: u8,
+    },
+    /// Шаг из правки текста и свойства: отмена проходит смесь `Text` и `Props`.
+    InsertRenamed {
+        who: usize,
+        at: usize,
+    },
+    Undo {
+        who: usize,
+    },
+    Redo {
+        who: usize,
+    },
+    /// Свои пачки в журнал, часть журнала — случайному участнику, в перемешанном порядке и с повторами.
+    Deliver {
+        seed: u64,
+    },
+}
+
+fn text_op() -> impl Strategy<Value = TextOp> {
+    let at = 0usize..64;
+    prop_oneof![
+        5 => (0usize..3, at.clone(), 1usize..4).prop_map(|(who, at, n)| TextOp::Insert { who, at, n }),
+        3 => (0usize..3, at.clone(), 1usize..4).prop_map(|(who, at, n)| TextOp::Delete { who, at, n }),
+        1 => (0usize..3, at.clone(), 1usize..5, 8u8..14).prop_map(|(who, at, n, size)| TextOp::Format { who, at, n, size }),
+        1 => (0usize..3, at).prop_map(|(who, at)| TextOp::InsertRenamed { who, at }),
+        4 => (0usize..3).prop_map(|who| TextOp::Undo { who }),
+        2 => (0usize..3).prop_map(|who| TextOp::Redo { who }),
+        4 => any::<u64>().prop_map(|seed| TextOp::Deliver { seed }),
+    ]
+}
+
+/// Класс символов участника: у каждого свой.
+fn glyph(who: usize, n: u32) -> char {
+    let (base, span) = [('a', 26), ('A', 26), ('α', 24)][who];
+    char::from_u32(base as u32 + n % span).unwrap()
+}
+
+fn class_of(c: char) -> Option<usize> {
+    (0..3).find(|who| (0..26).any(|n| glyph(*who, n) == c))
+}
+
+/// Символы других участников в порядке текста: инвариант отмены.
+fn foreign_chars(text: &str, who: usize) -> String {
+    text.chars()
+        .filter(|c| class_of(*c).is_some_and(|k| k != who))
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Спека, раздел 8: отменяются только свои шаги. Три участника правят один текст, отмена и повтор
+    /// вперемешку с импортом в любом порядке; чужие символы отмена не трогает, зеркало совпадает с
+    /// полной сборкой, а в конце все приходят к одному тексту.
+    #[test]
+    fn random_text_undo_keeps_foreign_chars_and_converges(ops in proptest::collection::vec(text_op(), 1..80)) {
+        let mut seed = Document::new();
+        let page = seed.pages()[0].0;
+        let id = text_node(&mut seed, page);
+        insert(&mut seed, page, id, 0, "........");
+        let bytes = encode_full(&seed).unwrap();
+        let mut docs: Vec<Document> = (0..3).map(|_| decode(&bytes).unwrap().document).collect();
+        for d in &mut docs {
+            d.sync_start();
+            d.page(page).unwrap();
+            for (k, v) in d.take_sync_subscribes() {
+                d.sync_subscribed(k, v);
+            }
+        }
+        let mut log: Vec<(DocKey, Vec<u8>)> = Vec::new();
+        let mut counter = 0u32;
+        for o in &ops {
+            counter += 1;
+            match o {
+                TextOp::Insert { who, at, n } => {
+                    let d = &mut docs[*who];
+                    let len = text_of(d, page, id).chars().count();
+                    let s: String = (0..*n as u32).map(|i| glyph(*who, counter + i)).collect();
+                    insert(d, page, id, at % len, &s);
+                }
+                TextOp::Delete { who, at, n } => {
+                    let d = &mut docs[*who];
+                    let chars: Vec<char> = text_of(d, page, id).chars().collect();
+                    // Последний перевод строки не символ пользователя.
+                    let last = chars.len() - 1;
+                    let start = at % chars.len();
+                    let end = (start + n).min(last);
+                    let own = |c: &char| matches!(class_of(*c), Some(k) if k == *who) || *c == '.';
+                    if start < end && chars[start..end].iter().all(own) {
+                        delete(d, page, id, start..end);
+                    }
+                }
+                TextOp::Format { who, at, n, size } => {
+                    let d = &mut docs[*who];
+                    let len = text_of(d, page, id).chars().count();
+                    let start = at % len;
+                    let end = (start + n).min(len - 1);
+                    if start < end {
+                        let set = TextAttrs { size: Some(*size as f64), ..Default::default() };
+                        d.transact(page, vec![id], |tx| {
+                            tx.format_text(id, start..end, &set, &[])?;
+                            Ok(vec![id])
+                        }).unwrap();
+                    }
+                }
+                TextOp::InsertRenamed { who, at } => {
+                    let d = &mut docs[*who];
+                    let len = text_of(d, page, id).chars().count();
+                    d.transact(page, vec![id], |tx| {
+                        tx.set_props(id, &PropsPatch {
+                            name: Some(format!("имя {counter}")),
+                            ..Default::default()
+                        })?;
+                        tx.insert_text(id, at % len, &glyph(*who, counter).to_string(), None)?;
+                        Ok(vec![id])
+                    }).unwrap();
+                }
+                TextOp::Undo { who } => {
+                    let d = &mut docs[*who];
+                    let before = foreign_chars(&text_of(d, page, id), *who);
+                    d.undo().unwrap();
+                    prop_assert_eq!(foreign_chars(&text_of(d, page, id), *who), before, "отмена задела чужие");
+                }
+                TextOp::Redo { who } => {
+                    let d = &mut docs[*who];
+                    let before = foreign_chars(&text_of(d, page, id), *who);
+                    d.redo().unwrap();
+                    prop_assert_eq!(foreign_chars(&text_of(d, page, id), *who), before, "повтор задел чужие");
+                }
+                TextOp::Deliver { seed } => {
+                    for d in docs.iter_mut() {
+                        for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+                            log.push((b.doc, b.bytes));
+                        }
+                    }
+                    let mut part = log.clone();
+                    shuffle(&mut part, *seed);
+                    part.truncate(part.len() / 2 + 1);
+                    let to = *seed as usize % 3;
+                    for (doc, bytes) in part {
+                        docs[to].apply_remote(doc, &[&bytes]).unwrap();
+                    }
+                }
+            }
+            for d in &mut docs {
+                assert_mirror(d, page);
+            }
+        }
+        for d in docs.iter_mut() {
+            for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+                log.push((b.doc, b.bytes));
+            }
+        }
+        for _ in 0..2 {
+            for (doc, bytes) in &log {
+                for d in &mut docs {
+                    d.apply_remote(*doc, &[bytes]).unwrap();
+                }
+            }
+        }
+        let want = text_of(&mut docs[0], page, id);
+        for d in &mut docs {
+            assert_mirror(d, page);
+            prop_assert_eq!(&text_of(d, page, id), &want);
+        }
+        let props = nodes(&mut docs[0], page);
+        for d in &mut docs {
+            prop_assert_eq!(&nodes(d, page), &props);
         }
     }
 }
