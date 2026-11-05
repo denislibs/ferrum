@@ -243,3 +243,68 @@ pub(crate) fn blob_end(bytes: &[u8]) -> VersionVector {
         .map(|m| m.partial_end_vv)
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loro::LoroDoc;
+
+    /// Документ с правками одного пира: каждая вставка — своя операция.
+    fn doc_with_ops(n: usize) -> LoroDoc {
+        let doc = LoroDoc::new();
+        let list = doc.get_list("l");
+        for i in 0..n {
+            list.insert(i, "значение, которое занимает место в пачке")
+                .unwrap();
+        }
+        doc.commit();
+        doc
+    }
+
+    /// Все куски, забирая вызов за вызовом, как `take_sync_updates`.
+    fn drain(doc: &LoroDoc, limit: usize, budget: usize) -> (Vec<Vec<u8>>, usize) {
+        let mut from = VersionVector::default();
+        let mut all = Vec::new();
+        let mut calls = 0;
+        while !from.includes_vv(&doc.oplog_vv()) {
+            calls += 1;
+            assert!(calls < 10_000, "остаток не уменьшается");
+            let part = split_updates(doc, &from, limit, budget).unwrap();
+            assert!(!part.is_empty(), "вызов ничего не отдал");
+            for (bytes, end) in part {
+                merge(&mut from, &end);
+                all.push(bytes);
+            }
+        }
+        (all, calls)
+    }
+
+    #[test]
+    fn budget_splits_work_between_calls_and_nothing_is_lost() {
+        let doc = doc_with_ops(4000);
+        let limit = 4 * 1024;
+        let budget = 16 * 1024;
+        let first = split_updates(&doc, &VersionVector::default(), limit, budget).unwrap();
+        let size: usize = first.iter().map(|(b, _)| b.len()).sum();
+        assert!(size >= budget && size < budget + limit, "порция {size}");
+        assert!(
+            !first.last().unwrap().1.includes_vv(&doc.oplog_vv()),
+            "за один вызов не всё"
+        );
+        let (chunks, calls) = drain(&doc, limit, budget);
+        assert!(calls > 1);
+        assert!(chunks.iter().all(|c| c.len() <= limit));
+        let got = LoroDoc::new();
+        for c in &chunks {
+            got.import(c).unwrap();
+        }
+        assert_eq!(got.get_deep_value(), doc.get_deep_value());
+    }
+
+    #[test]
+    fn small_edit_goes_whole_in_one_chunk() {
+        let doc = doc_with_ops(10);
+        let (chunks, calls) = drain(&doc, 1024 * 1024, 16);
+        assert_eq!((chunks.len(), calls), (1, 1));
+    }
+}

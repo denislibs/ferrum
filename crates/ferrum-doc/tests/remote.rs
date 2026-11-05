@@ -831,6 +831,22 @@ fn move_under_node_without_type_matches_rebuild() {
 }
 
 #[test]
+fn own_edit_before_subscription_counts_as_unacked() {
+    let doc = Document::new();
+    let bytes = encode_full(&doc).unwrap();
+    let mut a = decode(&bytes).unwrap().document;
+    let page = a.pages()[0].0;
+    a.sync_start();
+    a.page(page).unwrap();
+    assert!(a.sync_unacked(), "сервера ещё не спрашивали");
+    rect(&mut a, page);
+    assert!(a.sync_unacked());
+    // Подписка только на корень: правка страницы всё ещё без ответа.
+    a.sync_subscribed(DocKey::Root, SyncVersion::default());
+    assert!(a.sync_unacked());
+}
+
+#[test]
 fn broken_bytes_are_reported_without_harm() {
     let (mut a, mut b, page) = pair();
     let id = rect(&mut a, page);

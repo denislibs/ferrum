@@ -514,3 +514,117 @@ fn image_restored_from_journal_goes_to_server_before_the_edit() {
     assert!(image < update, "байты раньше ссылки: {ev:?}");
 }
 
+#[test]
+fn journal_of_past_sessions_is_covered_by_mark_zero_after_ack() {
+    let bytes = file();
+    let journal = journal_with_image(&bytes);
+    let mut c = reopened(&bytes, journal);
+    c.command(Command::SyncFlush);
+    c.take_events();
+    for (doc, version) in clean_versions(&bytes) {
+        c.command(Command::SyncSubscribed { doc, version });
+    }
+    let ups = updates(&mut c);
+    assert!(!ups.is_empty(), "неотправленное из журнала уходит");
+    assert!(c
+        .take_events()
+        .iter()
+        .all(|e| !matches!(e, CoreEvent::JournalCovered { .. })));
+    for (doc, seq, _) in &ups {
+        c.command(Command::SyncAcked {
+            doc: doc.clone(),
+            client_seq: *seq,
+        });
+    }
+    let ev = c.take_events();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, CoreEvent::JournalCovered { batch } if *batch == 0.0)),
+        "{ev:?}"
+    );
+}
+
+#[test]
+fn own_edit_before_subscription_is_journaled_and_unacked() {
+    let bytes = file();
+    let mut c = Core::new(
+        Platform::Windows,
+        Size::new(800.0, 600.0),
+        1.0,
+        Backend::Cpu,
+    );
+    c.command(Command::OpenWithJournal {
+        bytes: ByteBuf::from(bytes),
+        journal: vec![],
+        remote: Some(true),
+    });
+    c.command(Command::SyncStart);
+    rect(&mut c);
+    assert!(c.editor().sync_unacked(), "сервера ещё не спрашивали");
+    c.command(Command::FlushJournal);
+    let ev = c.take_events();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, CoreEvent::Journal { bytes: Some(_), .. })),
+        "правка не теряется: {ev:?}"
+    );
+    assert!(
+        ev.iter()
+            .all(|e| !matches!(e, CoreEvent::SyncState { unacked: false })),
+        "{ev:?}"
+    );
+}
+
+#[test]
+fn thumbnail_answers_with_png_and_keeps_nothing() {
+    let bytes = file();
+    let mut c = opened(&bytes);
+    let thumb = |c: &mut Core| {
+        c.command(Command::Thumbnail);
+        c.take_events().into_iter().find_map(|e| match e {
+            CoreEvent::Thumbnail { bytes, keep } => Some((bytes.is_some(), keep)),
+            _ => None,
+        })
+    };
+    assert_eq!(thumb(&mut c), Some((false, false)), "показать нечего");
+    rect(&mut c);
+    assert_eq!(thumb(&mut c), Some((true, false)));
+}
+
+#[test]
+fn page_removed_by_other_reaches_the_person_as_notice() {
+    let bytes = file();
+    let mut a = opened(&bytes);
+    let mut b = opened(&bytes);
+    let added = {
+        let before = a.editor().document().pages();
+        a.command(Command::AddPage);
+        let now = a.editor().document().pages();
+        now.into_iter().find(|p| !before.contains(p)).unwrap().0
+    };
+    for (doc, _, bytes) in updates(&mut a) {
+        b.command(Command::ApplyRemote {
+            doc,
+            batches: vec![ByteBuf::from(bytes)],
+        });
+    }
+    b.command(Command::SetPage {
+        id: added.to_string(),
+    });
+    a.command(Command::DeletePage {
+        id: added.to_string(),
+    });
+    b.take_events();
+    for (doc, _, bytes) in updates(&mut a) {
+        b.command(Command::ApplyRemote {
+            doc,
+            batches: vec![ByteBuf::from(bytes)],
+        });
+    }
+    let ev = b.take_events();
+    assert!(
+        ev.iter().any(|e| matches!(e, CoreEvent::Notice { message } if message == ferrum_editor::PAGE_REMOVED_BY_OTHER)),
+        "{ev:?}"
+    );
+}
+
