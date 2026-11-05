@@ -643,27 +643,140 @@ test('«Поделиться»: сбой, чужой ответ и запозд�
   await a.getByRole('button', { name: 'Повторить' }).click();
   await expect(a.getByRole('list', { name: 'Люди с доступом' })).toBeVisible();
   await a.getByRole('button', { name: 'Закрыть' }).click();
-  // Закрыли, пока ответ в пути, открыли заново: запоздавший ответ не затирает новый список.
+  // Закрыли, пока ответ в пути, открыли заново: запоздавший ответ (список без приглашённого) не затирает новый.
   const { promise: release, resolve } = Promise.withResolvers<void>();
+  const { promise: fetched, resolve: gotStale } = Promise.withResolvers<void>();
   let calls = 0;
   await a.context().route('**/share', async (r) => {
-    if (++calls === 1) await release;
-    await r.continue();
+    if (++calls > 1) return r.continue();
+    const stale = await r.fetch();
+    gotStale();
+    await release;
+    await r.fulfill({ response: stale });
   });
-  const held = a.waitForRequest('**/share');
   await a.getByRole('button', { name: 'Поделиться' }).click();
-  await held;
+  await fetched;
   await expect(a.getByText('Загрузка…')).toBeVisible();
   await a.getByRole('button', { name: 'Закрыть' }).click();
   await a.getByRole('button', { name: 'Поделиться' }).click();
   await a.getByLabel('Адрес, кого пригласить').fill(invited);
   await a.getByRole('button', { name: 'Пригласить' }).click();
-  await expect(a.getByRole('list', { name: 'Люди с доступом' }).getByText(invited)).toBeVisible();
-  const stale = a.waitForResponse('**/share');
+  const people = a.getByRole('list', { name: 'Люди с доступом' });
+  await expect(people.getByText(invited)).toBeVisible();
+  const delivered = a.waitForResponse('**/share');
   resolve();
-  await stale;
-  await expect(a.getByRole('list', { name: 'Люди с доступом' }).getByText(invited)).toBeVisible();
+  await delivered;
+  await expect(people.getByText(invited)).toBeVisible();
+  await a.context().unroute('**/share');
   await a.context().close();
+});
+
+test('«Поделиться»: снять, сменить роль, новая ссылка и копирование — через диалог', async ({ browser }, info) => {
+  const ownerPage = await person(browser, newEmail(info.project.name));
+  const mail = newEmail(info.project.name);
+  const b = await person(browser, mail);
+  const id = await storedFile(ownerPage);
+  await shareWith(ownerPage, mail);
+  await open(b, id);
+  await expect(b.getByRole('button', { name: 'Поделиться' })).toBeVisible();
+  await ownerPage.getByRole('button', { name: 'Поделиться' }).click();
+  // Смена роли в списке: сервер запомнил, и открытый редактор это видит.
+  await ownerPage.getByLabel(`Роль: ${mail}`).selectOption({ label: 'Может смотреть' });
+  await expect
+    .poll(
+      async () =>
+        ((await api(ownerPage, 'GET', `/api/files/${id}/share`)).body as { people: { email: string; role: string }[] }).people.find(
+          (p) => p.email === mail,
+        )?.role,
+    )
+    .toBe('viewer');
+  await checkAccessNow(b);
+  await expect(b.getByText('Только просмотр')).toBeVisible();
+  await expect(b.getByRole('button', { name: 'Поделиться' })).toHaveCount(0);
+  // Возврат роли без перезагрузки: кнопка и правка снова есть (T7, `chrome.tsx`).
+  await ownerPage.getByLabel(`Роль: ${mail}`).selectOption({ label: 'Может редактировать' });
+  await expect(ownerPage.getByLabel(`Роль: ${mail}`)).toBeEnabled();
+  await checkAccessNow(b);
+  await expect(b.getByText('Только просмотр')).toHaveCount(0);
+  await expect(b.getByRole('button', { name: 'Поделиться' })).toBeVisible();
+  // Ссылка: копирование отдаёт то, что на экране, «Новая ссылка» её меняет.
+  await ownerPage.getByRole('checkbox', { name: 'Доступ по ссылке' }).check();
+  await expect(ownerPage.getByRole('button', { name: 'Копировать ссылку' })).toBeVisible();
+  const token = async () => ((await api(ownerPage, 'GET', `/api/files/${id}/share`)).body as { link: { token: string } }).link.token;
+  const first = await token();
+  if (info.project.name === 'server') {
+    await ownerPage.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await ownerPage.getByRole('button', { name: 'Копировать ссылку' }).click();
+    await expect(ownerPage.getByRole('button', { name: 'Скопировано' })).toBeVisible();
+    expect(await ownerPage.evaluate(() => navigator.clipboard.readText())).toContain(`#/file/${id}?link=${first}`);
+  }
+  const reset = ownerPage.waitForResponse('**/share/link/reset');
+  await ownerPage.getByRole('button', { name: 'Новая ссылка' }).click();
+  await reset;
+  expect(await token()).not.toBe(first);
+  // «Снять»: человек уходит из списка, его редактор получает «Нет доступа».
+  await ownerPage.getByRole('button', { name: `Снять доступ: ${mail}` }).click();
+  await expect(ownerPage.getByRole('list', { name: 'Люди с доступом' }).getByText(mail)).toHaveCount(0);
+  await checkAccessNow(b);
+  await expect(b.getByRole('alert').getByText('Нет доступа', { exact: true })).toBeVisible();
+  await ownerPage.context().close();
+  await b.context().close();
+});
+
+test('«Поделиться»: отказ сервера возвращает выбор на место (T7-I3)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  const mail = newEmail(info.project.name);
+  await storedFile(a);
+  await shareWith(a, mail);
+  await a.getByRole('button', { name: 'Поделиться' }).click();
+  await a.context().route('**/share/people/**', (r) => r.fulfill({ status: 500, body: 'сбой' }));
+  await a.getByLabel(`Роль: ${mail}`).selectOption({ label: 'Может смотреть' });
+  await expect(a.getByRole('dialog').getByRole('alert')).toContainText('Сервер недоступен');
+  await expect(a.getByLabel(`Роль: ${mail}`)).toHaveValue('editor');
+  await a.context().unroute('**/share/people/**');
+  await a.context().route('**/share/link', (r) => r.fulfill({ status: 500, body: 'сбой' }));
+  await a.getByRole('checkbox', { name: 'Доступ по ссылке' }).click();
+  await expect(a.getByRole('dialog').getByRole('alert')).toContainText('Сервер недоступен');
+  await expect(a.getByRole('checkbox', { name: 'Доступ по ссылке' })).not.toBeChecked();
+  await a.context().unroute('**/share/link');
+  await a.getByRole('checkbox', { name: 'Доступ по ссылке' }).check();
+  await expect(a.getByLabel('Роль по ссылке')).toHaveValue('viewer');
+  await a.context().route('**/share/link', (r) => r.fulfill({ status: 500, body: 'сбой' }));
+  await a.getByLabel('Роль по ссылке').selectOption({ label: 'Может редактировать' });
+  await expect(a.getByRole('dialog').getByRole('alert')).toContainText('Сервер недоступен');
+  await expect(a.getByLabel('Роль по ссылке')).toHaveValue('viewer');
+  await a.context().close();
+});
+
+test('редактор по ссылке: кнопки нет; 403 в диалоге — объяснение без повтора и формы (T7-I1, T7-I2)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, newEmail(info.project.name));
+  const id = await storedFile(a);
+  await a.getByRole('button', { name: 'Поделиться' }).click();
+  await a.getByRole('checkbox', { name: 'Доступ по ссылке' }).check();
+  await a.getByLabel('Роль по ссылке').selectOption({ label: 'Может редактировать' });
+  await expect(a.getByRole('button', { name: 'Копировать ссылку' })).toBeVisible();
+  const { token } = ((await api(a, 'GET', `/api/files/${id}/share`)).body as { link: { token: string } }).link;
+  const answered = b.waitForResponse((r) => r.url().endsWith('/access'));
+  await b.goto(`/#/file/${id}?link=${token}`);
+  await editorReady(b);
+  await answered;
+  await expect(b.getByText('Только просмотр')).toHaveCount(0);
+  await drawRect(b);
+  await expect(b.getByRole('button', { name: 'Поделиться' })).toHaveCount(0);
+  // Сервер отказывает и когда кнопка всё-таки на экране (старый ответ опроса).
+  await b.context().route('**/access', async (r) => {
+    const res = await r.fetch();
+    await r.fulfill({ response: res, json: { ...((await res.json()) as object), canShare: true } });
+  });
+  await checkAccessNow(b);
+  await b.getByRole('button', { name: 'Поделиться' }).click();
+  const dialog = b.getByRole('dialog');
+  await expect(dialog.getByText('Делиться файлом может тот, кому его открыли напрямую')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Повторить' })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Пригласить' })).toHaveCount(0);
+  await a.context().close();
+  await b.context().close();
 });
 
 test('читатель в режиме просмотра сразу: ответ опроса ещё в пути, а правки уже нет (T6-I1)', async ({ browser }, info) => {

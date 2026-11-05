@@ -9,10 +9,10 @@ import { apiFailureText, changeRole, getShare, invitePerson, removePerson, reset
 
 const ROLE_TEXT: Record<string, string> = { owner: 'Владелец', editor: 'Может редактировать', viewer: 'Может смотреть' };
 
-export function ShareButton(props: { file: FileMeta; role: () => FileMeta['role'] }) {
+export function ShareButton(props: { file: FileMeta; role: () => FileMeta['role']; canShare: () => boolean }) {
   const [open, setOpen] = createSignal(false);
   return (
-    <Show when={props.role() !== 'viewer'}>
+    <Show when={props.role() !== 'viewer' && props.canShare()}>
       <button class="fe-btn fe-btn--primary" onClick={() => setOpen(true)}>
         Поделиться
       </button>
@@ -31,6 +31,8 @@ function ShareDialog(props: { file: FileMeta; onClose: () => void }) {
   const [email, setEmail] = createSignal('');
   const [role, setRole] = createSignal<ShareRole>('editor');
   const [copied, setCopied] = createSignal(false);
+  /** Сервер не даёт этому человеку звать людей: повторять нечего, и форма ему ни к чему. */
+  const [refused, setRefused] = createSignal(false);
   /** Поколение: ответ на прежний запрос не затирает то, что уже пришло по новому. */
   let generation = 0;
   let closed = false;
@@ -48,7 +50,8 @@ function ShareDialog(props: { file: FileMeta; onClose: () => void }) {
     if (closed || my !== generation) return false;
     setBusy(false);
     if (!r.ok) {
-      setError(apiFailureText(r.failure));
+      if (r.failure === 'FORBIDDEN' && !state()) setRefused(true);
+      else setError(apiFailureText(r.failure));
       return false;
     }
     setState(r.value);
@@ -91,31 +94,37 @@ function ShareDialog(props: { file: FileMeta; onClose: () => void }) {
 
   return (
     <Modal title={`Поделиться: ${props.file.name}`} onClose={props.onClose}>
-      <form class="fe-share__invite" novalidate onSubmit={(e) => void invite(e)}>
-        <div class="fe-field fe-field--text fe-share__email">
-          <input
-            type="email"
-            aria-label="Адрес, кого пригласить"
-            placeholder="Электронная почта"
-            autocomplete="off"
-            maxlength={MAX_EMAIL_BYTES}
-            value={email()}
-            onInput={(e) => setEmail(e.currentTarget.value)}
-          />
-        </div>
-        <select
-          class="fe-share__select"
-          aria-label="Роль приглашённого"
-          value={role()}
-          onChange={(e) => setRole(e.currentTarget.value as ShareRole)}
-        >
-          <option value="editor">{ROLE_TEXT.editor}</option>
-          <option value="viewer">{ROLE_TEXT.viewer}</option>
-        </select>
-        <button class="fe-btn fe-btn--primary" type="submit" disabled={busy()}>
-          Пригласить
-        </button>
-      </form>
+      <Show when={state()}>
+        <form class="fe-share__invite" novalidate onSubmit={(e) => void invite(e)}>
+          <div class="fe-field fe-field--text fe-share__email">
+            <input
+              ref={(el) => queueMicrotask(() => el.focus())}
+              type="email"
+              aria-label="Адрес, кого пригласить"
+              placeholder="Электронная почта"
+              autocomplete="off"
+              maxlength={MAX_EMAIL_BYTES}
+              value={email()}
+              onInput={(e) => setEmail(e.currentTarget.value)}
+            />
+          </div>
+          <select
+            class="fe-share__select"
+            aria-label="Роль приглашённого"
+            value={role()}
+            onChange={(e) => setRole(e.currentTarget.value as ShareRole)}
+          >
+            <option value="editor">{ROLE_TEXT.editor}</option>
+            <option value="viewer">{ROLE_TEXT.viewer}</option>
+          </select>
+          <button class="fe-btn fe-btn--primary" type="submit" disabled={busy()}>
+            Пригласить
+          </button>
+        </form>
+      </Show>
+      <Show when={refused()}>
+        <p class="t-muted">Делиться файлом может тот, кому его открыли напрямую</p>
+      </Show>
       <Show when={error()}>
         <p class="fe-share__error" role="alert">
           {error()}
@@ -130,7 +139,7 @@ function ShareDialog(props: { file: FileMeta; onClose: () => void }) {
       <Show
         when={state()}
         fallback={
-          <Show when={!error()}>
+          <Show when={!error() && !refused()}>
             <p class="t-muted">Загрузка…</p>
           </Show>
         }
@@ -153,7 +162,13 @@ function ShareDialog(props: { file: FileMeta; onClose: () => void }) {
                         aria-label={`Роль: ${p.email}`}
                         value={p.role}
                         disabled={busy()}
-                        onChange={(e) => void run(() => changeRole(id, p.id, e.currentTarget.value as ShareRole))}
+                        onChange={(e) => {
+                          const el = e.currentTarget;
+                          // Отказ: на экране остаётся то, что на сервере.
+                          void run(() => changeRole(id, p.id, el.value as ShareRole)).then((ok) => {
+                            if (!ok) el.value = p.role;
+                          });
+                        }}
                       >
                         <option value="editor">{ROLE_TEXT.editor}</option>
                         <option value="viewer">{ROLE_TEXT.viewer}</option>
@@ -173,7 +188,12 @@ function ShareDialog(props: { file: FileMeta; onClose: () => void }) {
                     type="checkbox"
                     checked={s().link?.enabled ?? false}
                     disabled={busy()}
-                    onChange={(e) => void run(() => updateLink(id, e.currentTarget.checked, s().link?.role ?? 'viewer'))}
+                    onChange={(e) => {
+                      const el = e.currentTarget;
+                      void run(() => updateLink(id, el.checked, s().link?.role ?? 'viewer')).then((ok) => {
+                        if (!ok) el.checked = s().link?.enabled ?? false;
+                      });
+                    }}
                   />
                   Доступ по ссылке
                 </label>
@@ -183,7 +203,12 @@ function ShareDialog(props: { file: FileMeta; onClose: () => void }) {
                     aria-label="Роль по ссылке"
                     value={s().link?.role}
                     disabled={busy()}
-                    onChange={(e) => void run(() => updateLink(id, true, e.currentTarget.value as ShareRole))}
+                    onChange={(e) => {
+                      const el = e.currentTarget;
+                      void run(() => updateLink(id, true, el.value as ShareRole)).then((ok) => {
+                        if (!ok) el.value = s().link?.role ?? 'viewer';
+                      });
+                    }}
                   >
                     <option value="editor">{ROLE_TEXT.editor}</option>
                     <option value="viewer">{ROLE_TEXT.viewer}</option>
