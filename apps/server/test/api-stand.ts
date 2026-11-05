@@ -126,9 +126,11 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
     return who;
   };
 
+  // Строка файла — первой, как у сервера (журнал и сжатие блокируют файл, потом документы): очистка посреди фонового
+  // сжатия прошлого теста дождётся его, а не сцепится с ним.
   const reset = () =>
     pool.query(
-      'TRUNCATE doc_update, doc_state, doc_peer, file, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
+      'TRUNCATE file, doc_state, doc_update, doc_peer, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
     );
 
   const stop = async () => {
