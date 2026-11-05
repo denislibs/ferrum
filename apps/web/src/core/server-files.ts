@@ -13,6 +13,7 @@ import {
   isFileMeta,
   isHash,
   LOST_IMAGES_HEADER,
+  MAX_IMAGE_REFS,
   parseSection,
   PREVIOUS_WRITE_HEADER,
   scanContainer,
@@ -62,6 +63,8 @@ export function failureMessage(code: Failure): string {
       return 'Сервер недоступен — повторите позже';
     case 'MISSING_IMAGES':
       return 'Картинки файла не дошли до сервера — повторите позже';
+    case 'TOO_MANY_IMAGES':
+      return `В файле больше ${MAX_IMAGE_REFS.toLocaleString('ru-RU')} картинок — такой файл на сервере не хранится. Правки останутся в этом браузере`;
     case 'NETWORK':
       return 'Нет связи с сервером';
     default:
@@ -167,6 +170,8 @@ interface Split {
   images: { hash: string; size: number; part: BlobPart }[];
   /** Ссылок содержимого, для которых в файле нет байтов: потеряны раньше, загрузить нечего. */
   lost: number;
+  /** Разных картинок, на которые ссылается содержимое. */
+  refs: number;
 }
 
 /** Хэши картинок, на которые ссылаются страницы. Секции ссылок небольшие. */
@@ -192,8 +197,11 @@ async function splitContainer(source: Source, whole: () => BodyInit): Promise<Sp
   }
   const images = spans.filter((s) => s.kind === SECTION_IMAGE && isHash(s.id));
   const present = new Set(images.map((s) => s.id));
-  const lost = [...(await imageRefs(source, spans))].filter((h) => !present.has(h)).length;
-  if (images.length === 0 && spans.every((s) => s.kind !== SECTION_IMAGE)) return { body: whole(), size: source.size, images: [], lost };
+  const refs = await imageRefs(source, spans);
+  const lost = [...refs].filter((h) => !present.has(h)).length;
+  if (images.length === 0 && spans.every((s) => s.kind !== SECTION_IMAGE)) {
+    return { body: whole(), size: source.size, images: [], lost, refs: refs.size };
+  }
   const kept = spans.filter((s) => s.kind !== SECTION_IMAGE);
   const parts: BlobPart[] = [containerHeader(kept.length) as Uint8Array<ArrayBuffer>];
   let size = 16;
@@ -206,6 +214,7 @@ async function splitContainer(source: Source, whole: () => BodyInit): Promise<Sp
     size,
     images: images.map((s) => ({ hash: s.id, size: s.size, part: source.part(s.data, s.data + s.size) })),
     lost,
+    refs: refs.size,
   };
 }
 
@@ -241,6 +250,18 @@ export class ServerFiles {
     private readonly clock: Clock,
     private readonly newId: () => string = () => crypto.randomUUID(),
   ) {}
+
+  /** Картинок в файле бывает много, а предел частоты общий на человека: 429 — не сбой, а просьба подождать. */
+  private async paced(send: () => Promise<Response>): Promise<Response> {
+    for (let attempt = 1; ; attempt++) {
+      const res = await send();
+      if (res.status !== 429 || attempt === RATE_ATTEMPTS) return res;
+      void res.body?.cancel().catch(() => {});
+      const asked = Number(res.headers.get('retry-after'));
+      const wait = Number.isFinite(asked) && asked > 0 ? Math.min(asked, RATE_MAX_WAIT_SECONDS) : RATE_DEFAULT_WAIT_SECONDS;
+      await new Promise<void>((resolve) => void this.clock.setTimeout(resolve, wait * 1000));
+    }
+  }
 
   /** Запрос с небольшим телом и ответом. Повтор один раз — только у чтения и только при сбое сети или
    * 5xx: запись повторяет тот, кто знает, можно ли. */
@@ -435,11 +456,18 @@ export class ServerFiles {
   /** Заголовки — как небольшой запрос, тело — по размеру: застывшее соединение не держит заставку. */
   private async image(file: string, hash: string): Promise<ArrayBuffer | null> {
     const ctl = new AbortController();
-    let timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+    let timer: unknown;
     try {
-      const res = await this.http(`${API_FILES}/${file}/images/${hash}`, { signal: ctl.signal });
+      const res = await this.paced(() => {
+        this.clock.clearTimeout(timer);
+        timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+        return this.http(`${API_FILES}/${file}/images/${hash}`, { signal: ctl.signal });
+      });
       if (res.status === 404) return null;
-      if (!res.ok) throw new ServerFailure(res.status >= 500 ? 'UNAVAILABLE' : 'NETWORK');
+      if (!res.ok) {
+        await this.readReply(res, (_v): _v is never => false);
+        throw new ServerFailure('NETWORK');
+      }
       const declared = Number(res.headers.get('content-length') ?? 0);
       this.clock.clearTimeout(timer);
       timer = this.clock.setTimeout(() => ctl.abort(), transferTimeout(Number.isFinite(declared) ? declared : 0));
@@ -528,17 +556,20 @@ export class ServerFiles {
       const url = `${API_FILES}/${file}/images/${img.hash}`;
       let res: Response;
       try {
-        res = await this.http(url, { method: 'HEAD', signal: AbortSignal.timeout(JSON_TIMEOUT_MS) });
+        res = await this.paced(() => this.http(url, { method: 'HEAD', signal: AbortSignal.timeout(JSON_TIMEOUT_MS) }));
         if (res.status === 404) {
-          res = await this.http(url, { method: 'PUT', body: new Blob([img.part]), signal: AbortSignal.timeout(transferTimeout(img.size)) });
+          res = await this.paced(() =>
+            this.http(url, { method: 'PUT', body: new Blob([img.part]), signal: AbortSignal.timeout(transferTimeout(img.size)) }),
+          );
         }
       } catch {
         throw new ServerFailure('NETWORK');
       }
       if (!res.ok) {
         // Ответ HEAD без тела: причину скажет проверка доступа, текст — сам код.
-        if (res.status === 404 || res.status === 401 || res.status === 403) {
-          throw new ServerFailure(res.status === 404 ? 'NOT_FOUND' : res.status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN');
+        if (res.status === 404 || res.status === 401 || res.status === 403 || res.status === 429) {
+          const codes = { 404: 'NOT_FOUND', 401: 'UNAUTHORIZED', 403: 'FORBIDDEN', 429: 'TOO_MANY_REQUESTS' } as const;
+          throw new ServerFailure(codes[res.status]);
         }
         await this.readReply(res, (_v): _v is never => false);
       }
@@ -567,6 +598,8 @@ export class ServerFiles {
   private async upload(file: string, base: number, previous: string | null, content: Blob | ArrayBuffer): Promise<FileMeta> {
     const source = content instanceof Blob ? blobSource(content) : bytesSource(new Uint8Array(content));
     const split = await splitContainer(source, () => content as BodyInit);
+    // Заведомый отказ сервера: ни картинки, ни тело не передаются зря.
+    if (split.refs > MAX_IMAGE_REFS) throw new ServerFailure('TOO_MANY_IMAGES');
     await this.uploadImages(file, split.images);
     try {
       return await this.putContent(file, base, previous, split);
@@ -616,6 +649,9 @@ export class ServerFiles {
     state.active++;
     state.begun++;
     try {
+      // Сервер считает файл без картинок, а открыть его целиком потом будет нельзя: прежнее содержимое остаётся,
+      // правки — в журнале браузера.
+      if (bytes.byteLength > MAX_OPEN_BYTES) throw new ServerFailure('TOO_LARGE');
       const from = await this.preflight(file, base);
       const meta = await this.upload(file, from.base, from.previous, bytes);
       let warning: string | undefined;
@@ -721,7 +757,7 @@ export class ServerFiles {
       throw new ServerFailure('NETWORK');
     }
     if (res.status === 204 || res.status === 404) return null;
-    if (!res.ok) throw new ServerFailure(res.status >= 500 ? 'UNAVAILABLE' : 'NETWORK');
+    if (!res.ok) throw new ServerFailure(res.status >= 500 ? 'UNAVAILABLE' : res.status === 429 ? 'TOO_MANY_REQUESTS' : 'NETWORK');
     return res.blob();
   }
 }

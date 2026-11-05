@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test';
-import { containerHeader, imageSectionHeader, SECTION_PAGE_REFS } from '@ferrum/protocol';
+import { containerHeader, imageSectionHeader, MAX_IMAGE_REFS, SECTION_PAGE_REFS } from '@ferrum/protocol';
 import {
   ACCESS_POLL_MS,
+  asUser,
   failureMessage,
   ServerFailure,
   ServerFiles,
@@ -403,7 +404,8 @@ test('перенос из браузера: журнал становится ж
 test('срок передачи растёт с размером, тексты ошибок для человека', () => {
   expect(transferTimeout(0)).toBe(60_000);
   expect(transferTimeout(34 * 1024 * 1024)).toBeGreaterThan(60_000);
-  expect(transferTimeout(MAX_OPEN_BYTES)).toBeLessThanOrEqual(30 * 60_000);
+  // 512 МБ на 64 КиБ/с: срок не обрывает законную загрузку на медленном канале.
+  expect(transferTimeout(MAX_OPEN_BYTES)).toBeGreaterThan((MAX_OPEN_BYTES / (64 * 1024)) * 1000);
   expect(failureMessage('CONFLICT')).toContain('сольются');
   expect(failureMessage('NETWORK')).toBe('Нет связи с сервером');
 });
@@ -693,4 +695,121 @@ test('перенос: сбой журнала откатывает файл це
   expect(s.calls.some((c) => c.method === 'DELETE' && c.url === '/api/files/n')).toBe(true);
   expect(s.journal.dropped).toEqual(['n']);
   expect(s.events.changed).toBe(0);
+});
+
+test('запрос идёт от имени вошедшего: заголовок добавляется к своим', async () => {
+  const seen: Headers[] = [];
+  const http = asUser('user-1', (async (_i: unknown, init: RequestInit = {}) => {
+    seen.push(new Headers(init.headers));
+    return new Response(null);
+  }) as typeof fetch);
+  await http('/x', { headers: { 'If-Match': '"1"' } });
+  await http('/y');
+  expect(seen[0].get('x-ferrum-user')).toBe('user-1');
+  expect(seen[0].get('if-match')).toBe('"1"');
+  expect(seen[1].get('x-ferrum-user')).toBe('user-1');
+});
+
+test('запись больше предела открытия: отказ до любого запроса, журнал цел (F-I1)', async () => {
+  const s = stand({});
+  const big = new ArrayBuffer(MAX_OPEN_BYTES + 1);
+  await expect(s.files.write('f', big, null, 1, { session: 1, upTo: 5 })).rejects.toMatchObject({ code: 'TOO_LARGE' });
+  expect(s.calls).toEqual([]);
+  expect(s.journal.cuts).toEqual([]);
+});
+
+test('картинок больше предела: отказ до передачи, свой текст (S-I1)', async () => {
+  const hashes = Array.from({ length: MAX_IMAGE_REFS + 1 }, (_, i) => i.toString(16).padStart(64, '0'));
+  const s = stand({ 'GET /api/files/f/access': json({ role: 'owner', version: 1, canShare: true }) });
+  const failure = await s.files.write('f', container(ROOT, refs(...hashes)), null, 1, null).catch((e: unknown) => e);
+  expect(failure).toMatchObject({ code: 'TOO_MANY_IMAGES' });
+  expect((failure as Error).message).toContain('картинок');
+  expect(s.calls.map((c) => c.method)).toEqual(['GET']);
+});
+
+const tooMany = (wait?: string) =>
+  new Response(JSON.stringify({ error: 'TOO_MANY_REQUESTS' }), { status: 429, headers: wait ? { 'Retry-After': wait } : {} });
+/** Обработчик: первые `times` ответов 429, дальше — `then`. */
+const limited = (times: number, then: () => Response, wait = '7') => {
+  let left = times;
+  return () => (left-- > 0 ? tooMany(wait) : then());
+};
+const settle = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 0));
+};
+
+test('открытие: 429 у картинки — пауза, какую просит сервер, а не «Нет связи» (F-I2)', async () => {
+  const image = new Uint8Array([1, 2, 3]);
+  const s = stand({
+    'GET /api/files/f': json(meta()),
+    'GET /api/files/f/content': () => new Response(new Uint8Array(container(ROOT, refs(HASH))), { headers: { 'x-ferrum-version': '1' } }),
+    [`GET /api/files/f/images/${HASH}`]: limited(1, () => new Response(image)),
+  });
+  let done = false;
+  const reading = s.files.read('f').then((r) => {
+    done = true;
+    return r;
+  });
+  await expect.poll(() => s.calls.filter((c) => c.url.includes('/images/')).length).toBe(1);
+  await settle();
+  s.clock.advance(6999);
+  await settle();
+  expect(s.calls.filter((c) => c.url.includes('/images/'))).toHaveLength(1);
+  expect(done).toBe(false);
+  s.clock.advance(1);
+  const r = await reading;
+  expect(s.calls.filter((c) => c.url.includes('/images/'))).toHaveLength(2);
+  expect(r.bytes!.byteLength).toBeGreaterThan(0);
+});
+
+test('429 не кончается: «Слишком много запросов», не «Нет связи»; попыток конечное число', async () => {
+  const s = stand({
+    'GET /api/files/f': json(meta()),
+    'GET /api/files/f/content': () => new Response(new Uint8Array(container(ROOT, refs(HASH))), { headers: { 'x-ferrum-version': '1' } }),
+    [`GET /api/files/f/images/${HASH}`]: () => tooMany('1'),
+  });
+  let failure: unknown;
+  const reading = s.files.read('f').catch((e: unknown) => (failure = e));
+  for (let i = 0; i < 10 && failure === undefined; i++) {
+    await settle();
+    s.clock.advance(1000);
+  }
+  await reading;
+  expect(failure).toMatchObject({ code: 'TOO_MANY_REQUESTS' });
+  expect((failure as Error).message).toBe(failureMessage('TOO_MANY_REQUESTS'));
+  expect(s.calls.filter((c) => c.url.includes('/images/')).length).toBeLessThanOrEqual(6);
+});
+
+test('загрузка картинок: 429 у HEAD и PUT — пауза и повтор, запись доходит; конец попыток — свой код', async () => {
+  const s = stand({
+    [`HEAD /api/files/f/images/${HASH}`]: limited(1, () => new Response(null, { status: 404 }), '2'),
+    [`PUT /api/files/f/images/${HASH}`]: limited(1, () => json({ ok: true }), '3'),
+    'GET /api/files/f/access': json({ role: 'owner', version: 1, canShare: true }),
+    'PUT /api/files/f/content': json(meta({ version: 2 })),
+  });
+  const file = container(ROOT, refs(HASH), imageSection(new Uint8Array([9])));
+  const writing = s.files.write('f', file, 'keep', 1, null);
+  await expect.poll(() => s.calls.filter((c) => c.method === 'HEAD').length).toBe(1);
+  await settle();
+  s.clock.advance(2000);
+  await expect.poll(() => s.calls.filter((c) => c.method === 'PUT').length).toBe(1);
+  await settle();
+  s.clock.advance(3000);
+  expect((await writing).version).toBe(2);
+
+  const refused = stand({
+    [`HEAD /api/files/f/images/${HASH}`]: () => new Response(null, { status: 429, headers: { 'Retry-After': '1' } }),
+    'GET /api/files/f/access': json({ role: 'owner', version: 1, canShare: true }),
+  });
+  let failure: unknown;
+  const attempt = refused.files
+    .write('f', container(ROOT, refs(HASH), imageSection(new Uint8Array([9]))), 'keep', 1, null)
+    .catch((e: unknown) => (failure = e));
+  for (let i = 0; i < 10 && failure === undefined; i++) {
+    await settle();
+    refused.clock.advance(1000);
+  }
+  await attempt;
+  expect(failure).toMatchObject({ code: 'TOO_MANY_REQUESTS' });
 });
