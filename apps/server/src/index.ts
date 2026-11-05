@@ -6,6 +6,7 @@ import { startServer } from './app';
 import { createAuth } from './auth';
 import { FsBlobStore } from './blob-store';
 import { loadConfig } from './config';
+import { startGc } from './gc';
 import { createPool } from './db';
 import { smtpMailer } from './mail';
 import { migrate } from './migrate';
@@ -24,26 +25,41 @@ const applied = await migrate(migrations, join(import.meta.dir, '../migrations')
 if (applied.length > 0) console.log(`Миграции применены: ${applied.join(', ')}`);
 console.log('Подключение к Valkey…');
 const valkey = await connectValkey(config.valkeyUrl);
-// Хранилище байтов нужно с этапа 2; здесь — проверка, что том доступен для записи.
-await new FsBlobStore(config.dataDir).put('healthcheck', new Uint8Array([1]));
+const blobs = new FsBlobStore(config.dataDir);
+// Том доступен для записи: иначе отказ при запуске, а не на первом сохранении.
+await blobs.put('healthcheck', new Uint8Array([1]));
 // Better Auth обращается к таблицам при первом запросе: к этому времени миграции уже применены.
+const mailer = smtpMailer(config.smtpUrl, config.mailFrom);
 const auth = createAuth({
   publicUrl: config.publicUrl,
   secret: config.authSecret,
   pool,
   valkey,
-  mailer: smtpMailer(config.smtpUrl, config.mailFrom),
+  mailer,
   allowedEmails: config.allowedEmails,
 });
 const server = startServer(
-  { pool, valkey, webDist: config.webDist, auth, publicUrl: config.publicUrl, trustedProxies: config.trustedProxies },
+  {
+    pool,
+    valkey,
+    webDist: config.webDist,
+    auth,
+    publicUrl: config.publicUrl,
+    trustedProxies: config.trustedProxies,
+    blobs,
+    mailer,
+    secret: config.authSecret,
+  },
   config.port,
 );
+const stopGc = startGc(pool, blobs);
 console.log(`Ferrum слушает порт ${server.port}`);
 
 // Остановка контейнера: дождаться запросов и закрыть соединения, а не ждать SIGKILL.
-stop = () =>
+stop = () => {
+  stopGc();
   void server
     .stop()
     .then(() => pool.end())
     .finally(() => process.exit(0));
+};

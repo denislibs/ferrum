@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Pool } from 'pg';
 import { startServer } from '../src/app';
 import { createAuth } from '../src/auth';
+import { FsBlobStore } from '../src/blob-store';
 import { connectValkey, valkeyAlive } from '../src/valkey';
 import { TEST_DATABASE_URL, TEST_SECRET, TEST_VALKEY_URL, testPool } from './helpers';
 
@@ -20,7 +21,16 @@ const pool = testPool();
 const valkey = await connectValkey(TEST_VALKEY_URL);
 const publicUrl = 'http://localhost:1';
 const auth = createAuth({ publicUrl, secret: TEST_SECRET, pool, valkey, mailer: { send: async () => {} }, allowedEmails: [] });
-const deps = { valkey, webDist: web, auth, publicUrl, trustedProxies: [] as string[] };
+const deps = {
+  valkey,
+  webDist: web,
+  auth,
+  publicUrl,
+  trustedProxies: [] as string[],
+  blobs: new FsBlobStore(web),
+  mailer: { send: async () => {} },
+  secret: TEST_SECRET,
+};
 const server = startServer({ ...deps, pool }, 0);
 const url = (p: string) => `http://127.0.0.1:${server.port}${p}`;
 afterAll(async () => {

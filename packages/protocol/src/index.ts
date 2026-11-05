@@ -2,3 +2,5 @@
 // потому что его импортируют и `apps/web`, и `apps/server` (спека подсистемы 4, раздел 3).
 
 export * from './auth';
+export * from './files';
+export * from './container';
