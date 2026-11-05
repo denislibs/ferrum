@@ -118,6 +118,8 @@ function stand(replies: Record<string, ((c: Call) => Response | Promise<Response
   };
   let id = 0;
   const http = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    // Как настоящий `fetch`: уже отменённый запрос не уходит.
+    init.signal?.throwIfAborted();
     const url = String(input);
     const method = init.method ?? 'GET';
     const call: Call = {
@@ -758,6 +760,22 @@ test('открытие: 429 у картинки — пауза, какую пр�
   expect(s.calls.filter((c) => c.url.includes('/images/'))).toHaveLength(1);
   expect(done).toBe(false);
   s.clock.advance(1);
+  const r = await reading;
+  expect(s.calls.filter((c) => c.url.includes('/images/'))).toHaveLength(2);
+  expect(r.bytes!.byteLength).toBeGreaterThan(0);
+});
+
+test('открытие: пауза после 429 дольше срока запроса не обрывает картинку', async () => {
+  const image = new Uint8Array([1, 2, 3]);
+  const s = stand({
+    'GET /api/files/f': json(meta()),
+    'GET /api/files/f/content': () => new Response(new Uint8Array(container(ROOT, refs(HASH))), { headers: { 'x-ferrum-version': '1' } }),
+    [`GET /api/files/f/images/${HASH}`]: limited(1, () => new Response(image), '57'),
+  });
+  const reading = s.files.read('f');
+  await expect.poll(() => s.calls.filter((c) => c.url.includes('/images/')).length).toBe(1);
+  await settle();
+  s.clock.advance(57_000);
   const r = await reading;
   expect(s.calls.filter((c) => c.url.includes('/images/'))).toHaveLength(2);
   expect(r.bytes!.byteLength).toBeGreaterThan(0);

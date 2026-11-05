@@ -458,11 +458,14 @@ export class ServerFiles {
     const ctl = new AbortController();
     let timer: unknown;
     try {
-      const res = await this.paced(() => {
-        this.clock.clearTimeout(timer);
+      // Срок — только на сам запрос: пауза после 429 бывает дольше него и обрывом не считается.
+      const res = await this.paced(async () => {
         timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
-        return this.http(`${API_FILES}/${file}/images/${hash}`, { signal: ctl.signal });
+        const reply = await this.http(`${API_FILES}/${file}/images/${hash}`, { signal: ctl.signal });
+        this.clock.clearTimeout(timer);
+        return reply;
       });
+      timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
       if (res.status === 404) return null;
       if (!res.ok) {
         await this.readReply(res, (_v): _v is never => false);

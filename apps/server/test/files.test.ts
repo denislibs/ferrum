@@ -3,7 +3,7 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_CONTENT_BYTES, MAX_IMAGE_REFS } from '@ferrum/protocol';
 import { LIMITS, MAX_JSON_BYTES } from '../src/api';
-import { uploadGate } from '../src/file-routes';
+import { MAX_UPLOADS, MAX_UPLOADS_PER_USER, uploadGate } from '../src/file-routes';
 import { runGc } from '../src/gc';
 import { apiStand, container, PNG, type Person } from './api-stand';
 
@@ -621,9 +621,10 @@ test('предел одновременных загрузок: девятая �
 test('предел загрузок на сервер: общий счётчик', () => {
   const gate = uploadGate();
   let taken = 0;
-  // На человека не больше 8, поэтому пятеро могли бы занять 40.
-  for (let p = 0; p < 5; p++) for (let i = 0; i < 8; i++) if (gate.enter(`u${p}`)) taken++;
-  expect(taken).toBe(32);
+  // Людей больше, чем нужно общему пределу при их собственном.
+  const people = Math.ceil(MAX_UPLOADS / MAX_UPLOADS_PER_USER) + 1;
+  for (let p = 0; p < people; p++) for (let i = 0; i < MAX_UPLOADS_PER_USER; i++) if (gate.enter(`u${p}`)) taken++;
+  expect(taken).toBe(MAX_UPLOADS);
   expect(gate.enter('новый')).toBe(false);
   gate.leave('u0');
   expect(gate.enter('новый')).toBe(true);

@@ -35,9 +35,11 @@ export const UPLOAD_IDLE_MS = 60_000;
 export const UPLOAD_PACE: UploadPace = { graceMs: 60_000, bytesPerSecond: 32 * 1024 };
 /** Байты заменённого файла удаляются не сразу: читатель, начавший раньше, успевает дочитать. */
 export const BLOB_GRACE_SECONDS = 120;
-/** Одновременных загрузок: на человека и на сервер. Памяти загрузка не занимает, занимает диск и поток. */
+/** Одновременных загрузок: на человека и на сервер. Памяти загрузка не занимает, занимает диск и поток.
+ * Общий предел — только от исчерпания дескрипторов, а не очередь: малый общий предел удерживают
+ * несколько аккаунтов, переподключаясь без единого байта. 1024 слота требуют 128 аккаунтов. */
 export const MAX_UPLOADS_PER_USER = 8;
-export const MAX_UPLOADS = 32;
+export const MAX_UPLOADS = 1024;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 export const trashBlob = (c: PoolClient, key: string | null) =>
