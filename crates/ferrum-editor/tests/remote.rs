@@ -374,3 +374,262 @@ fn missing_image_of_foreign_fill_is_requested() {
         "{fx:?}"
     );
 }
+
+fn no_error(h: &mut H) {
+    let events = h.ed.take_events();
+    assert!(
+        events.iter().all(|e| !matches!(e, EditorEvent::Error(_))),
+        "без технической ошибки: {events:?}"
+    );
+}
+
+fn delete_node(h: &mut H, id: NodeId) {
+    h.ed.transact(|tx| {
+        tx.delete_nodes(&[id])?;
+        Ok(vec![])
+    })
+    .unwrap();
+}
+
+fn x_edit(value: f64) -> PanelEdit {
+    PanelEdit::Number {
+        field: NumField::X,
+        value,
+        relative: false,
+    }
+}
+
+#[test]
+fn panel_edit_of_node_deleted_by_other_is_cancelled_silently() {
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 10.0, 10.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    b.ed.select(&[x]);
+    let steps = b.ed.step_count();
+    b.ed.edit_selection(&x_edit(40.0), Phase::Preview);
+    assert!(b.ed.scene().has_preview());
+    delete_node(&mut a, x);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(!b.ed.scene().has_preview(), "жест панели снят");
+    b.ed.edit_selection(&x_edit(40.0), Phase::Commit);
+    no_error(&mut b);
+    assert_eq!(b.ed.step_count(), steps, "шага нет");
+    b.assert_scene_clean();
+}
+
+#[test]
+fn panel_edit_goes_on_for_other_targets_when_one_is_deleted() {
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 10.0, 10.0, 50.0, 50.0);
+    let y = a.rect(None, 100.0, 10.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    b.ed.select(&[x, y]);
+    b.ed.edit_nodes(&x_edit(40.0), Phase::Preview, &[x, y]);
+    delete_node(&mut a, x);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    b.ed.edit_nodes(&x_edit(40.0), Phase::Commit, &[x, y]);
+    no_error(&mut b);
+    assert_eq!(b.props(y).x, 40.0, "выжившая цель получила правку");
+    b.assert_scene_clean();
+}
+
+#[test]
+fn panel_edit_of_group_with_child_deleted_by_other_has_no_error() {
+    let (mut a, mut b) = pair();
+    let g = a.frame(None, 0.0, 0.0, 200.0, 200.0);
+    let kid = a.rect(Some(g), 10.0, 10.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    b.ed.select(&[g]);
+    let scale = PanelEdit::Scale {
+        factor: 2.0,
+        anchor: ferrum_editor::scale::Anchor::TOP_LEFT,
+    };
+    b.ed.edit_selection(&scale, Phase::Preview);
+    delete_node(&mut a, kid);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    b.ed.edit_selection(&scale, Phase::Commit);
+    no_error(&mut b);
+    b.assert_scene_clean();
+}
+
+#[test]
+fn drawing_inside_frame_deleted_by_other_is_cancelled_silently() {
+    let (mut a, mut b) = pair();
+    let f = a.frame(None, 100.0, 100.0, 400.0, 400.0);
+    deliver(&mut a, &mut b);
+    let steps = b.ed.step_count();
+    b.ed.set_tool(ToolKind::Rect);
+    b.drag_hold((150.0, 150.0), (250.0, 250.0), none());
+    assert!(b.ed.scene().has_preview());
+    delete_node(&mut a, f);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(!b.ed.is_busy(), "жест снят");
+    b.up(250.0, 250.0, none());
+    no_error(&mut b);
+    assert_eq!(b.ed.step_count(), steps);
+    b.assert_scene_clean();
+}
+
+#[test]
+fn text_box_inside_frame_deleted_by_other_is_cancelled_silently() {
+    let (mut a, mut b) = pair();
+    let f = a.frame(None, 100.0, 100.0, 400.0, 400.0);
+    deliver(&mut a, &mut b);
+    b.ed.set_tool(ToolKind::Text);
+    b.drag_hold((150.0, 150.0), (250.0, 250.0), none());
+    delete_node(&mut a, f);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(!b.ed.is_busy(), "жест снят");
+    b.up(250.0, 250.0, none());
+    no_error(&mut b);
+    b.assert_scene_clean();
+}
+
+#[test]
+fn drawing_in_other_frame_survives_deletion_elsewhere() {
+    let (mut a, mut b) = pair();
+    let f = a.frame(None, 100.0, 100.0, 300.0, 300.0);
+    let other = a.frame(None, 500.0, 100.0, 300.0, 300.0);
+    deliver(&mut a, &mut b);
+    b.ed.set_tool(ToolKind::Rect);
+    b.drag_hold((150.0, 150.0), (250.0, 250.0), none());
+    delete_node(&mut a, other);
+    deliver(&mut a, &mut b);
+    assert!(b.ed.is_busy(), "другой фрейм жесту не мешает");
+    b.up(250.0, 250.0, none());
+    assert_eq!(b.children(Some(f)).len(), 1);
+    b.assert_scene_clean();
+}
+
+/// На странице два живых узла с одним `NodeId`: дальше каждая чужая правка идёт сборкой заново.
+fn with_twins(a: &mut H, b: &mut H) {
+    let id = a.rect(None, 700.0, 700.0, 10.0, 10.0);
+    deliver(a, b);
+    delete_node(a, id);
+    a.ed.execute(CommandId::Undo);
+    // Часы b уходят вперёд: его перенос побеждает удаление независимо от случайных пиров.
+    let spare = b.rect(None, 720.0, 700.0, 10.0, 10.0);
+    for x in 0..8 {
+        b.set(spare, patch(720.0 + x as f64, 700.0, 10.0, 10.0));
+    }
+    b.ed.transact(|tx| {
+        tx.move_node(id, None, 5)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    deliver(a, b);
+    deliver(b, a);
+    deliver(a, b);
+    deliver(b, a);
+}
+
+#[test]
+fn rebuild_keeps_drag_of_living_node_and_its_preview() {
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 100.0, 100.0, 50.0, 50.0);
+    let other = a.rect(None, 500.0, 500.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    with_twins(&mut a, &mut b);
+    b.drag_hold((120.0, 120.0), (220.0, 120.0), none());
+    let moved = b.ed.scene().node(x).unwrap().props.x;
+    assert_eq!(moved, 200.0);
+    a.set(other, patch(510.0, 500.0, 50.0, 50.0));
+    let fx = deliver(&mut a, &mut b);
+    assert!(fx.iter().any(|f| f.rebuilt), "{fx:?}");
+    assert!(b.ed.is_busy(), "сборка заново жест не прерывает");
+    assert_eq!(
+        b.ed.scene().node(x).unwrap().props.x,
+        moved,
+        "превью на месте"
+    );
+    b.mv(240.0, 120.0, none());
+    b.up(240.0, 120.0, none());
+    assert_eq!(b.props(x).x, 220.0);
+    b.assert_scene_clean();
+}
+
+#[test]
+fn rebuild_cancels_drag_of_deleted_node() {
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 100.0, 100.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    with_twins(&mut a, &mut b);
+    b.drag_hold((120.0, 120.0), (220.0, 120.0), none());
+    delete_node(&mut a, x);
+    b.ed.take_events();
+    let fx = deliver(&mut a, &mut b);
+    assert!(fx.iter().any(|f| f.rebuilt), "{fx:?}");
+    assert!(!b.ed.is_busy());
+    b.up(220.0, 120.0, none());
+    no_error(&mut b);
+    assert!(b.sel().is_empty());
+    b.assert_scene_clean();
+}
+
+#[test]
+fn grouping_by_other_does_not_touch_drag_and_scene_matches() {
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 100.0, 100.0, 50.0, 50.0);
+    let p = a.rect(None, 300.0, 300.0, 50.0, 50.0);
+    let q = a.rect(None, 400.0, 300.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    b.drag_hold((120.0, 120.0), (220.0, 120.0), none());
+    let f =
+        a.ed.transact(|tx| {
+            let f = tx.create_node(None, None, NodeKind::Frame)?;
+            tx.move_node(p, Some(f), 0)?;
+            tx.move_node(q, Some(f), 1)?;
+            Ok(vec![f])
+        })
+        .unwrap()[0];
+    let fx = deliver(&mut a, &mut b);
+    assert!(fx.iter().all(|e| !e.rebuilt), "{fx:?}");
+    assert!(b.ed.is_busy(), "жест продолжается");
+    assert_eq!(b.parent(q), Some(f));
+    b.up(220.0, 120.0, none());
+    assert_eq!(b.props(x).x, 200.0);
+    b.assert_scene_clean();
+}
+
+#[test]
+fn going_read_only_cancels_drag() {
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 100.0, 100.0, 50.0, 50.0);
+    let other = a.rect(None, 500.0, 500.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    b.drag_hold((120.0, 120.0), (220.0, 120.0), none());
+    let page = a.ed.page();
+    a.ed.document_mut_for_tests()
+        .page(page)
+        .unwrap()
+        .force_kind_for_tests(other, "star");
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(!b.ed.is_busy(), "писать уже нельзя");
+    b.up(220.0, 120.0, none());
+    no_error(&mut b);
+    assert_eq!(b.props(x).x, 100.0);
+    b.assert_scene_clean();
+}
+
+#[test]
+fn guide_over_frame_deleted_by_other_is_cancelled_silently() {
+    let (mut a, mut b) = pair();
+    let f = a.frame(None, 100.0, 100.0, 300.0, 300.0);
+    deliver(&mut a, &mut b);
+    b.ed.set_view(Some(true), Some(true));
+    b.drag_hold((10.0, 170.0), (170.0, 170.0), none());
+    assert!(b.ed.overlay().active_guide.is_some());
+    delete_node(&mut a, f);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert!(b.ed.overlay().active_guide.is_none(), "жест снят");
+    b.up(170.0, 170.0, none());
+    no_error(&mut b);
+    assert!(b.ed.document().page_guides(b.ed.page()).is_empty());
+}

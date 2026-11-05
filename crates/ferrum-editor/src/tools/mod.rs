@@ -326,6 +326,10 @@ pub trait Tool {
     fn cancel(&mut self, cx: &mut Ctx);
     /// Идёт жест (кнопка нажата).
     fn is_busy(&self) -> bool;
+    /// Родитель узла, который создаст идущий жест: удалит его другой — жест отменяется.
+    fn new_node_parent(&self) -> Option<NodeId> {
+        None
+    }
     fn cursor(&self) -> Cursor;
     fn overlay(&self) -> ToolOverlay;
 }

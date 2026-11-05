@@ -155,6 +155,13 @@ impl Tool for TextTool {
         !matches!(self.state, State::Idle)
     }
 
+    fn new_node_parent(&self) -> Option<NodeId> {
+        match &self.state {
+            State::Idle => None,
+            State::Pressed(s) | State::Drawing(s, _) => s.parent,
+        }
+    }
+
     fn cursor(&self) -> Cursor {
         Cursor::Text
     }

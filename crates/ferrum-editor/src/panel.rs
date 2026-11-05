@@ -168,6 +168,17 @@ pub(crate) struct PanelGesture {
     scale: Option<(Vec<Base>, SelectionBox)>,
 }
 
+impl PanelGesture {
+    /// Жест опирается на один из этих узлов: цель или поддерево масштаба.
+    pub(crate) fn touches(&self, gone: &impl Fn(NodeId) -> bool) -> bool {
+        let scale = self.scale.iter().flat_map(|(bases, _)| bases);
+        self.targets
+            .iter()
+            .any(|t| gone(t.id) || t.bases.iter().any(|b| gone(b.id)))
+            || scale.into_iter().any(|b| gone(b.id))
+    }
+}
+
 /// Правке нужно поддерево групп: ширина и высота масштабируют детей группы.
 fn needs_children(edit: &PanelEdit) -> bool {
     matches!(

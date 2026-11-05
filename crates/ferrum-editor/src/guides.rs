@@ -774,6 +774,17 @@ impl Editor {
     }
 
     /// Отмена жеста: превью и протяжки больше нет, документ не менялся.
+    /// Перетаскивание направляющей опирается на один из этих узлов: фрейм под указателем или фрейм,
+    /// с которого она снята.
+    pub(crate) fn guide_drag_touches(&self, gone: &impl Fn(ferrum_doc::NodeId) -> bool) -> bool {
+        self.guide_drag.as_ref().is_some_and(|d| {
+            d.frame
+                .and_then(|s| self.scene.node_at(s))
+                .is_some_and(|n| gone(n.id))
+                || matches!(d.source.map(|g| g.owner), Some(GuideOwner::Frame(f)) if gone(f))
+        })
+    }
+
     pub(crate) fn cancel_guides(&mut self) {
         let dragged = self.guide_drag.take().is_some();
         let previewed = self.guides_preview.take().is_some();

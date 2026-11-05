@@ -3,7 +3,7 @@
 //! сеанс правки вектора закрывается, если другой изменил его сеть. Чужая правка не шаг отмены и не
 //! делает документ изменённым.
 
-use ferrum_doc::{DocKey, DocResult, RemoteOutcome, SyncBatch, SyncVersion};
+use ferrum_doc::{DocKey, DocResult, NodeId, RemoteOutcome, SyncBatch, SyncVersion};
 use ferrum_scene::Scene;
 
 use crate::editor::{install_text_outlines, Editor, EditorEvent};
@@ -90,14 +90,20 @@ impl Editor {
         let guides = self.doc.guides_revision();
         let outcome = self.doc.apply_remote(doc, batches)?;
         self.follow_text(&outcome);
+        // Писать уже нельзя: жест и сеанс кончаются, причину человеку скажет вызывающий.
+        if outcome.became_read_only {
+            self.cancel_gesture();
+            self.vector_edit = None;
+            self.scene.clear_preview();
+        }
         let on_this_page = outcome.page == Some(self.page);
+        if on_this_page {
+            self.close_vector_edit_if_changed(&outcome);
+        }
         if on_this_page && outcome.rebuilt {
             self.rebuild_scene_after_remote();
         } else if on_this_page {
             self.leave_what_was_deleted();
-        }
-        if on_this_page {
-            self.close_vector_edit_if_changed(&outcome);
         }
         let before = self.out.events.len();
         sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
@@ -164,24 +170,45 @@ impl Editor {
         if gone.is_empty() {
             return;
         }
-        if self.is_busy() && self.selection.iter().any(|n| gone.contains(n)) {
-            self.cancel_gesture();
-        }
-        self.selection.retain(|n| !gone.contains(n));
+        self.leave_nodes(&|n| gone.contains(&n));
     }
 
-    /// Зеркало страницы построено заново: сцена — тоже, как при смене страницы, на месте.
+    /// Узлов больше нет: жест над ними отменяется, остальные жесты идут, выделение их теряет. Всё тихо.
+    fn leave_nodes(&mut self, gone: &impl Fn(NodeId) -> bool) {
+        let over_tool = self.is_busy()
+            && (self.selection.iter().any(|n| gone(*n))
+                || self.tool.new_node_parent().is_some_and(gone));
+        if over_tool {
+            self.cancel_gesture();
+        }
+        if self.panel.as_ref().is_some_and(|g| g.touches(gone)) {
+            self.cancel_panel();
+        }
+        if self.guide_drag_touches(gone) {
+            self.cancel_guides();
+        }
+        self.selection.retain(|n| !gone(*n));
+    }
+
+    /// Зеркало страницы построено заново: сцена — тоже, как при смене страницы, на месте. Жест над живыми
+    /// узлами продолжается (спека, раздел 8: прерывает только удаление) вместе со своим превью.
     fn rebuild_scene_after_remote(&mut self) {
-        self.cancel_gesture();
+        let Ok(page) = self.doc.page(self.page) else {
+            return;
+        };
+        let alive: std::collections::HashSet<_> = page.walk().into_iter().collect();
+        self.leave_nodes(&|n| !alive.contains(&n));
+        // Перетаскивание направляющей держит слоты старой сцены: другие жесты держат только `NodeId`.
+        self.cancel_guides();
+        let (drafts, patches) = self.scene.gesture();
         let Ok(page) = self.doc.page(self.page) else {
             return;
         };
         let scene = Scene::from_page(page);
-        let alive: std::collections::HashSet<_> = page.walk().into_iter().collect();
         self.scene = scene;
         install_text_outlines(&mut self.scene, &self.fonts, &self.outlines_missed);
+        self.scene.restore_gesture(&drafts, &patches);
         self.scene_epoch += 1;
-        self.selection.retain(|n| alive.contains(n));
         self.out.events.push(EditorEvent::RemoteRebuilt);
         self.out.events.push(EditorEvent::RemoteChanged);
         self.out.events.push(EditorEvent::NeedsRedraw);

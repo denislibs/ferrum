@@ -323,6 +323,13 @@ impl Tool for DrawTool {
         !matches!(self.state, State::Idle)
     }
 
+    fn new_node_parent(&self) -> Option<NodeId> {
+        match &self.state {
+            State::Idle => None,
+            State::Pressed(s) | State::Drawing { start: s, .. } => s.parent,
+        }
+    }
+
     fn cursor(&self) -> Cursor {
         Cursor::Crosshair
     }

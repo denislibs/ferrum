@@ -1244,6 +1244,24 @@ impl Scene {
         !self.preview.is_empty() || !self.drafts.is_empty()
     }
 
+    /// Черновики и превью идущего жеста: сцена строится заново на месте (чужая правка), а жест остаётся
+    /// (`restore_gesture`).
+    pub fn gesture(&self) -> (Vec<Draft>, Vec<(NodeId, PropsPatch)>) {
+        let patches = self
+            .preview
+            .iter()
+            .map(|(&s, (_, patch))| (self.at(s).id, patch.clone()))
+            .collect();
+        (self.drafts.clone(), patches)
+    }
+
+    /// Возвращает снятое `gesture`. Черновик без родителя и правка узла, которого больше нет,
+    /// пропускаются.
+    pub fn restore_gesture(&mut self, drafts: &[Draft], patches: &[(NodeId, PropsPatch)]) {
+        self.set_drafts(drafts);
+        self.set_preview(patches);
+    }
+
     /// Заменяет черновики жеста целиком. Каждый встаёт верхним ребёнком своего
     /// родителя в порядке списка. Черновик с неизвестным родителем или с
     /// идентификатором, который уже есть в сцене, пропускается вместе с поддеревом.
