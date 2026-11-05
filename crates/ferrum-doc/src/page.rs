@@ -526,6 +526,19 @@ impl PageDoc {
                 }
             }
         }
+        // Новые узлы уже в зеркале. Перенесённый под узел, которого для модели нет (половина чужой
+        // транзакции, скрытый), полная сборка скрыла бы вместе с родителем.
+        {
+            let state = self.state.borrow();
+            let hidden = |t: &TreeID| match self.tree.parent(*t) {
+                Some(TreeParentId::Node(p)) => !state.by_tree.contains_key(&p),
+                _ => false,
+            };
+            let known = tree.iter().filter(|t| state.by_tree.contains_key(t));
+            if known.filter(|t| !dead(t)).any(hidden) {
+                return Ok(false);
+            }
+        }
         for tid in props {
             if born.contains(tid) || dead(tid) {
                 continue;
@@ -590,7 +603,8 @@ impl PageDoc {
         }
     }
 
-    /// Добавляет в зеркало новый узел с потомками. `false` — неизвестный вид или занятый `NodeId`.
+    /// Добавляет в зеркало новый узел с потомками. `false` — неизвестный вид или `NodeId`, занятый
+    /// другим `TreeID`.
     fn adopt_subtree(
         &self,
         root: TreeID,
@@ -607,6 +621,13 @@ impl PageDoc {
         }
         let mut stack = vec![root];
         while let Some(tid) = stack.pop() {
+            // Уже в зеркале под этим же `TreeID`: его перенесли сюда той же пачкой (группировка). Он и
+            // его поддерево на месте.
+            let known = self.state.borrow().by_tree.get(&tid).copied();
+            if let Some(id) = known {
+                out.changes.moved.push(id);
+                continue;
+            }
             let meta = self.tree.get_meta(tid)?;
             if !codec::has_kind(&meta) {
                 continue;

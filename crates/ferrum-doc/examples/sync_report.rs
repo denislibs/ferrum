@@ -152,6 +152,23 @@ fn main() {
             .unwrap();
         },
     );
+    // Группировка: новый фрейм и перенос в него двух известных узлов одной пачкой.
+    ok &= one(
+        &mut s,
+        "группировка: новый фрейм и два переноса",
+        Some(TARGET),
+        200,
+        |d, p, ids, i| {
+            let (x, y) = (ids[80_001 + i * 2], ids[80_002 + i * 2]);
+            d.transact(p, vec![], |tx| {
+                let f = tx.create_node(None, None, NodeKind::Frame)?;
+                tx.move_node(x, Some(f), 0)?;
+                tx.move_node(y, Some(f), 1)?;
+                Ok(vec![f])
+            })
+            .unwrap();
+        },
+    );
     // Своя правка свойства рядом: Loro сливает без отката.
     {
         let mut times = Vec::new();

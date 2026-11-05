@@ -729,6 +729,85 @@ fn non_string_type_hides_node_and_keeps_batch_and_file_whole() {
 }
 
 #[test]
+fn grouping_by_other_does_not_rebuild_and_matches_mirror() {
+    let (mut a, mut b, page) = pair();
+    let ids: Vec<NodeId> = (0..3).map(|_| rect(&mut a, page)).collect();
+    sync(&mut a, &mut b);
+    b.take_changes(page);
+    let frame = a
+        .transact(page, vec![], |tx| {
+            let f = tx.create_node(None, None, NodeKind::Frame)?;
+            tx.move_node(ids[0], Some(f), 0)?;
+            tx.move_node(ids[1], Some(f), 1)?;
+            // Свойства переносимого узла в той же транзакции: они не должны потеряться.
+            tx.set_props(
+                ids[0],
+                &PropsPatch {
+                    x: Some(55.0),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![f])
+        })
+        .unwrap()[0];
+    let got = deliver(&mut a, &mut [&mut b]);
+    let o = got.iter().find(|o| o.page == Some(page)).unwrap();
+    assert!(!o.rebuilt, "{o:?}");
+    let c = b.take_changes(page);
+    assert!(c.created.contains(&frame), "{c:?}");
+    assert!(c.moved.contains(&ids[0]) && c.moved.contains(&ids[1]), "{c:?}");
+    assert!(!c.created.contains(&ids[0]), "{c:?}");
+    assert!(c.props.contains(&ids[0]), "{c:?}");
+    assert_eq!(b.page(page).unwrap().props(ids[0]).unwrap().x, 55.0);
+    assert_eq!(b.page(page).unwrap().parent(ids[1]), Some(frame));
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn ungrouping_by_other_does_not_rebuild_and_matches_mirror() {
+    let (mut a, mut b, page) = pair();
+    let ids = a
+        .transact(page, vec![], |tx| {
+            let f = tx.create_node(None, None, NodeKind::Frame)?;
+            Ok(vec![f, tx.create_node(Some(f), None, NodeKind::Rect)?])
+        })
+        .unwrap();
+    sync(&mut a, &mut b);
+    a.transact(page, vec![], |tx| {
+        tx.move_node(ids[1], None, 0)?;
+        tx.delete_nodes(&[ids[0]])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    let got = deliver(&mut a, &mut [&mut b]);
+    assert!(got.iter().all(|o| !o.rebuilt), "{got:?}");
+    assert!(b.page(page).unwrap().contains(ids[1]));
+    assert_mirror(&mut b, page);
+}
+
+/// Узел перенесён внутрь узла, который для модели ещё не существует (половина чужой транзакции):
+/// полная сборка его скрывает, значит, и зеркало по частям не должно его показывать.
+#[test]
+fn move_under_node_without_type_matches_rebuild() {
+    let (mut a, mut b, page) = pair();
+    let kid = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    let blob = foreign_raw_edit(&mut b, page, |t| {
+        let half = t.create(loro::TreeParentId::Root).unwrap();
+        let k = t
+            .children(loro::TreeParentId::Root)
+            .unwrap()
+            .into_iter()
+            .find(|k| k.to_string() == kid.to_string())
+            .unwrap();
+        t.mov(k, loro::TreeParentId::Node(half)).unwrap();
+    });
+    b.apply_remote(DocKey::Page(page), &[&blob]).unwrap();
+    assert!(!b.page(page).unwrap().contains(kid));
+    assert_mirror(&mut b, page);
+}
+
+#[test]
 fn broken_bytes_are_reported_without_harm() {
     let (mut a, mut b, page) = pair();
     let id = rect(&mut a, page);
