@@ -519,7 +519,7 @@ test('снимок при `snapshot-needed`: применить, подписа�
   });
   const ws = s.live();
   const resets = s.commands.filter((c) => c.type === 'syncReset').length;
-  ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/x' });
+  ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/f/docs/root/snapshot' });
   expect(s.flushing()).toBe(false);
   await tick();
   s.clock.advance(1000);
@@ -535,7 +535,7 @@ test('сервер снова и снова просит снимок: не по
   const s = stand();
   const ws = s.live();
   for (let i = 0; i < 4; i++) {
-    ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/x' });
+    ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/f/docs/root/snapshot' });
     await tick();
     await tick();
     s.client.onApplied();

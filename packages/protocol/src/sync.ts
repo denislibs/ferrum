@@ -11,12 +11,21 @@ export const MAX_SYNC_UPDATE_BYTES = 16 * 1024 * 1024;
 export const MAX_SYNC_FRAME_BYTES = MAX_SYNC_UPDATE_BYTES + 1024;
 /** Вектор версий: столько сеансов правки на один документ не набирается, а чужой кадр не задаёт размер разбора. */
 export const MAX_VERSION_PEERS = 65_536;
+/** Присутствие (этап 4) — курсор и выделение, килобайты: кадр в мегабайты — не присутствие. */
+export const MAX_EPHEMERAL_BYTES = 64 * 1024;
 const MAX_DOC_BYTES = 40;
-const DOC_RE = /^(root|\d{1,10}@\d{1,20})$/;
+/** Документ — `root` или `TreeID` страницы `counter@peer` в той же записи, что у Loro: без ведущих нулей, иначе один документ жил бы
+ * под разными ключами подписок, журнала и пределов. Диапазоны — ниже, в `isSyncDoc`. */
+const DOC_RE = /^(root|(0|[1-9]\d{0,9})@(0|[1-9]\d{0,19}))$/;
+/** Счётчик `TreeID` у Loro — `i32`, пир — `u64`. */
+const MAX_TREE_COUNTER = 0x7fffffff;
+const MAX_PEER = 2n ** 64n - 1n;
 
 /** Адрес соединения файла: `?user=` — кто в этой вкладке, как заголовок `USER_HEADER` у запросов. */
 export const syncPath = (file: string, user: string): string => `/api/files/${file}/sync?user=${encodeURIComponent(user)}`;
 export const snapshotPath = (file: string, doc: string): string => `/api/files/${file}/docs/${doc}/snapshot`;
+/** Адрес снимка в `snapshot-needed`: только свой маршрут, клиент всё равно строит его сам из файла и документа. */
+const SNAPSHOT_RE = /^\/api\/files\/[A-Za-z0-9_-]{1,64}\/docs\/([^/]+)\/snapshot$/;
 
 /** Коды закрытия соединения: клиент по ним решает, пробовать ли снова. */
 export const SYNC_CLOSE = {
@@ -100,7 +109,13 @@ const KIND = {
 const ROLES: readonly FileRole[] = ['viewer', 'editor', 'owner'];
 const REASONS: readonly RevokeReason[] = ['access', 'session'];
 const utf8 = new TextEncoder();
-const fromUtf8 = new TextDecoder('utf-8', { fatal: true });
+/** `ignoreBOM`: BOM остаётся в строке и не проходит проверку, иначе `EF BB BF root` разбирался бы как `root`. */
+const fromUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** Кодирование доверяет вызывающему, но не молча: число вне поля — ошибка здесь, а не другой кадр на проводе. */
+function checkInt(v: number, max: number, what: string): void {
+  if (!Number.isSafeInteger(v) || v < 0 || v > max) throw new RangeError(`${what}: ${v} вне 0..${max}`);
+}
 
 class Writer {
   private readonly parts: Uint8Array[] = [];
@@ -111,20 +126,24 @@ class Writer {
     return this;
   }
   u8(v: number): this {
+    checkInt(v, 0xff, 'u8');
     return this.push(Uint8Array.of(v));
   }
   u16(v: number): this {
+    checkInt(v, 0xffff, 'u16');
     const b = new Uint8Array(2);
     new DataView(b.buffer).setUint16(0, v, true);
     return this.push(b);
   }
   u32(v: number): this {
+    checkInt(v, 0xffffffff, 'u32');
     const b = new Uint8Array(4);
     new DataView(b.buffer).setUint32(0, v, true);
     return this.push(b);
   }
   /** Номер записи журнала: до 2^53, столько не набрать. */
   u64(v: number): this {
+    checkInt(v, Number.MAX_SAFE_INTEGER, 'u64');
     const b = new Uint8Array(8);
     new DataView(b.buffer).setBigUint64(0, BigInt(v), true);
     return this.push(b);
@@ -134,6 +153,7 @@ class Writer {
     return this.u16(b.length).push(b);
   }
   doc(s: string): this {
+    if (!isSyncDoc(s)) throw new RangeError(`документ: ${s}`);
     const b = utf8.encode(s);
     return this.u8(b.length).push(b);
   }
@@ -191,7 +211,7 @@ class Reader {
     const n = this.u8();
     if (n === null || n > MAX_DOC_BYTES || !this.has(n)) return null;
     const s = this.text(n);
-    return s !== null && DOC_RE.test(s) ? s : null;
+    return s !== null && isSyncDoc(s) ? s : null;
   }
   private text(n: number): string | null {
     try {
@@ -212,7 +232,12 @@ class Reader {
   }
 }
 
-export const isSyncDoc = (s: string): boolean => DOC_RE.test(s);
+export function isSyncDoc(s: string): boolean {
+  if (!DOC_RE.test(s)) return false;
+  if (s === 'root') return true;
+  const [counter, peer] = s.split('@');
+  return Number(counter) <= MAX_TREE_COUNTER && BigInt(peer) <= MAX_PEER;
+}
 
 export function encodeClientFrame(f: ClientFrame): Uint8Array<ArrayBuffer> {
   const w = new Writer().u8(KIND[f.t]);
@@ -282,8 +307,10 @@ export function parseClientFrame(b: Uint8Array): ClientFrame | null {
       const bytes = r.rest();
       return bytes.length > 0 && bytes.length <= MAX_SYNC_UPDATE_BYTES ? { t: 'update', doc, clientSeq, bytes } : null;
     }
-    case KIND.ephemeral:
-      return { t: 'ephemeral', bytes: r.rest() };
+    case KIND.ephemeral: {
+      const bytes = r.rest();
+      return bytes.length <= MAX_EPHEMERAL_BYTES ? { t: 'ephemeral', bytes } : null;
+    }
     case KIND.ping:
       return r.done() ? { t: 'ping' } : null;
     default:
@@ -291,16 +318,19 @@ export function parseClientFrame(b: Uint8Array): ClientFrame | null {
   }
 }
 
-/** Разбор кадра сервера у клиента: сеть не доверенная, неверное — как обрыв. */
+/** Разбор кадра сервера у клиента: сеть не доверенная, неверное — как обрыв. Пределы те же, что у кадров клиента: общий предел
+ * кадра — запас поверх пределов каждого вида. */
 export function parseServerFrame(b: Uint8Array): ServerFrame | null {
-  if (b.length === 0) return null;
+  if (b.length === 0 || b.length > MAX_SYNC_FRAME_BYTES) return null;
   const r = new Reader(b);
   switch (b[0]) {
     case KIND.role: {
       const role = ROLES[r.u8() ?? -1];
       const canShare = r.u8();
       const version = r.u64();
-      return role && canShare !== null && version !== null && r.done() ? { t: 'role', role, canShare: canShare === 1, version } : null;
+      return role && (canShare === 0 || canShare === 1) && version !== null && r.done()
+        ? { t: 'role', role, canShare: canShare === 1, version }
+        : null;
     }
     case KIND.subscribed: {
       const doc = r.doc();
@@ -312,12 +342,16 @@ export function parseServerFrame(b: Uint8Array): ServerFrame | null {
     case KIND.updates: {
       const doc = r.doc();
       const seq = r.u64();
-      return doc !== null && seq !== null ? { t: 'updates', doc, seq, bytes: r.rest() } : null;
+      if (doc === null || seq === null) return null;
+      const bytes = r.rest();
+      // Пустая пачка — не пачка.
+      return bytes.length > 0 && bytes.length <= MAX_SYNC_UPDATE_BYTES ? { t: 'updates', doc, seq, bytes } : null;
     }
     case KIND['snapshot-needed']: {
       const doc = r.doc();
       const url = r.str(1024);
-      return doc !== null && url !== null && r.done() ? { t: 'snapshot-needed', doc, url } : null;
+      // Адрес — только снимок этого же документа на своём сервере: без схемы, `//` и `..`.
+      return doc !== null && url !== null && r.done() && SNAPSHOT_RE.exec(url)?.[1] === doc ? { t: 'snapshot-needed', doc, url } : null;
     }
     case KIND.ack: {
       const doc = r.doc();
@@ -349,7 +383,8 @@ export function parseServerFrame(b: Uint8Array): ServerFrame | null {
 }
 
 /** Вектор версий на проводе: `n: u32 · (peer: u64 · counter: u32) × n`, как `SyncVersion` в ядре. Пир — десятичной
- * строкой: u64 не влезает в число JavaScript, а в JSON базы — так же. Сверх предела и с хвостом — `null`. */
+ * строкой: u64 не влезает в число JavaScript, а в JSON базы — так же. Сверх предела и с хвостом — `null`. Запись одна:
+ * пиры строго по возрастанию, счётчик больше нуля, как кодирует ядро (`SyncVersion::encode`) и `encodeVersion`. */
 export type VersionMap = Map<string, number>;
 
 export function parseVersion(b: Uint8Array): VersionMap | null {
@@ -358,20 +393,30 @@ export function parseVersion(b: Uint8Array): VersionMap | null {
   const n = v.getUint32(0, true);
   if (n > MAX_VERSION_PEERS || b.length !== 4 + n * 12) return null;
   const out: VersionMap = new Map();
+  let prev = -1n;
   for (let i = 0; i < n; i++) {
     const at = 4 + i * 12;
+    const peer = v.getBigUint64(at, true);
     const counter = v.getUint32(at + 8, true);
-    if (counter > 0x7fffffff) return null;
-    if (counter > 0) out.set(v.getBigUint64(at, true).toString(), counter);
+    if (counter === 0 || counter > 0x7fffffff || peer <= prev) return null;
+    prev = peer;
+    out.set(peer.toString(), counter);
   }
   return out;
 }
 
+/** Пустые записи (счётчик 0) ничего не значат и не кодируются: запись у одной версии одна. */
 export function encodeVersion(m: VersionMap): Uint8Array<ArrayBuffer> {
-  const peers = [...m.entries()].sort(([a], [b]) => {
-    const [x, y] = [BigInt(a), BigInt(b)];
-    return x < y ? -1 : x > y ? 1 : 0;
-  });
+  const peers = [...m.entries()]
+    .filter(([peer, counter]) => {
+      if (!/^(0|[1-9]\d{0,19})$/.test(peer) || BigInt(peer) > MAX_PEER) throw new RangeError(`пир: ${peer}`);
+      checkInt(counter, 0x7fffffff, 'счётчик');
+      return counter > 0;
+    })
+    .sort(([a], [b]) => {
+      const [x, y] = [BigInt(a), BigInt(b)];
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
   const out = new Uint8Array(4 + peers.length * 12);
   const v = new DataView(out.buffer);
   v.setUint32(0, peers.length, true);
