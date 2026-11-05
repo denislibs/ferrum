@@ -21,6 +21,35 @@ const person = async (browser: Browser, email: string, name = 'Человек'):
 const nodes = (page: Page, n: number, timeout = 15_000) => expect.poll(async () => (await live(page)).nodes, { timeout }).toBe(n);
 const indicator = (page: Page) => page.locator('.fe-sync');
 const synced = (page: Page, timeout = 15_000) => expect(indicator(page)).toHaveText('Синхронизировано', { timeout });
+const OFFLINE = 'Нет сети — правки сохранятся при подключении';
+/** Опрос доступа — раз в 15 с: показ быстрее него — заслуга соединения файла. */
+const PUSHED_MS = 5000;
+
+/** Пачек в журнале браузера (IndexedDB вошедшего). */
+const journalCount = (page: Page) =>
+  page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        void indexedDB.databases().then((list) => {
+          const name = list.find((d) => d.name?.startsWith('ferrum-user-'))?.name;
+          if (!name) return resolve(0);
+          const req = indexedDB.open(name);
+          req.onsuccess = () => {
+            const n = req.result.transaction('journal').objectStore('journal').count();
+            n.onsuccess = () => {
+              resolve(n.result);
+              req.result.close();
+            };
+          };
+        });
+      }),
+  );
+
+/** Человек уходит к файлам; вопрос об уходе — с этой причиной. */
+async function leaveAsks(page: Page, reason: string, timeout = 15_000): Promise<void> {
+  await page.getByRole('button', { name: 'Назад к файлам' }).click();
+  await expect(page.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' })).toContainText(reason, { timeout });
+}
 
 async function drawRect(page: Page, dx = 0): Promise<void> {
   const before = (await live(page)).nodes;
@@ -116,16 +145,31 @@ test('двое правят один файл: каждый видит чужо�
 
 test('читатель видит правки живьём и не пишет', async ({ browser }) => {
   const [a, v] = [await person(browser, newEmail('sc'), 'Анна'), await person(browser, newEmail('sd'), 'Вера')];
+  // Кадры `update` (вид 3), ушедшие из любого сокета читателя: соединение файла живёт в worker'е, Playwright видит и его.
+  let updates = 0;
+  v.on('websocket', (ws) =>
+    ws.on('framesent', (f) => {
+      if (typeof f.payload !== 'string' && f.payload[0] === 3) updates++;
+    }),
+  );
   const id = await newFile(a);
   await join(a, v, id, 'viewer');
   await expect(v.getByText('Только просмотр')).toBeVisible();
   await drawRect(a);
   await nodes(v, 1);
+  // Читатель пробует нарисовать: инструмент и жест, как у редактора.
   await v.locator('canvas').click({ position: { x: 10, y: 10 } });
   await v.keyboard.press('KeyR');
-  await expect.poll(async () => (await live(a)).nodes).toBe(1);
-  const before = (await live(v)).nodes;
-  expect(before).toBe(1);
+  const l = await live(v);
+  await drag(v, await appScreen(v, l, l.cameraX + 100, l.cameraY + 60), 100, 80);
+  await expect.poll(async () => (await live(v)).busy).toBe(0);
+  expect((await live(v)).nodes).toBe(1);
+  // Следующая правка `a` доходит до обоих, узлов ровно два, и читатель не послал ни одной пачки.
+  await drawRect(a, 200);
+  await nodes(v, 2);
+  await nodes(a, 2);
+  await synced(v);
+  expect(updates).toBe(0);
 });
 
 test('вторая вкладка того же человека — такой же участник', async ({ browser }) => {
@@ -150,23 +194,38 @@ test('снятие роли действует сразу, понижение п
   await synced(b);
   const entry = await peopleEntry(a, id, email);
 
-  const started = Date.now();
   expect((await api(a, 'PATCH', `/api/files/${id}/share/people/${entry}`, { role: 'viewer' })).status).toBe(200);
-  await expect(b.getByText('Только просмотр')).toBeVisible({ timeout: 3000 });
-  expect(Date.now() - started).toBeLessThan(3000);
+  await expect(b.getByText('Только просмотр')).toBeVisible({ timeout: PUSHED_MS });
   // Правки идут и читателю.
   await drawRect(a);
   await nodes(b, 1);
 
   expect((await api(a, 'PATCH', `/api/files/${id}/share/people/${entry}`, { role: 'editor' })).status).toBe(200);
-  await expect(b.getByText('Только просмотр')).toBeHidden({ timeout: 3000 });
+  await expect(b.getByText('Только просмотр')).toBeHidden({ timeout: PUSHED_MS });
   await drawRect(b, 200);
   await nodes(a, 2);
 
-  const removed = Date.now();
   expect((await api(a, 'DELETE', `/api/files/${id}/share/people/${entry}`)).status).toBe(200);
-  await expect(b.getByRole('alert').getByText('Нет доступа')).toBeVisible({ timeout: 3000 });
-  expect(Date.now() - removed).toBeLessThan(3000);
+  await expect(b.getByRole('alert').getByText('Нет доступа')).toBeVisible({ timeout: PUSHED_MS });
+  // Соединение снято: индикатор не застывает на «Синхронизировано».
+  await expect(indicator(b)).toHaveText('Правки не сохраняются');
+});
+
+test('доступ сняли, пока правки без подтверждения: уход сразу говорит правду, а не «уйдут при открытии»', async ({ browser }) => {
+  test.skip(test.info().project.name === 'server-firefox', 'setOffline в Firefox не закрывает WebSocket');
+  const [a, b] = [await person(browser, newEmail('sq'), 'Анна'), await person(browser, newEmail('sr'), 'Борис')];
+  const email = await b.evaluate(async () => ((await (await fetch('/api/auth/session')).json()) as { user: { email: string } }).user.email);
+  const id = await newFile(a);
+  await join(a, b, id);
+  await synced(b);
+  await b.context().setOffline(true);
+  await expect(indicator(b)).toHaveText(OFFLINE, { timeout: 45_000 });
+  await drawRect(b);
+  await expect.poll(() => journalCount(b)).toBeGreaterThan(0);
+  expect((await api(a, 'DELETE', `/api/files/${id}/share/people/${await peopleEntry(a, id, email)}`)).status).toBe(200);
+  await b.context().setOffline(false);
+  await expect(b.getByRole('alert').getByText('Нет доступа')).toBeVisible({ timeout: 45_000 });
+  await leaveAsks(b, 'Правки не сохранены на сервере');
 });
 
 test('обрыв сети: правки копятся, индикатор говорит правду, при возврате всё сходится', async ({ browser }) => {
@@ -203,12 +262,20 @@ test('рестарт сервера: переподключение, ни одн
   await nodes(a, 2);
   await drawRect(a, 400);
   await nodes(b, 3);
-  // Правка, сделанная прямо в рестарт: неподтверждённая уходит заново.
-  const restart = (async () => compose('restart', 'server'))();
-  await drawRect(a, 600);
-  await restart;
+  // Правка ушла, подтверждения нет: база стоит, группа ждёт фиксации в памяти сервера. Рестарт её теряет — клиент шлёт заново.
+  compose('pause', 'postgres');
+  try {
+    await drawRect(a, 600);
+    await expect(indicator(a)).toHaveText('Сохранение…');
+    compose('restart', 'server');
+  } finally {
+    compose('unpause', 'postgres');
+  }
   await synced(a, 60_000);
   await nodes(b, 4, 60_000);
+  // Подтверждение нового процесса сервера — правка в журнале базы. Заново открыть файл на этом стенде нельзя: байты файлов
+  // живут в tmpfs контейнера сервера и рестарт их стирает.
+  await synced(b, 60_000);
 });
 
 test('база отвалилась и зависла: сервер живёт, правки доходят, когда она вернулась', async ({ browser }) => {
@@ -230,10 +297,13 @@ test('база отвалилась и зависла: сервер живёт, 
     `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = 'ferrum'`,
   );
   compose('pause', 'postgres');
-  await drawRect(a, 100);
-  await a.waitForTimeout(8000);
-  await expect(indicator(a)).not.toHaveText('Синхронизировано');
-  compose('unpause', 'postgres');
+  try {
+    await drawRect(a, 100);
+    // Правка не подтверждена: база стоит.
+    await expect(indicator(a)).toHaveText('Сохранение…');
+  } finally {
+    compose('unpause', 'postgres');
+  }
   await drawRect(a, 200);
   await synced(a, 60_000);
   await a.reload();
@@ -247,7 +317,27 @@ test('выход в другой вкладке закрывает соедин�
   await drawRect(a);
   await synced(a);
   expect((await api(a, 'POST', '/api/auth/sign-out', {})).status).toBe(200);
-  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible({ timeout: 5000 });
+  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible({ timeout: PUSHED_MS });
+  // Соединение закрыто: индикатор это говорит, а не застывает на «Синхронизировано».
+  await expect(indicator(a)).toHaveText('Правки не сохраняются');
+});
+
+test('выход, пока правки без подтверждения: они в журнале браузера, уход спрашивает', async ({ browser }) => {
+  test.skip(test.info().project.name === 'server-firefox', 'setOffline в Firefox не закрывает WebSocket');
+  const a = await person(browser, newEmail('ss'), 'Анна');
+  await newFile(a);
+  await synced(a);
+  await a.context().setOffline(true);
+  await expect(indicator(a)).toHaveText(OFFLINE, { timeout: 45_000 });
+  await drawRect(a);
+  await expect.poll(() => journalCount(a)).toBeGreaterThan(0);
+  // Выход из другой вкладки: запрос — мимо выключенной сети страницы, с теми же cookie.
+  const out = await a.context().request.post('/api/auth/sign-out', { headers: { origin: STAND_URL }, data: {} });
+  expect(out.status()).toBe(200);
+  await a.context().setOffline(false);
+  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible({ timeout: 45_000 });
+  expect(await journalCount(a)).toBeGreaterThan(0);
+  await leaveAsks(a, 'сохранены в этом браузере');
 });
 
 test('журнал браузера снимается подтверждением сервера и держит неподтверждённое', async ({ browser }) => {
@@ -256,21 +346,74 @@ test('журнал браузера снимается подтверждени�
   await drawRect(a);
   await synced(a);
   test.skip(test.info().project.name === 'server-firefox', 'setOffline в Firefox не закрывает WebSocket');
+  // Прежние пачки подтверждены: журнал браузера пуст.
+  await expect.poll(() => journalCount(a)).toBe(0);
   await a.context().setOffline(true);
-  await expect(indicator(a)).toHaveText('Нет сети — правки сохранятся при подключении', { timeout: 45_000 });
+  await expect(indicator(a)).toHaveText(OFFLINE, { timeout: 45_000 });
   await drawRect(a, 200);
   // Журнал браузера записан: перезагрузка без сети не теряет правку, сеть вернулась — она на сервере.
   await a.keyboard.press('ControlOrMeta+KeyS');
-  await expect.poll(async () => (await live(a)).nodes).toBe(2);
-  await a.waitForTimeout(2500);
+  await expect.poll(() => journalCount(a)).toBeGreaterThan(0);
   await a.context().setOffline(false);
   await a.reload();
   await editorReady(a);
   await nodes(a, 2);
   await synced(a, 45_000);
+  // Сервер подтвердил: журнал браузера снят — и пачки прошлого сеанса, прочитанные при открытии, тоже.
+  await expect.poll(() => journalCount(a)).toBe(0);
   await a.reload();
   await editorReady(a);
   await nodes(a, 2);
+});
+
+/** Секции страниц (вид 2) контейнера файла на сервере: их id. */
+const pageSections = (page: Page, id: string) =>
+  page.evaluate(async (file) => {
+    const b = new Uint8Array(await (await fetch(`/api/files/${file}/content`)).arrayBuffer());
+    const v = new DataView(b.buffer);
+    const out: string[] = [];
+    let at = 16;
+    for (let i = 0, n = v.getUint32(12, true); i < n; i++) {
+      const kind = b[at];
+      const idLen = v.getUint32(at + 1, true);
+      const sid = new TextDecoder().decode(b.subarray(at + 5, at + 5 + idLen));
+      const len = Number(v.getBigUint64(at + 5 + idLen, true));
+      if (kind === 2) out.push(sid);
+      at += 5 + idLen + 40 + len;
+    }
+    return out;
+  }, id);
+
+test('удалённая страница остаётся в контейнере сервера: файл открывается, копия скачивается (сервер, п. 11)', async ({ browser }) => {
+  const a = await person(browser, newEmail('st'), 'Анна');
+  const id = await newFile(a);
+  await drawRect(a);
+  const pages = a.getByRole('listbox', { name: 'Страницы' });
+  await a.getByRole('button', { name: 'Добавить страницу' }).click();
+  await expect(pages.getByRole('option')).toHaveCount(2);
+  // Правка на новой странице: у неё журнал на сервере, сжатие соберёт её секцию.
+  await drawRect(a);
+  await synced(a);
+  await pages.getByRole('option', { name: 'Страница 2' }).focus();
+  await a.keyboard.press('Delete');
+  await a.getByRole('dialog', { name: 'Удалить страницу?' }).getByRole('button', { name: 'Удалить' }).click();
+  await expect(pages.getByRole('option')).toHaveCount(1);
+  await synced(a);
+  // «Скачать копию» сжимает журнал: удалённая страница остаётся секцией контейнера, корень о ней не знает.
+  await a.goto('/#/drafts');
+  await a.getByRole('option', { name: 'Без названия' }).click({ button: 'right' });
+  const download = a.waitForEvent('download');
+  await a.getByRole('menuitem', { name: 'Скачать копию (.ferrum)' }).click();
+  expect((await download).suggestedFilename()).toBe('Без названия.ferrum');
+  expect(await pageSections(a, id)).toHaveLength(2);
+  // Ядро открывает такой контейнер: одна страница, её узел, без ошибок.
+  await a.goto(`/#/file/${id}`);
+  await a.reload();
+  await editorReady(a);
+  await nodes(a, 1);
+  await expect(pages.getByRole('option')).toHaveCount(1);
+  await synced(a);
+  await expect(a.getByRole('alert')).toHaveCount(0);
 });
 
 test('файл 100 000 узлов: чужие правки во время своего жеста, основной поток свободен, задержка до другого @big', async ({
