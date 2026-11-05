@@ -107,7 +107,9 @@ test('разбор запросов', () => {
   expect(parseRedeem({ token: '../' })).toBeNull();
   const headers = (h: Record<string, string>) => ({ get: (n: string) => h[n] ?? null });
   const id = '00000000-0000-4000-8000-000000000000';
-  expect(parseWriteHeaders(headers({ 'if-match': '"3"', 'x-ferrum-write': id }))).toEqual({ base: 3, write: id, previous: null });
+  expect(parseWriteHeaders(headers({ 'if-match': '"3"', 'x-ferrum-write': id }))).toEqual({ base: 3, write: id, previous: null, lost: 0 });
+  expect(parseWriteHeaders(headers({ 'if-match': '"3"', 'x-ferrum-write': id, 'x-ferrum-lost-images': '2' }))?.lost).toBe(2);
+  expect(parseWriteHeaders(headers({ 'if-match': '"3"', 'x-ferrum-write': id, 'x-ferrum-lost-images': 'много' }))).toBeNull();
   expect(parseWriteHeaders(headers({ 'if-match': '3', 'x-ferrum-write': id }))).toBeNull();
   expect(parseWriteHeaders(headers({ 'if-match': '"3"' }))).toBeNull();
 });

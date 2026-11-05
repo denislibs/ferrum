@@ -207,6 +207,14 @@ function writeAllowed(row: { version: string; last_write_id: string | null }, ba
   return version === base || (previous !== null && row.last_write_id === previous && version === base + 1);
 }
 
+/** Запись не оставляет ссылку без байтов: очистка могла снять картинку, пока клиент считал её известной.
+ * Строки под блокировкой: очистка, начатая раньше, уже прошла, а начатая позже увидит снятый срок. */
+async function missingImages(c: PoolClient, file: string, refs: string[], lost: number): Promise<Response | null> {
+  if (refs.length === 0) return null;
+  const { rowCount } = await c.query('SELECT 1 FROM file_image WHERE file_id = $1 AND hash = ANY($2::text[]) FOR UPDATE', [file, refs]);
+  return refs.length - (rowCount ?? 0) > lost ? apiError(409, 'MISSING_IMAGES') : null;
+}
+
 export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
   const { pool, blobs } = deps;
   const idle = deps.uploadIdleMs ?? UPLOAD_IDLE_MS;
@@ -468,7 +476,10 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
               [ctx.params.id, ctx.user.id],
             );
             const row = rows[0];
-            const refused = commitRefusal(row) ?? (writeAllowed(row, write.base, write.previous) ? null : apiError(409, 'CONFLICT'));
+            const refused =
+              commitRefusal(row) ??
+              (writeAllowed(row, write.base, write.previous) ? null : apiError(409, 'CONFLICT')) ??
+              (await missingImages(c, ctx.params.id, refs, write.lost));
             const settled = await settleUpload(c, key, refused);
             if (settled) return settled;
             await trashBlob(c, row.content_key);

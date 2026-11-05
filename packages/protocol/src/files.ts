@@ -22,6 +22,8 @@ export const API_ERROR_CODES = [
   'HASH_MISMATCH',
   /** В команде есть проекты, в проекте — файлы. */
   'NOT_EMPTY',
+  /** Содержимое ссылается на картинку, которой у файла нет: сначала её байты, потом запись. */
+  'MISSING_IMAGES',
   /** Слишком много одновременных загрузок. */
   'BUSY',
 ] as const;
@@ -239,17 +241,22 @@ export interface WriteHeaders {
   write: string;
   /** Запись, ответ на которую потерялся: своя удачная запись — не `CONFLICT`. */
   previous: string | null;
+  lost: number;
 }
 export const WRITE_ID_HEADER = 'x-ferrum-write';
 export const PREVIOUS_WRITE_HEADER = 'x-ferrum-previous-write';
 export const VERSION_HEADER = 'x-ferrum-version';
+/** Сколько картинок из ссылок содержимого потеряно ещё до этой записи: байтов нет и у клиента, а правки
+ * из-за этого не должны застревать (ядро показывает заглушку). Сверх этого числа запись отказывает. */
+export const LOST_IMAGES_HEADER = 'x-ferrum-lost-images';
 
 export function parseWriteHeaders(h: { get(name: string): string | null }): WriteHeaders | null {
   const m = /^"(\d{1,15})"$/.exec(h.get('if-match') ?? '');
   const write = h.get(WRITE_ID_HEADER);
   const previous = h.get(PREVIOUS_WRITE_HEADER);
-  if (!m || !isUuid(write) || (previous !== null && !isUuid(previous))) return null;
-  return { base: Number(m[1]), write, previous };
+  const lost = h.get(LOST_IMAGES_HEADER);
+  if (!m || !isUuid(write) || (previous !== null && !isUuid(previous)) || (lost !== null && !/^\d{1,6}$/.test(lost))) return null;
+  return { base: Number(m[1]), write, previous, lost: Number(lost ?? 0) };
 }
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);

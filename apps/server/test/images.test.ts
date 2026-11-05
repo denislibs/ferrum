@@ -63,15 +63,17 @@ test('знание хэша ничего не даёт: чужая картин�
   // Через чужой файл: нет доступа, 404.
   expect((await get(other, mine.id, hash)).status).toBe(404);
   expect((await head(other, mine.id, hash)).status).toBe(404);
-  // Содержимое со ссылкой на чужой хэш не привязывает картинку.
-  expect((await s.writeContent(other, theirs.id, 0, container([hash]))).status).toBe(200);
+  // Содержимое со ссылкой на чужой хэш не привязывает картинку, в том числе объявленное потерянным.
+  expect((await s.writeContent(other, theirs.id, 0, container([hash]))).status).toBe(409);
+  expect((await s.writeContent(other, theirs.id, 0, container([hash]), { 'x-ferrum-lost-images': '1' })).status).toBe(200);
   expect((await get(other, theirs.id, hash)).status).toBe(404);
   // Прислать все байты — значит иметь картинку: тогда ссылка есть, а запись на диске одна.
   expect((await put(other, theirs.id, hash, img)).status).toBe(200);
   expect((await get(other, theirs.id, hash)).status).toBe(200);
   const { rows } = await s.pool.query('SELECT blob_key FROM image');
   expect(rows).toHaveLength(1);
-  const trash = await s.pool.query('SELECT key FROM blob_trash');
+  // Отказанная запись содержимого тоже в очистке: здесь считаются только байты картинки.
+  const trash = await s.pool.query("SELECT key FROM blob_trash WHERE key NOT LIKE '%/content-%'");
   expect(trash.rows).toHaveLength(1);
   expect(trash.rows[0].key).not.toBe(rows[0].blob_key);
 });
@@ -164,6 +166,42 @@ const imageFiles = (hash: string) => {
   }
 };
 const pending = async () => (await s.pool.query('SELECT 1 FROM blob_pending')).rowCount;
+
+test('запись содержимого со ссылкой на отсутствующую картинку отказывает, байты файла не меняются', async () => {
+  const f = await s.newFile(owner);
+  const img = bytes(21);
+  const hash = hashOf(img);
+  await put(owner, f.id, hash, img);
+  expect((await s.writeContent(owner, f.id, 0, container([hash]))).status).toBe(200);
+  // Кэш клиента устарел: ссылку сняли, картинку убрала очистка.
+  await s.writeContent(owner, f.id, 1, container());
+  await age('file_image', 'unreferenced_at', 31);
+  await runGc(s.pool, s.blobs);
+  expect((await head(owner, f.id, hash)).status).toBe(404);
+  const refused = await s.writeContent(owner, f.id, 2, container([hash]));
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toEqual({ error: 'MISSING_IMAGES' });
+  // Запись не прошла, а загруженные байты ушли в очистку, намерений не осталось.
+  expect((await s.pool.query('SELECT version FROM file WHERE id = $1', [f.id])).rows[0].version).toBe('2');
+  expect(await pending()).toBe(0);
+  // Клиент догружает и повторяет: те же поколение и ссылка проходят, срок снят.
+  expect((await put(owner, f.id, hash, img)).status).toBe(200);
+  expect((await s.writeContent(owner, f.id, 2, container([hash]))).status).toBe(200);
+  expect((await s.pool.query('SELECT unreferenced_at FROM file_image')).rows[0].unreferenced_at).toBeNull();
+  expect((await get(owner, f.id, hash)).status).toBe(200);
+});
+
+test('потерянные раньше картинки не мешают записи, но объявленное число не прикрывает лишние', async () => {
+  const f = await s.newFile(owner);
+  const img = bytes(22);
+  const hash = hashOf(img);
+  const gone = hashOf(bytes(23));
+  const gone2 = hashOf(bytes(24));
+  await put(owner, f.id, hash, img);
+  expect((await s.writeContent(owner, f.id, 0, container([hash, gone]), { 'x-ferrum-lost-images': '1' })).status).toBe(200);
+  expect((await s.writeContent(owner, f.id, 1, container([hash, gone, gone2]), { 'x-ferrum-lost-images': '1' })).status).toBe(409);
+  expect((await s.writeContent(owner, f.id, 1, container([hash]), { 'x-ferrum-lost-images': 'x' })).status).toBe(400);
+});
 
 test('картинка без записи содержимого удаляется по сроку', async () => {
   const f = await s.newFile(owner);
