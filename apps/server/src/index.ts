@@ -52,6 +52,7 @@ const server = startServer(
     mailer,
     allowedEmails: config.allowedEmails,
     secret: config.authSecret,
+    compact: { init: { databaseUrl: config.databaseUrl, dataDir: config.dataDir } },
   },
   config.port,
 );
@@ -61,8 +62,9 @@ console.log(`Ferrum слушает порт ${server.port}`);
 // Остановка контейнера: дождаться запросов и закрыть соединения, а не ждать SIGKILL.
 stop = () => {
   stopGc();
+  server.compactor?.stop();
   // Принятое дописывается, соединения закрываются (клиенты подключатся заново): `server.stop()` без `true`
-  // ждал бы их, и контейнер дождался бы SIGKILL (B-207).
+  // ждал бы их, и контейнер дождался бы SIGKILL.
   void server.hub
     .stop()
     .then(() => server.stop(true))

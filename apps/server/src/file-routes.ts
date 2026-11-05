@@ -514,6 +514,19 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       },
     },
     {
+      // «Скачать копию» с экрана файлов: содержимое без журнала было бы старше того, что видят люди. Читателю тоже: экспорт ему
+      // разрешён. Сжатие занимает секунды на большом файле, поэтому общего срока нет.
+      method: 'POST',
+      path: '/api/files/:id/compact',
+      access: { kind: 'file', min: 'viewer' },
+      limit: 'write',
+      stream: true,
+      handle: async (ctx) => {
+        const done = deps.compactNow ? await deps.compactNow(ctx.params.id) : true;
+        return done ? ok({ ok: true }) : apiError(503, 'UNAVAILABLE');
+      },
+    },
+    {
       // Клиент отстал сильнее журнала (спека, раздел 7.3): снимок одного документа, поверх него — журнал.
       method: 'GET',
       path: '/api/files/:id/docs/:doc/snapshot',

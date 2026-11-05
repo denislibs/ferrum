@@ -10,6 +10,8 @@ import type { BlobStore, UploadPace } from './blob-store';
 import { fileRoutes, uploadGate } from './file-routes';
 import { imageRoutes } from './image-routes';
 import { shareRoutes } from './share-routes';
+import type { CompactInit } from './sync/compact.worker';
+import { Compactor, type CompactLimits } from './sync/compactor';
 import { SyncHub, type ConnData, type SyncLimits } from './sync/hub';
 import { teamRoutes } from './team-routes';
 import type { Mailer } from './mail';
@@ -37,6 +39,8 @@ export interface AppDeps {
   maxContentBytes?: number;
   /** Тесты сокращают пределы и сроки WebSocket. */
   syncLimits?: Partial<SyncLimits>;
+  /** Откуда worker сжатия берёт базу и байты; нет — сжатия нет (тесты другого). */
+  compact?: { init: CompactInit; limits?: Partial<CompactLimits> };
 }
 
 /** Запись, после которой доступ к открытым файлам не изменился: содержимое, превью, картинки, отметка открытия. */
@@ -77,16 +81,23 @@ async function health(deps: AppDeps): Promise<Response> {
 }
 
 /** Сервер и его WebSocket: остановка контейнера и тесты обращаются к обоим. */
-export type Running = Bun.Server<ConnData> & { hub: SyncHub };
+export type Running = Bun.Server<ConnData> & { hub: SyncHub; compactor: Compactor | null };
 
 export function startServer(deps: AppDeps, port: number): Running {
   const hub = new SyncHub(deps.pool, deps.blobs, deps.auth, deps.publicUrl, deps.syncLimits);
+  const compactor = deps.compact ? new Compactor(deps.pool, deps.compact.init, deps.compact.limits) : null;
+  if (compactor) {
+    hub.onLog = (file, _doc, count, bytes) => compactor.note(file, count, bytes);
+    hub.onLastLeft = (file) => compactor.lastLeft(file);
+    compactor.active = (file) => hub.isOpen(file);
+  }
   const handleAuth = authRoutes({ ...deps, hub });
   const withHeaders = responseHeaders(deps.publicUrl);
   const api: ApiDeps = {
     ...apiDeps(deps),
     afterWrite: (route, ctx) => accessChanged(hub, route, ctx),
     contentReplaced: (file) => hub.forgetFile(file),
+    compactNow: (file) => (compactor ? compactor.compactNow(file) : Promise.resolve(true)),
   };
   const handleApi = apiHandler(apiRoutes(api), api);
   const server = Bun.serve({
@@ -112,5 +123,5 @@ export function startServer(deps: AppDeps, port: number): Running {
     },
     websocket: hub.websocket,
   });
-  return Object.assign(server, { hub });
+  return Object.assign(server, { hub, compactor });
 }

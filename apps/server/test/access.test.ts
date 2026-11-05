@@ -102,6 +102,7 @@ const SAMPLES: Record<string, Sample> = {
   'GET /api/files/:id/access': { params: file, allowed: viewer },
   'GET /api/files/:id/content': { params: file, allowed: viewer, status: 204 },
   'PUT /api/files/:id/content': { params: file, body: container(), headers: {}, allowed: editor, denied: [viewer] },
+  'POST /api/files/:id/compact': { params: file, allowed: viewer },
   // Документа нет в файле: 404 и у читателя, но это уже после проверки доступа.
   'GET /api/files/:id/docs/:doc/snapshot': { params: (w) => ({ id: w.file, doc: 'root' }), allowed: viewer, status: 404 },
   'GET /api/files/:id/thumb': { params: file, allowed: viewer, status: 204 },

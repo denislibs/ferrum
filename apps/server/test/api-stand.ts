@@ -68,7 +68,19 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
   const dataDir = mkdtempSync(join(tmpdir(), 'ferrum-files-'));
   const blobs = new FsBlobStore(dataDir);
   const server = startServer(
-    { pool, valkey, webDist: '/nonexistent', auth, publicUrl, trustedProxies: [], blobs, mailer, secret: TEST_SECRET, ...over },
+    {
+      pool,
+      valkey,
+      webDist: '/nonexistent',
+      auth,
+      publicUrl,
+      trustedProxies: [],
+      blobs,
+      mailer,
+      secret: TEST_SECRET,
+      ...over,
+      ...(over.compact ? { compact: { ...over.compact, init: { ...over.compact.init, dataDir } } } : {}),
+    },
     port,
   );
 
@@ -120,6 +132,7 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
     );
 
   const stop = async () => {
+    server.compactor?.stop();
     await server.hub.stop();
     server.stop(true);
     valkey.close();
@@ -188,6 +201,7 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
     dataDir,
     server,
     hub: server.hub,
+    compactor: server.compactor,
     call,
     signIn,
     waitMail,

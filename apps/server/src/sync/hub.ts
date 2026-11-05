@@ -653,6 +653,11 @@ export class SyncHub {
     this.validator.forget(file);
   }
 
+  /** Открыт ли файл у кого-нибудь. */
+  isOpen(file: string): boolean {
+    return (this.conns.get(file)?.size ?? 0) > 0;
+  }
+
   /** Сколько байт ждут в буферах сокетов: тесты и проба медленного читателя. */
   bufferedBytes(): number {
     let n = 0;

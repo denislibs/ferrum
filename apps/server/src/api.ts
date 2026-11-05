@@ -66,6 +66,8 @@ export interface ApiDeps {
   afterWrite?: (route: Route, ctx: Ctx) => void;
   /** Содержимое файла заменено целиком: проверка пачек забывает его документы. */
   contentReplaced?: (file: string) => void;
+  /** Сжать журнал файла сейчас: копия для скачивания должна быть полной. `false` — не вышло. */
+  compactNow?: (file: string) => Promise<boolean>;
 }
 
 export interface ApiUser {
