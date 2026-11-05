@@ -943,5 +943,5 @@ test('«Скачать копию»: сервер просит подождат�
   expect(e!.message).toBe('Копия собирается — повторите через 27 с');
   // Без срока — обычный текст.
   const plain = stand({ 'POST /api/files/f/compact': new Response('', { status: 503 }) });
-  expect((await plain.files.blob('f').catch((x: unknown) => x as ServerFailure))!.message).toBe(failureMessage('UNAVAILABLE'));
+  expect(((await plain.files.blob('f').catch((x: unknown) => x)) as ServerFailure).message).toBe(failureMessage('UNAVAILABLE'));
 });

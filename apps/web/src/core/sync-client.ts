@@ -5,10 +5,15 @@
 // Ничего не хранится здесь надолго. Что отправить, знает курсор ядра: на каждом новом соединении ядро подписывается своей версией,
 // сервер отвечает своей, и ядро шлёт всё сверх неё. Поэтому обрыв, рестарт сервера, отказ «повторите» и пауза — один и тот же
 // путь (`resync`), а неподтверждённое не теряется: оно в документе и в журнале браузера.
+//
+// Поколения. Каждый `resync` — новое поколение: ядро сбрасывает курсор (`syncReset`) и сообщает об этом (`onReset`), а всё, что
+// оно прислало по порту до этого, — старое поколение и не уходит: ядро соберёт это заново после новой подписки. Отказы пачкам,
+// ушедшим до `resync`, тоже старые: номера пачек у ядра растут, поэтому старые — не больше последнего номера до `resync`.
 
 import {
   encodeClientFrame,
   parseServerFrame,
+  snapshotPath,
   SYNC_CLOSE,
   SYNC_PROTOCOL,
   syncPath,
@@ -89,10 +94,12 @@ const MAX_OUT_BYTES = 32 * 1024 * 1024;
 const IMAGE_RETRY_MS = 5000;
 /** Отказ «повторите» (`UNAVAILABLE`, `GAP`): от этого и с тем же ростом, что переподключение. */
 const RESYNC_MIN_MS = 1000;
-/** Столько раз подряд `GAP` без единого `ack`: клиент не может послать правки в верном порядке. */
+/** Столько поколений подряд с `GAP` без единого `ack`: клиент не может послать правки в верном порядке. */
 const MAX_GAPS = 6;
-/** Столько снимков подряд на документ без ответа `subscribed`. */
+/** Столько применённых снимков подряд на документ без ответа `subscribed`. */
 const MAX_SNAPSHOT_ROUNDS = 3;
+/** Снимок не скачался столько раз по сети — соединение заново, обычным путём переподключения. */
+const MAX_SNAPSHOT_ATTEMPTS = 4;
 /** Сколько картинок качается разом. */
 const IMAGE_CONCURRENCY = 4;
 /** Журнал файла полон: ждём, пока сервер его сожмёт. */
@@ -109,23 +116,34 @@ export class SyncClient {
   private pongTimer: unknown = null;
   private pauseTimer: unknown = null;
   private retryTimer: unknown = null;
-  private sendTimer: unknown = null;
+  /** Ожидания отправки, картинок и снимков: их бывает несколько разом, остановка снимает все. */
+  private readonly sleeps = new Set<unknown>();
   private opened = false;
   private ended = false;
   private rejected: string | null = null;
   private paused = false;
   private unacked = false;
-  private readyDocs = 0;
-  /** Подписки без ответа: пока они есть, файл ещё догоняет. */
-  private pendingSubs = 0;
+  /** Подписки этого поколения: `false` — без ответа (файл ещё догоняет), `true` — сервер ответил. */
+  private readonly subs = new Map<string, boolean>();
+  /** Поколения подряд с `GAP` без `ack`; `gapCounted` — в этом поколении уже посчитан. */
   private gaps = 0;
+  private gapCounted = false;
+  /** Сбросы, которые ядро ещё не выполнило: всё, что оно шлёт до этого, — старое поколение. */
+  private resets = 0;
+  /** Наибольший номер пачки, взятой в отправку, и он же на момент последнего `resync`: отказы до него — прежнему поколению. */
+  private lastSeq = -1;
+  private oldSeq = -1;
+  /** Ждём ответа о роли после `FORBIDDEN`: отправка выключена, вопрос один. */
+  private roleCheck = false;
   private resyncs = 0;
   private readonly out: Out[] = [];
   private outBytes = 0;
   private sending = false;
   private readonly inbound: In[] = [];
   private applying = false;
-  private snapshots = 0;
+  /** Документы, чей снимок качается: одна загрузка на документ, сколько бы раз сервер ни просил. */
+  private readonly snapshotting = new Set<string>();
+  /** Применённые снимки подряд на документ без ответа `subscribed`. */
   private readonly snapshotRounds = new Map<string, number>();
   private needImages = new Set<string>();
   private imagesActive = 0;
@@ -176,8 +194,9 @@ export class SyncClient {
   }
 
   private clearTimers(): void {
-    for (const t of [this.reconnectTimer, this.pingTimer, this.pongTimer, this.pauseTimer, this.retryTimer, this.sendTimer]) this.clock(t);
-    this.reconnectTimer = this.pingTimer = this.pongTimer = this.pauseTimer = this.retryTimer = this.sendTimer = null;
+    for (const t of [this.reconnectTimer, this.pingTimer, this.pongTimer, this.pauseTimer, this.retryTimer, ...this.sleeps]) this.clock(t);
+    this.reconnectTimer = this.pingTimer = this.pongTimer = this.pauseTimer = this.retryTimer = null;
+    this.sleeps.clear();
   }
 
   private connect(): void {
@@ -225,13 +244,20 @@ export class SyncClient {
    * ядро. Картинки остаются: их байты больше нигде не собрать. */
   private resync(): void {
     this.resyncs++;
-    this.readyDocs = 0;
-    this.pendingSubs = 0;
+    this.subs.clear();
     this.catchingUp = true;
+    this.gapCounted = false;
+    this.oldSeq = this.lastSeq;
+    this.resets++;
     this.drop('update');
     this.enqueueCmd({ type: 'syncReset' });
     this.updateFlush();
     this.emitStatus();
+  }
+
+  /** Ядро выполнило `syncReset`: дальше по порту — новое поколение. */
+  onReset(): void {
+    this.resets = Math.max(0, this.resets - 1);
   }
 
   private drop(kind: Out['kind']): void {
@@ -302,11 +328,12 @@ export class SyncClient {
         this.env.access({ kind: 'role', role: f.role, version: f.version, canShare: f.canShare, own: true });
         break;
       case 'subscribed':
+        // Ответ на подписку прежнего поколения (или без подписки): его версия ядру уже не нужна.
+        if (this.subs.get(f.doc) !== false) break;
+        this.subs.set(f.doc, true);
         this.attempt = 0;
         this.lostOnce = false;
         this.snapshotRounds.delete(f.doc);
-        this.readyDocs++;
-        this.pendingSubs = Math.max(0, this.pendingSubs - 1);
         this.enqueueCmd({ type: 'syncSubscribed', doc: f.doc, version: f.version.slice() });
         this.emitStatus();
         break;
@@ -318,14 +345,17 @@ export class SyncClient {
         this.enqueueCmd({ type: 'syncAcked', doc: f.doc, clientSeq: f.clientSeq });
         break;
       case 'refused':
-        this.refused(f.code);
+        this.refused(f.code, f.clientSeq);
         break;
       case 'pause':
         this.pause(f.ms);
         break;
       case 'snapshot-needed':
-        this.pendingSubs = Math.max(0, this.pendingSubs - 1);
-        void this.fetchSnapshot(f.doc, f.url);
+        // Только для документа этого поколения; адрес — свой, из файла и документа, а не из кадра сети.
+        if (!this.subs.has(f.doc)) break;
+        this.subs.delete(f.doc);
+        void this.fetchSnapshot(f.doc);
+        this.emitStatus();
         break;
       case 'access-revoked':
         this.end();
@@ -346,27 +376,48 @@ export class SyncClient {
     this.env.core.flush(false);
   }
 
-  private refused(code: SyncRefusal): void {
+  private refused(code: SyncRefusal, clientSeq: number): void {
+    // Пачка ушла до подписки заново: ядро её забыло и соберёт снова, отказ ей ничего не значит. Номер пачки — u32, за годы
+    // работы одной вкладки по кругу не пройдёт.
+    const stale = clientSeq <= this.oldSeq;
     switch (code) {
       case 'GAP':
-        if (++this.gaps >= MAX_GAPS) {
-          this.reject(
-            'Сервер не принимает правки в этом порядке. Они сохранены только в этом браузере — сохраните копию на диск и обновите страницу',
-          );
-          return;
+        if (stale) return;
+        // Пачки одного поколения в пути получают `GAP` одна за другой: это один разрыв.
+        if (!this.gapCounted) {
+          this.gapCounted = true;
+          if (++this.gaps >= MAX_GAPS) {
+            this.reject(
+              'Сервер не принимает правки в этом порядке. Они сохранены только в этом браузере — сохраните копию на диск и обновите страницу',
+            );
+            return;
+          }
         }
         this.resyncLater();
         break;
       case 'UNAVAILABLE':
+        if (stale) return;
         this.resyncLater();
         break;
       case 'LOG_FULL':
         this.pause(LOG_FULL_WAIT_MS, 'Журнал файла на сервере переполнен. Правки ждут здесь, они не потеряются');
         break;
+      case 'DOC_LIMIT':
+        this.reject(
+          'В файле слишком много страниц для сервера: правки новых страниц он не принимает. Они сохранены только в этом браузере — сохраните копию на диск',
+        );
+        break;
       case 'FORBIDDEN':
-        // Роль сменилась: настоящее состояние скажет сервер, редактор перейдёт в просмотр и покажет, что правки не дошли.
+        // Роль сменилась: настоящее состояние скажет сервер, редактор перейдёт в просмотр и покажет, что правки не дошли. Пачки в
+        // пути получают тот же отказ — вопрос один, и до ответа правки не уходят.
+        if (this.roleCheck) return;
+        this.roleCheck = true;
+        this.updateFlush();
         void this.env.files.access().then((a) => {
+          this.roleCheck = false;
+          if (this.ended) return;
           if (a) this.env.access(a);
+          this.updateFlush();
         });
         break;
       case 'BAD_UPDATE':
@@ -413,8 +464,7 @@ export class SyncClient {
     this.lostOnce = true;
     this.ws = null;
     this.opened = false;
-    this.readyDocs = 0;
-    this.pendingSubs = 0;
+    this.subs.clear();
     this.clock(this.pingTimer);
     this.clock(this.pongTimer);
     this.pingTimer = this.pongTimer = null;
@@ -468,7 +518,9 @@ export class SyncClient {
   onCore(e: CoreSyncEvent): void {
     switch (e.type) {
       case 'syncSubscribe':
-        this.pendingSubs++;
+        // Подписка прежнего поколения: после сброса ядро подпишется заново.
+        if (this.resets > 0 || !this.ws || !this.opened) break;
+        this.subs.set(e.doc, false);
         this.emitStatus();
         this.send(encodeClientFrame({ t: 'subscribe', doc: e.doc, version: e.version }));
         break;
@@ -476,8 +528,11 @@ export class SyncClient {
         this.push({ kind: 'image', hash: e.hash, bytes: e.bytes });
         break;
       case 'localUpdates':
-        // Соединение успело упасть: ядро соберёт их снова от версии сервера.
-        if (this.ws && this.opened) this.push({ kind: 'update', doc: e.doc, clientSeq: e.clientSeq, bytes: e.bytes });
+        // Соединение успело упасть или пачка собрана до сброса: ядро соберёт её снова от версии сервера, а раньше новой подписки
+        // она дала бы `GAP`.
+        if (this.resets > 0 || !this.ws || !this.opened) break;
+        this.lastSeq = Math.max(this.lastSeq, e.clientSeq);
+        this.push({ kind: 'update', doc: e.doc, clientSeq: e.clientSeq, bytes: e.bytes });
         break;
       case 'syncState':
         this.unacked = e.unacked;
@@ -527,7 +582,10 @@ export class SyncClient {
    * ядро ждёт, правки копятся в документе, а не в памяти этого worker'а. */
   private updateFlush(): void {
     const room = this.outBytes < MAX_OUT_BYTES;
-    this.env.core.flush(!!this.ws && this.opened && !this.paused && !this.rejected && room);
+    // Пока качается снимок, правки ждут: документ без подписки дал бы `GAP` на каждую.
+    this.env.core.flush(
+      !!this.ws && this.opened && !this.paused && !this.rejected && !this.roleCheck && this.snapshotting.size === 0 && room,
+    );
   }
 
   private pumpOut(): void {
@@ -571,44 +629,62 @@ export class SyncClient {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
-      this.sendTimer = this.env.clock.setTimeout(() => {
-        this.sendTimer = null;
+      const t = this.env.clock.setTimeout(() => {
+        this.sleeps.delete(t);
         resolve();
       }, ms);
+      this.sleeps.add(t);
     });
   }
 
   // ——— Что запрашивается отдельно ———
 
-  private async fetchSnapshot(doc: string, url: string): Promise<void> {
+  /** Снимок документа: одна загрузка, сколько бы раз сервер ни просил (каждое переподключение просит снова). Сеть не отдаёт его —
+   * соединение заново обычным путём; сервер не отдаёт при живой роли — отказ с причиной, а не вечный повтор. */
+  private async fetchSnapshot(doc: string): Promise<void> {
+    if (this.snapshotting.has(doc)) return;
     // Снимок применён, а сервер снова просит снимок: дальше по кругу только трафик.
-    const rounds = (this.snapshotRounds.get(doc) ?? 0) + 1;
-    this.snapshotRounds.set(doc, rounds);
-    if (rounds > MAX_SNAPSHOT_ROUNDS) {
+    if ((this.snapshotRounds.get(doc) ?? 0) >= MAX_SNAPSHOT_ROUNDS) {
       this.reject('Файл не удаётся догнать — обновите страницу. Правки сохранены в этом браузере');
       return;
     }
-    this.snapshots++;
-    this.env.core.flush(false);
-    for (let wait = RESYNC_MIN_MS; !this.ended; wait = Math.min(RECONNECT_MAX_MS, wait * 2)) {
+    this.snapshotting.add(doc);
+    this.updateFlush();
+    let bytes: ArrayBuffer | null = null;
+    for (let attempt = 1, wait = RESYNC_MIN_MS; !this.ended && !this.rejected; attempt++, wait = Math.min(RECONNECT_MAX_MS, wait * 2)) {
       try {
-        const bytes = await this.env.files.snapshot(url);
-        this.enqueueApply(doc, new Uint8Array(bytes));
+        bytes = await this.env.files.snapshot(snapshotPath(this.env.file, doc));
         break;
       } catch (e) {
         const code = (e as { code?: string }).code;
-        if (code === 'NOT_FOUND' || code === 'UNAUTHORIZED') {
+        if (code === 'NOT_FOUND' || code === 'UNAUTHORIZED' || code === 'FORBIDDEN') {
           const a = await this.env.files.access();
+          if (this.ended) break;
           if (a && a.kind !== 'role') {
             this.end();
             this.env.access(a);
-            return;
+            break;
           }
+          if (a) {
+            this.reject('Снимок файла не отдаётся сервером — обновите страницу. Правки сохранены в этом браузере');
+            break;
+          }
+        }
+        if (attempt >= MAX_SNAPSHOT_ATTEMPTS) {
+          this.snapshotting.delete(doc);
+          this.dropSocket();
+          return;
         }
         await this.sleep(wait);
       }
     }
-    if (--this.snapshots === 0 && this.ws && this.opened) this.resync();
+    this.snapshotting.delete(doc);
+    if (bytes && !this.ended) {
+      this.snapshotRounds.set(doc, (this.snapshotRounds.get(doc) ?? 0) + 1);
+      this.enqueueApply(doc, new Uint8Array(bytes));
+    }
+    if (this.snapshotting.size === 0 && this.ws && this.opened && !this.ended) this.resync();
+    else this.updateFlush();
   }
 
   private pumpImages(): void {
@@ -645,7 +721,12 @@ export class SyncClient {
     if (!this.ws || !this.opened) return this.lostOnce ? 'offline' : 'connecting';
     // «Синхронизировано» — когда все документы ответили и догоняющие правки уже в ядре. Обычная чужая правка индикатор не трогает:
     // она приходит, когда подписок в пути нет.
-    if (this.readyDocs === 0 || this.pendingSubs > 0 || (this.catchingUp && (this.applying || this.inbound.length > 0)))
+    if (
+      this.subs.size === 0 ||
+      [...this.subs.values()].includes(false) ||
+      this.snapshotting.size > 0 ||
+      (this.catchingUp && (this.applying || this.inbound.length > 0))
+    )
       return 'connecting';
     this.catchingUp = false;
     return this.unacked ? 'saving' : 'synced';

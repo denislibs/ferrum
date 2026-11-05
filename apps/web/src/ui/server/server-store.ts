@@ -7,7 +7,7 @@ import type { FileMeta, IoResults, JournalMark, Section } from '../../core/file-
 import type { AccessState } from '../../core/server-files';
 import type { FromServer, ServerOp, ServerResults, ToServer } from '../../core/server-messages';
 import type { FromSync, ToSync } from '../../core/sync-messages';
-import { IdbFileStore, type FileStore, type SyncEvents } from '../file-store';
+import { IdbFileStore, type FileStore, type SyncCore, type SyncEvents } from '../file-store';
 import type { SettingsBackend } from '../settings-store';
 
 /** Версия схемы документа этой сборки: то же, что `SCHEMA_VERSION` ядра. Растёт вместе с ней. */
@@ -142,7 +142,7 @@ export class ServerFileStore implements FileStore, SettingsBackend {
     return () => this.listeners.delete(listener);
   }
   /** Соединение файла: свой worker, с worker'ом ядра — прямой порт. Доступ теперь сообщает оно, а получатели `watch` те же. */
-  sync(file: string, core: { connectSync(port: MessagePort): void }, events: SyncEvents) {
+  sync(file: string, core: SyncCore, events: SyncEvents) {
     const worker = new Worker(new URL('../../worker/sync.worker.ts', import.meta.url), { type: 'module' });
     const channel = new MessageChannel();
     core.connectSync(channel.port1);
@@ -162,7 +162,8 @@ export class ServerFileStore implements FileStore, SettingsBackend {
     this.stopPolling(file);
     return {
       stop: () => {
-        worker.postMessage({ t: 'stop' } satisfies ToSync);
+        // Сначала ядро: его таймер пачек и порт живут в его worker'е, `terminate` этого worker'а их не снимает.
+        core.disconnectSync();
         worker.terminate();
       },
     };

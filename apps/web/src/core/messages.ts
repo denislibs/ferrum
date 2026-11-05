@@ -10,6 +10,8 @@ import { MAX_TEXT_INPUT_BYTES, utf8Length } from './text-keys';
 export type ToWorker =
   /** Прямой порт к `sync.worker`: файл на сервере. */
   | { t: 'syncPort'; port: MessagePort }
+  /** Уход с файла: порт закрыть, пачки больше не собирать. */
+  | { t: 'syncStop' }
   | {
       t: 'init';
       canvas: OffscreenCanvas;
@@ -196,6 +198,7 @@ export const TO_WORKER_KINDS: ReadonlySet<string> = new Set([
   'tick',
   'testPanic',
   'syncPort',
+  'syncStop',
 ]);
 
 /** Конверт сообщения worker'у: объект известного вида. Содержимое команды

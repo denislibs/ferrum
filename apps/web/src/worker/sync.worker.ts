@@ -79,6 +79,7 @@ scope.onmessage = (e: MessageEvent<ToSync>) => {
   });
   port.onmessage = (ev: MessageEvent<CoreToSync>) => {
     if (ev.data.t === 'applied') client?.onApplied();
+    else if (ev.data.t === 'reset') client?.onReset();
     else client?.onCore(ev.data.event);
   };
   client.start();

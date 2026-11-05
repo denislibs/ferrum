@@ -128,11 +128,21 @@ function stand(over: Partial<SyncEnv['files']> = {}) {
     last: () => sockets.at(-1)!,
     status: () => statuses.at(-1)?.status,
     flushing: () => flushes.at(-1),
+    /** Ядро выполнило `syncReset`: всё, что оно пришлёт дальше, — новое поколение. */
+    reset(): void {
+      (client as unknown as { onReset?(): void }).onReset?.();
+    },
+    /** Ядро подписалось на документы, сервер ответил. */
+    subscribe(ws: FakeSocket, docs: string[] = ['root']): void {
+      for (const doc of docs) client.onCore({ type: 'syncSubscribe', doc, version: encodeVersion(new Map()) });
+      for (const doc of docs) ws.receive({ t: 'subscribed', doc, seq: 0, version: encodeVersion(new Map()) });
+    },
     live(): FakeSocket {
       client.start();
       const s = sockets.at(-1)!;
       s.open();
-      s.receive({ t: 'subscribed', doc: 'root', seq: 0, version: encodeVersion(new Map()) });
+      this.reset();
+      this.subscribe(s);
       return s;
     },
   };
@@ -157,6 +167,7 @@ test('открытие: hello, сброс курсора, ядро отдаёт 
   expect(ws.sent[0]).toEqual({ t: 'hello', protocol: 1, schema: 1 });
   expect(s.commands).toContainEqual({ type: 'syncReset' });
   expect(s.flushing()).toBe(true);
+  s.reset();
   s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
   ws.drain();
   expect(ws.sent.at(-1)?.t).toBe('subscribe');
@@ -172,6 +183,7 @@ test('индикатор: «синхронизировано» — только 
   s.client.start();
   const ws = s.last();
   ws.open();
+  s.reset();
   const version = encodeVersion(new Map());
   s.client.onCore({ type: 'syncSubscribe', doc: 'root', version });
   s.client.onCore({ type: 'syncSubscribe', doc: '1@1', version });
@@ -382,6 +394,8 @@ test('порядок ядру: `subscribed` — после правок, при�
   s.client.start();
   const ws = s.last();
   ws.open();
+  s.reset();
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
   ws.receive({ t: 'updates', doc: 'root', seq: 1, bytes: new Uint8Array([1]) });
   ws.receive({ t: 'updates', doc: 'root', seq: 2, bytes: new Uint8Array([2]) });
   ws.receive({ t: 'subscribed', doc: 'root', seq: 2, version: encodeVersion(new Map()) });
@@ -534,13 +548,20 @@ test('снимок при `snapshot-needed`: применить, подписа�
 test('сервер снова и снова просит снимок: не по кругу, человек узнаёт', async () => {
   const s = stand();
   const ws = s.live();
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  s.clock.advance(1000);
   for (let i = 0; i < 4; i++) {
+    // Снимок применён, подписка заново — и снова просьба о снимке.
+    expect(s.status()).not.toBe('rejected');
+    s.reset();
+    s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
     ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/f/docs/root/snapshot' });
     await tick();
     await tick();
     s.client.onApplied();
   }
   expect(s.status()).toBe('rejected');
+  expect(s.commands.filter((c) => c.type === 'applyRemote')).toHaveLength(3);
 });
 
 test('чужая картинка: скачать и отдать ядру, не больше четырёх разом', async () => {
@@ -579,4 +600,288 @@ test('остановка: таймеров нет, сокет закрыт, пе
   expect(s.clock.timers.size).toBe(0);
   s.clock.advance(RECONNECT_MAX_MS);
   expect(s.sockets).toHaveLength(1);
+});
+
+const updatesSent = (ws: FakeSocket) => {
+  ws.drain();
+  return ws.sent.filter((f) => f.t === 'update').map((f) => (f as { clientSeq: number }).clientSeq);
+};
+const resets = (s: ReturnType<typeof stand>) => s.commands.filter((c) => c.type === 'syncReset').length;
+
+test('«повторите» и отказы пачкам в пути — одно поколение: не вечный отказ (T8-I1)', async () => {
+  const s = stand();
+  const ws = s.live();
+  for (let seq = 1; seq <= 7; seq++) s.client.onCore(update(seq));
+  await tick();
+  expect(updatesSent(ws)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  // Сервер отказал первой «повторите», следующим — разрыв: они в пути и опирались на неё.
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  for (let seq = 2; seq <= 7; seq++) ws.receive({ t: 'refused', doc: 'root', clientSeq: seq, code: 'GAP' });
+  s.clock.advance(1000);
+  expect(s.status()).not.toBe('rejected');
+  expect(resets(s)).toBe(2);
+  // Новое поколение: отказы прежним пачкам, пришедшие после подписки заново, не считаются.
+  s.reset();
+  s.subscribe(ws);
+  for (let seq = 2; seq <= 7; seq++) ws.receive({ t: 'refused', doc: 'root', clientSeq: seq, code: 'GAP' });
+  s.clock.advance(1000);
+  expect(resets(s)).toBe(2);
+  expect(s.status()).toBe('synced');
+  expect(s.flushing()).toBe(true);
+});
+
+test('правки, собранные ядром до сброса, не уходят раньше новой подписки (T8-I1)', async () => {
+  const s = stand();
+  const ws = s.live();
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  s.clock.advance(1000);
+  // Сброс в пути к ядру, а пачка старого поколения уже идёт по порту.
+  s.client.onCore(update(5));
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+  await tick();
+  ws.drain();
+  expect(ws.sent.filter((f) => f.t === 'update' || f.t === 'subscribe').length).toBe(1);
+  s.reset();
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+  ws.receive({ t: 'subscribed', doc: 'root', seq: 0, version: encodeVersion(new Map()) });
+  s.client.onCore(update(6));
+  await tick();
+  ws.drain();
+  const kinds = ws.sent.map((f) => (f.t === 'update' ? `update ${f.clientSeq}` : f.t));
+  expect(kinds.slice(-2)).toEqual(['subscribe', 'update 6']);
+});
+
+test('разрыв — один на поколение; шесть поколений подряд без подтверждения — отказ', async () => {
+  const s = stand();
+  const ws = s.live();
+  let seq = 0;
+  for (let gen = 0; gen < 6; gen++) {
+    expect(s.status()).not.toBe('rejected');
+    s.client.onCore(update(++seq));
+    s.client.onCore(update(++seq));
+    await tick();
+    ws.receive({ t: 'refused', doc: 'root', clientSeq: seq - 1, code: 'GAP' });
+    ws.receive({ t: 'refused', doc: 'root', clientSeq: seq, code: 'GAP' });
+    s.clock.advance(1000);
+    s.reset();
+    s.subscribe(ws);
+  }
+  expect(s.status()).toBe('rejected');
+});
+
+test('`UNAVAILABLE` до ответа на подписку и при чужом отказе — снова подписка, а не отказ (сервер, п. 2–3)', () => {
+  const s = stand();
+  s.client.start();
+  const ws = s.last();
+  ws.open();
+  s.reset();
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+  for (let i = 0; i < 20; i++) {
+    ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+    s.clock.advance(1000);
+  }
+  expect(s.status()).not.toBe('rejected');
+});
+
+test('`DOC_LIMIT` — правки не уходят, причина своя', () => {
+  const s = stand();
+  const ws = s.live();
+  ws.receive({ t: 'refused', doc: '1@1', clientSeq: 1, code: 'DOC_LIMIT' });
+  expect(s.status()).toBe('rejected');
+  expect(s.flushing()).toBe(false);
+  expect(s.statuses.at(-1)?.detail).toContain('страниц');
+});
+
+test('закрытие «не успевает читать» (4408) и остановка сервера (1001): переподключение, не отказ (сервер, п. 6–7)', () => {
+  for (const code of [SYNC_CLOSE.SLOW, SYNC_CLOSE.GOING_AWAY]) {
+    const s = stand();
+    s.live().dropped(code);
+    expect(s.status()).toBe('offline');
+    s.clock.advance(500);
+    expect(s.sockets).toHaveLength(2);
+  }
+});
+
+test('устаревший ответ на подписку прежнего поколения не доходит до ядра (T8-M3)', () => {
+  const s = stand();
+  const ws = s.live();
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  s.clock.advance(1000);
+  s.reset();
+  const before = s.commands.length;
+  // Ответ на прежнюю подписку: новой ещё нет.
+  ws.receive({ t: 'subscribed', doc: 'root', seq: 1, version: encodeVersion(new Map([['1', 1]])) });
+  expect(s.commands.slice(before).some((c) => c.type === 'syncSubscribed')).toBe(false);
+  expect(s.status()).toBe('connecting');
+});
+
+test('снимок: адрес строится из своего файла, а не из кадра; документ без подписки — не повод (T8-I3)', async () => {
+  const paths: string[] = [];
+  const s = stand({
+    snapshot: (path) => {
+      paths.push(path);
+      return Promise.resolve(new ArrayBuffer(1));
+    },
+  });
+  const ws = s.live();
+  // Документ, на который подписки нет.
+  ws.receive({ t: 'snapshot-needed', doc: '1@1', url: '/api/files/f/docs/1@1/snapshot' });
+  await tick();
+  expect(paths).toEqual([]);
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  s.clock.advance(1000);
+  s.reset();
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+  ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/other/docs/root/snapshot' });
+  await tick();
+  expect(paths).toEqual(['/api/files/f/docs/root/snapshot']);
+});
+
+test('снимок: 404 при живой роли — отказ с причиной, а не вечный повтор (T8-I2)', async () => {
+  let calls = 0;
+  const s = stand({
+    snapshot: () => {
+      calls++;
+      return Promise.reject(Object.assign(new Error('нет'), { code: 'NOT_FOUND' }));
+    },
+  });
+  const ws = s.live();
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  s.clock.advance(1000);
+  s.reset();
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+  ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/f/docs/root/snapshot' });
+  for (let i = 0; i < 20; i++) {
+    await tick();
+    await tick();
+    s.clock.advance(30_000);
+  }
+  expect(s.status()).toBe('rejected');
+  expect(s.statuses.at(-1)?.detail).toContain('Снимок');
+  expect(calls).toBeLessThan(5);
+});
+
+test('снимок: сеть не отдаёт его — после нескольких попыток обычный путь переподключения (T8-I2)', async () => {
+  let calls = 0;
+  const s = stand({
+    snapshot: () => {
+      calls++;
+      return Promise.reject(Object.assign(new Error('сеть'), { code: 'NETWORK' }));
+    },
+  });
+  const ws = s.live();
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  s.clock.advance(1000);
+  s.reset();
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+  ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/f/docs/root/snapshot' });
+  for (let i = 0; i < 10 && ws.closedCode === null; i++) {
+    await tick();
+    await tick();
+    // Сокет жив и отвечает: рвёт его не проверка связи.
+    ws.receive({ t: 'pong' });
+    s.clock.advance(10_000);
+  }
+  expect(ws.closedCode).not.toBeNull();
+  expect(calls).toBeLessThanOrEqual(4);
+  expect(s.status()).not.toBe('rejected');
+});
+
+test('снимок качается долго, соединение рвётся: одна загрузка, не отказ (T8-I6)', async () => {
+  let started = 0;
+  let finish!: () => void;
+  const s = stand({
+    snapshot: () => {
+      started++;
+      return new Promise((resolve) => (finish = () => resolve(new ArrayBuffer(4))));
+    },
+  });
+  let ws = s.live();
+  for (let i = 0; i < 4; i++) {
+    // Каждое новое соединение подписывается прежней версией, сервер снова просит снимок.
+    ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+    s.clock.advance(1000);
+    s.reset();
+    s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+    ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/f/docs/root/snapshot' });
+    await tick();
+    expect(s.status()).toBe('connecting');
+    // Пока снимка нет, правки ждут: документ без подписки дал бы `GAP` на каждую.
+    expect(s.flushing()).toBe(false);
+    ws.dropped();
+    s.clock.advance(30_000);
+    ws = s.last();
+    ws.open();
+    s.reset();
+  }
+  expect(started).toBe(1);
+  expect(s.status()).not.toBe('rejected');
+  finish();
+  await tick();
+  await tick();
+  expect(s.commands.filter((c) => c.type === 'applyRemote')).toHaveLength(1);
+});
+
+test('`snapshot-needed` посреди догоняния: документ не считается дважды (сервер, п. 5)', async () => {
+  let finish!: () => void;
+  const s = stand({ snapshot: () => new Promise((resolve) => (finish = () => resolve(new ArrayBuffer(4)))) });
+  s.client.start();
+  const ws = s.last();
+  ws.open();
+  s.reset();
+  const v = encodeVersion(new Map());
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: v });
+  s.client.onCore({ type: 'syncSubscribe', doc: '1@1', version: v });
+  ws.receive({ t: 'subscribed', doc: 'root', seq: 0, version: v });
+  ws.receive({ t: 'updates', doc: '1@1', seq: 1, bytes: new Uint8Array([1]) });
+  ws.receive({ t: 'snapshot-needed', doc: '1@1', url: '/api/files/f/docs/1@1/snapshot' });
+  s.client.onApplied();
+  await tick();
+  // Снимок ещё качается: не «синхронизировано».
+  expect(s.status()).toBe('connecting');
+  // Устаревший ответ на ту же подписку ничего не меняет.
+  ws.receive({ t: 'subscribed', doc: '1@1', seq: 1, version: v });
+  expect(s.status()).toBe('connecting');
+  finish();
+  await tick();
+  await tick();
+  s.client.onApplied();
+  expect(resets(s)).toBe(2);
+});
+
+test('`FORBIDDEN` пачкам в пути: один вопрос о роли, отправка выключена до ответа (T8-M4)', async () => {
+  let asked = 0;
+  let answer!: (a: AccessState) => void;
+  const s = stand({
+    access: () => {
+      asked++;
+      return new Promise((resolve) => (answer = resolve));
+    },
+  });
+  const ws = s.live();
+  for (let seq = 1; seq <= 5; seq++) ws.receive({ t: 'refused', doc: 'root', clientSeq: seq, code: 'FORBIDDEN' });
+  expect(asked).toBe(1);
+  expect(s.flushing()).toBe(false);
+  answer({ kind: 'role', role: 'viewer', version: 2, canShare: false, own: true });
+  await tick();
+  expect(s.access.at(-1)).toMatchObject({ role: 'viewer' });
+  expect(s.flushing()).toBe(true);
+});
+
+test('остановка снимает все ожидания: повтор картинки и пауза снимка разом (T8-M2)', async () => {
+  const s = stand({
+    uploadImage: () => Promise.reject(Object.assign(new Error('сеть'), { code: 'NETWORK' })),
+    snapshot: () => Promise.reject(Object.assign(new Error('сеть'), { code: 'NETWORK' })),
+  });
+  const ws = s.live();
+  s.client.onCore({ type: 'localImage', hash: 'h', bytes: new Uint8Array(1) });
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'UNAVAILABLE' });
+  s.clock.advance(1000);
+  s.reset();
+  s.client.onCore({ type: 'syncSubscribe', doc: 'root', version: encodeVersion(new Map()) });
+  ws.receive({ t: 'snapshot-needed', doc: 'root', url: '/api/files/f/docs/root/snapshot' });
+  await tick();
+  await tick();
+  s.client.stop();
+  expect(s.clock.timers.size).toBe(0);
 });

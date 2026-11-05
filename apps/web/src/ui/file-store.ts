@@ -22,6 +22,12 @@ export interface SyncEvents {
   reload(): void;
 }
 
+/** Ядро для соединения файла: прямой порт к `sync.worker` и его конец. */
+export interface SyncCore {
+  connectSync(port: MessagePort): void;
+  disconnectSync(): void;
+}
+
 export interface FileStore {
   /** Окно списка раздела (не больше 200 строк) и общее число записей в нём. */
   list(section: Section, query: string, start: number, count: number): Promise<IoResults['list']>;
@@ -72,7 +78,7 @@ export interface FileStore {
   /** Запись зависит от сети: неудачная повторяется сама, закрытие вкладки спрашивает о незаписанном. */
   readonly remote?: boolean;
   /** Соединение файла (спека подсистемы 4, раздел 7): правки идут журналом сервера, файл целиком пишется только первый раз. */
-  sync?(id: string, core: { connectSync(port: MessagePort): void }, events: SyncEvents): { stop(): void };
+  sync?(id: string, core: SyncCore, events: SyncEvents): { stop(): void };
   /** Сервер подтвердил правки: снять пачки журнала браузера. */
   cutJournal?(id: string, mark: JournalMark): Promise<void>;
   /** Превью при правках журналом. `null` — убрать. */
