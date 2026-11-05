@@ -1081,7 +1081,8 @@ fn deleting_named_twin_gives_its_name_to_the_other() {
     assert_mirror(&mut b, page);
     assert_eq!(nodes(&mut a, page), nodes(&mut b, page));
 
-    // Узел с таким именем жив: отменять нечего, и зеркало не расходится.
+    // `Restore` пропускается (имя занято), отмена уходит к шагу создания и убирает оставшегося двойника:
+    // редкий случай, узел возвращается повтором (бэклог). Здесь важно, что зеркало не расходится.
     a.undo().unwrap();
     assert_mirror(&mut a, page);
     sync(&mut a, &mut b);
