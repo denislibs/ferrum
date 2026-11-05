@@ -1,9 +1,13 @@
 // Нагрузка отдельным процессом: память на соединение, задержка на 50 участниках, медленный читатель.
 
+import { fileURLToPath } from 'node:url';
 import { expect, test } from 'bun:test';
 
 async function run(...args: string[]): Promise<Record<string, number | boolean>> {
-  const p = Bun.spawn(['bun', new URL('./sync-load-probe.ts', import.meta.url).pathname, ...args], { stdout: 'pipe', stderr: 'pipe' });
+  const p = Bun.spawn(['bun', fileURLToPath(new URL('./sync-load-probe.ts', import.meta.url)), ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
   const [text, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
   await p.exited;
   const line = text.trim().split('\n').at(-1) ?? '';
