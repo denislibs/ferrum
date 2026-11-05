@@ -311,3 +311,29 @@ fn drawing_back_to_start_falls_back_to_click_size() {
     let p = h.props(id);
     assert_eq!((p.w, p.h), (100.0, 100.0), "{p:?}");
 }
+
+/// Роль понизили посреди рисования: жест отменён без следа, инструмент сброшен на «Перемещение», снятие режима
+/// не возвращает прежний инструмент и позволяет рисовать снова.
+#[test]
+fn view_only_cancels_a_gesture_and_resets_the_tool() {
+    let mut h = H::new();
+    let before = h.state();
+    let steps = h.ed.step_count();
+    h.key("KeyR", Modifiers::NONE);
+    assert_eq!(h.ed.tool_kind(), ToolKind::Rect);
+    h.down(100.0, 100.0, Modifiers::NONE);
+    h.mv(200.0, 200.0, Modifiers::NONE);
+    assert!(h.ed.is_busy());
+    h.ed.set_view_only(true);
+    assert!(!h.ed.is_busy());
+    assert_eq!(h.ed.tool_kind(), ToolKind::Move);
+    h.up(200.0, 200.0, Modifiers::NONE);
+    assert_eq!(h.state(), before);
+    assert_eq!(h.ed.step_count(), steps);
+    h.assert_scene_clean();
+    h.ed.set_view_only(false);
+    assert_eq!(h.ed.tool_kind(), ToolKind::Move);
+    h.key("KeyR", Modifiers::NONE);
+    h.drag((100.0, 100.0), (200.0, 200.0), Modifiers::NONE);
+    assert_eq!(h.children(None).len(), 1);
+}

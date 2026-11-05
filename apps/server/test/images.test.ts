@@ -38,6 +38,10 @@ test('байты не совпали с хэшем: 400, ни записи, ни
   expect(await res.json()).toEqual({ error: 'HASH_MISMATCH' });
   expect((await s.pool.query('SELECT 1 FROM image')).rowCount).toBe(0);
   expect((await head(owner, f.id, hashOf(bytes(1)))).status).toBe(404);
+  // Ни байтов на диске, ни намерения загрузки: очистке дожидаться нечего.
+  const files = readdirSync(join(s.dataDir, 'images'), { recursive: true, withFileTypes: true }).filter((e) => e.isFile());
+  expect(files).toEqual([]);
+  expect((await s.pool.query('SELECT 1 FROM blob_pending')).rowCount).toBe(0);
 });
 
 test('сверх предела размера: 413 по `Content-Length`', async () => {

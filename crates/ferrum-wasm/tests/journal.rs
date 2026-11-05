@@ -370,16 +370,35 @@ fn view_only_survives_open_and_lifts() {
         name: "Чужое".into(),
         quiet: None,
     });
-    run(&mut c, "edit.delete");
     let ev = c.take_events();
     assert!(ev.iter().any(
         |e| matches!(e, CoreEvent::Error { message } if message.contains("только для чтения"))
     ));
+    // Удаление с настоящим выделением: без выделения оно ничего не делает и в обычном режиме.
+    run(&mut c, "edit.select_all");
+    let selected = c
+        .take_events()
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::Selection { count, .. } => Some(*count),
+            _ => None,
+        })
+        .expect("нет Selection");
+    assert!(selected > 0, "читателю можно выделять");
+    run(&mut c, "edit.delete");
+    let ev = c.take_events();
     assert!(!ev
         .iter()
         .any(|e| matches!(e, CoreEvent::Modified { modified: true })));
+    assert!(!ev.iter().any(|e| matches!(e, CoreEvent::Document { .. })));
     c.command(Command::SetViewOnly { on: false });
     c.take_events();
+    // Снятие режима: та же команда снова работает, значит отказ был из-за режима.
+    run(&mut c, "edit.delete");
+    assert!(c
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Modified { modified: true })));
     c.command(Command::SetDocumentName {
         name: "Своё".into(),
         quiet: None,
