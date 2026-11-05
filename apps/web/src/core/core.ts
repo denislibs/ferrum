@@ -197,6 +197,11 @@ export class Core {
     return core;
   }
 
+  /** Прямой порт к `sync.worker`: дальше worker ядра говорит с ним сам, основной поток трафика не видит. */
+  connectSync(port: MessagePort): void {
+    this.transport.post({ t: 'syncPort', port }, [port]);
+  }
+
   private onWorker(m: FromWorker): void {
     if (m.t === 'events') {
       for (const e of m.events) {

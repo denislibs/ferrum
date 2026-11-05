@@ -8,6 +8,8 @@ import { MAX_DATA_BYTES, MAX_FONT_BYTES, MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES, mb
 import { MAX_TEXT_INPUT_BYTES, utf8Length } from './text-keys';
 
 export type ToWorker =
+  /** Прямой порт к `sync.worker`: файл на сервере. */
+  | { t: 'syncPort'; port: MessagePort }
   | {
       t: 'init';
       canvas: OffscreenCanvas;
@@ -186,7 +188,15 @@ export function isTextCommand(cmd: Command): boolean {
 }
 
 /** Виды сообщений worker'у: остальное — неверный конверт. */
-export const TO_WORKER_KINDS: ReadonlySet<string> = new Set(['init', 'cmd', 'pasteText', 'encodeClipboard', 'tick', 'testPanic']);
+export const TO_WORKER_KINDS: ReadonlySet<string> = new Set([
+  'init',
+  'cmd',
+  'pasteText',
+  'encodeClipboard',
+  'tick',
+  'testPanic',
+  'syncPort',
+]);
 
 /** Конверт сообщения worker'у: объект известного вида. Содержимое команды
  * проверяет ядро. */

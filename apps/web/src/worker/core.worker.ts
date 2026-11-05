@@ -18,6 +18,7 @@ import {
   type FromWorker,
   type ToWorker,
 } from '../core/messages';
+import type { SyncToCore } from '../core/sync-messages';
 import { imageSize } from '../core/image-size';
 import { isFontPath, manifestFamilies } from '../core/fonts';
 import { addSaturating, drainRing, holdInput, writeLive as writeLiveSlots, type Held } from '../core/shared';
@@ -231,11 +232,63 @@ async function loadBundled(family: string, files: string[]): Promise<void> {
   );
 }
 
+/** Прямой порт к `sync.worker` (файл на сервере): трафик синхронизации идёт мимо основного потока. */
+let syncPort: MessagePort | null = null;
+let syncFlushTimer: ReturnType<typeof setInterval> | null = null;
+/** Пачки правок — не реже 30 раз в секунду, пока есть куда (спека подсистемы 4, раздел 8). */
+const SYNC_FLUSH_MS = 33;
+
+const SYNC_EVENTS: ReadonlySet<string> = new Set(['syncSubscribe', 'localImage', 'localUpdates', 'syncState', 'imagesNeeded']);
+
+function sendToSync(events: CoreEvent[]): void {
+  if (!syncPort) return;
+  for (const e of events) {
+    const transfer: Transferable[] = [];
+    if (e.type === 'localUpdates' || e.type === 'localImage') transfer.push(e.bytes.buffer as ArrayBuffer);
+    if (e.type === 'syncSubscribe') transfer.push(e.version.buffer as ArrayBuffer);
+    syncPort.postMessage({ t: 'event', event: e }, transfer);
+  }
+}
+
+function runSync(cmd: Parameters<WasmCore['command']>[0]): void {
+  if (!core) return;
+  try {
+    core.command(cmd);
+    sendEvents();
+  } catch (e) {
+    fatal(e);
+  }
+}
+
+function connectSync(port: MessagePort): void {
+  syncPort = port;
+  port.onmessage = (e: MessageEvent<SyncToCore>) => {
+    const m = e.data;
+    if (m.t === 'flush') {
+      if (syncFlushTimer !== null) clearInterval(syncFlushTimer);
+      syncFlushTimer = null;
+      if (m.on) {
+        runSync({ type: 'syncFlush' });
+        syncFlushTimer = setInterval(() => runSync({ type: 'syncFlush' }), SYNC_FLUSH_MS);
+      }
+      return;
+    }
+    runSync(m.cmd as Parameters<WasmCore['command']>[0]);
+    if (m.cmd.type === 'applyRemote') port.postMessage({ t: 'applied' });
+  };
+}
+
 /** Байты событий уходят без копии: их буферы передаются основному потоку. */
 function sendEvents(): void {
   if (!core) return;
   let events: CoreEvent[] = core.takeEvents();
   if (events.length === 0) return;
+  // Трафик синхронизации основному потоку не нужен. `syncState` нужен обоим: индикатор считает `sync.worker`, а «Сохранить» ждёт сервер.
+  if (syncPort && events.some((e) => SYNC_EVENTS.has(e.type))) {
+    sendToSync(events.filter((e) => SYNC_EVENTS.has(e.type)));
+    events = events.filter((e) => !SYNC_EVENTS.has(e.type) || e.type === 'syncState');
+    if (events.length === 0) return;
+  }
   // Вшитые шрифты качает этот worker; основному потоку — только системные.
   for (const e of events) if (e.type === 'fontRequest' && e.source === 'bundled') void loadBundled(e.family, e.files);
   events = events.filter((e) => !(e.type === 'fontRequest' && e.source === 'bundled'));
@@ -384,6 +437,9 @@ function handle(msg: ToWorker): void {
         // Паника бросает исключение: его ловит общий обработчик ниже (`fatal`).
         if (testHooks) core.panicForTests();
         else postError('Неверное сообщение для ядра');
+        break;
+      case 'syncPort':
+        connectSync(msg.port);
         break;
       case 'init':
         break;

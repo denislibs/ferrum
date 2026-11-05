@@ -107,8 +107,13 @@ function stand(replies: Record<string, ((c: Call) => Response | Promise<Response
       this.appended.push([f, s, b]);
     },
     async read() {
-      return { entries: this.entries, session: this.session, tooLarge: false };
+      return { entries: this.entries, session: this.session, tooLarge: false, keys: this.keys };
     },
+    exact: [] as unknown[][],
+    async cutExact(keys: readonly unknown[]) {
+      this.exact.push([...keys]);
+    },
+    keys: undefined as [string, number, number][] | undefined,
     async cut(f: string, s: number, u: number) {
       this.cuts.push([f, s, u]);
     },
@@ -830,4 +835,44 @@ test('загрузка картинок: 429 у HEAD и PUT — пауза и п
   }
   await attempt;
   expect(failure).toMatchObject({ code: 'TOO_MANY_REQUESTS' });
+});
+
+test('журнал сервера: подтверждение снимает прочитанное при открытии и своё, а пачки другой вкладки остаются', async () => {
+  const s = stand({
+    'GET /api/files/f': json(meta({ id: 'f' })),
+    'GET /api/files/f/content': new Response(container(ROOT), { headers: { 'x-ferrum-version': '1' } }),
+  });
+  s.journal.entries = [new ArrayBuffer(1), new ArrayBuffer(1)];
+  s.journal.session = 7;
+  s.journal.keys = [
+    ['f', 5, 1],
+    ['f', 7, 3],
+  ];
+  await s.files.read('f');
+  await s.files.cutJournal('f', 100, 0);
+  expect(s.journal.exact[0]).toEqual([
+    ['f', 5, 1],
+    ['f', 7, 3],
+  ]);
+  // Прочитанное снято один раз; новые пачки другой вкладки в этот список не попадают.
+  await s.files.cutJournal('f', 100, 0);
+  expect(s.journal.exact).toHaveLength(1);
+  await s.files.cutJournal('f', 100, 2);
+  expect(s.journal.exact[1]).toEqual([
+    ['f', 100, 1],
+    ['f', 100, 2],
+  ]);
+});
+
+test('журнал читателя подтверждение не снимает: он не применён и ждёт, пока вернут право', async () => {
+  const s = stand({
+    'GET /api/files/v': json(meta({ id: 'v', role: 'viewer' })),
+    'GET /api/files/v/content': new Response(container(ROOT), { headers: { 'x-ferrum-version': '1' } }),
+  });
+  s.journal.entries = [new ArrayBuffer(1)];
+  s.journal.session = 7;
+  s.journal.keys = [['v', 7, 1]];
+  await s.files.read('v');
+  await s.files.cutJournal('v', 100, 0);
+  expect(s.journal.exact).toEqual([]);
 });

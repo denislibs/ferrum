@@ -60,6 +60,7 @@ const journal: JournalStore = {
   append: async () => {},
   read: async () => ({ entries: [], session: null, tooLarge: false }),
   cut: async () => {},
+  cutExact: async () => {},
   drop: async () => {},
 };
 
