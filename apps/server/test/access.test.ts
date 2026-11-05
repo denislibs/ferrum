@@ -3,6 +3,8 @@
 // неотличим от несуществующего; роли ниже нужной — 403; нужной — работает.
 
 import { afterAll, beforeEach, expect, test } from 'bun:test';
+import { blake3 } from '@noble/hashes/blake3.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { apiRoutes } from '../src/app';
 import { apiStand, container, PNG, type Person } from './api-stand';
 
@@ -28,6 +30,8 @@ const ROUTES = apiRoutes({
 
 const NOBODY = '00000000-0000-4000-8000-000000000000';
 const HASH = 'a'.repeat(64);
+const IMAGE: Uint8Array<ArrayBuffer> = new Uint8Array([1, 2, 3]);
+const IMAGE_HASH = bytesToHex(blake3(IMAGE));
 
 interface World {
   file: string;
@@ -76,6 +80,10 @@ const SAMPLES: Record<string, Sample> = {
   'GET /api/files/:id/thumb': { params: file, allowed: viewer, status: 204 },
   'PUT /api/files/:id/thumb': { params: file, body: PNG, allowed: editor, denied: [viewer] },
   'DELETE /api/files/:id/thumb': { params: file, allowed: editor, denied: [viewer] },
+  // Хэш не у этого файла: 404 и у читателя, но это уже после проверки доступа к файлу.
+  'HEAD /api/files/:id/images/:hash': { params: file, allowed: viewer, status: 404 },
+  'GET /api/files/:id/images/:hash': { params: file, allowed: viewer, status: 404 },
+  'PUT /api/files/:id/images/:hash': { params: (w) => ({ id: w.file, hash: IMAGE_HASH }), body: IMAGE, allowed: editor, denied: [viewer] },
 };
 
 const key = (r: { method: string; path: string }) => `${r.method} ${r.path}`;
@@ -103,7 +111,7 @@ for (const route of ROUTES) {
     const path = pathOf(route.path, sample.params?.(w) ?? {}) + queryOf(route);
     const res = await s.call(null, route.method, path, sample.body, headersOf(route, sample));
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: 'UNAUTHORIZED' });
+    if (route.method !== 'HEAD') expect(await res.json()).toEqual({ error: 'UNAUTHORIZED' });
   });
 
   if (mutating) {
@@ -128,6 +136,7 @@ for (const route of ROUTES) {
       const missing = await s.call(stranger, route.method, pathOf(route.path, {}), sample.body, headersOf(route, sample));
       expect(foreign.status).toBe(404);
       expect(missing.status).toBe(404);
+      expect(foreign.headers.get('content-type')).toBe(missing.headers.get('content-type'));
       expect(await foreign.text()).toBe(await missing.text());
       // И без записи: файл цел.
       const meta = await s.call(owner, 'GET', `/api/files/${w.file}`);

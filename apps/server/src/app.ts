@@ -8,6 +8,7 @@ import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
 import type { BlobStore } from './blob-store';
 import { fileRoutes, uploadGate } from './file-routes';
+import { imageRoutes } from './image-routes';
 import type { Mailer } from './mail';
 import { responseHeaders, serveStatic } from './static';
 import { valkeyAlive } from './valkey';
@@ -35,7 +36,8 @@ const IDLE_TIMEOUT_SECONDS = 120;
 /** Все маршруты API: отсюда их берёт и сервер, и таблица проверки прав в тестах. */
 export function apiRoutes(deps: AppDeps): Route[] {
   const api = { ...deps, deadlineMs: deps.apiDeadlineMs };
-  return [...fileRoutes(api, uploadGate())];
+  const gate = uploadGate();
+  return [...fileRoutes(api, gate), ...imageRoutes(api, gate)];
 }
 
 /** Проверка не должна висеть дольше проверки контейнера. */

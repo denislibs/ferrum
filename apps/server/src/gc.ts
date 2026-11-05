@@ -6,10 +6,34 @@ import type { BlobStore } from './blob-store';
 
 /** Проход раз в минуту, у него есть срок на каждый запрос (`Pool`). */
 export const GC_INTERVAL_MS = 60_000;
+/** Неиспользуемая картинка живёт столько (спека, раздел 6.4): отмена может вернуть ссылку на неё. */
+export const IMAGE_GRACE_DAYS = 30;
 const BATCH = 200;
+
+/** Картинки: ссылка файла без ссылок в содержимом снимается через срок, картинка без файлов получает
+ * отметку и через срок уходит в список на удаление. Удаление записи и отправка байтов на удаление —
+ * одним запросом с условием «всё ещё ни одного файла»: одновременная загрузка той же картинки
+ * либо успевает раньше и картинка живёт, либо создаёт новую запись со своими байтами. */
+async function sweepImages(pool: Pool): Promise<void> {
+  await pool.query(`DELETE FROM file_image WHERE unreferenced_at < now() - make_interval(days => $1)`, [IMAGE_GRACE_DAYS]);
+  await pool.query(`UPDATE image i SET orphaned_at = now()
+    WHERE orphaned_at IS NULL AND NOT EXISTS (SELECT 1 FROM file_image l WHERE l.hash = i.hash)`);
+  await pool.query(`UPDATE image i SET orphaned_at = NULL
+    WHERE orphaned_at IS NOT NULL AND EXISTS (SELECT 1 FROM file_image l WHERE l.hash = i.hash)`);
+  await pool.query(
+    `WITH gone AS (
+       DELETE FROM image i WHERE orphaned_at < now() - make_interval(days => $1)
+         AND NOT EXISTS (SELECT 1 FROM file_image l WHERE l.hash = i.hash)
+       RETURNING blob_key
+     )
+     INSERT INTO blob_trash (key, delete_after) SELECT blob_key, now() FROM gone ON CONFLICT DO NOTHING`,
+    [IMAGE_GRACE_DAYS],
+  );
+}
 
 /** Сколько байтов-записей удалено. Один проход на все процессы: сервер один, но блокировка дешевле ошибки. */
 export async function runGc(pool: Pool, blobs: BlobStore): Promise<number> {
+  await sweepImages(pool);
   const { rows } = await pool.query<{ key: string }>(
     'SELECT key FROM blob_trash WHERE delete_after <= now() ORDER BY delete_after LIMIT $1',
     [BATCH],
