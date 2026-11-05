@@ -12,7 +12,10 @@ use kurbo::Size;
 
 fn snapshot(core: &mut Core, thumbnail: bool) -> (Duration, bool) {
     let t = Instant::now();
-    core.command(Command::Snapshot { thumbnail });
+    core.command(Command::Snapshot {
+        thumbnail,
+        full: None,
+    });
     let d = t.elapsed();
     let thumb = core.take_events().into_iter().any(|e| {
         matches!(

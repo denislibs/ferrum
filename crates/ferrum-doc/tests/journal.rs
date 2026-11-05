@@ -4,7 +4,7 @@
 //! безвреден; случайные правки с записью пачек и полных файлов в случайные моменты
 //! восстанавливаются точно.
 
-use ferrum_doc::container::{decode, encode};
+use ferrum_doc::container::{decode, encode, encode_full};
 use ferrum_doc::*;
 use proptest::prelude::*;
 
@@ -377,4 +377,87 @@ fn duplicated_page_survives_journal_and_full_save() {
     assert_eq!(state(&mut back), state(&mut doc));
     let mut again = decode(&encode(&back).unwrap()).unwrap().document;
     assert_eq!(state(&mut again), state(&mut doc));
+}
+
+/// Сервер хранит полные снимки (спека подсистемы 4, раздел 7.6): журнал вкладки, отставшей от
+/// чужой записи (`CONFLICT`), сливается с новым файлом при следующем открытии.
+#[test]
+fn journal_of_a_stale_tab_merges_with_a_newer_full_snapshot() {
+    let mut base = Document::new();
+    let page = base.pages()[0].0;
+    rect(&mut base, page, 1.0);
+    let v1 = encode_full(&base).unwrap();
+    let mut a = decode(&v1).unwrap().document;
+    let mut b = decode(&v1).unwrap().document;
+    let ra = rect(&mut a, page, 2.0);
+    let rb = rect(&mut b, page, 3.0);
+    let journal = b.take_journal().unwrap().unwrap();
+    let v2 = encode_full(&a).unwrap();
+    let mut merged = decode(&v2).unwrap().document;
+    let replayed = merged.apply_journal(&[&journal]);
+    assert!(replayed.warnings.is_empty(), "{:?}", replayed.warnings);
+    let nodes = merged.page(page).unwrap().children(None);
+    assert_eq!(nodes.len(), 3);
+    assert!(nodes.contains(&ra) && nodes.contains(&rb));
+}
+
+/// А shallow-снапшот такой журнал не примет: поэтому файл на сервере пишется только полным.
+#[test]
+fn journal_of_a_stale_tab_does_not_merge_with_a_shallow_snapshot() {
+    let mut base = Document::new();
+    let page = base.pages()[0].0;
+    rect(&mut base, page, 1.0);
+    let v1 = encode(&base).unwrap();
+    let mut a = decode(&v1).unwrap().document;
+    let mut b = decode(&v1).unwrap().document;
+    rect(&mut a, page, 2.0);
+    rect(&mut b, page, 3.0);
+    let journal = b.take_journal().unwrap().unwrap();
+    let mut merged = decode(&encode(&a).unwrap()).unwrap().document;
+    assert!(!merged.apply_journal(&[&journal]).warnings.is_empty());
+    assert_eq!(merged.page(page).unwrap().children(None).len(), 2);
+}
+
+#[test]
+fn full_snapshot_opens_like_a_shallow_one_and_keeps_images() {
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let r = rect(&mut doc, page, 1.0);
+    let hash = doc.images.add(vec![9; 64]);
+    doc.transact(page, vec![], |tx| {
+        tx.set_props(
+            r,
+            &PropsPatch {
+                fills: Some(vec![Fill::image(hash.clone())]),
+                ..Default::default()
+            },
+        )?;
+        Ok(vec![r])
+    })
+    .unwrap();
+    let mut back = decode(&encode_full(&doc).unwrap()).unwrap().document;
+    assert_eq!(state(&mut back), state(&mut doc));
+    assert_eq!(back.images.get(&hash), Some(&[9u8; 64][..]));
+}
+
+#[test]
+fn view_only_refuses_edits_and_journal_until_lifted() {
+    let (_, mut doc) = opened();
+    let page = doc.pages()[0].0;
+    rect(&mut doc, page, 1.0);
+    let batch = doc.take_journal().unwrap().unwrap();
+    doc.set_view_only(true);
+    assert!(doc.is_read_only());
+    assert!(doc.set_name("Новое").is_err());
+    let before = doc.page(page).unwrap().children(None).len();
+    let err = doc.transact(page, vec![], |tx| {
+        tx.create_node(None, None, NodeKind::Rect)?;
+        Ok(vec![])
+    });
+    assert!(matches!(err, Err(DocError::ReadOnly)));
+    assert_eq!(doc.page(page).unwrap().children(None).len(), before);
+    assert!(!doc.apply_journal(&[&batch]).warnings.is_empty());
+    doc.set_view_only(false);
+    assert!(!doc.is_read_only());
+    assert!(doc.set_name("Новое").is_ok());
 }

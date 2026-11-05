@@ -1231,7 +1231,10 @@ fn modified(ev: &[CoreEvent]) -> Option<bool> {
 
 /// Сохранение в хранилище: снимок, затем `MarkSaved` с его ревизией (запись удалась).
 fn save(core: &mut Core) {
-    core.command(Command::Snapshot { thumbnail: false });
+    core.command(Command::Snapshot {
+        thumbnail: false,
+        full: None,
+    });
     let revision = core
         .take_events()
         .into_iter()
@@ -1331,7 +1334,10 @@ fn mark_saved_clears_modified_only_for_the_latest_revision() {
     assert_eq!(modified(&core.take_events()), Some(true));
     core.command(Command::Save);
     assert_eq!(modified(&core.take_events()), None, "копия на диск");
-    core.command(Command::Snapshot { thumbnail: false });
+    core.command(Command::Snapshot {
+        thumbnail: false,
+        full: None,
+    });
     let snap = core.take_events();
     let Some(CoreEvent::Snapshot { revision, name, .. }) = snap
         .iter()
@@ -1383,7 +1389,10 @@ fn quiet_document_name_does_not_mark_modified() {
 #[test]
 fn snapshot_says_whether_to_keep_the_old_thumbnail() {
     let keep = |core: &mut Core, thumbnail| {
-        core.command(Command::Snapshot { thumbnail });
+        core.command(Command::Snapshot {
+            thumbnail,
+            full: None,
+        });
         core.take_events().into_iter().find_map(|e| match e {
             CoreEvent::Snapshot {
                 keep_thumbnail,
@@ -1401,7 +1410,10 @@ fn snapshot_says_whether_to_keep_the_old_thumbnail() {
 }
 
 fn thumbnail_of(core: &mut Core) -> Option<Vec<u8>> {
-    core.command(Command::Snapshot { thumbnail: true });
+    core.command(Command::Snapshot {
+        thumbnail: true,
+        full: None,
+    });
     core.take_events().into_iter().find_map(|e| match e {
         CoreEvent::Snapshot { thumbnail, .. } => Some(thumbnail.map(|t| t.into_vec())),
         _ => None,

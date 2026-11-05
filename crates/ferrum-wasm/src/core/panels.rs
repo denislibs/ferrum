@@ -751,6 +751,7 @@ impl Core {
             | Command::PlaceImage { .. }
             | Command::Save
             | Command::Snapshot { .. }
+            | Command::SetViewOnly { .. }
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements

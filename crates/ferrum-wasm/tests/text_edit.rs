@@ -809,7 +809,10 @@ fn journal_and_snapshot_apply_typing_that_waits_for_a_font() {
     // Снимок — так же.
     let (mut c, id) = core();
     typing_waits_for_roboto(&mut c, &id);
-    c.command(Command::Snapshot { thumbnail: false });
+    c.command(Command::Snapshot {
+        thumbnail: false,
+        full: None,
+    });
     assert_eq!(text_of(&c, &id), "Привет!\n");
     assert!(c
         .take_events()

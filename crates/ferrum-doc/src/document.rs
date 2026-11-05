@@ -37,6 +37,13 @@ pub(crate) struct UnloadedPage {
     pub scene: Option<Vec<SceneRow>>,
 }
 
+/// Что пишется в снимок страницы: только состояние или состояние с историей правок.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SnapshotKind {
+    Shallow,
+    Full,
+}
+
 /// Всё, что пишется в файл для одной страницы.
 pub(crate) struct PagePayload {
     pub snapshot: Vec<u8>,
@@ -77,6 +84,9 @@ pub struct Document {
     changes: HashMap<PageId, Changes>,
     pub images: ImageStore,
     read_only: bool,
+    /// Режим просмотра: так решил не файл, а роль человека (читатель, спека подсистемы 4,
+    /// раздел 6.1). В отличие от `read_only` снимается, когда роль повысили.
+    view_only: bool,
     /// Журнал (этап 6): версии Loro корня и загруженных страниц, до которых правки
     /// уже отданы в журнал (`take_journal`). Страница получает версию при загрузке.
     journaled_root: VersionVector,
@@ -119,6 +129,7 @@ impl Document {
             changes: HashMap::new(),
             images,
             read_only: false,
+            view_only: false,
             journaled_root,
             journaled_pages: HashMap::new(),
             parked: HashMap::new(),
@@ -183,7 +194,12 @@ impl Document {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.read_only
+        self.read_only || self.view_only
+    }
+
+    /// Режим просмотра по роли: правки отвергаются так же, как у файла только для чтения.
+    pub fn set_view_only(&mut self, on: bool) {
+        self.view_only = on;
     }
 
     /// Записывает в страницу направляющие как есть — как чужой файл (тесты разбора).
@@ -203,7 +219,7 @@ impl Document {
     }
 
     fn writable(&self) -> DocResult<()> {
-        if self.read_only {
+        if self.is_read_only() {
             Err(DocError::ReadOnly)
         } else {
             Ok(())
@@ -585,10 +601,13 @@ impl Document {
     }
 
     /// Данные страницы для файла — без загрузки, если она не открыта.
-    pub(crate) fn page_payload(&self, id: PageId) -> DocResult<PagePayload> {
+    pub(crate) fn page_payload(&self, id: PageId, kind: SnapshotKind) -> DocResult<PagePayload> {
         if let Some(p) = self.loaded.get(&id) {
             return Ok(PagePayload {
-                snapshot: p.export_snapshot()?,
+                snapshot: match kind {
+                    SnapshotKind::Shallow => p.export_snapshot()?,
+                    SnapshotKind::Full => p.export_full_snapshot()?,
+                },
                 image_refs: p.image_refs()?,
                 scene: Some(p.scene_rows()?),
             });
@@ -765,7 +784,7 @@ impl Document {
         if batches.is_empty() {
             return out;
         }
-        if self.read_only {
+        if self.is_read_only() {
             out.warnings
                 .push("Несохранённые изменения не применены: файл открыт только для чтения".into());
             return out;
@@ -808,7 +827,7 @@ impl Document {
                 lost = true;
                 continue;
             }
-            if self.read_only {
+            if self.is_read_only() {
                 // Страница с неизвестными узлами (найдена при загрузке) — только чтение,
                 // как в ветке раннего выхода: правки этой и следующих страниц не применяем.
                 skipped_read_only = true;
@@ -1106,7 +1125,7 @@ mod tests {
             .unwrap()
             .force_raw_kind_for_tests(star, Some("star"));
         let root = doc.root_snapshot().unwrap();
-        let payload = doc.page_payload(page).unwrap();
+        let payload = doc.page_payload(page, SnapshotKind::Shallow).unwrap();
         let mut unloaded = HashMap::new();
         unloaded.insert(
             page,
@@ -1140,7 +1159,7 @@ mod tests {
             .unwrap()
             .force_raw_kind_for_tests(star, Some("star"));
         let root = doc.root_snapshot().unwrap();
-        let payload = doc.page_payload(page).unwrap();
+        let payload = doc.page_payload(page, SnapshotKind::Shallow).unwrap();
         let mut unloaded = HashMap::new();
         unloaded.insert(
             page,
@@ -1248,7 +1267,7 @@ mod tests {
         let p1 = doc.pages()[0].0;
         let p2 = doc.add_page("Вторая").unwrap();
         let root = doc.root_snapshot().unwrap();
-        let s1 = doc.page_payload(p1).unwrap();
+        let s1 = doc.page_payload(p1, SnapshotKind::Shallow).unwrap();
 
         let mut unloaded = HashMap::new();
         unloaded.insert(
@@ -1270,7 +1289,7 @@ mod tests {
         let (mut d2, _) = Document::from_parts(&root, unloaded, ImageStore::default()).unwrap();
 
         assert!(d2.page(p2).is_err());
-        let payload = d2.page_payload(p2).unwrap();
+        let payload = d2.page_payload(p2, SnapshotKind::Shallow).unwrap();
         assert_eq!(payload.snapshot, b"garbage".to_vec());
         assert!(d2.pages().iter().any(|(id, _)| *id == p2));
         assert!(d2.page(p1).is_ok());

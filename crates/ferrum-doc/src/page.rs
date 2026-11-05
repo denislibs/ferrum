@@ -381,6 +381,14 @@ impl PageDoc {
         Ok(self.doc.export(ExportMode::shallow_snapshot(&frontiers))?)
     }
 
+    /// Полный снимок: состояние вместе с историей правок. Серверные файлы хранят только такие
+    /// (спека подсистемы 4, раздел 7.6): на shallow-снапшот Loro не примет правку, основанную на
+    /// более раннем состоянии, поэтому файл из другой вкладки или журнал после `CONFLICT` не
+    /// сольются с ним.
+    pub fn export_full_snapshot(&self) -> DocResult<Vec<u8>> {
+        Ok(self.doc.export(ExportMode::Snapshot)?)
+    }
+
     pub(crate) fn commit(&self) {
         self.doc.commit();
     }

@@ -132,7 +132,10 @@ fn snapshot_flushes_the_journal_first_and_carries_its_number() {
     let (_, mut c) = stored(10);
     run(&mut c, "edit.select_all");
     run(&mut c, "edit.delete");
-    c.command(Command::Snapshot { thumbnail: false });
+    c.command(Command::Snapshot {
+        thumbnail: false,
+        full: None,
+    });
     let ev = c.take_events();
     let j = ev
         .iter()
@@ -153,7 +156,10 @@ fn snapshot_flushes_the_journal_first_and_carries_its_number() {
         .expect("снимок");
     assert!(j < s);
     // Без правок снимок пачку не шлёт, номер — прежний.
-    c.command(Command::Snapshot { thumbnail: false });
+    c.command(Command::Snapshot {
+        thumbnail: false,
+        full: None,
+    });
     let ev = c.take_events();
     assert!(journal(&ev).is_empty());
     assert!(ev
@@ -316,4 +322,70 @@ fn journal_that_changes_nothing_is_not_a_recovery() {
     );
     assert!(!ev.contains(&CoreEvent::Modified { modified: true }));
     assert_eq!(back.editor().scene().len(), 0);
+}
+
+/// Снимок для сервера — полный: журнал отставшей вкладки сливается с ним (спека подсистемы 4,
+/// раздел 7.6). Команда без `full` пишет как раньше.
+#[test]
+fn full_snapshot_comes_only_on_request() {
+    let (_, mut c) = stored(100);
+    run(&mut c, "edit.select_all");
+    run(&mut c, "edit.delete");
+    let snap = |c: &mut Core, full| {
+        c.command(Command::Snapshot {
+            thumbnail: false,
+            full,
+        });
+        c.take_events()
+            .into_iter()
+            .find_map(|e| match e {
+                CoreEvent::Snapshot { bytes, .. } => Some(bytes.into_vec()),
+                _ => None,
+            })
+            .expect("нет Snapshot")
+    };
+    let shallow = snap(&mut c, None);
+    let full = snap(&mut c, Some(true));
+    // Удаление лежит только в истории: полный снимок её хранит, shallow — нет.
+    assert!(
+        full.len() > shallow.len(),
+        "{} > {}",
+        full.len(),
+        shallow.len()
+    );
+}
+
+/// Режим просмотра: правки отвергаются, признак «изменён» не появляется, режим переживает открытие
+/// файла, снятие возвращает правки.
+#[test]
+fn view_only_survives_open_and_lifts() {
+    let (bytes, _) = stored(10);
+    let mut c = core();
+    c.command(Command::SetViewOnly { on: true });
+    c.command(Command::Open {
+        bytes: ByteBuf::from(bytes),
+    });
+    c.take_events();
+    c.command(Command::SetDocumentName {
+        name: "Чужое".into(),
+        quiet: None,
+    });
+    run(&mut c, "edit.delete");
+    let ev = c.take_events();
+    assert!(ev.iter().any(
+        |e| matches!(e, CoreEvent::Error { message } if message.contains("только для чтения"))
+    ));
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Modified { modified: true })));
+    c.command(Command::SetViewOnly { on: false });
+    c.take_events();
+    c.command(Command::SetDocumentName {
+        name: "Своё".into(),
+        quiet: None,
+    });
+    assert!(c
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::DocumentName { name } if name == "Своё")));
 }

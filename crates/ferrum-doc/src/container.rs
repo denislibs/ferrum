@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::binary::Reader;
-use crate::document::{Document, UnloadedPage};
+use crate::document::{Document, SnapshotKind, UnloadedPage};
 use crate::error::{DocError, DocResult};
 use crate::images::ImageStore;
 use crate::page::PageDoc;
@@ -60,15 +60,26 @@ pub(crate) fn push_section(out: &mut Vec<u8>, kind: u8, id: &str, data: &[u8]) {
     out.extend_from_slice(data);
 }
 
-/// Сериализует документ. Изображения без ссылок со страниц не записываются.
+/// Сериализует документ со shallow-снапшотами страниц: копия на диск и локальные файлы.
+/// Изображения без ссылок со страниц не записываются.
 pub fn encode(doc: &Document) -> DocResult<Vec<u8>> {
+    encode_with(doc, SnapshotKind::Shallow)
+}
+
+/// То же с полными снимками страниц: файл на сервере (спека подсистемы 4, раздел 7.6). Страница,
+/// которую не открывали, пишется как прочитана: правок в ней не было.
+pub fn encode_full(doc: &Document) -> DocResult<Vec<u8>> {
+    encode_with(doc, SnapshotKind::Full)
+}
+
+fn encode_with(doc: &Document, kind: SnapshotKind) -> DocResult<Vec<u8>> {
     let mut sections = Vec::new();
     let mut count = 0u32;
     push_section(&mut sections, ROOT, "", &doc.root_snapshot()?);
     count += 1;
     let mut used = HashSet::new();
     for (id, _) in doc.pages() {
-        let payload = doc.page_payload(id)?;
+        let payload = doc.page_payload(id, kind)?;
         let page = id.to_string();
         push_section(&mut sections, PAGE, &page, &payload.snapshot);
         push_section(
