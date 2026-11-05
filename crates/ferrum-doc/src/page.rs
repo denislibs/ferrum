@@ -17,11 +17,13 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use loro::event::{Diff, DiffEvent};
 use loro::{
-    ExportMode, LoroDoc, LoroText, LoroTree, LoroValue, TextDelta, TreeID, TreeParentId,
-    ValueOrContainer, VersionVector,
+    EventTriggerKind, ExportMode, Index, LoroDoc, LoroText, LoroTree, LoroValue, Subscription,
+    TextDelta, TreeExternalDiff, TreeID, TreeParentId, ValueOrContainer, VersionVector,
 };
 
+use crate::changes::Changes;
 use crate::codec;
 use crate::error::{DocError, DocResult};
 use crate::loro_ext;
@@ -80,6 +82,66 @@ pub(crate) enum Inverse {
     Text(NodeId, Vec<TextDelta>),
 }
 
+/// Больше стольких изменённых узлов за пачку зеркало строится заново: по одному узлу это дольше
+/// полной сборки, а сцене дешевле собраться целиком.
+const REBUILD_ABOVE: usize = 20_000;
+
+/// Что сообщили события Loro о пачке чужих правок: сырые `TreeID`, зеркало их разберёт, когда пачка
+/// применена целиком (события приходят по контейнерам, и порядок между ними не важен).
+#[derive(Default)]
+struct RemoteDirty {
+    tree: Vec<TreeID>,
+    props: Vec<TreeID>,
+    text: Vec<(TreeID, Vec<TextDelta>)>,
+}
+
+impl RemoteDirty {
+    fn collect(&mut self, e: &DiffEvent) {
+        // Своя транзакция зеркало уже обновила; чужие приходят только импортом.
+        if e.triggered_by != EventTriggerKind::Import {
+            return;
+        }
+        for d in &e.events {
+            match &d.diff {
+                Diff::Tree(t) => self.tree.extend(t.diff.iter().map(|i| {
+                    debug_assert!(matches!(
+                        i.action,
+                        TreeExternalDiff::Create { .. }
+                            | TreeExternalDiff::Move { .. }
+                            | TreeExternalDiff::Delete { .. }
+                    ));
+                    i.target
+                })),
+                diff => {
+                    // Карта узла, текст в карте узла: узел — последний в пути.
+                    let node = d.path.iter().rev().find_map(|(_, i)| match i {
+                        Index::Node(t) => Some(*t),
+                        _ => None,
+                    });
+                    if let Some(tid) = node {
+                        self.props.push(tid);
+                        if let Diff::Text(delta) = diff {
+                            self.text.push((tid, delta.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Итог пачки чужих правок для страницы.
+#[derive(Default)]
+pub(crate) struct RemoteApplied {
+    pub changes: Changes,
+    pub failed: bool,
+    pub pending: bool,
+    pub rebuilt: bool,
+    pub text: Vec<(NodeId, Vec<TextDelta>)>,
+    pub vectors: Vec<NodeId>,
+    pub images: Vec<String>,
+}
+
 /// Индекс стабильных ID и зеркало свойств живых узлов.
 #[derive(Default)]
 struct State {
@@ -136,6 +198,10 @@ pub struct PageDoc {
     hidden_refs: RefCell<Vec<String>>,
     /// Индекс и зеркало взяты из кэша сцены, а не прочитаны из Loro.
     from_cache: Cell<bool>,
+    /// Один `NodeId` у двух живых узлов (параллельные отмена удаления и перенос): см. `rebuild_from_loro`.
+    duplicates: Cell<bool>,
+    /// События чужих правок: подписка только у файлов на сервере, остальным она ни к чему.
+    remote: RefCell<Option<(std::sync::Arc<std::sync::Mutex<RemoteDirty>>, Subscription)>>,
 }
 
 impl PageDoc {
@@ -226,6 +292,8 @@ impl PageDoc {
             oversized_text: Cell::default(),
             hidden_refs: RefCell::default(),
             from_cache: Cell::default(),
+            duplicates: Cell::default(),
+            remote: RefCell::default(),
         }
     }
 
@@ -256,10 +324,34 @@ impl PageDoc {
         let mut unknown = false;
         let mut oversized = false;
         let mut hidden_refs = Vec::new();
+        let mut duplicates = false;
         let mut stack = self.tree.children(TreeParentId::Root).unwrap_or_default();
         while let Some(tid) = stack.pop() {
-            let id = self.stable_id(tid);
-            let props = match codec::read_props(&self.tree.get_meta(tid)?, &id) {
+            let mut id = self.stable_id(tid);
+            // Два живых узла с одним `NodeId`: отмена удаления создала новый узел, а параллельный
+            // перенос оживил старый. Правило не зависит от порядка обхода, поэтому все участники
+            // видят одно и то же: имя остаётся у исходного узла, иначе у меньшего `TreeID`;
+            // другой узел живёт под своим `TreeID`, ничего не пропадает.
+            if let Some(&other) = state.by_id.get(&id) {
+                duplicates = true;
+                let order = |t: TreeID| (t.peer, t.counter);
+                let keeps = id.0 == other || (id.0 != tid && order(other) < order(tid));
+                if keeps {
+                    id = NodeId(tid);
+                } else {
+                    let props = state.props.remove(&id).expect("запись индекса");
+                    state.by_id.remove(&id);
+                    state.by_tree.remove(&other);
+                    state.insert(NodeId(other), other, props);
+                }
+            }
+            let meta = self.tree.get_meta(tid)?;
+            // Узел без типа — половина чужой транзакции (большая правка идёт кусками): остальное придёт,
+            // а пока ни его, ни его детей для модели нет.
+            if !codec::has_kind(&meta) {
+                continue;
+            }
+            let props = match codec::read_props(&meta, &id) {
                 Ok(props) => props,
                 // Неверная сеть вектора и неизвестная булева операция (чужая
                 // сборка, повреждение) — как неизвестный тип: узел скрыт,
@@ -289,6 +381,7 @@ impl PageDoc {
         *self.state.borrow_mut() = state;
         self.unknown_nodes.set(unknown);
         self.oversized_text.set(oversized);
+        self.duplicates.set(duplicates);
         hidden_refs.sort();
         hidden_refs.dedup();
         *self.hidden_refs.borrow_mut() = hidden_refs;
@@ -308,6 +401,212 @@ impl PageDoc {
             );
         }
         Ok(())
+    }
+
+    /// Подписка на события Loro: дальше чужие правки обновляют зеркало по изменённым узлам. У
+    /// подписки цена и на своих правках, поэтому только у файлов на сервере.
+    pub(crate) fn listen(&self) {
+        let mut remote = self.remote.borrow_mut();
+        if remote.is_some() {
+            return;
+        }
+        let dirty = std::sync::Arc::new(std::sync::Mutex::new(RemoteDirty::default()));
+        let sink = dirty.clone();
+        let sub = self.doc.subscribe_root(std::sync::Arc::new(move |e| {
+            if let Ok(mut d) = sink.lock() {
+                d.collect(&e);
+            }
+        }));
+        *remote = Some((dirty, sub));
+    }
+
+    /// Применяет чужие правки и обновляет зеркало только там, где они что-то изменили (спека
+    /// подсистемы 4, раздел 8). Сбой одной пачки не мешает следующим и не роняет документ.
+    pub(crate) fn apply_remote(&self, batches: &[&[u8]]) -> DocResult<RemoteApplied> {
+        self.listen();
+        let mut out = RemoteApplied::default();
+        for data in batches {
+            match self.doc.import(data) {
+                Ok(status) => out.pending |= status.pending.is_some(),
+                Err(_) => out.failed = true,
+            }
+        }
+        let dirty = match self.remote.borrow().as_ref() {
+            Some((d, _)) => match d.lock() {
+                Ok(mut d) => std::mem::take(&mut *d),
+                Err(_) => RemoteDirty::default(),
+            },
+            None => RemoteDirty::default(),
+        };
+        self.from_cache.set(false);
+        let tree: HashSet<TreeID> = dirty.tree.into_iter().collect();
+        let props: HashSet<TreeID> = dirty.props.into_iter().collect();
+        // Скрытые узлы и двойники зеркало по частям не ведёт, это редкость: сборка заново.
+        let whole = self.unknown_nodes.get()
+            || self.duplicates.get()
+            || tree.len() + props.len() > REBUILD_ABOVE
+            || !self.reconcile(&tree, &props, &mut out)?;
+        if whole {
+            out.changes = Changes::default();
+            out.images.clear();
+            out.vectors.clear();
+            out.rebuilt = true;
+            self.rebuild_from_loro()?;
+        }
+        let state = self.state.borrow();
+        out.text = dirty
+            .text
+            .into_iter()
+            .filter_map(|(tid, d)| Some((*state.by_tree.get(&tid)?, d)))
+            .collect();
+        Ok(out)
+    }
+
+    /// Сверяет с Loro узлы, которых коснулись события. События при параллельных правках бывают
+    /// шумными (Loro откатывает и применяет заново): правда — текущее состояние дерева, а не их порядок.
+    /// `false` — зеркало по частям не обновить: нужна сборка заново.
+    fn reconcile(
+        &self,
+        tree: &HashSet<TreeID>,
+        props: &HashSet<TreeID>,
+        out: &mut RemoteApplied,
+    ) -> DocResult<bool> {
+        let dead = |t: &TreeID| self.tree.is_node_deleted(t).unwrap_or(true);
+        // Сначала удаления: отмена удаления создаёт новый узел с прежним `NodeId`.
+        for tid in tree.iter().filter(|t| dead(t)) {
+            self.forget_subtree(*tid, &mut out.changes);
+        }
+        let mut born = HashSet::new();
+        for tid in tree.iter().filter(|t| !dead(t)) {
+            if born.contains(tid) {
+                continue;
+            }
+            let known = self.state.borrow().by_tree.get(tid).copied();
+            match known {
+                Some(id) => out.changes.moved.push(id),
+                None => {
+                    if !self.adopt_subtree(*tid, &mut born, out)? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        for tid in props {
+            if born.contains(tid) || dead(tid) {
+                continue;
+            }
+            let Some(id) = self.state.borrow().by_tree.get(tid).copied() else {
+                // Живой, но не в зеркале: половина чужой транзакции, теперь, возможно, узел целый.
+                if !self.adopt_subtree(*tid, &mut born, out)? {
+                    return Ok(false);
+                }
+                continue;
+            };
+            let new = match codec::read_props(&self.tree.get_meta(*tid)?, &id) {
+                Ok(p) => p,
+                Err(
+                    DocError::UnknownKind(..)
+                    | DocError::InvalidVector(..)
+                    | DocError::InvalidBooleanOp(..),
+                ) => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            let mut state = self.state.borrow_mut();
+            let Some(old) = state.props.get_mut(&id) else {
+                continue;
+            };
+            if *old == new {
+                continue;
+            }
+            if old.vector != new.vector {
+                out.vectors.push(id);
+            }
+            if old.fills != new.fills {
+                out.images.extend(image_hashes(&new));
+            }
+            if new
+                .text
+                .as_ref()
+                .is_some_and(|t| t.content.check_limits().is_err())
+            {
+                self.oversized_text.set(true);
+            }
+            *old = new;
+            out.changes.props.push(id);
+        }
+        Ok(true)
+    }
+
+    /// Убирает из зеркала узел и потомков. У удалённого узла Loro по-прежнему отдаёт детей.
+    fn forget_subtree(&self, root: TreeID, changes: &mut Changes) {
+        let mut stack = vec![root];
+        let mut state = self.state.borrow_mut();
+        while let Some(tid) = stack.pop() {
+            let Some(id) = state.by_tree.get(&tid).copied() else {
+                continue;
+            };
+            state.remove(id);
+            changes.deleted.push(id);
+            stack.extend(
+                self.tree
+                    .children(TreeParentId::Node(tid))
+                    .unwrap_or_default(),
+            );
+        }
+    }
+
+    /// Добавляет в зеркало новый узел с потомками. `false` — неизвестный вид или занятый `NodeId`.
+    fn adopt_subtree(
+        &self,
+        root: TreeID,
+        born: &mut HashSet<TreeID>,
+        out: &mut RemoteApplied,
+    ) -> DocResult<bool> {
+        // Родитель ещё неполон: узел придёт вместе с ним, как и при полной сборке.
+        let parent_ready = match self.tree.parent(root) {
+            Some(TreeParentId::Node(p)) => self.state.borrow().by_tree.contains_key(&p),
+            _ => true,
+        };
+        if !parent_ready {
+            return Ok(true);
+        }
+        let mut stack = vec![root];
+        while let Some(tid) = stack.pop() {
+            let meta = self.tree.get_meta(tid)?;
+            if !codec::has_kind(&meta) {
+                continue;
+            }
+            let id = self.stable_id(tid);
+            if self.state.borrow().by_id.contains_key(&id) {
+                return Ok(false);
+            }
+            let props = match codec::read_props(&meta, &id) {
+                Ok(p) => p,
+                Err(
+                    DocError::UnknownKind(..)
+                    | DocError::InvalidVector(..)
+                    | DocError::InvalidBooleanOp(..),
+                ) => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            if props
+                .text
+                .as_ref()
+                .is_some_and(|t| t.content.check_limits().is_err())
+            {
+                self.oversized_text.set(true);
+            }
+            out.images.extend(image_hashes(&props));
+            self.state.borrow_mut().insert(id, tid, props);
+            out.changes.created.push(id);
+            born.insert(tid);
+            stack.extend(
+                self.tree
+                    .children(TreeParentId::Node(tid))
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(true)
     }
 
     /// Загружена ли страница по кэшу сцены — чтобы тесты проверяли именно быстрый путь.
@@ -334,6 +633,15 @@ impl PageDoc {
         let t = text_codec::text_container(&self.tree.get_meta(tid).expect("карта узла"))
             .expect("текст узла");
         t.insert(0, text).expect("вставка в Loro");
+        self.doc.commit();
+    }
+
+    /// Только для тестов: тип узла в Loro как есть (чужая правка из более новой сборки).
+    #[doc(hidden)]
+    pub fn force_kind_for_tests(&self, id: NodeId, kind: &str) {
+        let tid = self.tid(id).expect("узел есть");
+        let meta = self.tree.get_meta(tid).expect("карта узла");
+        meta.insert(codec::key::TYPE, kind).expect("запись в Loro");
         self.doc.commit();
     }
 
@@ -391,6 +699,11 @@ impl PageDoc {
 
     pub(crate) fn commit(&self) {
         self.doc.commit();
+    }
+
+    /// Документ Loro страницы: курсор синхронизации сам собирает пачки (`sync::split_updates`).
+    pub(crate) fn loro(&self) -> &LoroDoc {
+        &self.doc
     }
 
     /// Версия операций страницы — отметка журнала.
@@ -1406,6 +1719,10 @@ impl<'a> Tx<'a> {
     }
 }
 
+fn image_hashes(p: &Props) -> impl Iterator<Item = String> + '_ {
+    p.fills.iter().filter_map(|f| f.image_hash.clone())
+}
+
 impl std::ops::Deref for Tx<'_> {
     type Target = PageDoc;
 
@@ -1713,15 +2030,17 @@ mod tests {
         assert_eq!(loaded.scene_rows().unwrap().len(), 3);
     }
 
+    /// Узел без типа — половина чужой транзакции: файл открывается, узла для модели пока нет.
     #[test]
-    fn missing_kind_is_corruption() {
+    fn missing_kind_hides_node_until_it_arrives() {
         let page = PageDoc::new();
         let a = page.create_node(None, None, NodeKind::Rect).unwrap();
+        let b = page.create_node(None, None, NodeKind::Rect).unwrap();
         page.force_raw_kind_for_tests(a, None);
-        assert!(matches!(
-            PageDoc::from_snapshot(&page.export_snapshot().unwrap()),
-            Err(DocError::Corrupted(_))
-        ));
+        let loaded = PageDoc::from_snapshot(&page.export_snapshot().unwrap()).unwrap();
+        assert!(!loaded.contains(a));
+        assert_eq!(loaded.walk(), vec![b]);
+        assert!(!loaded.has_unknown_nodes(), "не повод для «только чтения»");
     }
 
     #[test]

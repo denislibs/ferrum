@@ -207,6 +207,11 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
 
 /// Хэши изображений в заливках узла — без разбора остальных свойств и типа узла:
 /// так читаются и узлы неизвестного типа, скрытые от модели.
+/// Записан ли тип узла. Нет — половина чужой транзакции: узел создан, свойства ещё в пути.
+pub(crate) fn has_kind(map: &LoroMap) -> bool {
+    value(map, key::TYPE).is_some()
+}
+
 pub(crate) fn read_image_refs(map: &LoroMap) -> Vec<String> {
     match value(map, key::FILLS) {
         Some(v) => read_list(&v, read_fill)
