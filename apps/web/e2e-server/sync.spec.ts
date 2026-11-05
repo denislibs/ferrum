@@ -391,7 +391,8 @@ test('удалённая страница остаётся в контейнер
   const pages = a.getByRole('listbox', { name: 'Страницы' });
   await a.getByRole('button', { name: 'Добавить страницу' }).click();
   await expect(pages.getByRole('option')).toHaveCount(2);
-  // Правка на новой странице: у неё журнал на сервере, сжатие соберёт её секцию.
+  // Новая страница открыта (пустая) — правка на ней: у неё журнал на сервере, сжатие соберёт её секцию.
+  await nodes(a, 0);
   await drawRect(a);
   await synced(a);
   await pages.getByRole('option', { name: 'Страница 2' }).focus();

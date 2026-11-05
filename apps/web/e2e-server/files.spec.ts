@@ -56,8 +56,9 @@ async function storedFile(page: Page): Promise<string> {
   await inSync(page);
   const before = await contentSize(page, id);
   await drawRect(page);
-  // Правка на сервере и в его файле: журнал сжат, `content` содержит всё.
-  await expect.poll(() => contentSize(page, id), { timeout: 30_000 }).toBeGreaterThan(before);
+  // Правка на сервере и в его файле: журнал сжат, `content` содержит всё. «Скачать копию» сервер повторяет по файлу не чаще
+  // раза в 30 с (503 с `Retry-After`), а первое сжатие было только что: ждём дольше этого окна.
+  await expect.poll(() => contentSize(page, id), { timeout: 60_000 }).toBeGreaterThan(before);
   await inSync(page);
   return id;
 }
