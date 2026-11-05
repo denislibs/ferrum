@@ -13,8 +13,10 @@ import {
   FULL_MAX_MS,
   JOURNAL_MS,
   newSession,
+  NOT_ON_SERVER,
   sessionAfter,
   SETTLE_MS,
+  SYNC_WAIT_MS,
   withTimeout,
   type SaverOptions,
 } from '../src/ui/saver';
@@ -670,4 +672,93 @@ test('закрытие вкладки: спрашивает, только пок
   await stored.tick();
   expect(stored.saver.pending()).toBe(false);
   expect(ask(stored)).toBe(false);
+});
+
+// --- Журнал сервера: файл целиком пишется только первый раз ---
+
+const synced = (stored: boolean, opts: SaverOptions = {}) => harness(stored, null, true, true, { sync: true, ...opts });
+
+test('журнал сервера: правки идут журналом, полный файл не пишется ни в простое, ни со временем', async () => {
+  const h = synced(true);
+  h.emit({ type: 'modified', modified: true });
+  h.advance(FULL_MAX_MS * 3);
+  await h.tick();
+  expect(h.sent.some((c) => c.type === 'flushJournal')).toBe(true);
+  expect(h.sent.some((c) => c.type === 'snapshot')).toBe(false);
+  expect(h.writes).toHaveLength(0);
+});
+
+test('журнал сервера: новый файл записывается сразу, без правок; потом можно подключаться', async () => {
+  let stored = 0;
+  const h = harness(false, null, true, true, { sync: true, onStored: () => stored++ });
+  await h.tick();
+  expect(h.sent.find((c) => c.type === 'snapshot')).toBeTruthy();
+  h.snapshot(0);
+  await h.tick();
+  await h.tick();
+  expect(h.writes).toHaveLength(1);
+  expect(stored).toBe(1);
+  expect(h.saver.stored()).toBe(true);
+});
+
+test('журнал сервера: читатель первую запись не делает', async () => {
+  const h = harness(false, null, true, true, { sync: true, viewer: true });
+  await h.tick();
+  expect(h.sent.some((c) => c.type === 'snapshot')).toBe(false);
+});
+
+test('журнал сервера: первую запись опередили, своих правок нет — файл открывается заново, а не теряет чужое', async () => {
+  let taken = 0;
+  const h = harness(false, null, true, true, { sync: true, onTaken: () => taken++ });
+  h.failWrites(true, 'CONFLICT');
+  await h.tick();
+  h.snapshot(0);
+  await h.tick();
+  await h.tick();
+  expect(taken).toBe(1);
+});
+
+test('журнал сервера: первую запись опередили, а правки уже есть — честный вопрос, правки не пропадают молча', async () => {
+  let taken = 0;
+  let diverged = 0;
+  const h = harness(false, null, true, true, { sync: true, onTaken: () => taken++, onDiverged: () => diverged++ });
+  h.failWrites(true, 'CONFLICT');
+  h.emit({ type: 'modified', modified: true });
+  await h.tick();
+  h.snapshot(0);
+  await h.tick();
+  await h.tick();
+  expect(taken).toBe(0);
+  expect(diverged).toBe(1);
+});
+
+test('журнал сервера: «Сохранить» ждёт сервера; подтвердил — записано', async () => {
+  const h = synced(true);
+  h.emit({ type: 'modified', modified: true });
+  h.emit({ type: 'syncState', unacked: true });
+  const saved = h.saver.save();
+  await h.tick();
+  h.emit({ type: 'journal', batch: 1, bytes: new Uint8Array([1]), failed: false });
+  await h.tick();
+  await h.tick();
+  h.emit({ type: 'syncState', unacked: false });
+  expect(await saved).toBe(true);
+  expect(h.saver.failure()).toBeNull();
+});
+
+test('журнал сервера: сервер не подтвердил за срок — уход спросит, причина не пугает: правки в браузере', async () => {
+  const h = synced(true);
+  h.emit({ type: 'modified', modified: true });
+  h.emit({ type: 'syncState', unacked: true });
+  const saved = h.saver.save();
+  await h.tick();
+  h.emit({ type: 'journal', batch: 1, bytes: new Uint8Array([1]), failed: false });
+  await h.tick();
+  await h.tick();
+  h.advance(SYNC_WAIT_MS);
+  expect(await saved).toBe(false);
+  expect(h.saver.failure()).toBe(NOT_ON_SERVER);
+  // Позже подтвердил: причина снята.
+  h.emit({ type: 'syncState', unacked: false });
+  expect(h.saver.failure()).toBeNull();
 });

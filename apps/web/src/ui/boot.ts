@@ -89,6 +89,8 @@ export interface BootOptions {
   /** Байты файла и пачки журнала после них (читаются, пока запускается ядро);
    * `null` — новый файл. */
   document?: Promise<{ bytes: ArrayBuffer; journal: ArrayBuffer[] } | null>;
+  /** Файл на сервере: журналу может не хватать правок, которые придут при догонянии. */
+  remote?: boolean;
   /** Системные шрифты платформы (подсистема 3); нет — только вшитые. */
   systemFonts?: SystemFonts;
 }
@@ -223,7 +225,12 @@ export async function boot(canvas: HTMLCanvasElement, store: UiStore, opts: Boot
   const doc = (await opts.document) ?? null;
   if (doc && doc.journal.length > 0) {
     // Правки после файла (сбой, закрытая вкладка): ядро применит их поверх него.
-    core.send({ type: 'openWithJournal', bytes: new Uint8Array(doc.bytes), journal: doc.journal.map((b) => new Uint8Array(b)) });
+    core.send({
+      type: 'openWithJournal',
+      bytes: new Uint8Array(doc.bytes),
+      journal: doc.journal.map((b) => new Uint8Array(b)),
+      remote: opts.remote === true,
+    });
   } else if (doc) core.send({ type: 'open', bytes: new Uint8Array(doc.bytes) });
   else if (params.has('texts')) core.send({ type: 'demoText', texts: Number(params.get('texts')) });
   else core.send({ type: 'demo', nodes: Number(params.get('nodes') ?? 0) });

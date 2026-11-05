@@ -1,7 +1,9 @@
 // Шапки панелей (PanelHeader), главное меню, зум, «Поделиться», вкладки, края
 // панелей для изменения ширины.
 
+import type { FileRole } from '@ferrum/protocol';
 import type { FileMeta } from '../core/file-list';
+import type { SyncStatus } from '../core/sync-client';
 import { extensions } from './extensions';
 import { createSignal, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { useEditor } from './context';
@@ -12,6 +14,26 @@ import { roving } from './roving';
 import { clampPanel, PANEL_MAX, PANEL_MIN } from './settings';
 
 export { clampPanel, PANEL_MAX, PANEL_MIN };
+
+/** Подпись состояния соединения файла (спека подсистемы 4, раздел 8.1). */
+function syncText(status: SyncStatus | null, role: FileRole | null): string | null {
+  switch (status) {
+    case 'synced':
+      return 'Синхронизировано';
+    case 'saving':
+      // Роль понизили, пока правки шли: они уже не дойдут.
+      return role === 'viewer' ? 'Правки не дошли до сервера' : 'Сохранение…';
+    case 'connecting':
+    case 'paused':
+      return 'Сохранение…';
+    case 'offline':
+      return 'Нет сети — правки сохранятся при подключении';
+    case 'rejected':
+      return 'Правки не сохраняются';
+    case null:
+      return null;
+  }
+}
 
 /** Шапка левой панели: кнопка с логотипом открывает главное меню (как в Figma
  * UI3; оно же — по `ui.main_menu`, Alt+/), имя файла, «Назад к файлам».
@@ -139,6 +161,13 @@ export function DesignHeader(props: { file?: FileMeta }) {
         </button>
         <Show when={ed.store.state.fileRole === 'viewer'}>
           <span class="fe-viewonly t-muted">Только просмотр</span>
+        </Show>
+        <Show when={syncText(ed.store.state.syncStatus, ed.store.state.fileRole)}>
+          {(text) => (
+            <span class="fe-sync t-muted" role="status" data-status={ed.store.state.syncStatus}>
+              {text()}
+            </span>
+          )}
         </Show>
         {extensions.shareButton && props.file ? (
           <extensions.shareButton

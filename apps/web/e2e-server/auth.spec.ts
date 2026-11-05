@@ -457,10 +457,13 @@ async function drawRect(page: Page): Promise<void> {
   await page.keyboard.press('KeyR');
   const l = await live(page);
   await drag(page, await appScreen(page, l, l.cameraX - 50, l.cameraY - 40), 100, 80);
-  await nodesAre(page, l.nodes + 1);
-  // Живое число узлов идёт через общую память и обгоняет событие `modified`, а запись видит правку
-  // только по нему: человек не успеет уйти быстрее одного кадра (B-200).
-  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  // Число узлов считает и черновик рисования: жест закончен, только когда редактор свободен.
+  await expect
+    .poll(async () => {
+      const now = await live(page);
+      return now.busy === 0 ? now.nodes : -1;
+    })
+    .toBe(l.nodes + 1);
 }
 
 /** Вторая ссылка для уже вошедшего человека: письмо запрашивается в обход интерфейса. */
@@ -599,22 +602,27 @@ test('выход из редактора: правка не пропадает',
 });
 
 test('выход, когда запись не удалась: вопрос, «Остаться» отменяет выход', async ({ page }, info) => {
+  test.skip(info.project.name === 'server-firefox', '`setOffline` не действует на worker в Firefox');
   const email = newEmail(info.project.name);
   await testMode(page);
   await page.goto('/?nodes=0');
   await signIn(page, email);
   await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
   await editorReady(page);
+  // Сервера нет, правка в браузере: сервер её не подтвердит.
+  await expect(page.locator('.fe-sync')).toHaveText('Синхронизировано');
+  await page.context().setOffline(true);
+  await expect(page.locator('.fe-sync')).toHaveText('Нет сети — правки сохранятся при подключении', { timeout: 45_000 });
   await drawRect(page);
-  // Запись на сервер не проходит: и в worker'е файлов, и из любой вкладки контекста.
-  await page.context().route('**/api/files/*/content', (r) => r.abort());
   await mainMenu(page, 'Настройки', 'Настройки…');
   await page.getByRole('tab', { name: 'Аккаунт' }).click();
   await page.getByRole('tabpanel', { name: 'Аккаунт' }).getByRole('button', { name: 'Выйти', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' });
-  await expect(dialog).toContainText('Изменения не сохранены');
+  await expect(dialog).toContainText('Изменения не сохранены', { timeout: 15_000 });
+  await expect(dialog).toContainText('сохранены в этом браузере');
   await dialog.getByRole('button', { name: 'Остаться' }).click();
   await expect(dialog).toHaveCount(0);
+  await page.context().setOffline(false);
   // Сессия жива, редактор на месте.
   const me = (await (await page.request.get('/api/auth/session')).json()) as { user: { email: string } | null };
   expect(me.user?.email).toBe(email);
@@ -768,6 +776,8 @@ test('выход в другой вкладке: новый файл не зап
   await testMode(page);
   await page.goto('/?nodes=0');
   await signIn(page, email);
+  // Первая запись нового файла не проходит: у него нет ничего, кроме памяти вкладки.
+  await context.route('**/api/files/*/content', (r) => (r.request().method() === 'PUT' ? r.abort() : r.continue()));
   await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
   await editorReady(page);
   const tab = await context.newPage();
@@ -788,7 +798,7 @@ test('выход в другой вкладке: новый файл не зап
   await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
 });
 
-test('выход в другой вкладке: записанный файл, правка возвращается из журнала после входа', async ({ page, context }, info) => {
+test('выход в другой вкладке: записанный файл, правка на месте после входа', async ({ page, context }, info) => {
   const email = newEmail(info.project.name);
   await testMode(page);
   await page.goto('/?nodes=0');
@@ -803,9 +813,9 @@ test('выход в другой вкладке: записанный файл, 
   await tab.goto('/');
   await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible();
   await drawRect(page);
+  await expect(page.locator('.fe-sync')).toHaveText('Синхронизировано');
   await tab.getByRole('button', { name: 'Выйти' }).click();
-  await expect(page.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
-  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  // Правка на сервере: вопросов нет, вкладка просит войти.
   await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
   await signIn(page, email, '');
   await expect(page).toHaveURL(url);
