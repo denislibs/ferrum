@@ -16,7 +16,7 @@ test.afterEach(() => {
 test("отказ worker'а несёт код: сохранитель отличает `CONFLICT` от сбоя сети (T6-I4)", async () => {
   const workers: { onmessage: (e: { data: unknown }) => void; sent: { t: string; id?: number }[] }[] = [];
   g.Worker = class {
-    onmessage = (_: { data: unknown }) => {};
+    onmessage: (e: { data: unknown }) => void = () => {};
     onerror = null;
     sent: { t: string; id?: number }[] = [];
     constructor() {

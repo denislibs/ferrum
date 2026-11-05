@@ -194,7 +194,14 @@ export interface IoResults {
    * `journalHeld` — журнал есть, но не применён (файл открыт читателем): вернули право — открыть заново.
    * `journalTooLarge` — журнал сверх пределов (больше `MAX_JOURNAL_ENTRIES` пачек или
    * файл вместе с ним больше `MAX_OPEN_BYTES`) не прочитан: файл открывается без него. */
-  read: { meta: FileMeta; bytes: ArrayBuffer | null; journal: ArrayBuffer[]; session: number | null; journalTooLarge?: boolean; journalHeld?: boolean };
+  read: {
+    meta: FileMeta;
+    bytes: ArrayBuffer | null;
+    journal: ArrayBuffer[];
+    session: number | null;
+    journalTooLarge?: boolean;
+    journalHeld?: boolean;
+  };
   write: FileMeta;
   appendJournal: null;
   journalCount: number;
