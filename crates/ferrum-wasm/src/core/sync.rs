@@ -47,13 +47,14 @@ impl Core {
     }
 
     pub(super) fn sync_acked(&mut self, doc: &str, client_seq: u32) {
+        // Кадр не доверенный: чужой документ не подтверждает эту пачку и не снимает её ожидание.
+        match self.sync.inflight.get(&client_seq) {
+            Some((key, _)) if key.to_string() == doc => {}
+            _ => return,
+        }
         let Some((key, end)) = self.sync.inflight.remove(&client_seq) else {
             return;
         };
-        // Кадр не доверенный: чужой документ не подтверждает эту пачку.
-        if key.to_string() != doc {
-            return;
-        }
         self.editor.sync_acked(key, &end);
         self.sync_note();
     }

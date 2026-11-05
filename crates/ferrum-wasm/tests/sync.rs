@@ -628,3 +628,24 @@ fn page_removed_by_other_reaches_the_person_as_notice() {
     );
 }
 
+#[test]
+fn ack_with_wrong_document_does_not_cancel_the_real_one() {
+    let bytes = file();
+    let mut a = opened(&bytes);
+    rect(&mut a);
+    let ups = updates(&mut a);
+    for (_, seq, _) in &ups {
+        a.command(Command::SyncAcked {
+            doc: "root-other".into(),
+            client_seq: *seq,
+        });
+    }
+    assert!(a.editor().sync_unacked());
+    for (doc, seq, _) in &ups {
+        a.command(Command::SyncAcked {
+            doc: doc.clone(),
+            client_seq: *seq,
+        });
+    }
+    assert!(!a.editor().sync_unacked(), "настоящее подтверждение дошло");
+}
