@@ -252,6 +252,38 @@ fn restoring_deleted_node_under_parent_removed_by_other_is_skipped() {
 }
 
 #[test]
+fn undo_of_move_that_would_make_a_cycle_is_skipped() {
+    let (mut a, mut b, page) = pair();
+    // Узлы создал b: у a в стеке только перенос.
+    let ids = b
+        .transact(page, vec![], |tx| {
+            let y = tx.create_node(None, None, NodeKind::Frame)?;
+            let x = tx.create_node(Some(y), None, NodeKind::Frame)?;
+            Ok(vec![x, y])
+        })
+        .unwrap();
+    let (x, y) = (ids[0], ids[1]);
+    sync(&mut a, &mut b);
+    a.transact(page, vec![], |tx| {
+        tx.move_node(x, None, 0)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    b.transact(page, vec![], |tx| {
+        tx.move_node(y, Some(x), 0)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    // Отмена вернула бы x внутрь y, а y теперь внутри x: цикл, шаг пропускается без ошибки.
+    assert_eq!(a.undo().unwrap(), None);
+    assert_eq!(a.page(page).unwrap().parent(y), Some(x));
+    assert_eq!(a.page(page).unwrap().parent(x), None);
+    assert_mirror(&mut a, page);
+}
+
+#[test]
 fn text_undo_keeps_foreign_insert_before_and_inside() {
     let (mut a, mut b, page) = pair();
     let id = a
