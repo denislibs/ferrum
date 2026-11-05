@@ -323,10 +323,10 @@ impl Tool for DrawTool {
         !matches!(self.state, State::Idle)
     }
 
-    fn new_node_parent(&self) -> Option<NodeId> {
+    fn touches(&self, gone: &dyn Fn(NodeId) -> bool) -> bool {
         match &self.state {
-            State::Idle => None,
-            State::Pressed(s) | State::Drawing { start: s, .. } => s.parent,
+            State::Idle => false,
+            State::Pressed(s) | State::Drawing { start: s, .. } => s.parent.is_some_and(gone),
         }
     }
 

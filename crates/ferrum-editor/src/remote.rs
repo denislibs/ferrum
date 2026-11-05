@@ -180,9 +180,8 @@ impl Editor {
 
     /// Узлов больше нет: жест над ними отменяется, остальные жесты идут, выделение их теряет. Всё тихо.
     fn leave_nodes(&mut self, gone: &impl Fn(NodeId) -> bool) {
-        let over_tool = self.is_busy()
-            && (self.selection.iter().any(|n| gone(*n))
-                || self.tool.new_node_parent().is_some_and(gone));
+        let over_tool =
+            self.is_busy() && (self.selection.iter().any(|n| gone(*n)) || self.tool.touches(gone));
         if over_tool {
             self.cancel_gesture();
         }

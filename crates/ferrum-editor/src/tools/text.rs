@@ -155,10 +155,10 @@ impl Tool for TextTool {
         !matches!(self.state, State::Idle)
     }
 
-    fn new_node_parent(&self) -> Option<NodeId> {
+    fn touches(&self, gone: &dyn Fn(NodeId) -> bool) -> bool {
         match &self.state {
-            State::Idle => None,
-            State::Pressed(s) | State::Drawing(s, _) => s.parent,
+            State::Idle => false,
+            State::Pressed(s) | State::Drawing(s, _) => s.parent.is_some_and(gone),
         }
     }
 

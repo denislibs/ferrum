@@ -767,3 +767,80 @@ fn guide_over_frame_deleted_by_other_is_cancelled_silently() {
     no_error(&mut b);
     assert!(b.ed.document().page_guides(b.ed.page()).is_empty());
 }
+
+/// Группа из двух прямоугольников; другой удаляет ребёнка, пока у `b` идёт жест над группой. Жест,
+/// который держит детей, отменяется; который держит только группу, идёт дальше. Ошибки нет ни там, ни там.
+fn group_gesture_child_deleted(
+    tool: ToolKind,
+    from: (f64, f64),
+    to: (f64, f64),
+    holds_children: bool,
+) {
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 100.0, 100.0, 50.0, 50.0);
+    let y = a.rect(None, 200.0, 200.0, 50.0, 50.0);
+    a.ed.select(&[x, y]);
+    a.ed.execute(CommandId::Group);
+    let g = a.ed.selection()[0];
+    a.ed.select(&[]);
+    deliver(&mut a, &mut b);
+    assert_eq!(b.parent(x), Some(g));
+    b.ed.set_tool(tool);
+    b.ed.select(&[g]);
+    let steps = b.ed.step_count();
+    b.drag_hold(from, to, none());
+    assert!(b.ed.is_busy() && b.ed.scene().has_preview(), "жест идёт");
+    delete_node(&mut a, x);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert_eq!(
+        b.ed.is_busy(),
+        !holds_children,
+        "жест снят, только если держит детей"
+    );
+    b.up(to.0, to.1, none());
+    no_error(&mut b);
+    let made = if holds_children { 0 } else { 1 };
+    assert_eq!(b.ed.step_count(), steps + made);
+    assert_eq!(b.sel(), vec![g], "группа жива и выделена");
+    b.assert_scene_clean();
+}
+
+#[test]
+fn resizing_group_whose_child_is_deleted_by_other_is_cancelled_silently() {
+    group_gesture_child_deleted(ToolKind::Move, (250.0, 250.0), (300.0, 300.0), true);
+}
+
+#[test]
+fn scaling_group_whose_child_is_deleted_by_other_is_cancelled_silently() {
+    group_gesture_child_deleted(ToolKind::Scale, (250.0, 250.0), (300.0, 300.0), true);
+}
+
+#[test]
+fn rotating_group_whose_child_is_deleted_by_other_goes_on() {
+    // Поворот держит только группу.
+    group_gesture_child_deleted(ToolKind::Move, (258.0, 258.0), (175.0, 320.0), false);
+}
+
+#[test]
+fn moving_group_whose_child_is_deleted_by_other_goes_on() {
+    // Перенос держит только верхний уровень выделения: удалённый ребёнок ему не мешает.
+    let (mut a, mut b) = pair();
+    let x = a.rect(None, 100.0, 100.0, 50.0, 50.0);
+    let y = a.rect(None, 200.0, 200.0, 50.0, 50.0);
+    a.ed.select(&[x, y]);
+    a.ed.execute(CommandId::Group);
+    let g = a.ed.selection()[0];
+    deliver(&mut a, &mut b);
+    b.ed.select(&[g]);
+    let gx = b.props(g).x;
+    b.drag_hold((220.0, 220.0), (320.0, 220.0), none());
+    delete_node(&mut a, x);
+    deliver(&mut a, &mut b);
+    assert!(b.ed.is_busy(), "перенос идёт");
+    b.up(320.0, 220.0, none());
+    no_error(&mut b);
+    assert_eq!(b.props(g).x, gx + 100.0);
+    assert!(b.ed.page_doc().contains(y));
+    b.assert_scene_clean();
+}

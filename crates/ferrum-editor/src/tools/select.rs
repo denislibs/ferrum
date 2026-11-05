@@ -1077,6 +1077,15 @@ impl Tool for SelectTool {
         !matches!(self.state, State::Idle)
     }
 
+    /// Ресайз и «Масштаб» держат базы потомков групп. Остальные жесты (нажатие, перенос, поворот, конец
+    /// линии, рамка) держат только выделение или ничего: выделение проверяет редактор.
+    fn touches(&self, gone: &dyn Fn(NodeId) -> bool) -> bool {
+        match &self.state {
+            State::Resizing(r) => r.bases.iter().any(|b| gone(b.id)),
+            _ => false,
+        }
+    }
+
     fn cursor(&self) -> Cursor {
         match &self.state {
             State::Dragging(d) if d.copies.is_some() => Cursor::Duplicate,
