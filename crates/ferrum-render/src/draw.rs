@@ -143,6 +143,8 @@ struct Raster {
     /// Поколение реестра шрифтов при построении: пришли новые шрифты — текст
     /// в растре мог устареть.
     fonts_generation: u64,
+    /// Поколение картинок при построении (`ImageProvider::generation`).
+    images_generation: u64,
 }
 
 impl Raster {
@@ -631,6 +633,7 @@ impl Painter {
         area: Rect,
     ) -> bool {
         let fonts_generation = ctx.fonts.borrow().generation();
+        let images_generation = ctx.images.generation();
         // Растр того же содержимого, возможно, другой плотности.
         let same = self
             .rasters
@@ -640,6 +643,7 @@ impl Painter {
             && self.rasters.get(&slot).is_some_and(|r| {
                 !r.placeholder
                     && r.fonts_generation == fonts_generation
+                    && r.images_generation == images_generation
                     && r.scale >= ctx.scale
                     && r.scale < 2.0 * ctx.scale
             });
@@ -743,6 +747,7 @@ impl Painter {
                 last_used: self.frame,
                 placeholder,
                 fonts_generation,
+                images_generation,
             };
             self.raster_bytes += raster.bytes();
             self.rasters.insert(slot, raster);

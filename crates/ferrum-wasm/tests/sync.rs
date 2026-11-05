@@ -367,6 +367,84 @@ fn drag(c: &mut Core, from: (f64, f64), to: (f64, f64), t: f64) {
     )));
 }
 
+/// Несколько кадров: растр догоняет по бюджету. Пиксели цвета `tiny_png`.
+fn image_pixels(c: &mut Core) -> usize {
+    let (w, h) = c.device_size();
+    let mut pixels = 0;
+    for _ in 0..5 {
+        let mut b = CpuBackend::new(w, h);
+        c.draw(&mut b);
+        pixels = b
+            .render()
+            .data_as_u8_slice()
+            .chunks_exact(4)
+            .filter(|p| p[..3] == [10, 20, 30])
+            .count();
+    }
+    pixels
+}
+
+#[test]
+fn image_downloaded_later_appears_inside_a_frame_when_zoomed_out() {
+    let bytes = file();
+    let mut a = opened(&bytes);
+    let mut b = opened(&bytes);
+    a.command(Command::SetTool { tool: Tool::Frame });
+    drag(&mut a, (100.0, 100.0), (400.0, 400.0), 1000.0);
+    let png = tiny_png();
+    a.command(Command::PlaceImage {
+        bytes: ByteBuf::from(png.clone()),
+    });
+    drag(&mut a, (150.0, 150.0), (350.0, 350.0), 2000.0);
+    b.command(Command::SetZoom { zoom: 0.25 });
+    b.take_events();
+    for (doc, _, bytes) in updates(&mut a) {
+        b.command(Command::ApplyRemote {
+            doc,
+            batches: vec![ByteBuf::from(bytes)],
+        });
+    }
+    let hash = b
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::ImagesNeeded { hashes } => hashes.first().cloned(),
+            _ => None,
+        })
+        .expect("картинку попросили");
+    assert_eq!(image_pixels(&mut b), 0, "пока заглушка");
+    b.command(Command::AddRemoteImage {
+        hash,
+        bytes: ByteBuf::from(png),
+    });
+    assert!(image_pixels(&mut b) > 0, "растр фрейма перестроен");
+}
+
+#[test]
+fn image_not_drawn_yet_does_not_invalidate_rasters() {
+    let bytes = file();
+    let mut b = opened(&bytes);
+    b.command(Command::SetTool { tool: Tool::Frame });
+    drag(&mut b, (100.0, 100.0), (400.0, 400.0), 1000.0);
+    b.command(Command::SetTool { tool: Tool::Rect });
+    drag(&mut b, (150.0, 150.0), (250.0, 250.0), 2000.0);
+    b.command(Command::SetZoom { zoom: 0.25 });
+    image_pixels(&mut b);
+    let (w, h) = b.device_size();
+    assert_eq!(
+        b.draw(&mut CpuBackend::new(w, h)).raster_builds,
+        0,
+        "растр готов"
+    );
+    let png = tiny_png();
+    let hash = ferrum_doc::ImageStore::default().add(png.clone());
+    b.command(Command::AddRemoteImage {
+        hash,
+        bytes: ByteBuf::from(png),
+    });
+    assert_eq!(b.draw(&mut CpuBackend::new(w, h)).raster_builds, 0);
+}
+
 /// Файл на сервере и журнал браузера с картинкой и правкой, которую сервер не видел.
 fn journal_with_image(bytes: &[u8]) -> Vec<u8> {
     let mut a = opened(bytes);
