@@ -48,6 +48,7 @@ const server = startServer(
     trustedProxies: config.trustedProxies,
     blobs,
     mailer,
+    allowedEmails: config.allowedEmails,
     secret: config.authSecret,
   },
   config.port,

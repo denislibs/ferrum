@@ -306,7 +306,7 @@ test('JSON сверх предела — 400, неверный JSON — 400', as
 
 test('предел частоты по человеку: другой не страдает; срок обработчика — 503 в формате ошибок', async () => {
   expect(LIMITS.read.max).toBeGreaterThan(100);
-  const tight = await apiStand({ limits: { read: { max: 2, windowSeconds: 60 } } });
+  const tight = await apiStand({ limits: { read: { max: 2, windowSeconds: 60 } } }, true);
   const a = await tight.signIn('a@example.com');
   const b = await tight.signIn('b@example.com');
   const path = '/api/files?section=drafts&start=0&count=1';
@@ -320,7 +320,7 @@ test('предел частоты по человеку: другой не ст�
 });
 
 test('простой клиента посреди загрузки: обрыв по сроку, временных файлов нет', async () => {
-  const slow = await apiStand({ uploadIdleMs: 50 });
+  const slow = await apiStand({ uploadIdleMs: 50 }, true);
   const who = await slow.signIn('slow@example.com');
   const f = await slow.newFile(who);
   const silent = new ReadableStream<Uint8Array>({

@@ -60,6 +60,7 @@ test('знание хэша ничего не даёт: чужая картин�
   expect((await head(other, theirs.id, hash)).status).toBe(404);
   // Через чужой файл: нет доступа, 404.
   expect((await get(other, mine.id, hash)).status).toBe(404);
+  expect((await head(other, mine.id, hash)).status).toBe(404);
   // Содержимое со ссылкой на чужой хэш не привязывает картинку.
   expect((await s.writeContent(other, theirs.id, 0, container([hash]))).status).toBe(200);
   expect((await get(other, theirs.id, hash)).status).toBe(404);

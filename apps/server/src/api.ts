@@ -40,6 +40,8 @@ export interface ApiDeps {
   publicUrl: string;
   blobs: BlobStore;
   mailer: Mailer;
+  /** Кому можно писать: как у входа. */
+  allowedEmails: string[];
   /** Секрет сервера: из него выводятся токены ссылок. */
   secret: string;
   /** Тесты сокращают; по умолчанию — `LIMITS`, `API_DEADLINE_MS`, `UPLOAD_IDLE_MS`. */

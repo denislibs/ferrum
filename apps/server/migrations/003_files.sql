@@ -134,7 +134,8 @@ CREATE TABLE blob_trash (
 CREATE FUNCTION file_role_rank(p_file uuid, p_user text) RETURNS integer
 LANGUAGE sql STABLE AS $$
   SELECT CASE
-    WHEN f.trashed_at IS NOT NULL AND f.owner_id <> p_user AND f.trashed_by IS DISTINCT FROM p_user THEN 0
+    WHEN f.trashed_at IS NOT NULL AND f.trashed_by = p_user THEN 3
+    WHEN f.trashed_at IS NOT NULL AND f.owner_id <> p_user THEN 0
     ELSE GREATEST(
       COALESCE((SELECT CASE a.role WHEN 'owner' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END
                 FROM file_access a WHERE a.file_id = f.id AND a.user_id = p_user), 0),

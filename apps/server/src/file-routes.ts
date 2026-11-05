@@ -87,7 +87,7 @@ export function fileDto(r: FileRow): FileMetaDto {
     size: Number(r.size),
     thumbVersion: r.thumb_version,
     version: Number(r.version),
-    role: (RANK_ROLE[r.rank] ?? 'viewer') as FileRole,
+    role: RANK_ROLE[r.rank] as FileRole,
     ...(r.trashed_at ? { trashedAt: r.trashed_at.getTime() } : {}),
     ...(r.project_id ? { projectId: r.project_id } : {}),
   };
@@ -95,7 +95,8 @@ export function fileDto(r: FileRow): FileMetaDto {
 
 export async function loadFile(db: Pool | PoolClient, id: string, user: string): Promise<FileMetaDto | null> {
   const { rows } = await db.query<FileRow>(`SELECT ${FILE_COLUMNS} FROM file f WHERE f.id = $2`, [user, id]);
-  return rows[0] ? fileDto(rows[0]) : null;
+  // Нет роли — нет и записи: файл только что убрали в корзину или сняли доступ.
+  return rows[0] && rows[0].rank > 0 ? fileDto(rows[0]) : null;
 }
 
 /** Условие раздела: только файлы, доступные этому человеку. `$1` — его id, `$2` — проект. */
@@ -212,7 +213,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
            LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
           [...params, q.count, q.start],
         );
-        return ok({ total: Number(total.rows[0].n), rows: rows.rows.map(fileDto) } satisfies FileListDto);
+        return ok({ total: Number(total.rows[0].n), rows: rows.rows.filter((r) => r.rank > 0).map(fileDto) } satisfies FileListDto);
       },
     },
     {

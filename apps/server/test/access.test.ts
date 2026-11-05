@@ -25,6 +25,7 @@ const ROUTES = apiRoutes({
   trustedProxies: [],
   blobs: s.blobs,
   mailer: { send: async () => {} },
+  allowedEmails: [],
   secret: '',
 });
 
@@ -35,6 +36,11 @@ const IMAGE_HASH = bytesToHex(blake3(IMAGE));
 
 interface World {
   file: string;
+  /** Запись списка людей: читатель и приглашённый. */
+  entry: string;
+  team: string;
+  project: string;
+  member: string;
 }
 
 async function world(): Promise<World> {
@@ -44,7 +50,17 @@ async function world(): Promise<World> {
     editor.id,
     viewer.id,
   ]);
-  return { file: f.id };
+  const entry = await s.pool.query<{ id: string }>('SELECT id FROM file_access WHERE file_id = $1 AND user_id = $2', [f.id, viewer.id]);
+  const team = await s.pool.query<{ id: string }>(`INSERT INTO team (name) VALUES ('Команда') RETURNING id`);
+  const t = team.rows[0].id;
+  await s.pool.query(`INSERT INTO team_member (team_id, user_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'member')`, [
+    t,
+    owner.id,
+    editor.id,
+  ]);
+  const member = await s.pool.query<{ id: string }>('SELECT id FROM team_member WHERE team_id = $1 AND user_id = $2', [t, editor.id]);
+  const project = await s.pool.query<{ id: string }>(`INSERT INTO project (team_id, name) VALUES ($1, 'Проект') RETURNING id`, [t]);
+  return { file: f.id, entry: entry.rows[0].id, team: t, project: project.rows[0].id, member: member.rows[0].id };
 }
 
 /** Запрос маршрута: метод и адрес — из таблицы маршрутов, здесь — чем его наполнить. */
@@ -62,6 +78,8 @@ interface Sample {
 
 const write = () => ({ 'if-match': '"0"', 'x-ferrum-write': crypto.randomUUID() });
 const file = (w: World) => ({ id: w.file });
+const team = (w: World) => ({ teamId: w.team });
+const project = (w: World) => ({ projectId: w.project });
 
 const SAMPLES: Record<string, Sample> = {
   'GET /api/files': {},
@@ -84,9 +102,41 @@ const SAMPLES: Record<string, Sample> = {
   'HEAD /api/files/:id/images/:hash': { params: file, allowed: viewer, status: 404 },
   'GET /api/files/:id/images/:hash': { params: file, allowed: viewer, status: 404 },
   'PUT /api/files/:id/images/:hash': { params: (w) => ({ id: w.file, hash: IMAGE_HASH }), body: IMAGE, allowed: editor, denied: [viewer] },
+  'GET /api/teams': {},
+  'POST /api/teams': { body: { name: 'Новая' }, status: 201 },
+  'PATCH /api/teams/:teamId': { params: team, body: { name: 'Имя' }, allowed: owner, denied: [editor] },
+  // Команда с проектом не удаляется: но это уже после проверки прав.
+  'DELETE /api/teams/:teamId': { params: team, allowed: owner, denied: [editor], status: 409 },
+  'GET /api/teams/:teamId/members': { params: team, allowed: editor },
+  'POST /api/teams/:teamId/invite': { params: team, body: { email: 'new@example.com' }, allowed: owner, denied: [editor] },
+  'DELETE /api/teams/:teamId/members/:entryId': { params: (w) => ({ teamId: w.team, entryId: w.member }), allowed: owner },
+  'POST /api/teams/:teamId/projects': { params: team, body: { name: 'Новый' }, allowed: editor, status: 201 },
+  'PATCH /api/projects/:projectId': { params: project, body: { name: 'Имя' }, allowed: editor },
+  'DELETE /api/projects/:projectId': { params: project, allowed: owner, denied: [editor] },
+  'GET /api/files/:id/share': { params: file, allowed: editor, denied: [viewer] },
+  'POST /api/files/:id/share/invite': {
+    params: file,
+    body: { email: 'new@example.com', role: 'viewer' },
+    allowed: editor,
+    denied: [viewer],
+  },
+  'PATCH /api/files/:id/share/people/:entryId': {
+    params: (w) => ({ id: w.file, entryId: w.entry }),
+    body: { role: 'editor' },
+    allowed: owner,
+    denied: [viewer, editor],
+  },
+  'DELETE /api/files/:id/share/people/:entryId': { params: (w) => ({ id: w.file, entryId: w.entry }), allowed: owner },
+  'PUT /api/files/:id/share/link': { params: file, body: { enabled: true, role: 'viewer' }, allowed: owner, denied: [viewer, editor] },
+  'POST /api/files/:id/share/link/reset': { params: file, allowed: owner, denied: [viewer, editor] },
+  // Прав на файл здесь ещё нет: чужой файл, неверный токен и выключенная ссылка неотличимы.
+  'POST /api/files/:id/redeem': { params: file, body: { token: 'x'.repeat(43) }, allowed: stranger, status: 404 },
+  'POST /api/files/:id/request-access': { params: file, allowed: stranger },
 };
 
 const key = (r: { method: string; path: string }) => `${r.method} ${r.path}`;
+/** Права на файл здесь только появляются: их отдельные проверки — в `share.test.ts`. */
+const OPEN_ROUTES = new Set(['POST /api/files/:id/redeem', 'POST /api/files/:id/request-access']);
 
 function pathOf(path: string, params: Record<string, string>): string {
   return path.replace(/:(\w+)/g, (_, name: string) => params[name] ?? (name === 'hash' ? HASH : NOBODY));
@@ -128,7 +178,8 @@ for (const route of ROUTES) {
     });
   }
 
-  if (route.access.kind !== 'user') {
+  // Из таблицы, а не из объявления маршрута: иначе снятие проверки с маршрута снимало бы и этот тест.
+  if (sample.params && !OPEN_ROUTES.has(key(route))) {
     test(`${key(route)}: чужой неотличим от несуществующего`, async () => {
       const w = await world();
       const params = sample.params?.(w) ?? {};

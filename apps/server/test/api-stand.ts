@@ -2,7 +2,7 @@
 // вход по письму. Люди заводятся один раз на файл тестов, данные файлов очищаются между тестами.
 
 import { containerHeader, SECTION_PAGE_REFS } from '@ferrum/protocol';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Pool } from 'pg';
@@ -49,12 +49,15 @@ export function container(refs: string[] = [], fill = 16): Uint8Array<ArrayBuffe
 
 export const PNG: Uint8Array<ArrayBuffer> = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
 
-export async function apiStand(over: Partial<AppDeps> = {}) {
+/** `keep` — второй стенд с другими настройками на той же базе: люди первого остаются. */
+export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
   const pool: Pool = testPool();
   const valkey = await connectValkey(TEST_VALKEY_URL);
-  await resetDatabase(pool);
-  await resetValkey(valkey);
-  await migrate(pool, join(import.meta.dir, '../migrations'));
+  if (!keep) {
+    await resetDatabase(pool);
+    await resetValkey(valkey);
+    await migrate(pool, join(import.meta.dir, '../migrations'));
+  }
   const free = Bun.serve({ port: 0, fetch: () => new Response() });
   const port = free.port!;
   free.stop(true);
@@ -120,6 +123,8 @@ export async function apiStand(over: Partial<AppDeps> = {}) {
     server.stop(true);
     valkey.close();
     await pool.end();
+    // Байты тестов: десятки прогонов иначе заполнят диск (проба памяти пишет 200 МБ).
+    rmSync(dataDir, { recursive: true, force: true });
   };
 
   /** Новый файл и запись содержимого. */
