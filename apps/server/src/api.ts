@@ -2,7 +2,7 @@
 // обработчиках: `Origin` на изменяющих запросах, сессия, предел частоты, проверка прав, срок и ответ в
 // формате ошибок. Маршрут только объявляет, что ему нужно; забыть проверку нельзя, её нет в его коде.
 
-import { ROLE_RANK, RANK_ROLE, isHash, isUuid, type ApiErrorBody, type ApiErrorCode, type FileRole } from '@ferrum/protocol';
+import { ROLE_RANK, RANK_ROLE, USER_HEADER, isHash, isUuid, type ApiErrorBody, type ApiErrorCode, type FileRole } from '@ferrum/protocol';
 import type { Pool } from 'pg';
 import type { Auth } from './auth';
 import { originAllowed } from './auth-routes';
@@ -180,6 +180,9 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
     if (req.method !== 'GET' && req.method !== 'HEAD' && !originAllowed(req, deps.publicUrl)) refuse(403, 'BAD_ORIGIN');
     const session = await deps.auth.api.getSession({ headers: req.headers, query: { disableRefresh: true } });
     if (!session) refuse(401, 'UNAUTHORIZED');
+    // Вкладка работает за другого человека (вход сменили в другой вкладке): для неё сессии нет.
+    const expected = req.headers.get(USER_HEADER);
+    if (expected !== null && expected !== session.user.id) refuse(401, 'UNAUTHORIZED');
     const user: ApiUser = { id: session.user.id, email: session.user.email, name: session.user.name };
     const limit = limits[route.limit];
     const counter = `api:${route.limit}:${user.id}`;

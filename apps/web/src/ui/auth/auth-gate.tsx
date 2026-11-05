@@ -116,7 +116,8 @@ export function AuthGate(props: { children: JSX.Element }) {
         const was = currentUser();
         const now = r.value.user;
         if (was?.id === now?.id && was?.name === now?.name) return;
-        // Спросить человека некому (он в другой вкладке): файл записывается молча.
+        // Спросить человека некому (он в другой вкладке): файл записывается молча. Пришёл другой человек —
+        // запись откажет сервер: запросы вкладки идут от прежнего (`USER_HEADER`), его правки остаются в его журнале.
         const saved = await (editorHooks.flush?.() ?? Promise.resolve(true)).catch(() => false);
         if (saved) {
           location.reload();

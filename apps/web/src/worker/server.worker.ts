@@ -3,7 +3,7 @@
 // файлов идёт только пока вкладка видна.
 
 import { MAX_JOURNAL_ENTRIES } from '../core/limits';
-import { ACCESS_POLL_MS, ServerFiles, type JournalEntries, type JournalStore } from '../core/server-files';
+import { ACCESS_POLL_MS, asUser, ServerFiles, type JournalEntries, type JournalStore } from '../core/server-files';
 import type { FromServer, ServerRequest, ToServer } from '../core/server-messages';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -143,7 +143,7 @@ scope.onmessage = (e: MessageEvent<ToServer>) => {
   const m = e.data;
   if (m.t === 'init') {
     files = new ServerFiles(
-      (input, init) => fetch(input, init),
+      asUser(m.user, (input, init) => fetch(input, init)),
       journalStore(m.user),
       {
         changed: notifyChanged,

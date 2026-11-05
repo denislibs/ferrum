@@ -349,6 +349,30 @@ test('картинок в файле больше предела: 400 в фор�
   expect(await json(await s.call(owner, 'GET', `/api/files/${f.id}/access`))).toMatchObject({ version: 0 });
 });
 
+test('содержимое и превью не читаются с чужого сайта: `Cross-Origin-Resource-Policy`', async () => {
+  const f = await s.newFile(owner);
+  await s.writeContent(owner, f.id, 0);
+  await s.call(owner, 'PUT', `/api/files/${f.id}/thumb`, PNG);
+  for (const path of ['content', 'thumb']) {
+    const res = await s.call(owner, 'GET', `/api/files/${f.id}/${path}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cross-origin-resource-policy')).toBe('same-origin');
+  }
+});
+
+test('вкладка работает за другого человека: 401 и ни запись, ни чтение не проходят', async () => {
+  const f = await s.newFile(owner);
+  const as = (who: Person) => ({ 'x-ferrum-user': who.id });
+  expect((await s.call(owner, 'GET', `/api/files/${f.id}/access`, undefined, as(owner))).status).toBe(200);
+  const read = await s.call(owner, 'GET', `/api/files/${f.id}/access`, undefined, as(other));
+  expect(read.status).toBe(401);
+  expect(await read.json()).toEqual({ error: 'UNAUTHORIZED' });
+  expect((await s.writeContent(owner, f.id, 0, container(), as(other))).status).toBe(401);
+  expect(await json(await s.call(owner, 'GET', `/api/files/${f.id}/access`))).toMatchObject({ version: 0 });
+  // Без заголовка — как раньше: запросы основного потока идут от того, чья cookie.
+  expect((await s.writeContent(owner, f.id, 0)).status).toBe(200);
+});
+
 test('сверх предела частоты: ответ говорит, сколько ждать', async () => {
   const tight = await apiStand({ limits: { read: { max: 1, windowSeconds: 60 } } }, true);
   const a = await tight.signIn('wait@example.com');

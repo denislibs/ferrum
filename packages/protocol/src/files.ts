@@ -248,6 +248,9 @@ export interface WriteHeaders {
 export const WRITE_ID_HEADER = 'x-ferrum-write';
 export const PREVIOUS_WRITE_HEADER = 'x-ferrum-previous-write';
 export const VERSION_HEADER = 'x-ferrum-version';
+/** Кто работает с файлом, как считает вкладка. Cookie общая на браузер: после смены входа в другой вкладке запрос
+ * ушёл бы от имени другого человека, поэтому сервер сверяет заголовок с сессией и отвечает 401. */
+export const USER_HEADER = 'x-ferrum-user';
 /** Сколько картинок из ссылок содержимого потеряно ещё до этой записи: байтов нет и у клиента, а правки
  * из-за этого не должны застревать (ядро показывает заглушку). Сверх этого числа запись отказывает. */
 export const LOST_IMAGES_HEADER = 'x-ferrum-lost-images';

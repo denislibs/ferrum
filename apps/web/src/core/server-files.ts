@@ -18,6 +18,7 @@ import {
   scanContainer,
   SECTION_IMAGE,
   SECTION_PAGE_REFS,
+  USER_HEADER,
   VERSION_HEADER,
   WRITE_ID_HEADER,
   type ApiErrorCode,
@@ -76,13 +77,26 @@ export const JSON_TIMEOUT_MS = 15_000;
 export const ACCESS_POLL_MS = 15_000;
 /** Превью — не чаще раза в минуту (спека, раздел 6.2). */
 export const THUMB_INTERVAL_MS = 60_000;
-/** Срок передачи по размеру: от 64 КиБ/с, но не меньше минуты и не больше получаса. */
+/** Срок передачи по размеру: от 64 КиБ/с, но не меньше минуты. Верхнего предела нет: 512 МБ на канале в 1 Мбит/с
+ * идут час, а застывшее соединение и так оборвёт сервер (простой минута, 32 КиБ/с в среднем, `UPLOAD_PACE`). */
 const MIN_TRANSFER_MS = 60_000;
-const MAX_TRANSFER_MS = 30 * 60_000;
-export const transferTimeout = (bytes: number): number =>
-  Math.ceil(Math.min(MAX_TRANSFER_MS, MIN_TRANSFER_MS + (bytes / (64 * 1024)) * 1000));
+export const transferTimeout = (bytes: number): number => Math.ceil(MIN_TRANSFER_MS + (bytes / (64 * 1024)) * 1000);
 /** Картинок загружается одновременно. */
 const IMAGE_CONCURRENCY = 4;
+/** Запрос картинки под пределом частоты: столько попыток с паузой, какую просит сервер. Окно предела минута,
+ * поэтому файл на пределе `MAX_IMAGE_REFS` проходит с запасом, а заставка не вечна. */
+const RATE_ATTEMPTS = 6;
+const RATE_DEFAULT_WAIT_SECONDS = 5;
+const RATE_MAX_WAIT_SECONDS = 60;
+
+/** Запросы вкладки идут от того, кто в ней вошёл: сервер сверяет это с сессией (`USER_HEADER`). */
+export function asUser(user: string, http: typeof fetch): typeof fetch {
+  return (input, init = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set(USER_HEADER, user);
+    return http(input, { ...init, headers });
+  };
+}
 
 /** `canShare`: сервер разрешает этому человеку звать других (ответа без поля — считаем, что нет).
  * `own`: идёт своя запись или её исход неизвестен, поэтому новое поколение может быть своим. */
