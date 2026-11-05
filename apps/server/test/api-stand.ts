@@ -116,10 +116,11 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
 
   const reset = () =>
     pool.query(
-      'TRUNCATE file, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
+      'TRUNCATE doc_update, doc_state, doc_peer, file, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
     );
 
   const stop = async () => {
+    await server.hub.stop();
     server.stop(true);
     valkey.close();
     await pool.end();
@@ -186,6 +187,7 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
     blobs,
     dataDir,
     server,
+    hub: server.hub,
     call,
     signIn,
     waitMail,

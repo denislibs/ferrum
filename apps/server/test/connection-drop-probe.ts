@@ -6,7 +6,9 @@
 import { Pool } from 'pg';
 import { createPool } from '../src/db';
 import { claimInvites } from '../src/invites';
+import { LoroDoc } from 'loro-crdt';
 import { apiStand, container } from './api-stand';
+import { Client } from './sync-client';
 import { TEST_DATABASE_URL, TEST_VALKEY_URL } from './helpers';
 
 async function main(): Promise<void> {
@@ -98,6 +100,32 @@ async function main(): Promise<void> {
     out.duringValkey = res.status;
     await Bun.sleep(20);
   }
+
+  // Запись журнала: соединение группы обрывается посреди транзакции. Пачка получает отказ «повторите», процесс живёт.
+  const synced = await s.newFile(who);
+  const client = await Client.open(s, who, synced.id);
+  if (!client) throw new Error('соединение не открылось');
+  client.hello();
+  client.subscribe('root');
+  await client.wait('subscribed');
+  const doc = new LoroDoc();
+  doc.getMap('m').set('a', 1);
+  doc.commit();
+  const bytes = doc.export({ mode: 'update' });
+  const docLock = await admin.connect();
+  await docLock.query('BEGIN');
+  await docLock.query('SELECT 1 FROM file WHERE id = $1 FOR UPDATE', [synced.id]);
+  client.update('root', 1, bytes);
+  await dropWaiter();
+  await docLock.query('ROLLBACK');
+  docLock.release();
+  const refused = await client.wait('refused');
+  out.journal = refused.code;
+  client.frames.length = 0;
+  client.update('root', 2, bytes);
+  out.journalNext = (await client.wait('ack')).seq;
+  client.close();
+  out.afterJournal = await healthy();
 
   console.log(JSON.stringify(out));
   await admin.end();

@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { apiError, busy, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
 import { BlobStalled, BlobTooLarge, type UploadPace } from './blob-store';
+import { readDocSnapshot } from './sync/container-read';
 import { inTransaction } from './db';
 
 /** Клиент молчит дольше этого посреди загрузки — обрыв. */
@@ -198,6 +199,12 @@ export function uploadFailure(e: unknown): Response | null {
 function writeAllowed(row: { version: string; last_write_id: string | null }, base: number, previous: string | null): boolean {
   const version = Number(row.version);
   return version === base || (previous !== null && row.last_write_id === previous && version === base + 1);
+}
+
+/** Правки уже идут журналом: запись файла целиком (вкладка прежней версии приложения) затёрла бы их. */
+async function journalStarted(db: Pool | PoolClient, file: string): Promise<boolean> {
+  const { rowCount } = await db.query('SELECT 1 FROM doc_state WHERE file_id = $1 AND next_seq > 1 LIMIT 1', [file]);
+  return (rowCount ?? 0) > 0;
 }
 
 /** Запись не оставляет ссылку без байтов: очистка могла снять картинку, пока клиент считал её известной.
@@ -444,6 +451,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         );
         if (!before.rows[0]) return apiError(404, 'NOT_FOUND');
         if (!writeAllowed(before.rows[0], write.base, write.previous)) return apiError(409, 'CONFLICT');
+        if (await journalStarted(pool, ctx.params.id)) return apiError(409, 'CONFLICT');
         if (!gate.enter(ctx.user.id)) return busy();
         const key = `files/${ctx.params.id}/content-${randomUUID()}`;
         try {
@@ -475,10 +483,13 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             const refused =
               commitRefusal(row) ??
               (writeAllowed(row, write.base, write.previous) ? null : apiError(409, 'CONFLICT')) ??
+              ((await journalStarted(c, ctx.params.id)) ? apiError(409, 'CONFLICT') : null) ??
               (await missingImages(c, ctx.params.id, refs, write.lost));
             const settled = await settleUpload(c, key, refused);
             if (settled) return settled;
             await trashBlob(c, row.content_key);
+            // Журнала нет: строки документов описывали прежние байты, следующая подписка заведёт новые.
+            await c.query('DELETE FROM doc_state WHERE file_id = $1', [ctx.params.id]);
             await c.query(
               `UPDATE file SET version = version + 1, size = $2, content_key = $3, last_write_id = $4, edited_at = now() WHERE id = $1`,
               [ctx.params.id, size, key, write.write],
@@ -495,10 +506,31 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             await blobs.delete(key).catch(() => {});
             return outcome;
           }
+          deps.contentReplaced?.(ctx.params.id);
           return await fresh(ctx);
         } finally {
           gate.leave(ctx.user.id);
         }
+      },
+    },
+    {
+      // Клиент отстал сильнее журнала (спека, раздел 7.3): снимок одного документа, поверх него — журнал.
+      method: 'GET',
+      path: '/api/files/:id/docs/:doc/snapshot',
+      access: { kind: 'file', min: 'viewer' },
+      limit: 'read',
+      handle: async (ctx) => {
+        const { rows } = await pool.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1', [ctx.params.id]);
+        const bytes = await readDocSnapshot(blobs, rows[0]?.content_key ?? null, ctx.params.doc);
+        if (!bytes) return apiError(404, 'NOT_FOUND');
+        return new Response(bytes as Uint8Array<ArrayBuffer>, {
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': 'attachment',
+            'Cache-Control': 'no-store',
+            'Cross-Origin-Resource-Policy': 'same-origin',
+          },
+        });
       },
     },
     {

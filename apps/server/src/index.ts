@@ -61,8 +61,11 @@ console.log(`Ferrum слушает порт ${server.port}`);
 // Остановка контейнера: дождаться запросов и закрыть соединения, а не ждать SIGKILL.
 stop = () => {
   stopGc();
-  void server
+  // Принятое дописывается, соединения закрываются (клиенты подключатся заново): `server.stop()` без `true`
+  // ждал бы их, и контейнер дождался бы SIGKILL (B-207).
+  void server.hub
     .stop()
+    .then(() => server.stop(true))
     .then(() => pool.end())
     .finally(() => process.exit(0));
 };

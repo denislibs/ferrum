@@ -1,15 +1,16 @@
 // HTTP-сервер: `Bun.serve` с маршрутами, без веб-фреймворка. Все зависимости — параметрами:
 // тесты поднимают настоящий сервер на свободном порту против настоящих Postgres и Valkey.
 
-import { MAX_CONTENT_BYTES } from '@ferrum/protocol';
+import { isUuid, MAX_CONTENT_BYTES } from '@ferrum/protocol';
 import type { Pool } from 'pg';
-import { apiHandler, type ApiDeps, type Limits, type Route } from './api';
+import { apiHandler, type ApiDeps, type Ctx, type Limits, type Route } from './api';
 import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
 import type { BlobStore, UploadPace } from './blob-store';
 import { fileRoutes, uploadGate } from './file-routes';
 import { imageRoutes } from './image-routes';
 import { shareRoutes } from './share-routes';
+import { SyncHub, type ConnData, type SyncLimits } from './sync/hub';
 import { teamRoutes } from './team-routes';
 import type { Mailer } from './mail';
 import { responseHeaders, serveStatic } from './static';
@@ -34,6 +35,18 @@ export interface AppDeps {
   uploadIdleMs?: number;
   uploadPace?: UploadPace;
   maxContentBytes?: number;
+  /** Тесты сокращают пределы и сроки WebSocket. */
+  syncLimits?: Partial<SyncLimits>;
+}
+
+/** Запись, после которой доступ к открытым файлам не изменился: содержимое, превью, картинки, отметка открытия. */
+const NO_ACCESS_CHANGE = /\/(content|thumb|touch|images\/[^/]+)$/;
+
+/** Маршрут изменил файлы или права: открытые соединения сверяют роль сразу, а не по таймеру. */
+function accessChanged(hub: SyncHub, route: Route, ctx: Ctx): void {
+  if (NO_ACCESS_CHANGE.test(route.path) || route.path === '/api/files') return;
+  if (ctx.params.id) void hub.recheckFile(ctx.params.id).catch((e: unknown) => console.error('Проверка ролей:', e));
+  else hub.recheckAll();
 }
 
 /** Простой соединения: загрузка с паузами дольше этого уже оборвана проверкой `UPLOAD_IDLE_MS`. */
@@ -42,8 +55,8 @@ const IDLE_TIMEOUT_SECONDS = 120;
 const apiDeps = (deps: AppDeps): ApiDeps => ({ ...deps, allowedEmails: deps.allowedEmails ?? [], deadlineMs: deps.apiDeadlineMs });
 
 /** Все маршруты API: отсюда их берёт и сервер, и таблица проверки прав в тестах. */
-export function apiRoutes(deps: AppDeps): Route[] {
-  const api = apiDeps(deps);
+export function apiRoutes(deps: AppDeps | ApiDeps): Route[] {
+  const api = apiDeps(deps as AppDeps);
   const gate = uploadGate();
   return [...fileRoutes(api, gate), ...imageRoutes(api, gate), ...teamRoutes(api), ...shareRoutes(api)];
 }
@@ -63,24 +76,41 @@ async function health(deps: AppDeps): Promise<Response> {
   );
 }
 
-export function startServer(deps: AppDeps, port: number): Bun.Server<undefined> {
-  const handleAuth = authRoutes(deps);
+/** Сервер и его WebSocket: остановка контейнера и тесты обращаются к обоим. */
+export type Running = Bun.Server<ConnData> & { hub: SyncHub };
+
+export function startServer(deps: AppDeps, port: number): Running {
+  const hub = new SyncHub(deps.pool, deps.blobs, deps.auth, deps.publicUrl, deps.syncLimits);
+  const handleAuth = authRoutes({ ...deps, hub });
   const withHeaders = responseHeaders(deps.publicUrl);
-  const handleApi = apiHandler(apiRoutes(deps), apiDeps(deps));
-  return Bun.serve({
+  const api: ApiDeps = {
+    ...apiDeps(deps),
+    afterWrite: (route, ctx) => accessChanged(hub, route, ctx),
+    contentReplaced: (file) => hub.forgetFile(file),
+  };
+  const handleApi = apiHandler(apiRoutes(api), api);
+  const server = Bun.serve({
     port,
     // Содержимое файла идёт потоком: предел здесь только не должен быть меньше предела файла.
     maxRequestBodySize: MAX_CONTENT_BYTES + 1024 * 1024,
     idleTimeout: IDLE_TIMEOUT_SECONDS,
     routes: {
       '/healthz': async () => withHeaders(await health(deps)),
-      '/api/auth/*': async (req, server) => withHeaders(await handleAuth(req, server.requestIP(req)?.address)),
-      '/api/*': async (req) => withHeaders(await handleApi(req)),
+      '/api/auth/*': async (req: Request, server: Bun.Server<ConnData>) =>
+        withHeaders(await handleAuth(req, server.requestIP(req)?.address)),
+      '/api/files/:id/sync': async (req: Bun.BunRequest<'/api/files/:id/sync'>, server: Bun.Server<ConnData>) => {
+        if (!isUuid(req.params.id)) return withHeaders(new Response(null, { status: 404 }));
+        const refused = await hub.upgrade(req, server, req.params.id);
+        return refused && withHeaders(refused);
+      },
+      '/api/*': async (req: Request) => withHeaders(await handleApi(req)),
     },
-    fetch: async (req) => withHeaders(await serveStatic(req, deps.webDist)),
-    error: (e) => {
+    fetch: async (req: Request) => withHeaders(await serveStatic(req, deps.webDist)),
+    error: (e: Error) => {
       console.error(e);
       return withHeaders(new Response('Внутренняя ошибка сервера', { status: 500 }));
     },
+    websocket: hub.websocket,
   });
+  return Object.assign(server, { hub });
 }

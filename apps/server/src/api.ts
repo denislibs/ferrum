@@ -2,7 +2,17 @@
 // обработчиках: `Origin` на изменяющих запросах, сессия, предел частоты, проверка прав, срок и ответ в
 // формате ошибок. Маршрут только объявляет, что ему нужно; забыть проверку нельзя, её нет в его коде.
 
-import { ROLE_RANK, RANK_ROLE, USER_HEADER, isHash, isUuid, type ApiErrorBody, type ApiErrorCode, type FileRole } from '@ferrum/protocol';
+import {
+  ROLE_RANK,
+  RANK_ROLE,
+  USER_HEADER,
+  isHash,
+  isSyncDoc,
+  isUuid,
+  type ApiErrorBody,
+  type ApiErrorCode,
+  type FileRole,
+} from '@ferrum/protocol';
 import type { Pool } from 'pg';
 import type { Auth } from './auth';
 import { originAllowed } from './auth-routes';
@@ -52,6 +62,10 @@ export interface ApiDeps {
   uploadIdleMs?: number;
   uploadPace?: UploadPace;
   maxContentBytes?: number;
+  /** Изменяющий запрос удался: открытые соединения сверяют роль сразу. */
+  afterWrite?: (route: Route, ctx: Ctx) => void;
+  /** Содержимое файла заменено целиком: проверка пачек забывает его документы. */
+  contentReplaced?: (file: string) => void;
 }
 
 export interface ApiUser {
@@ -126,6 +140,7 @@ const PARAM_CHECK: Record<string, (v: string) => boolean> = {
   projectId: isUuid,
   entryId: isUuid,
   hash: isHash,
+  doc: isSyncDoc,
 };
 
 interface Compiled {
@@ -231,7 +246,9 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
       if (!params) continue;
       try {
         const ctx = await withinDeadline(prepare(c.route, req, url, params), deadline, url.pathname);
-        return await (c.route.stream ? c.route.handle(ctx) : withinDeadline(c.route.handle(ctx), deadline, url.pathname));
+        const res = await (c.route.stream ? c.route.handle(ctx) : withinDeadline(c.route.handle(ctx), deadline, url.pathname));
+        if (req.method !== 'GET' && req.method !== 'HEAD' && res.ok) deps.afterWrite?.(c.route, ctx);
+        return res;
       } catch (e) {
         if (e instanceof Refused) return e.response;
         console.error('Сбой маршрута API', c.route.method, c.route.path, e instanceof Error ? e.message : e);

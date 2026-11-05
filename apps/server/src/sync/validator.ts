@@ -26,7 +26,8 @@ interface Waiting {
 }
 
 export class Validator {
-  private worker: Worker;
+  /** Заводится по первой работе: сервер без открытых файлов память wasm не держит. */
+  private worker: Worker | null = null;
   private seq = 0;
   private loads = 0;
   private queued = 0;
@@ -41,7 +42,6 @@ export class Validator {
     private readonly pool: Pool,
     private readonly blobs: BlobStore,
   ) {
-    this.worker = this.spawn();
     this.watchdog = setInterval(() => this.checkHung(), 1000);
     this.watchdog.unref?.();
   }
@@ -72,7 +72,7 @@ export class Validator {
   private restart(): void {
     if (this.stopped) return;
     this.restarts++;
-    this.worker.terminate();
+    this.worker?.terminate();
     this.worker = this.spawn();
     this.loads = 0;
     this.loading.clear();
@@ -98,6 +98,7 @@ export class Validator {
     this.queued += size;
     return new Promise((done) => {
       this.waiting.set(id, { done, size, at: performance.now() });
+      this.worker ??= this.spawn();
       this.worker.postMessage({ ...work, id } as ToValidator);
     });
   }
@@ -169,7 +170,7 @@ export class Validator {
   stop(): void {
     this.stopped = true;
     clearInterval(this.watchdog);
-    this.worker.terminate();
+    this.worker?.terminate();
     for (const w of this.waiting.values()) w.done(null);
     this.waiting.clear();
   }

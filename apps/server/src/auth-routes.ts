@@ -86,6 +86,8 @@ export interface AuthRoutesDeps {
   trustedProxies: readonly string[];
   /** Тесты сокращают срок; по умолчанию — `AUTH_DEADLINE_MS`. */
   authDeadlineMs?: number;
+  /** Выход закрывает WebSocket этой сессии сразу. */
+  hub?: { sessionEnded(session: string): void; userSignedOut(user: string): void };
 }
 
 export function authRoutes(deps: AuthRoutesDeps) {
@@ -185,8 +187,10 @@ export function authRoutes(deps: AuthRoutesDeps) {
    * интерфейса будет уже нельзя. Её cookie из ответа в браузер не идёт. Сбой входу не мешает. */
   async function dropPreviousSession(req: Request, ip: string): Promise<void> {
     if (!req.headers.get('cookie')) return;
+    const s = await sessionOf(req);
     const out = await inner(req, ip, '/sign-out', { method: 'POST', body: {} }).catch(() => null);
     if (!out?.ok) console.error('Не удалось снять прежнюю сессию при входе:', out?.status ?? 'сбой запроса');
+    else if (s) deps.hub?.sessionEnded(s.session.id);
   }
 
   async function name(req: Request, ip: string): Promise<Response> {
@@ -199,21 +203,28 @@ export function authRoutes(deps: AuthRoutesDeps) {
     return session(req, ip);
   }
 
+  /** Сессия запроса: её соединения закрываются вместе с ней. */
+  const sessionOf = (req: Request) => auth.api.getSession({ headers: req.headers, query: { disableRefresh: true } }).catch(() => null);
+
   async function signOut(req: Request, ip: string): Promise<Response> {
+    const s = await sessionOf(req);
     const r = await inner(req, ip, '/sign-out', { method: 'POST', body: {} });
     if (r.status === 429) return limited(r);
     if (!r.ok) throw new Error(`Better Auth: выход вернул ${r.status}`);
+    if (s) deps.hub?.sessionEnded(s.session.id);
     return respond([r], { ok: true });
   }
 
   /** Все устройства: сессии снимает `/revoke-sessions`, cookie этого браузера убирает `/sign-out`. */
   async function signOutEverywhere(req: Request, ip: string): Promise<Response> {
+    const s = await sessionOf(req);
     const revoked = await inner(req, ip, '/revoke-sessions', { method: 'POST', body: {} });
     if (revoked.status === 429) return limited(revoked);
     if (revoked.status === 401) return fail(401, 'UNAUTHORIZED');
     if (!revoked.ok) throw new Error(`Better Auth: снятие сессий вернуло ${revoked.status}: ${await revoked.text()}`);
     const out = await inner(req, ip, '/sign-out', { method: 'POST', body: {} });
     if (!out.ok) throw new Error(`Better Auth: выход вернул ${out.status}`);
+    if (s) deps.hub?.userSignedOut(s.user.id);
     return respond([revoked, out], { ok: true });
   }
 
@@ -245,8 +256,7 @@ export interface UpgradeSession {
   sessionId: string;
 }
 
-/** Проверка перед открытием WebSocket (спека, разделы 5 и 7.1): верный `Origin` и живая сессия
- * в Valkey. Сам WebSocket синхронизации — этап 3. */
+/** Проверка перед открытием WebSocket (спека, разделы 5 и 7.1): верный `Origin` и живая сессия в Valkey. */
 export async function authorizeUpgrade(req: Request, auth: Auth, publicUrl: string): Promise<UpgradeSession | null> {
   if (!originAllowed(req, publicUrl)) return null;
   const s = await auth.api.getSession({ headers: req.headers, query: { disableRefresh: true } });
