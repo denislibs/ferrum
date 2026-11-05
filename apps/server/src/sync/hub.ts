@@ -404,10 +404,12 @@ export class SyncHub {
       return;
     }
     d.strikes = 0;
-    const item: Item = { file: d.file, doc, user: d.user, bytes, start: verdict.start, end: verdict.end };
+    const item: Item = { file: d.file, doc, user: d.user, bytes, start: verdict.start, end: verdict.end, chain: verdict.chain };
     (item as ItemFrom).from = d;
     const outcome = await this.log.submit(item);
     if (outcome.kind === 'refused') {
+      // Документ проверки уже принял пачку, а журнал нет: он больше не равен журналу.
+      this.validator.reject(verdict.chain);
       this.refuse(d, doc, clientSeq, outcome.code);
       return;
     }
@@ -500,7 +502,9 @@ export class SyncHub {
     const { rows } = await this.pool.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1', [file]);
     const snapshot = await readDocSnapshot(this.blobs, rows[0]?.content_key ?? null, doc);
     if (!snapshot) return null;
+    // Сбой проверки — не пустая версия: строка с пустой версией дала бы `GAP` на каждую правку. Подписка повторится.
     const base = await this.validator.baseVersion(snapshot);
+    if (!base) throw new Error('проверка недоступна');
     await this.pool.query(
       `INSERT INTO doc_state (file_id, doc, vv, base_vv) VALUES ($1, $2, $3::jsonb, $3::jsonb) ON CONFLICT DO NOTHING`,
       [file, doc, JSON.stringify(base)],
