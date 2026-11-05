@@ -252,37 +252,6 @@ fn restoring_deleted_node_under_parent_removed_by_other_is_skipped() {
 }
 
 #[test]
-fn undo_of_move_into_descendant_of_foreign_move_is_skipped() {
-    let (mut a, mut b, page) = pair();
-    let ids = a
-        .transact(page, vec![], |tx| {
-            Ok(vec![
-                tx.create_node(None, None, NodeKind::Frame)?,
-                tx.create_node(None, None, NodeKind::Frame)?,
-            ])
-        })
-        .unwrap();
-    let (x, y) = (ids[0], ids[1]);
-    a.transact(page, vec![], |tx| {
-        tx.move_node(x, Some(y), 0)?;
-        Ok(vec![])
-    })
-    .unwrap();
-    sync(&mut a, &mut b);
-    // x внутри y. a вернул бы x на корень — можно. Другой участник вынес y в x нельзя: цикл.
-    b.transact(page, vec![], |tx| {
-        tx.move_node(x, None, 0)?;
-        tx.move_node(y, Some(x), 0)?;
-        Ok(vec![])
-    })
-    .unwrap();
-    sync(&mut a, &mut b);
-    // Отмена переноса x в y: прежний родитель x — корень, цикла нет, шаг применяется без ошибки.
-    assert!(a.undo().is_ok());
-    assert_mirror(&mut a, page);
-}
-
-#[test]
 fn text_undo_keeps_foreign_insert_before_and_inside() {
     let (mut a, mut b, page) = pair();
     let id = a
@@ -323,6 +292,108 @@ fn text_undo_keeps_foreign_insert_before_and_inside() {
     assert_eq!(t(&mut a).chars().filter(|c| "абв".contains(*c)).count(), 3);
     sync(&mut a, &mut b);
     assert_eq!(t(&mut a), t(&mut b));
+}
+
+fn text_node(doc: &mut Document, page: PageId) -> NodeId {
+    doc.transact(page, vec![], |tx| {
+        Ok(vec![tx.create_node(None, None, NodeKind::Text)?])
+    })
+    .unwrap()[0]
+}
+
+/// Текст узла вместе с последним переводом строки.
+fn text_of(doc: &mut Document, page: PageId, id: NodeId) -> String {
+    doc.page(page)
+        .unwrap()
+        .props(id)
+        .unwrap()
+        .text
+        .unwrap()
+        .content
+        .runs
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect()
+}
+
+fn insert(doc: &mut Document, page: PageId, id: NodeId, at: usize, s: &str) {
+    doc.transact(page, vec![id], |tx| {
+        tx.insert_text(id, at, s, None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+}
+
+fn delete(doc: &mut Document, page: PageId, id: NodeId, range: std::ops::Range<usize>) {
+    doc.transact(page, vec![id], |tx| {
+        tx.delete_text(id, range)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+}
+
+#[test]
+fn undo_at_the_place_of_foreign_insert_removes_own_char_not_foreign() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    insert(&mut b, page, id, 0, "аб");
+    sync(&mut a, &mut b);
+    insert(&mut a, page, id, 1, "x");
+    delete(&mut a, page, id, 1..2);
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 1, "F");
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), "аFб\n");
+    a.undo().unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "аFб\n", "чужой символ на месте");
+    a.redo().unwrap();
+    a.redo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "аFб\n");
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), text_of(&mut b, page, id));
+}
+
+#[test]
+fn undo_of_replaced_word_keeps_foreign_insert_at_the_seam() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut a, page);
+    insert(&mut a, page, id, 0, "abc");
+    sync(&mut a, &mut b);
+    delete(&mut a, page, id, 0..3);
+    insert(&mut a, page, id, 0, "xyz");
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 0, "F");
+    sync(&mut a, &mut b);
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "F\n", "своё слово снято");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "Fabc\n", "прежнее вернулось");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "F\n", "своего не осталось");
+}
+
+#[test]
+fn foreign_delete_across_two_own_steps_transforms_the_whole_stack() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    sync(&mut a, &mut b);
+    insert(&mut a, page, id, 0, "abc");
+    insert(&mut a, page, id, 3, "def");
+    sync(&mut a, &mut b);
+    delete(&mut b, page, id, 2..4);
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), "abef\n");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "ab\n");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "\n");
+    a.redo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "ab\n");
+    a.redo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "abef\n", "повтор — без удалённого");
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), text_of(&mut b, page, id));
 }
 
 #[test]

@@ -1,7 +1,8 @@
 //! Перенос дельты текста через чужую правку: шаг отмены записан относительно текста, каким он был,
 //! а другой человек с тех пор вставил или удалил символы (спека подсистемы 4, раздел 8).
-//! Обычное преобразование операций: `transform(a, b)` — как применить `a` после `b`, если обе написаны
-//! к одному и тому же тексту. При вставке в одно место своя (`a`) встаёт после чужой (`b`).
+//! Обычное преобразование операций: `transform(a, b, side)` — как применить `a` после `b`, если обе
+//! написаны к одному и тому же тексту. Чтобы оба порядка применения давали один текст, две вставки в
+//! одно место решает сторона, и у двух встречных преобразований она разная.
 
 use loro::TextDelta;
 
@@ -63,12 +64,26 @@ fn push(out: &mut Vec<TextDelta>, op: TextDelta) {
     }
 }
 
+/// Кто из двух вставок в одно место стоит раньше: `a` или `b` из `transform(a, b, side)`.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Tie {
+    AFirst,
+    BFirst,
+}
+
 /// `a` после `b`. Обе — к одному тексту, хвост после последней операции — как `retain`.
-pub(crate) fn transform(a: &[TextDelta], b: &[TextDelta]) -> Vec<TextDelta> {
+pub(crate) fn transform(a: &[TextDelta], b: &[TextDelta], tie: Tie) -> Vec<TextDelta> {
     let (mut x, mut y) = (Cursor::new(a), Cursor::new(b));
     let mut out = Vec::new();
     loop {
-        // Чужая вставка: своя операция её только перешагивает.
+        if tie == Tie::AFirst {
+            if let Some(op @ TextDelta::Insert { .. }) = x.peek() {
+                push(&mut out, op.clone());
+                x.i += 1;
+                continue;
+            }
+        }
+        // Вставка `b`: операция `a` её только перешагивает.
         if let Some(TextDelta::Insert { insert, .. }) = y.peek() {
             push(
                 &mut out,
@@ -157,7 +172,7 @@ mod tests {
         // Текст «аб»: своя вставка «XY» в 1 дала «аXYб», чужая дописала «!» в начало.
         let undo = [ret(1), del(2)];
         let foreign = [ins("!")];
-        let moved = transform(&undo, &foreign);
+        let moved = transform(&undo, &foreign, Tie::BFirst);
         assert_eq!(apply("аXYб", &[&foreign, &moved]), "!аб");
     }
 
@@ -165,7 +180,7 @@ mod tests {
     fn foreign_insert_inside_deleted_range_stays() {
         let undo = [ret(1), del(2)];
         let foreign = [ret(2), ins("!")];
-        let moved = transform(&undo, &foreign);
+        let moved = transform(&undo, &foreign, Tie::BFirst);
         assert_eq!(apply("аXYб", &[&foreign, &moved]), "а!б");
     }
 
@@ -173,7 +188,7 @@ mod tests {
     fn foreign_delete_shrinks_own_delete() {
         let undo = [ret(1), del(3)];
         let foreign = [ret(2), del(5)];
-        let moved = transform(&undo, &foreign);
+        let moved = transform(&undo, &foreign, Tie::BFirst);
         assert_eq!(apply("0123456789", &[&foreign, &moved]), "0789");
     }
 
@@ -181,12 +196,34 @@ mod tests {
     fn insert_at_the_same_place_goes_after_foreign() {
         let own = [ret(1), ins("X")];
         let foreign = [ret(1), ins("Y")];
-        assert_eq!(apply("аб", &[&foreign, &transform(&own, &foreign)]), "аYXб");
+        let moved = transform(&own, &foreign, Tie::BFirst);
+        assert_eq!(apply("аб", &[&foreign, &moved]), "аYXб");
+    }
+
+    /// Оба порядка применения дают один текст: без этого нижние шаги стека отмены приведены не к тому
+    /// тексту, который есть на самом деле.
+    #[test]
+    fn both_orders_of_a_tie_give_the_same_text() {
+        let own = [ret(1), ins("X")];
+        let foreign = [ret(1), ins("Y")];
+        let via_foreign = [&foreign[..], &transform(&own, &foreign, Tie::BFirst)];
+        let via_own = [&own[..], &transform(&foreign, &own, Tie::AFirst)];
+        assert_eq!(apply("аб", &via_foreign), apply("аб", &via_own));
+    }
+
+    #[test]
+    fn no_tie_is_the_same_for_both_sides() {
+        let own = [ret(1), del(1), ins("😀")];
+        let foreign = [ret(3), ins("!")];
+        assert_eq!(
+            transform(&own, &foreign, Tie::AFirst),
+            transform(&own, &foreign, Tie::BFirst)
+        );
     }
 
     #[test]
     fn empty_foreign_keeps_delta_meaning() {
         let own = [ret(2), del(1)];
-        assert_eq!(apply("абв", &[&transform(&own, &[])]), "аб");
+        assert_eq!(apply("абв", &[&transform(&own, &[], Tie::BFirst)]), "аб");
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::guides::Guide;
 use crate::page::Inverse;
-use crate::text_ot;
+use crate::text_ot::{self, Tie};
 use crate::types::{Color, NodeId, PageId};
 
 /// Пауза, после которой ввод подряд начинает новый шаг отмены (как в Figma).
@@ -230,8 +230,10 @@ impl History {
 
     /// Другой участник правил текст `node`: дельты отмены и повтора этого текста сдвигаются. Верхний
     /// шаг написан к нынешнему тексту, следующий — к тексту после его применения, поэтому чужая правка
-    /// проходит стек сверху вниз и сама преобразуется каждым шагом. Склейка ввода рвётся: позиции
-    /// курсора прошлой правки больше не те.
+    /// проходит стек сверху вниз и сама преобразуется каждым шагом. Вставка в одно место: своя встаёт
+    /// за чужой, поэтому в обратную сторону чужая идёт раньше своей, иначе текст, к которому приводятся
+    /// нижние шаги, разойдётся с настоящим, и отмена снимет чужой символ.
+    /// Склейка ввода рвётся: позиции курсора прошлой правки больше не те.
     pub fn transform_text(&mut self, page: PageId, node: NodeId, delta: &[loro::TextDelta]) {
         for stack in [&mut self.undo, &mut self.redo] {
             let mut incoming = delta.to_vec();
@@ -239,8 +241,8 @@ impl History {
                 for op in e.ops.iter_mut().rev() {
                     if let Inverse::Text(n, d) = op {
                         if *n == node {
-                            let moved = text_ot::transform(d, &incoming);
-                            incoming = text_ot::transform(&incoming, d);
+                            let moved = text_ot::transform(d, &incoming, Tie::BFirst);
+                            incoming = text_ot::transform(&incoming, d, Tie::AFirst);
                             *d = moved;
                         }
                     }
