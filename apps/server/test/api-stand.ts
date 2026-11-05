@@ -2,7 +2,7 @@
 // вход по письму. Люди заводятся один раз на файл тестов, данные файлов очищаются между тестами.
 
 import { containerHeader, SECTION_PAGE_REFS } from '@ferrum/protocol';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Pool } from 'pg';
@@ -116,7 +116,7 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
 
   const reset = () =>
     pool.query(
-      'TRUNCATE file, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, team, team_member, team_invite, project CASCADE',
+      'TRUNCATE file, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
     );
 
   const stop = async () => {
@@ -140,6 +140,63 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
       ...extra,
     });
 
-  return { pool, valkey, auth, publicUrl, mails, blobs, dataDir, server, call, signIn, waitMail, reset, stop, newFile, writeContent };
+  /** Загрузка, застывшая посреди тела: первые байты ушли, остальные — после `release`. */
+  const gatedUpload = (who: Person, path: string, bytes: Uint8Array, headers: Record<string, string> = {}) => {
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+    const body = new ReadableStream<Uint8Array>({
+      async start(c) {
+        c.enqueue(bytes.subarray(0, 8));
+        await gate;
+        c.enqueue(bytes.subarray(8));
+        c.close();
+      },
+    });
+    const done = fetch(`${publicUrl}${path}`, { method: 'PUT', headers: { origin: publicUrl, cookie: who.cookie, ...headers }, body });
+    return { done, release };
+  };
+
+  /** Загрузки дошли до хранилища: столько временных файлов уже открыто. */
+  const waitTmp = async (count: number): Promise<void> => {
+    const seen = () =>
+      readdirSync(dataDir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile() && e.name.endsWith('.tmp')).length;
+    for (let i = 0; i < 500 && seen() < count; i++) await Bun.sleep(10);
+    if (seen() < count) throw new Error(`нет ${count} временных файлов, есть ${seen()}`);
+  };
+
+  /** Сбой базы внутри `work`: запросы `op` к таблице `table` падают. */
+  const failing = async <T>(table: string, op: string, work: () => Promise<T>): Promise<T> => {
+    await pool.query(`CREATE FUNCTION test_failure() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'сбой теста'; END $f$`);
+    await pool.query(`CREATE TRIGGER test_failure BEFORE ${op} ON ${table} FOR EACH ROW EXECUTE FUNCTION test_failure()`);
+    try {
+      return await work();
+    } finally {
+      await pool.query('DROP FUNCTION test_failure CASCADE');
+    }
+  };
+
+  /** Намерения загрузок старше срока очистки. */
+  const expireUploads = () => pool.query(`UPDATE blob_pending SET started_at = now() - interval '25 hours'`);
+
+  return {
+    pool,
+    valkey,
+    auth,
+    publicUrl,
+    mails,
+    blobs,
+    dataDir,
+    server,
+    call,
+    signIn,
+    waitMail,
+    reset,
+    stop,
+    newFile,
+    writeContent,
+    gatedUpload,
+    waitTmp,
+    failing,
+    expireUploads,
+  };
 }
 export type ApiStand = Awaited<ReturnType<typeof apiStand>>;

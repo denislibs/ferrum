@@ -48,6 +48,7 @@ export interface ApiDeps {
   limits?: Partial<Limits>;
   deadlineMs?: number;
   uploadIdleMs?: number;
+  maxContentBytes?: number;
 }
 
 export interface ApiUser {

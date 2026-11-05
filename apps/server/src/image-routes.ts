@@ -8,7 +8,17 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { randomUUID } from 'node:crypto';
 import { apiError, ok, type ApiDeps, type Route } from './api';
-import { inTransaction, trashBlob, uploadFailure, UPLOAD_IDLE_MS, type UploadGate } from './file-routes';
+import {
+  beginUpload,
+  commitRefusal,
+  dropUpload,
+  inTransaction,
+  settleUpload,
+  trashBlob,
+  uploadFailure,
+  UPLOAD_IDLE_MS,
+  type UploadGate,
+} from './file-routes';
 
 export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
   const { pool, blobs } = deps;
@@ -66,6 +76,7 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         if (!gate.enter(ctx.user.id)) return apiError(429, 'BUSY');
         const key = `images/${ctx.params.hash}/${randomUUID()}`;
         try {
+          await beginUpload(pool, key);
           const hasher = blake3.create();
           let size: number;
           try {
@@ -75,16 +86,23 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
               onChunk: (chunk) => void hasher.update(chunk),
             }));
           } catch (e) {
-            await blobs.delete(key).catch(() => {});
+            await dropUpload(deps, key).catch(() => {});
             const failure = uploadFailure(e);
             if (failure) return failure;
             throw e;
           }
           if (bytesToHex(hasher.digest()) !== ctx.params.hash) {
-            await blobs.delete(key).catch(() => {});
+            await dropUpload(deps, key).catch(() => {});
             return apiError(400, 'HASH_MISMATCH');
           }
-          await inTransaction(pool, async (c) => {
+          // Пока байты шли, файл могли удалить, а роль снять: решает только эта транзакция.
+          const outcome = await inTransaction(pool, async (c) => {
+            const file = await c.query<{ rank: number }>('SELECT file_role_rank(id, $2) AS rank FROM file WHERE id = $1 FOR UPDATE', [
+              ctx.params.id,
+              ctx.user.id,
+            ]);
+            const settled = await settleUpload(c, key, commitRefusal(file.rows[0]));
+            if (settled) return settled;
             // Такая уже есть: новые байты лишние, а запись оживает, даже если её вот-вот удалила бы очистка.
             const { rows } = await c.query<{ blob_key: string }>(
               `INSERT INTO image (hash, size, blob_key) VALUES ($1, $2, $3)
@@ -92,12 +110,18 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
               [ctx.params.hash, size, key],
             );
             if (rows[0].blob_key !== key) await trashBlob(c, key);
-            await c.query(
-              `INSERT INTO file_image (file_id, hash) VALUES ($1, $2)
-               ON CONFLICT (file_id, hash) DO UPDATE SET unreferenced_at = NULL`,
-              [ctx.params.id, ctx.params.hash],
-            );
+            // Срок идёт с загрузки, его снимает только запись содержимого со ссылкой (спека, 6.4: сначала
+            // картинка, потом правка). Повторная загрузка срок не трогает: иначе его можно продлевать вечно.
+            await c.query('INSERT INTO file_image (file_id, hash) VALUES ($1, $2) ON CONFLICT (file_id, hash) DO NOTHING', [
+              ctx.params.id,
+              ctx.params.hash,
+            ]);
+            return null;
           });
+          if (outcome) {
+            await blobs.delete(key).catch(() => {});
+            return outcome;
+          }
           return ok({ ok: true });
         } finally {
           gate.leave(ctx.user.id);

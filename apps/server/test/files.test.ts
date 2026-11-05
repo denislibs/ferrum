@@ -1,7 +1,9 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { MAX_CONTENT_BYTES } from '@ferrum/protocol';
 import { LIMITS, MAX_JSON_BYTES } from '../src/api';
+import { uploadGate } from '../src/file-routes';
 import { runGc } from '../src/gc';
 import { apiStand, container, PNG, type Person } from './api-stand';
 
@@ -121,7 +123,7 @@ test('содержимое не контейнер, обрезано, с кар�
   expect(new Uint8Array(await (await s.call(owner, 'GET', `/api/files/${f.id}/content`)).arrayBuffer())).toEqual(good);
 });
 
-test('заголовки записи обязательны; сверх предела по `Content-Length` — 413 без чтения', async () => {
+test('заголовки записи обязательны', async () => {
   const f = await s.newFile(owner);
   const put = (headers: Record<string, string>) => s.call(owner, 'PUT', `/api/files/${f.id}/content`, container(), headers);
   expect((await put({})).status).toBe(400);
@@ -260,7 +262,10 @@ async function waitFor(check: () => boolean): Promise<void> {
 
 test('файл большого размера идёт потоком: память сервера не растёт на размер файла', async () => {
   const MB = 200;
-  const child = Bun.spawn(['bun', 'run', join(import.meta.dir, 'memory-probe.ts'), String(MB)], { stdout: 'pipe', stderr: 'inherit' });
+  const child = Bun.spawn([process.execPath, 'run', join(import.meta.dir, 'memory-probe.ts'), String(MB)], {
+    stdout: 'pipe',
+    stderr: 'inherit',
+  });
   const out = await new Response(child.stdout).text();
   expect(await child.exited).toBe(0);
   const r = JSON.parse(out.trim().split('\n').at(-1)!) as { status: number; read: number; growthMb: number };
@@ -281,7 +286,7 @@ test('JSON сверх предела — 400, неверный JSON — 400', as
   expect(await res.json()).toEqual({ error: 'BAD_REQUEST' });
 });
 
-test('предел частоты по человеку: другой не страдает; срок обработчика — 503 в формате ошибок', async () => {
+test('предел частоты по человеку: другой не страдает', async () => {
   expect(LIMITS.read.max).toBeGreaterThan(100);
   const tight = await apiStand({ limits: { read: { max: 2, windowSeconds: 60 } } }, true);
   const a = await tight.signIn('a@example.com');
@@ -325,4 +330,223 @@ test('неизвестный маршрут API и метод — 404 в фор�
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'NOT_FOUND' });
   }
+});
+
+const THUMB = (id: string) => `/api/files/${id}/thumb`;
+const pendingKeys = async () => (await s.pool.query<{ key: string }>('SELECT key FROM blob_pending')).rows.map((r) => r.key);
+
+/** Запрос без тела: ответ пришёл, значит сервер отказал, не дожидаясь байтов. */
+function declaredOnly(stand: typeof s, who: Person, path: string, bytes: number, headers: string[]): Promise<string> {
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  let text = '';
+  const head = [
+    `PUT ${path} HTTP/1.1`,
+    `Host: localhost:${stand.server.port}`,
+    `Origin: ${stand.publicUrl}`,
+    `Cookie: ${who.cookie}`,
+    `Content-Length: ${bytes}`,
+    ...headers,
+  ];
+  void Bun.connect({
+    hostname: 'localhost',
+    port: stand.server.port!,
+    socket: {
+      open: (sock) => void sock.write(`${head.join('\r\n')}\r\n\r\n`),
+      data: (sock, d) => {
+        text += new TextDecoder().decode(d);
+        if (/\{"error":"\w+"\}/.test(text)) {
+          resolve(text);
+          sock.end();
+        }
+      },
+      close: () => resolve(text),
+      error: (_, e) => reject(e),
+    },
+  });
+  return promise;
+}
+
+test('сверх настоящего предела по `Content-Length` — 413, тело не читается', async () => {
+  // Срок простоя короткий: если сервер станет ждать тело, ответ будет другим и сразу.
+  const stand = await apiStand({ uploadIdleMs: 200 }, true);
+  const f = await s.newFile(owner);
+  const write = ['If-Match: "0"', `X-Ferrum-Write: ${crypto.randomUUID()}`];
+  const reply = await declaredOnly(stand, owner, `/api/files/${f.id}/content`, MAX_CONTENT_BYTES + 1, write);
+  expect(reply.split(' ')[1]).toBe('413');
+  expect(reply).toContain('{"error":"TOO_LARGE"}');
+  await stand.stop();
+});
+
+test('сверх предела потоком и по `Content-Length`: 413, байтов и намерения нет, старое цело', async () => {
+  const stand = await apiStand({ maxContentBytes: 64 }, true);
+  const f = await s.newFile(owner);
+  const small = container([], 1);
+  expect(
+    (await stand.call(owner, 'PUT', `/api/files/${f.id}/content`, small, { 'if-match': '"0"', 'x-ferrum-write': crypto.randomUUID() }))
+      .status,
+  ).toBe(200);
+  const big = container([], 1000);
+  const write = () => ({ 'if-match': '"1"', 'x-ferrum-write': crypto.randomUUID() });
+  const declared = await stand.call(owner, 'PUT', `/api/files/${f.id}/content`, big, write());
+  expect(declared.status).toBe(413);
+  const { done, release } = stand.gatedUpload(owner, `/api/files/${f.id}/content`, big, write());
+  release();
+  const streamed = await done;
+  expect(streamed.status).toBe(413);
+  expect(await streamed.json()).toEqual({ error: 'TOO_LARGE' });
+  expect(await pendingKeys()).toEqual([]);
+  expect(new Uint8Array(await (await stand.call(owner, 'GET', `/api/files/${f.id}/content`)).arrayBuffer())).toEqual(small);
+  await stand.stop();
+});
+
+test('срок обработчика: зависший запрос к базе — 503 в формате ошибок', async () => {
+  const f = await s.newFile(owner);
+  const tight = await apiStand({ apiDeadlineMs: 100 }, true);
+  const lock = await s.pool.connect();
+  await lock.query('BEGIN');
+  await lock.query('SELECT 1 FROM file WHERE id = $1 FOR UPDATE', [f.id]);
+  const res = await tight.call(owner, 'PATCH', `/api/files/${f.id}`, { name: 'Новое' });
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({ error: 'UNAVAILABLE' });
+  await lock.query('ROLLBACK');
+  lock.release();
+  await tight.stop();
+});
+
+test('срок проверки прав: зависшая база до обработчика — 503 в формате ошибок', async () => {
+  const f = await s.newFile(owner);
+  const tight = await apiStand({ apiDeadlineMs: 100 }, true);
+  const lock = await s.pool.connect();
+  await lock.query('BEGIN');
+  await lock.query('LOCK TABLE file IN ACCESS EXCLUSIVE MODE');
+  const res = await tight.call(owner, 'GET', `/api/files/${f.id}`);
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({ error: 'UNAVAILABLE' });
+  await lock.query('ROLLBACK');
+  lock.release();
+  await tight.stop();
+});
+
+test('сбой транзакции после загрузки: 503, намерение остаётся, очистка убирает байты', async () => {
+  const f = await s.newFile(owner);
+  const res = await s.failing('file', 'UPDATE', () => s.writeContent(owner, f.id, 0));
+  expect(res.status).toBe(503);
+  expect(readdirSync(join(s.dataDir, 'files', f.id))).toHaveLength(1);
+  expect(await pendingKeys()).toHaveLength(1);
+  // Загрузка ещё может быть жива: до срока очистка её не трогает.
+  await runGc(s.pool, s.blobs);
+  expect(readdirSync(join(s.dataDir, 'files', f.id))).toHaveLength(1);
+  await s.expireUploads();
+  await runGc(s.pool, s.blobs);
+  expect(readdirSync(join(s.dataDir, 'files', f.id))).toEqual([]);
+  expect(await pendingKeys()).toEqual([]);
+  expect((await s.pool.query('SELECT 1 FROM blob_trash')).rowCount).toBe(0);
+});
+
+test('сбой транзакции превью: байты тоже убирает очистка', async () => {
+  const f = await s.newFile(owner);
+  const res = await s.failing('file', 'UPDATE', () => s.call(owner, 'PUT', THUMB(f.id), PNG));
+  expect(res.status).toBe(503);
+  expect(fileCount(f.id)).toBe(1);
+  await s.expireUploads();
+  await runGc(s.pool, s.blobs);
+  expect(fileCount(f.id)).toBe(0);
+});
+
+test('зафиксированная запись не считается брошенной: очистка по сроку не трогает живые байты', async () => {
+  const f = await s.newFile(owner);
+  const bytes = container([], 8);
+  await s.writeContent(owner, f.id, 0, bytes);
+  await s.call(owner, 'PUT', THUMB(f.id), PNG);
+  expect(await pendingKeys()).toEqual([]);
+  await s.expireUploads();
+  await runGc(s.pool, s.blobs);
+  expect(new Uint8Array(await (await s.call(owner, 'GET', `/api/files/${f.id}/content`)).arrayBuffer())).toEqual(bytes);
+  expect(new Uint8Array(await (await s.call(owner, 'GET', THUMB(f.id))).arrayBuffer())).toEqual(PNG);
+});
+
+test('загрузка дольше срока намерения: отказ при фиксации, в базе нет ключа без байтов', async () => {
+  const f = await s.newFile(owner);
+  const write = { 'if-match': '"0"', 'x-ferrum-write': crypto.randomUUID() };
+  const { done, release } = s.gatedUpload(owner, `/api/files/${f.id}/content`, container([], 64), write);
+  await s.waitTmp(1);
+  await s.expireUploads();
+  await runGc(s.pool, s.blobs);
+  release();
+  const res = await done;
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({ error: 'UNAVAILABLE' });
+  const meta = await s.pool.query('SELECT version, content_key FROM file WHERE id = $1', [f.id]);
+  expect(meta.rows[0]).toEqual({ version: '0', content_key: null });
+  expect(fileCount(f.id)).toBe(0);
+});
+
+test('превью: роль снята посреди загрузки — 403, превью прежнее, байты убраны', async () => {
+  const f = await s.newFile(owner);
+  await giveAccess(f.id, other, 'editor');
+  const { done, release } = s.gatedUpload(other, THUMB(f.id), PNG);
+  await s.waitTmp(1);
+  await s.pool.query(`UPDATE file_access SET role = 'viewer' WHERE file_id = $1 AND user_id = $2`, [f.id, other.id]);
+  release();
+  const res = await done;
+  expect(res.status).toBe(403);
+  expect(await res.json()).toEqual({ error: 'FORBIDDEN' });
+  expect((await json(await s.call(owner, 'GET', `/api/files/${f.id}`))).thumbVersion).toBe(0);
+  expect(fileCount(f.id)).toBe(0);
+  expect(await pendingKeys()).toEqual([]);
+});
+
+test('превью: файл удалён посреди загрузки — 404, байтов нет; убран в корзину — редактору 404', async () => {
+  const gone = await s.newFile(owner);
+  const a = s.gatedUpload(owner, THUMB(gone.id), PNG);
+  await s.waitTmp(1);
+  expect((await s.call(owner, 'DELETE', `/api/files/${gone.id}`)).status).toBe(200);
+  a.release();
+  const res = await a.done;
+  expect(res.status).toBe(404);
+  expect(await res.json()).toEqual({ error: 'NOT_FOUND' });
+  expect(fileCount(gone.id)).toBe(0);
+  expect(await pendingKeys()).toEqual([]);
+
+  const f = await s.newFile(owner);
+  await giveAccess(f.id, other, 'editor');
+  const b = s.gatedUpload(other, THUMB(f.id), PNG);
+  await s.waitTmp(1);
+  await s.call(owner, 'POST', `/api/files/${f.id}/trash`);
+  b.release();
+  expect((await b.done).status).toBe(404);
+  expect((await s.pool.query('SELECT thumb_key FROM file WHERE id = $1', [f.id])).rows[0].thumb_key).toBeNull();
+});
+
+test('предел одновременных загрузок: девятая — 429 `BUSY`, у другого своё место, освободившееся снова доступно', async () => {
+  const f = await s.newFile(owner);
+  const running = Array.from({ length: 8 }, () => s.gatedUpload(owner, THUMB(f.id), PNG));
+  await s.waitTmp(8);
+  const write = { 'if-match': '"0"', 'x-ferrum-write': crypto.randomUUID() };
+  for (const refused of [
+    await s.call(owner, 'PUT', THUMB(f.id), PNG),
+    await s.call(owner, 'PUT', `/api/files/${f.id}/content`, container(), write),
+    await s.call(owner, 'PUT', `/api/files/${f.id}/images/${'a'.repeat(64)}`, new Uint8Array(1)),
+  ]) {
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toEqual({ error: 'BUSY' });
+  }
+  const mine = await s.newFile(other);
+  expect((await s.call(other, 'PUT', THUMB(mine.id), PNG)).status).toBe(200);
+  running[0].release();
+  expect((await running[0].done).status).toBe(200);
+  expect((await s.call(owner, 'PUT', THUMB(f.id), PNG)).status).toBe(200);
+  for (const u of running.slice(1)) u.release();
+  for (const u of running.slice(1)) expect((await u.done).status).toBe(200);
+});
+
+test('предел загрузок на сервер: общий счётчик', () => {
+  const gate = uploadGate();
+  let taken = 0;
+  // На человека не больше 8, поэтому пятеро могли бы занять 40.
+  for (let p = 0; p < 5; p++) for (let i = 0; i < 8; i++) if (gate.enter(`u${p}`)) taken++;
+  expect(taken).toBe(32);
+  expect(gate.enter('новый')).toBe(false);
+  gate.leave('u0');
+  expect(gate.enter('новый')).toBe(true);
 });

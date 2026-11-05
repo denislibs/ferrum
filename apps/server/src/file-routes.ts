@@ -58,6 +58,30 @@ export const trashBlob = (c: PoolClient, key: string | null) =>
       ])
     : Promise.resolve();
 
+/** Намерение: до первого байта. Без него сбой транзакции или процесса оставил бы байты навсегда. */
+export const beginUpload = (pool: Pool, key: string) => pool.query('INSERT INTO blob_pending (key) VALUES ($1)', [key]);
+
+/** Загрузка оборвалась до транзакции: ни байтов, ни намерения. Не удалось — останется очистке по сроку. */
+export async function dropUpload(deps: ApiDeps, key: string): Promise<void> {
+  await deps.blobs.delete(key);
+  await deps.pool.query('DELETE FROM blob_pending WHERE key = $1', [key]);
+}
+
+/** Решение транзакции фиксации. Отказ — байты уходят в очистку той же транзакцией, вызывающий
+ * возвращает ответ. Намерения уже нет — очистка сочла загрузку брошенной, байты тоже не жильцы. */
+export async function settleUpload(c: PoolClient, key: string, refusal: Response | null): Promise<Response | null> {
+  const { rowCount } = await c.query('DELETE FROM blob_pending WHERE key = $1', [key]);
+  const out = refusal ?? (rowCount === 0 ? apiError(503, 'UNAVAILABLE') : null);
+  if (out) await trashBlob(c, key);
+  return out;
+}
+
+/** Файл и роль на момент фиксации: пока шли байты, его могли удалить, а роль снять. */
+export function commitRefusal(row: { rank: number } | undefined): Response | null {
+  if (!row || row.rank === 0) return apiError(404, 'NOT_FOUND');
+  return row.rank < ROLE_RANK.editor ? apiError(403, 'FORBIDDEN') : null;
+}
+
 interface FileRow {
   id: string;
   name: string;
@@ -186,6 +210,7 @@ function writeAllowed(row: { version: string; last_write_id: string | null }, ba
 export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
   const { pool, blobs } = deps;
   const idle = deps.uploadIdleMs ?? UPLOAD_IDLE_MS;
+  const maxContent = deps.maxContentBytes ?? MAX_CONTENT_BYTES;
   const fresh = async (ctx: Ctx) => {
     const meta = await loadFile(pool, ctx.params.id, ctx.user.id);
     return meta ? ok(meta) : apiError(404, 'NOT_FOUND');
@@ -400,7 +425,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         const write = parseWriteHeaders(ctx.req.headers);
         if (!write || !ctx.req.body) return apiError(400, 'BAD_REQUEST');
         const declared = Number(ctx.req.headers.get('content-length') ?? 0);
-        if (declared > MAX_CONTENT_BYTES) return apiError(413, 'TOO_LARGE');
+        if (declared > maxContent) return apiError(413, 'TOO_LARGE');
         // Заведомый отказ — раньше загрузки: не занимать диск и не гонять байты зря.
         const before = await pool.query<{ version: string; last_write_id: string | null }>(
           'SELECT version, last_write_id FROM file WHERE id = $1',
@@ -411,17 +436,18 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         if (!gate.enter(ctx.user.id)) return apiError(429, 'BUSY');
         const key = `files/${ctx.params.id}/content-${randomUUID()}`;
         try {
+          await beginUpload(pool, key);
           const walker = new ContainerWalker();
           let size: number;
           try {
             ({ size } = await blobs.putStream(key, ctx.req.body, {
-              maxBytes: MAX_CONTENT_BYTES,
+              maxBytes: maxContent,
               idleMs: idle,
               onChunk: (chunk) => walker.feed(chunk),
             }));
             walker.finish();
           } catch (e) {
-            await blobs.delete(key).catch(() => {});
+            await dropUpload(deps, key).catch(() => {});
             const failure = uploadFailure(e);
             if (failure) return failure;
             throw e;
@@ -434,9 +460,9 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
               [ctx.params.id, ctx.user.id],
             );
             const row = rows[0];
-            if (!row || row.rank === 0) return apiError(404, 'NOT_FOUND');
-            if (row.rank < ROLE_RANK.editor) return apiError(403, 'FORBIDDEN');
-            if (!writeAllowed(row, write.base, write.previous)) return apiError(409, 'CONFLICT');
+            const refused = commitRefusal(row) ?? (writeAllowed(row, write.base, write.previous) ? null : apiError(409, 'CONFLICT'));
+            const settled = await settleUpload(c, key, refused);
+            if (settled) return settled;
             await trashBlob(c, row.content_key);
             await c.query(
               `UPDATE file SET version = version + 1, size = $2, content_key = $3, last_write_id = $4, edited_at = now() WHERE id = $1`,
@@ -485,6 +511,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         if (!gate.enter(ctx.user.id)) return apiError(429, 'BUSY');
         const key = `files/${ctx.params.id}/thumb-${randomUUID()}`;
         try {
+          await beginUpload(pool, key);
           let seen = 0;
           try {
             await blobs.putStream(key, ctx.req.body, {
@@ -498,18 +525,27 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             });
             if (seen < PNG_SIGNATURE.length) throw new ContainerError('не PNG');
           } catch (e) {
-            await blobs.delete(key).catch(() => {});
+            await dropUpload(deps, key).catch(() => {});
             const failure = uploadFailure(e);
             if (failure) return failure;
             throw e;
           }
-          await inTransaction(pool, async (c) => {
-            const { rows } = await c.query<{ thumb_key: string | null }>('SELECT thumb_key FROM file WHERE id = $1 FOR UPDATE', [
-              ctx.params.id,
-            ]);
-            await trashBlob(c, rows[0]?.thumb_key ?? null);
+          // Пока байты шли, файл могли удалить, а роль снять: решает только эта транзакция.
+          const outcome = await inTransaction(pool, async (c) => {
+            const { rows } = await c.query<{ thumb_key: string | null; rank: number }>(
+              'SELECT thumb_key, file_role_rank(id, $2) AS rank FROM file WHERE id = $1 FOR UPDATE',
+              [ctx.params.id, ctx.user.id],
+            );
+            const settled = await settleUpload(c, key, commitRefusal(rows[0]));
+            if (settled) return settled;
+            await trashBlob(c, rows[0].thumb_key);
             await c.query('UPDATE file SET thumb_key = $2, thumb_version = thumb_version + 1 WHERE id = $1', [ctx.params.id, key]);
+            return null;
           });
+          if (outcome) {
+            await blobs.delete(key).catch(() => {});
+            return outcome;
+          }
           return await fresh(ctx);
         } finally {
           gate.leave(ctx.user.id);

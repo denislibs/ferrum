@@ -32,6 +32,7 @@ export interface AppDeps {
   limits?: Partial<Limits>;
   apiDeadlineMs?: number;
   uploadIdleMs?: number;
+  maxContentBytes?: number;
 }
 
 /** Простой соединения: загрузка с паузами дольше этого уже оборвана проверкой `UPLOAD_IDLE_MS`. */

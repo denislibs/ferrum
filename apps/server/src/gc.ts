@@ -8,6 +8,8 @@ import type { BlobStore } from './blob-store';
 export const GC_INTERVAL_MS = 60_000;
 /** Неиспользуемая картинка живёт столько (спека, раздел 6.4): отмена может вернуть ссылку на неё. */
 export const IMAGE_GRACE_DAYS = 30;
+/** Загрузка без фиксации дольше этого брошена; идущая получит отказ при фиксации, а не потеряет байты. */
+export const PENDING_UPLOAD_HOURS = 24;
 const BATCH = 200;
 
 /** Картинки: ссылка файла без ссылок в содержимом снимается через срок, картинка без файлов получает
@@ -31,8 +33,22 @@ async function sweepImages(pool: Pool): Promise<void> {
   );
 }
 
+/** Брошенные загрузки (сбой транзакции или процесса) идут в список на удаление. */
+async function sweepPending(pool: Pool): Promise<void> {
+  await pool.query(
+    `WITH due AS (
+       DELETE FROM blob_pending WHERE key IN (
+         SELECT key FROM blob_pending WHERE started_at < now() - make_interval(hours => $1) ORDER BY started_at LIMIT $2
+       ) RETURNING key
+     )
+     INSERT INTO blob_trash (key, delete_after) SELECT key, now() FROM due ON CONFLICT DO NOTHING`,
+    [PENDING_UPLOAD_HOURS, BATCH],
+  );
+}
+
 /** Сколько байтов-записей удалено. Один проход на все процессы: сервер один, но блокировка дешевле ошибки. */
 export async function runGc(pool: Pool, blobs: BlobStore): Promise<number> {
+  await sweepPending(pool);
   await sweepImages(pool);
   const { rows } = await pool.query<{ key: string }>(
     'SELECT key FROM blob_trash WHERE delete_after <= now() ORDER BY delete_after LIMIT $1',

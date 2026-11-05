@@ -1,6 +1,8 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { runGc } from '../src/gc';
 import { apiStand, container, type Person } from './api-stand';
 
@@ -134,7 +136,125 @@ test('повторная загрузка той же картинки ожив�
   await age('image', 'orphaned_at', 29);
   const g = await s.newFile(owner);
   expect((await put(owner, g.id, hash, img)).status).toBe(200);
+  // Сама загрузка снимает отметку: это и закрывает гонку с очисткой.
+  expect((await s.pool.query('SELECT orphaned_at FROM image')).rows[0].orphaned_at).toBeNull();
+  await runGc(s.pool, s.blobs);
+  expect((await s.pool.query('SELECT orphaned_at FROM image')).rows[0].orphaned_at).toBeNull();
+  expect((await get(owner, g.id, hash)).status).toBe(200);
+});
+
+test('очистка снимает отметку с картинки, у которой снова есть ссылка', async () => {
+  const f = await s.newFile(owner);
+  const img = bytes(7);
+  const hash = hashOf(img);
+  await put(owner, f.id, hash, img);
   await age('image', 'orphaned_at', 40);
   await runGc(s.pool, s.blobs);
-  expect((await get(owner, g.id, hash)).status).toBe(200);
+  expect((await s.pool.query('SELECT orphaned_at FROM image')).rows[0].orphaned_at).toBeNull();
+  expect((await get(owner, f.id, hash)).status).toBe(200);
+});
+
+const imagePath = (file: string, hash: string) => `/api/files/${file}/images/${hash}`;
+/** Байты этой картинки на диске. */
+const imageFiles = (hash: string) => {
+  try {
+    return readdirSync(join(s.dataDir, 'images', hash)).length;
+  } catch {
+    return 0;
+  }
+};
+const pending = async () => (await s.pool.query('SELECT 1 FROM blob_pending')).rowCount;
+
+test('картинка без записи содержимого удаляется по сроку', async () => {
+  const f = await s.newFile(owner);
+  const img = bytes(8);
+  const hash = hashOf(img);
+  await put(owner, f.id, hash, img);
+  // Клиент ещё не прислал содержимое: читать можно, но срок уже идёт.
+  expect((await s.pool.query('SELECT unreferenced_at FROM file_image')).rows[0].unreferenced_at).not.toBeNull();
+  expect((await get(owner, f.id, hash)).status).toBe(200);
+  await age('file_image', 'unreferenced_at', 31);
+  await runGc(s.pool, s.blobs);
+  expect((await head(owner, f.id, hash)).status).toBe(404);
+  await age('image', 'orphaned_at', 31);
+  await runGc(s.pool, s.blobs);
+  expect((await s.pool.query('SELECT 1 FROM image')).rowCount).toBe(0);
+  expect(imageFiles(hash)).toBe(0);
+});
+
+test('повторная загрузка срок не останавливает, запись содержимого со ссылкой — останавливает', async () => {
+  const f = await s.newFile(owner);
+  const img = bytes(9);
+  const hash = hashOf(img);
+  await put(owner, f.id, hash, img);
+  await age('file_image', 'unreferenced_at', 20);
+  const before = (await s.pool.query('SELECT unreferenced_at FROM file_image')).rows[0].unreferenced_at;
+  expect((await put(owner, f.id, hash, img)).status).toBe(200);
+  expect((await s.pool.query('SELECT unreferenced_at FROM file_image')).rows[0].unreferenced_at).toEqual(before);
+  await s.writeContent(owner, f.id, 0, container([hash]));
+  expect((await s.pool.query('SELECT unreferenced_at FROM file_image')).rows[0].unreferenced_at).toBeNull();
+  // Ссылка уже есть в содержимом: повторная загрузка не ставит срок заново.
+  expect((await put(owner, f.id, hash, img)).status).toBe(200);
+  expect((await s.pool.query('SELECT unreferenced_at FROM file_image')).rows[0].unreferenced_at).toBeNull();
+});
+
+test('файл удалён посреди загрузки картинки: 404, ни записи, ни байтов', async () => {
+  const f = await s.newFile(owner);
+  const img = bytes(10);
+  const hash = hashOf(img);
+  const { done, release } = s.gatedUpload(owner, imagePath(f.id, hash), img);
+  await s.waitTmp(1);
+  expect((await s.call(owner, 'DELETE', `/api/files/${f.id}`)).status).toBe(200);
+  release();
+  const res = await done;
+  expect(res.status).toBe(404);
+  expect(await res.json()).toEqual({ error: 'NOT_FOUND' });
+  expect((await s.pool.query('SELECT 1 FROM image')).rowCount).toBe(0);
+  expect(imageFiles(hash)).toBe(0);
+  expect(await pending()).toBe(0);
+});
+
+test('роль снята или файл убран в корзину посреди загрузки картинки: ссылки нет', async () => {
+  const f = await s.newFile(owner);
+  await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'editor')`, [f.id, other.id]);
+  const img = bytes(11);
+  const hash = hashOf(img);
+  const a = s.gatedUpload(other, imagePath(f.id, hash), img);
+  await s.waitTmp(1);
+  await s.pool.query(`UPDATE file_access SET role = 'viewer' WHERE user_id = $1`, [other.id]);
+  a.release();
+  const refused = await a.done;
+  expect(refused.status).toBe(403);
+  expect(await refused.json()).toEqual({ error: 'FORBIDDEN' });
+  await s.pool.query(`UPDATE file_access SET role = 'editor' WHERE user_id = $1`, [other.id]);
+  const b = s.gatedUpload(other, imagePath(f.id, hash), img);
+  await s.waitTmp(1);
+  await s.call(owner, 'POST', `/api/files/${f.id}/trash`);
+  b.release();
+  expect((await b.done).status).toBe(404);
+  expect((await s.pool.query('SELECT 1 FROM file_image')).rowCount).toBe(0);
+  expect((await s.pool.query('SELECT 1 FROM image')).rowCount).toBe(0);
+  expect(imageFiles(hash)).toBe(0);
+  expect(await pending()).toBe(0);
+});
+
+test('сбой транзакции загрузки картинки: 503, очистка убирает байты', async () => {
+  const f = await s.newFile(owner);
+  const img = bytes(12);
+  const hash = hashOf(img);
+  const res = await s.failing('image', 'INSERT', () => put(owner, f.id, hash, img));
+  expect(res.status).toBe(503);
+  expect(imageFiles(hash)).toBe(1);
+  await s.expireUploads();
+  await runGc(s.pool, s.blobs);
+  expect(imageFiles(hash)).toBe(0);
+  expect(await pending()).toBe(0);
+});
+
+test('байты не совпали с хэшем: и файла на диске, и намерения нет', async () => {
+  const f = await s.newFile(owner);
+  const hash = hashOf(bytes(13));
+  expect((await put(owner, f.id, hash, bytes(14))).status).toBe(400);
+  expect(imageFiles(hash)).toBe(0);
+  expect(await pending()).toBe(0);
 });

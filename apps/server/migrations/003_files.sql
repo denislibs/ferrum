@@ -115,8 +115,9 @@ CREATE TABLE image (
 CREATE TABLE file_image (
   file_id uuid NOT NULL REFERENCES file ON DELETE CASCADE,
   hash text NOT NULL REFERENCES image,
-  -- С этого момента на неё нет ссылок в содержимом файла (отмена может её вернуть).
-  unreferenced_at timestamptz,
+  -- С этого момента на неё нет ссылок в содержимом файла (отмена может её вернуть). Новая ссылка
+  -- получает срок сразу: загруженная и ни разу не использованная картинка тоже удаляется.
+  unreferenced_at timestamptz DEFAULT now(),
   PRIMARY KEY (file_id, hash)
 );
 CREATE INDEX file_image_hash_idx ON file_image (hash);
@@ -126,6 +127,14 @@ CREATE INDEX file_image_hash_idx ON file_image (hash);
 CREATE TABLE blob_trash (
   key text PRIMARY KEY,
   delete_after timestamptz NOT NULL
+);
+
+-- Загрузки, ещё не зафиксированные в базе: запись появляется до первого байта и снимается той же
+-- транзакцией, что и фиксация. Сбой транзакции или процесса оставляет запись, очистка по сроку
+-- переносит ключ в `blob_trash`. Перенос и фиксация спорят за одну строку: выигрывает одна из них.
+CREATE TABLE blob_pending (
+  key text PRIMARY KEY,
+  started_at timestamptz NOT NULL DEFAULT now()
 );
 
 -- Действующая роль (раздел 6.1): наибольшая из прямой, по ссылке и через команду. 0 — нет доступа.
