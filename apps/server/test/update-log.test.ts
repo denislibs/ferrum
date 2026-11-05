@@ -155,7 +155,7 @@ test('предел документов: новый документ сверх 
   const log = new UpdateLog(s.pool, { groupMs: 1, maxDocsPerFile: 2 });
   expect(await log.submit(item())).toMatchObject({ kind: 'written' });
   expect(await log.submit(item({ doc: '1@1', start: { '2': 0 }, end: { '2': 1 } }))).toMatchObject({ kind: 'written' });
-  expect(await log.submit(item({ doc: '2@1', start: { '3': 0 }, end: { '3': 1 } }))).toEqual({ kind: 'refused', code: 'LOG_FULL' });
+  expect(await log.submit(item({ doc: '2@1', start: { '3': 0 }, end: { '3': 1 } }))).toEqual({ kind: 'refused', code: 'DOC_LIMIT' });
   const docs = async () =>
     (await s.pool.query<{ doc: string }>('SELECT doc FROM doc_state WHERE file_id = $1 ORDER BY doc', [file])).rows.map((r) => r.doc);
   expect(await docs()).toEqual(['1@1', 'root']);

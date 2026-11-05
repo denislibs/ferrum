@@ -51,6 +51,8 @@ export const SYNC_REFUSALS = [
   'LOG_FULL',
   /** База недоступна: правка не записана, клиент подписывается заново и шлёт снова. */
   'UNAVAILABLE',
+  /** В файле больше документов, чем держит сервер: новый документ не заводится, повтор не поможет. */
+  'DOC_LIMIT',
 ] as const;
 export type SyncRefusal = (typeof SYNC_REFUSALS)[number];
 
