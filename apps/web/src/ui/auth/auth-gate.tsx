@@ -6,7 +6,7 @@ import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch,
 import { MAX_NAME_CHARS, parseConfirmHash, parseEmail, parseNext, type SessionUser } from '@ferrum/protocol';
 import { dismissSplash } from '../boot';
 import { editorHooks } from '../extensions';
-import { confirmLink, getSession, requestLink, saveName } from './auth-api';
+import { confirmInfo, confirmLink, getSession, requestLink, saveName } from './auth-api';
 import { failureText, resendLeft, screenFor, type AuthFailure, type AuthScreen } from './auth-logic';
 import { announceAuthChange, currentUser, onAuthChange, setCurrentUser } from './session';
 
@@ -305,7 +305,10 @@ function LoginScreen() {
  * одноразовый токен. Токен тратится только по нажатию. Ссылка точно мертва только при отказе
  * `INVALID_TOKEN` (или если токена нет). При любом другом сбое «Войти» остаётся повтором, а токен в
  * адресе не трогается. Но при сбое сервера токен мог быть уже потрачен (Better Auth снимает его до
- * обращения к базе): тогда рядом и «Запросить новую ссылку». */
+ * обращения к базе): тогда рядом и «Запросить новую ссылку».
+ * Страница показывает, в какой адрес идёт вход, и предупреждает, если человек уже вошёл под другим
+ * (B-193): чужая ссылка, нажатая по неосторожности, иначе молча сложила бы его работу в чужой аккаунт.
+ * Эти два запроса токен не тратят; их сбой вход не блокирует, просто на экране нет адреса. */
 function ConfirmScreen(props: {
   token: string | null;
   next: string | null;
@@ -316,6 +319,25 @@ function ConfirmScreen(props: {
   const [dead, setDead] = createSignal(!props.token);
   const [serverDown, setServerDown] = createSignal(false);
   const [error, setError] = createSignal<string | null>(props.token ? null : failureText('INVALID_TOKEN'));
+  const [target, setTarget] = createSignal<string | null>(null);
+  const [signedIn, setSignedIn] = createSignal<string | null>(null);
+  let closed = false;
+  onCleanup(() => (closed = true));
+  if (props.token) {
+    void confirmInfo(props.token).then((r) => {
+      if (closed || busy()) return;
+      if (r.ok) setTarget(r.value.email);
+      else if (r.failure === 'INVALID_TOKEN') {
+        setDead(true);
+        setError(failureText('INVALID_TOKEN'));
+      }
+    });
+    void getSession().then((r) => {
+      if (!closed && r.ok) setSignedIn(r.value.user?.email ?? null);
+    });
+  }
+  /** Уже вошёл под этим же адресом: токен незачем тратить. */
+  const same = () => signedIn() !== null && signedIn() === target();
   const enter = async () => {
     setBusy(true);
     setError(null);
@@ -338,12 +360,48 @@ function ConfirmScreen(props: {
         </p>
       </Show>
       <Show when={!dead()}>
-        <Show when={!error()}>
-          <p class="fe-auth__text">Нажмите кнопку, чтобы завершить вход.</p>
+        <Show
+          when={signedIn() && target() && !same()}
+          fallback={
+            <Show when={!error()}>
+              <p class="fe-auth__text">
+                <Show when={target()} fallback="Нажмите кнопку, чтобы завершить вход.">
+                  {(email) => (
+                    <>
+                      <Show when={same()} fallback="Вход как ">
+                        Вы уже вошли как{' '}
+                      </Show>
+                      <b>{email()}</b>.
+                    </>
+                  )}
+                </Show>
+              </p>
+            </Show>
+          }
+        >
+          <p class="fe-auth__text" role="status">
+            Вы уже вошли как <b>{signedIn()}</b>. Эта ссылка входит как <b>{target()}</b>: новые файлы будут сохраняться в его аккаунте.
+          </p>
         </Show>
-        <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy()} onClick={() => void enter()}>
-          Войти
-        </button>
+        <Show
+          when={same()}
+          fallback={
+            <button class="fe-btn fe-btn--primary fe-auth__wide" disabled={busy()} onClick={() => void enter()}>
+              <Show when={signedIn() && target()} fallback="Войти">
+                Войти как {target()}
+              </Show>
+            </button>
+          }
+        >
+          <button class="fe-btn fe-btn--primary fe-auth__wide" onClick={() => props.onDone(props.next)}>
+            Продолжить
+          </button>
+        </Show>
+        <Show when={signedIn() && target() && !same()}>
+          <button class="fe-btn fe-btn--secondary fe-auth__wide" disabled={busy()} onClick={() => props.onDone(props.next)}>
+            Остаться как {signedIn()}
+          </button>
+        </Show>
       </Show>
       <Show when={dead() || serverDown()}>
         <button

@@ -3,6 +3,7 @@
 
 export const API_SIGN_IN = '/api/auth/sign-in/magic-link';
 export const API_CONFIRM = '/api/auth/confirm';
+export const API_CONFIRM_INFO = '/api/auth/confirm-info';
 export const API_SESSION = '/api/auth/session';
 export const API_NAME = '/api/auth/name';
 export const API_SIGN_OUT = '/api/auth/sign-out';
@@ -49,6 +50,11 @@ export interface SignInRequest {
 
 export interface ConfirmRequest {
   token: string;
+}
+
+/** Куда ведёт ссылка: страница подтверждения показывает адрес, токен при этом не тратится. */
+export interface ConfirmInfo {
+  email: string;
 }
 
 export interface NameRequest {

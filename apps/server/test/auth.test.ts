@@ -691,3 +691,27 @@ test('настоящее письмо через SMTP в Mailpit', async () => {
   expect(full.Text).toContain(link);
   expect(full.HTML).toContain(link.replaceAll('&', '&amp;'));
 });
+
+test('куда ведёт ссылка: адрес без траты токена, неверный токен и чужой `Origin` — отказ (B-193)', async () => {
+  const s = stand();
+  const token = await requestLink(s, 'Ivan@Example.com');
+  const info = await s.post('/api/auth/confirm-info', { token });
+  expect(info.status).toBe(200);
+  expect(await info.json()).toEqual({ email: 'ivan@example.com' });
+  // Второй раз то же самое: токен не потрачен.
+  expect((await s.post('/api/auth/confirm-info', { token })).status).toBe(200);
+  expect((await s.post('/api/auth/confirm', { token })).status).toBe(200);
+  // Потрачен — той же ошибкой, что и подтверждение.
+  const dead = await s.post('/api/auth/confirm-info', { token });
+  expect(dead.status).toBe(400);
+  expect(await dead.json()).toEqual({ error: 'INVALID_TOKEN' });
+  expect((await s.post('/api/auth/confirm-info', { token: 'x' })).status).toBe(400);
+  expect((await s.post('/api/auth/confirm-info', { token: 'a'.repeat(32) }, { origin: 'https://evil.example' })).status).toBe(403);
+});
+
+test('куда ведёт ссылка: предел с одного адреса', async () => {
+  const s = stand();
+  const body = { token: 'a'.repeat(32) };
+  for (let i = 0; i < 30; i++) expect((await s.post('/api/auth/confirm-info', body)).status).toBe(400);
+  expect((await s.post('/api/auth/confirm-info', body)).status).toBe(429);
+});

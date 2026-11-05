@@ -106,7 +106,9 @@ test('открытие ссылки токен не тратит: сканер �
   });
   await scanner.goto(link);
   await expect(scanner.getByRole('button', { name: 'Войти', exact: true })).toBeVisible();
-  expect(asked).toEqual([]);
+  // Страница спрашивает, кому принадлежит ссылка: токен это не тратит (B-193), подтверждения нет.
+  await expect(scanner.getByText(email)).toBeVisible();
+  expect(asked.filter((u) => new URL(u).pathname === '/api/auth/confirm')).toEqual([]);
   await scanner.context().close();
   // Токен цел.
   await page.goto(link);
@@ -121,12 +123,68 @@ test('ссылка одноразовая: второе нажатие — со�
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   const [link] = await linksFor(email);
   const other = await newContext(browser);
+  // Потраченная ссылка видна сразу, нажимать нечего.
   await other.goto(link);
-  await other.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(other.getByRole('alert')).toHaveText('Ссылка недействительна или устарела. Запросите новую');
+  await expect(other.getByRole('button', { name: 'Войти', exact: true })).toHaveCount(0);
   await other.getByRole('button', { name: 'Запросить новую ссылку' }).click();
   await expect(other.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
   await other.context().close();
+});
+
+test('ссылку потратили, пока страница открыта: нажатие — то же сообщение', async ({ page, browser }, info) => {
+  const email = newEmail(info.project.name);
+  await page.goto('/');
+  await requestLink(page, email);
+  const [link] = await linksFor(email);
+  await page.goto(link);
+  await expect(page.getByText(email)).toBeVisible();
+  const other = await newContext(browser);
+  await other.goto(link);
+  await other.getByRole('button', { name: 'Войти', exact: true }).click();
+  await expect(other.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('Ссылка недействительна или устарела. Запросите новую');
+  await other.context().close();
+});
+
+test('страница подтверждения показывает адрес; вошедшему под другим адресом — выбор, ссылка цела (B-193)', async ({ page }, info) => {
+  const mine = newEmail(info.project.name);
+  const foreign = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, mine);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email: foreign }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(foreign);
+  await page.goto(link);
+  await expect(page.getByRole('status')).toContainText(`Вы уже вошли как ${mine}`);
+  await expect(page.getByRole('status')).toContainText(foreign);
+  // «Остаться» не тратит токен и оставляет прежний вход.
+  await page.getByRole('button', { name: `Остаться как ${mine}` }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  expect(((await (await page.request.get('/api/auth/session')).json()) as { user: { email: string } }).user.email).toBe(mine);
+  await page.goto(link);
+  await page.getByRole('button', { name: `Войти как ${foreign}` }).click();
+  await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
+  expect(((await (await page.request.get('/api/auth/session')).json()) as { user: { email: string } }).user.email).toBe(foreign);
+});
+
+test('ссылка на свой же адрес: токен не тратится, «Продолжить»', async ({ page }, info) => {
+  const email = newEmail(info.project.name);
+  await page.goto('/');
+  await signIn(page, email);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await page.request.post('/api/auth/sign-in/magic-link', { data: { email }, headers: { origin: STAND_URL } });
+  const [link] = await linksFor(email, 2);
+  await page.goto(link);
+  await expect(page.getByText('Вы уже вошли как')).toBeVisible();
+  const confirm: string[] = [];
+  page.on('request', (r) => {
+    if (new URL(r.url()).pathname === '/api/auth/confirm') confirm.push(r.url());
+  });
+  await page.getByRole('button', { name: 'Продолжить' }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  expect(confirm).toEqual([]);
 });
 
 test('истёкшая ссылка показывает то же сообщение', async ({ page }, info) => {
@@ -143,8 +201,8 @@ test('истёкшая ссылка показывает то же сообще�
   valkey('PEXPIRE', keys[0], '1');
   await expect.poll(() => valkey('EXISTS', keys[0]).trim()).toBe('0');
   await page.goto(link);
-  await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveText('Ссылка недействительна или устарела. Запросите новую');
+  await expect(page.getByRole('button', { name: 'Войти', exact: true })).toHaveCount(0);
 });
 
 test('испорченная ссылка: сообщение сразу, запросов нет', async ({ page }) => {
@@ -350,7 +408,7 @@ test('ссылка из письма в той же вкладке на экра
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   await pasteHash(page, await secondLink(page, email));
   await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
-  await enter(page).click();
+  await page.getByRole('button', { name: 'Продолжить' }).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
 });
 
@@ -367,7 +425,7 @@ test('ссылка из письма в той же вкладке в редак
   await drawRect(page);
   // Сразу, не дожидаясь журнала: приложение должно записать правку само.
   await pasteHash(page, link);
-  await enter(page).click();
+  await page.getByRole('button', { name: 'Продолжить' }).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   await page.goto(url);
   await page.reload();
@@ -619,6 +677,10 @@ test('сбой сервера при подтверждении: и «Войти
 });
 
 test('сбой сервера при подтверждении: новая ссылка ведёт на экран входа', async ({ page }) => {
+  // Сбой чтения адреса входа не блокирует: на экране просто нет адреса.
+  await page.route('**/api/auth/confirm-info', (r) =>
+    r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"UNAVAILABLE"}' }),
+  );
   await page.goto(`/#/auth/confirm?token=${'a'.repeat(32)}&next=%23%2Ftrash`);
   await page.route('**/api/auth/confirm', (r) => r.fulfill({ status: 500, contentType: 'text/plain', body: 'сбой' }));
   await enter(page).click();
