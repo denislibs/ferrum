@@ -8,7 +8,8 @@
 //   работе без пауз; по Ctrl/Cmd+S; при уходе на экран файлов или к другому файлу
 //   (уход ждёт записи). Перед снимком ядро отдаёт пачку с правками до него — она
 //   дописывается раньше, чем пишется файл, а запись файла стирает пачки до номера
-//   снимка в той же транзакции.
+//   снимка (в браузере — той же транзакцией, на сервере — после ответа сервера: сбой
+//   между ними оставит пачки, и открытие применит их поверх файла без вреда).
 // - Новый файл без байтов в хранилище: журнал не к чему применить, поэтому до первой
 //   записи он сохраняется полным файлом через `AUTOSAVE_MS` после правки.
 // - Вкладку скрыли — сразу пачка журнала; `pagehide` — пачка и попытка полного файла
@@ -25,9 +26,14 @@
 // заберёт полный файл. Пока журнал неполон (пачка не собрана или потеряна), правки
 // не отодвигают полный файл дальше `FULL_MAX_MS` от прошлого. После неудачной
 // полной записи следующая сама по себе — не раньше чем через `FULL_IDLE_MS`.
-// Запись через сеть (`files.remote`): после сбоя она повторяется сама через `FULL_IDLE_MS`, кроме отказов,
-// которые повтор не исправит, а закрытие вкладки спрашивает, пока правки есть только в памяти.
+// Запись через сеть (`files.remote`): после сбоя она повторяется сама с растущей паузой, от `FULL_IDLE_MS` до
+// десяти минут (удача или правка начинают заново), кроме отказов, которые повтор не исправит. Без сети и за
+// ночь со скрытой вкладкой выходит несколько десятков снимков, а не сотни. Закрытие вкладки спрашивает, пока
+// правки есть только в памяти или пачка ещё дописывается: незавершённая запись в IndexedDB откатится.
+// Новый файл без записи, а файл уже записал другой человек: журнала нет и сливать нечего, документы независимы.
+// Запись больше не пробуется, правки спасает человек: новым файлом или копией на диск (`onDiverged`).
 
+import { NEW_FILE_TAKEN, type FileMeta } from '../core/file-list';
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import type { Editor } from './context';
 import type { FileStore } from './file-store';
@@ -54,7 +60,11 @@ const FINAL_FAILURES: ReadonlySet<unknown> = new Set([
   'TOO_LARGE',
   'BAD_CONTAINER',
   'BAD_REQUEST',
+  'HASH_MISMATCH',
+  'TOO_MANY_IMAGES',
 ]);
+/** Пауза перед автоповтором записи — во столько раз больше `fullIdleMs`: 30 с, 1, 2, 5 и 10 минут. */
+const RETRY_STEPS = [1, 2, 4, 10, 20];
 
 /** `p` или, если он не успел за `ms`, — `fallback`; таймер снимается в любом случае. */
 export function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -74,6 +84,8 @@ export interface SaverOptions {
   /** Наибольший сеанс среди пачек журнала файла при открытии (`null` — пачек нет):
    * сеанс этого редактора — после него, даже если часы ушли назад. */
   journalSession?: number | null;
+  /** Файл без записи уже записал другой человек: правки больше не лягут в него. */
+  onDiverged?: () => void;
 }
 
 export interface Saver {
@@ -93,6 +105,8 @@ export interface Saver {
   version(): number;
   /** Человек согласился уйти: закрытие вкладки больше не спрашивает. */
   release(): void;
+  /** Правки — в новый файл (когда в этот они больше не лягут). `null` — не вышло, причина показана. */
+  saveAsNew(name: string): Promise<FileMeta | null>;
   dispose(): void;
 }
 
@@ -128,12 +142,19 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   let lastFull = performance.now();
   /** Последняя неудачная попытка полного файла (снимок или запись). */
   let failedAt = -Infinity;
+  /** Пауза после неудачи: растёт с каждым автоповтором через сеть. */
+  let pause = fullIdleMs;
+  let retries = 0;
+  const resetRetries = () => {
+    retries = 0;
+    pause = fullIdleMs;
+  };
   /** Срок следующего полного файла сам по себе (без просьбы пользователя): не реже
-   * `FULL_MAX_MS` от прошлого и, после неудачи, не раньше чем через `fullIdleMs` от
+   * `FULL_MAX_MS` от прошлого и, после неудачи, не раньше чем через `pause` от
    * неё. Причина отказа (место, другая вкладка, кодирование) за секунды не проходит,
    * а каждая попытка — снимок всего документа (≈0,45 с на 100 000 узлах): чаще
    * обычного шага полных файлов повторять незачем. Ctrl/Cmd+S и уход пробуют сразу. */
-  const fullDue = () => Math.max(lastFull + FULL_MAX_MS, failedAt + fullIdleMs);
+  const fullDue = () => Math.max(lastFull + FULL_MAX_MS, failedAt + pause);
   let running: Promise<boolean> | null = null;
   let again: Promise<boolean> | null = null;
   /** Последняя показанная ошибка записи: повтор не показываем, пока запись не удастся. */
@@ -153,6 +174,13 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   let lost = 0;
   let covered = 0;
   let snapSeq = 0;
+  /** Пачки, отправленные в хранилище и ещё не подтверждённые. */
+  let appending = 0;
+  /** Файл без записи уже записал другой человек: запись бессмысленна. */
+  let diverged = false;
+  /** Правки уже в новом файле: этому редактору записывать нечего. */
+  let rescued = false;
+  let disposed = false;
   const unjournaled = () => lost > covered;
   /** Последняя пачка не собрана ядром: правки ждут следующей. */
   let unbuilt = false;
@@ -167,6 +195,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
 
   const edited = () => {
     dirty = true;
+    resetRetries();
     clearTimeout(fullTimer);
     if (!stored) {
       fullTimer = window.setTimeout(() => void save(), AUTOSAVE_MS);
@@ -240,12 +269,15 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     if (stored) unbuilt = false;
     if (stored && e.bytes) {
       const bytes = ownBuffer(e.bytes);
+      appending++;
       const p = files.appendJournal(id, { session, batch: e.batch }, bytes).then(
         () => {
+          appending--;
           journalReported = null;
           return true;
         },
         (err: unknown) => {
+          appending--;
           lose();
           const message = `Не удалось записать журнал изменений: ${err instanceof Error ? err.message : String(err)}`;
           if (journalReported !== message) {
@@ -280,14 +312,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     });
   }
 
-  async function write(): Promise<boolean> {
-    clearTimeout(fullTimer);
-    if (!modified) return true;
-    if (ed.store.state.stopped) {
-      // Плашка остановки уже на экране: здесь — только причина для вопроса при уходе.
-      failure = 'Ядро остановлено — изменения не сохранены';
-      return false;
-    }
+  async function takeSnapshot(): Promise<Snapshot | null> {
     const snap = await new Promise<Snapshot | null>((resolve) => {
       waiting = resolve;
       failWaiting = () => resolve(null);
@@ -295,6 +320,20 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     });
     waiting = null;
     failWaiting = null;
+    return snap;
+  }
+
+  async function write(): Promise<boolean> {
+    clearTimeout(fullTimer);
+    if (!modified || rescued) return true;
+    // Отказ не изменится, а причина уже показана: вопрос при уходе назовёт её.
+    if (diverged) return false;
+    if (ed.store.state.stopped) {
+      // Плашка остановки уже на экране: здесь — только причина для вопроса при уходе.
+      failure = 'Ядро остановлено — изменения не сохранены';
+      return false;
+    }
+    const snap = await takeSnapshot();
     if (!snap) {
       failedAt = performance.now();
       return false;
@@ -313,6 +352,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
       stored = true;
       lastFull = performance.now();
       covered = Math.max(covered, seen);
+      resetRetries();
       ed.send({ type: 'markSaved', revision: snap.revision });
       reported = null;
       failure = null;
@@ -323,8 +363,19 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     } catch (err) {
       if (!wasStored) dirty = true;
       failedAt = performance.now();
+      const code = (err as { code?: unknown }).code;
+      if (files.remote && !wasStored && code === 'CONFLICT') {
+        diverged = true;
+        fail(NEW_FILE_TAKEN);
+        opts.onDiverged?.();
+        return false;
+      }
       fail(`Не удалось сохранить файл: ${err instanceof Error ? err.message : String(err)}`);
-      if (files.remote && !FINAL_FAILURES.has((err as { code?: unknown }).code)) armFull();
+      if (files.remote && !FINAL_FAILURES.has(code) && !disposed) {
+        pause = fullIdleMs * RETRY_STEPS[Math.min(retries++, RETRY_STEPS.length - 1)];
+        clearTimeout(fullTimer);
+        fullTimer = window.setTimeout(() => void save(), pause);
+      }
       return false;
     }
   }
@@ -352,9 +403,9 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   const onVisibility = () => {
     if (document.visibilityState === 'hidden') void flushJournal();
   };
-  const pending = () => dirty || unjournaled() || (!stored && modified);
+  const pending = () => !rescued && (dirty || unjournaled() || (!stored && modified));
   const onBeforeUnload = (e: BeforeUnloadEvent) => {
-    if (!pending()) return;
+    if (!pending() && appending === 0) return;
     e.preventDefault();
     e.returnValue = '';
   };
@@ -376,7 +427,22 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     failure: () => failure,
     version: () => base,
     release,
+    async saveAsNew(name) {
+      const create = files.createFrom?.bind(files);
+      if (!create) return null;
+      const snap = await takeSnapshot();
+      try {
+        if (!snap) return null;
+        const meta = await create(name, ownBuffer(snap.bytes));
+        rescued = true;
+        return meta;
+      } catch (err) {
+        ed.store.toast(`Не удалось сохранить новым файлом: ${err instanceof Error ? err.message : String(err)}`, 'error');
+        return null;
+      }
+    },
     dispose() {
+      disposed = true;
       release();
       clearTimeout(journalTimer);
       clearTimeout(fullTimer);

@@ -6,7 +6,18 @@ import { expect, test } from '@playwright/test';
 import type { CoreEvent } from '../src/wasm/ferrum_wasm';
 import type { Editor } from '../src/ui/context';
 import type { FileStore, JournalMark } from '../src/ui/file-store';
-import { createSaver, FULL_IDLE_MS, FULL_MAX_MS, JOURNAL_MS, newSession, sessionAfter, SETTLE_MS, withTimeout } from '../src/ui/saver';
+import { NEW_FILE_TAKEN } from '../src/core/file-list';
+import {
+  createSaver,
+  FULL_IDLE_MS,
+  FULL_MAX_MS,
+  JOURNAL_MS,
+  newSession,
+  sessionAfter,
+  SETTLE_MS,
+  withTimeout,
+  type SaverOptions,
+} from '../src/ui/saver';
 
 test('сеанс журнала: по времени, целый, безопасный', () => {
   const t = Date.UTC(2026, 9, 28, 12, 0, 0);
@@ -51,7 +62,7 @@ test.afterEach(() => {
   }
 });
 
-function harness(stored: boolean, journalSession?: number | null, fullHistory?: boolean, remote?: boolean) {
+function harness(stored: boolean, journalSession?: number | null, fullHistory?: boolean, remote?: boolean, opts: SaverOptions = {}) {
   /** Поддельные часы: таймеры `window` и `performance.now()`. */
   let now = 0;
   const timers = new Map<number, { at: number; fn: () => void }>();
@@ -95,9 +106,11 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
   let writeFailure: Error = new Error('недостаточно места в хранилище браузера');
   let hangAppend = false;
   let warning: string | undefined;
+  const created: string[] = [];
   const files = {
     fullHistory,
     remote,
+    createFrom: async (name: string) => (created.push(name), { id: 'новый' }),
     appendJournal: async (_id: string, mark: JournalMark) => {
       if (hangAppend) await new Promise(() => {});
       if (failAppend) throw new Error('нет места');
@@ -109,7 +122,7 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
       return { version: base + 1, ...(warning ? { warning } : {}) };
     },
   } as unknown as FileStore;
-  const saver = createSaver(ed, files, 'f', 1, stored, { journalSession });
+  const saver = createSaver(ed, files, 'f', 1, stored, { journalSession, ...opts });
   const emit = (e: CoreEvent) => listeners.forEach((l) => l(e));
   const tick = () => new Promise((r) => setTimeout(r, 0));
   return {
@@ -121,6 +134,7 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
     marks,
     writes,
     timers,
+    created,
     advance,
     now: () => now,
     failAppends: (on: boolean) => void (failAppend = on),
@@ -455,6 +469,172 @@ test('запись через сеть: неудачная повторяетс�
   c.advance(FULL_MAX_MS * 2);
   await answerSnapshot(c);
   expect(c.writes).toHaveLength(1);
+});
+
+test('автоповтор через сеть: пауза растёт до десяти минут, снимков за ночь — десятки (R-I1)', async () => {
+  const h = harness(true, null, true, true);
+  edit(h);
+  h.failWrites(true, 'NETWORK');
+  const snapshots = () => h.sent.filter((c) => c.type === 'snapshot').length;
+  void h.saver.save();
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(1);
+  // Каждая следующая попытка — только к своему сроку: на шаг раньше снимка нет.
+  for (const [i, minutes] of [0.5, 1, 2, 5, 10, 10, 10].entries()) {
+    const ms = minutes * 60_000;
+    h.advance(ms - 1);
+    await h.tick();
+    expect(snapshots(), `до срока попытки ${i + 2}`).toBe(i + 1);
+    h.advance(1);
+    await answerSnapshot(h);
+    expect(snapshots(), `попытка ${i + 2}`).toBe(i + 2);
+    expect(h.writes).toHaveLength(i + 2);
+  }
+  // Ночь без сети: десять часов, снимок не чаще раза в десять минут.
+  const before = snapshots();
+  for (let i = 0; i < 60; i++) {
+    h.advance(10 * 60_000);
+    await answerSnapshot(h);
+  }
+  expect(snapshots() - before).toBeLessThanOrEqual(60);
+});
+
+test('автоповтор: правка и удача начинают паузы сначала, `HASH_MISMATCH` не повторяется', async () => {
+  const h = harness(true, null, true, true);
+  edit(h);
+  h.failWrites(true, 'NETWORK');
+  void h.saver.save();
+  await answerSnapshot(h);
+  for (const minutes of [0.5, 1, 2]) {
+    h.advance(minutes * 60_000);
+    await answerSnapshot(h);
+  }
+  expect(h.writes).toHaveLength(4);
+  // Правка: снова 30 с, затем снова 30 с первой ступени, потом уже минута.
+  h.emit({ type: 'document', canUndo: true, canRedo: false, steps: 1 });
+  h.advance(FULL_IDLE_MS);
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(5);
+  h.advance(FULL_IDLE_MS);
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(6);
+  h.advance(FULL_IDLE_MS);
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(6);
+  // Удача сбрасывает ступени: следующий сбой снова ждёт 30 с.
+  h.failWrites(false);
+  h.advance(FULL_IDLE_MS);
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(7);
+  expect(h.saver.failure()).toBeNull();
+  // Без новой правки: «изменён» ещё не снят, запись по просьбе человека снова не удалась.
+  h.failWrites(true, 'NETWORK');
+  void h.saver.save();
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(8);
+  h.advance(FULL_IDLE_MS);
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(9);
+
+  for (const code of ['HASH_MISMATCH', 'TOO_MANY_IMAGES']) {
+    const c = harness(true, null, true, true);
+    edit(c);
+    c.failWrites(true, code);
+    void c.saver.save();
+    await answerSnapshot(c);
+    c.advance(FULL_MAX_MS * 2);
+    await answerSnapshot(c);
+    expect(c.writes, code).toHaveLength(1);
+  }
+});
+
+test('снятый сохранитель: запись в пути не заводит новую попытку', async () => {
+  const h = harness(true, null, true, true);
+  edit(h);
+  h.failWrites(true, 'NETWORK');
+  void h.saver.save();
+  await h.tick();
+  h.snapshot(0);
+  h.saver.dispose();
+  await h.tick();
+  await h.tick();
+  expect(h.timers.size).toBe(0);
+});
+
+test('закрытие вкладки спрашивает, пока пачка журнала дописывается (R-I2)', async () => {
+  const h = harness(true, null, true, true);
+  const asks = () => {
+    let asked = false;
+    h.windowEvents.get('beforeunload')?.({ preventDefault: () => (asked = true), returnValue: undefined });
+    return asked;
+  };
+  edit(h);
+  h.hangAppends(true);
+  void h.saver.flushJournal();
+  h.batch(1);
+  // Ядро отдало пачку: признак снят, а запись в хранилище ещё идёт.
+  expect(h.saver.pending()).toBe(false);
+  expect(asks()).toBe(true);
+
+  const ok = harness(true, null, true, true);
+  const okAsks = () => {
+    let asked = false;
+    ok.windowEvents.get('beforeunload')?.({ preventDefault: () => (asked = true), returnValue: undefined });
+    return asked;
+  };
+  edit(ok);
+  void ok.saver.flushJournal();
+  ok.batch(1);
+  await ok.tick();
+  expect(okAsks(), 'пачка дописана — спрашивать не о чем').toBe(false);
+  const bad = harness(true, null, true, true);
+  edit(bad);
+  bad.failAppends(true);
+  void bad.saver.flushJournal();
+  bad.batch(1);
+  await bad.tick();
+  let asked = false;
+  bad.windowEvents.get('beforeunload')?.({ preventDefault: () => (asked = true), returnValue: undefined });
+  expect(asked, 'потерянная пачка — правки только в памяти').toBe(true);
+});
+
+test('новый файл, а записал другой человек: честная причина, запись не повторяется, правки — новым файлом (C-1)', async () => {
+  const diverged: number[] = [];
+  const h = harness(false, null, true, true, { onDiverged: () => diverged.push(1) });
+  edit(h);
+  h.failWrites(true, 'CONFLICT');
+  void h.saver.save();
+  await answerSnapshot(h);
+  expect(diverged).toHaveLength(1);
+  expect(h.saver.failure()).toBe(NEW_FILE_TAKEN);
+  expect(h.toasts).toEqual([NEW_FILE_TAKEN]);
+  expect(h.saver.failure()).toContain('пропадут');
+  expect(h.saver.failure()).not.toContain('правки сольются');
+  // Ни автоповтора, ни снимков при уходе: отказ не изменится.
+  const snapshots = h.sent.filter((c) => c.type === 'snapshot').length;
+  h.advance(FULL_MAX_MS * 2);
+  await h.tick();
+  expect(await h.saver.save()).toBe(false);
+  expect(h.sent.filter((c) => c.type === 'snapshot')).toHaveLength(snapshots);
+  expect(h.saver.pending()).toBe(true);
+  // Новым файлом: снимок идёт туда, уходить больше не о чем спрашивать.
+  const made = h.saver.saveAsNew('Копия');
+  h.snapshot(0);
+  expect(await made).toMatchObject({ id: 'новый' });
+  expect(h.created).toEqual(['Копия']);
+  expect(h.saver.pending()).toBe(false);
+  expect(await h.saver.save()).toBe(true);
+});
+
+test('записанный файл при `CONFLICT` остаётся с журналом: правки сольются, а не спасаются', async () => {
+  const diverged: number[] = [];
+  const h = harness(true, null, true, true, { onDiverged: () => diverged.push(1) });
+  edit(h);
+  h.failWrites(true, 'CONFLICT');
+  void h.saver.save();
+  await answerSnapshot(h);
+  expect(diverged).toEqual([]);
+  expect(h.saver.failure()).toContain('Не удалось сохранить файл');
 });
 
 test('запись без сети (автономная сборка): сама не повторяется, закрытие вкладки не спрашивает', async () => {

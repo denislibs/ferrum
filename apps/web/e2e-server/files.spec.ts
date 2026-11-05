@@ -317,6 +317,131 @@ test('CONFLICT: два окна с одного поколения; после �
   await b.context().close();
 });
 
+test('файл без записи записал другой человек: честный вопрос, правки уходят новым файлом (C-1)', async ({ browser }, info) => {
+  const editorMail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, editorMail);
+  await a.goto('/?nodes=0#/new');
+  await editorReady(a);
+  const id = fileId(a);
+  await shareWith(a, editorMail);
+  await open(b, id);
+  await drawRect(a, 200);
+  await saveKey(a);
+  await saved(a);
+  await drawRect(b, -200);
+  await saveKey(b);
+  const plaque = b.getByRole('alert').filter({ hasText: 'Файл уже записан' });
+  await expect(plaque).toBeVisible();
+  await expect(plaque).toContainText('пропадут');
+  await expect(toast(b, 'пропадут')).toBeVisible();
+  expect(await b.evaluate(() => window.__ferrum!.ui!.modified)).toBe(true);
+  // Запись X не тронута, версия прежняя.
+  const version = (await api(b, 'GET', `/api/files/${id}/access`)).body as { version: number };
+  expect(version.version).toBe(1);
+  // Вопрос при уходе не обещает слияния.
+  await b.getByRole('button', { name: 'Назад к файлам' }).click();
+  const ask = b.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' });
+  await expect(ask).toContainText('пропадут');
+  await expect(ask).not.toContainText('правки сольются');
+  await b.getByRole('button', { name: 'Остаться' }).click();
+  // Опрос не снимает плашку и режим просмотра, даже когда поколение снова новое.
+  await drawRect(a, 400);
+  await saveKey(a);
+  await saved(a);
+  await checkAccessNow(b);
+  await expect(plaque).toBeVisible();
+  // Правки — новым файлом в «Черновиках»: Y в нём, правка на месте, в исходном файле только правки X.
+  await b.getByRole('button', { name: 'Сохранить новым файлом' }).click();
+  await expect.poll(() => fileId(b)).not.toBe(id);
+  await editorReady(b);
+  await nodes(b, 1);
+  const copy = fileId(b);
+  const list = (await api(b, 'GET', '/api/files?section=drafts&start=0&count=10')).body as { rows: { id: string; name: string }[] };
+  expect(list.rows.find((r) => r.id === copy)?.name).toContain('(копия)');
+  await a.reload();
+  await editorReady(a);
+  await nodes(a, 2);
+  await a.context().close();
+  await b.context().close();
+});
+
+test('смена входа в другой вкладке: правки X не записываются под Y и не теряются (F-I4)', async ({ browser }, info) => {
+  const xMail = newEmail(info.project.name);
+  const yMail = newEmail(info.project.name);
+  const a = await person(browser, xMail);
+  const id = await storedFile(a);
+  await shareWith(a, yMail);
+  const before = (await api(a, 'GET', `/api/files/${id}/access`)).body as { version: number };
+  await drawRect(a, 200);
+  await nodes(a, 2);
+  const tab = await a.context().newPage();
+  await testMode(tab);
+  await tab.goto('/');
+  await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(tab.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  await signIn(tab, yMail, 'Другой');
+  await expect(tab.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  // Правки только в журнале X: вкладка перезагружается как Y, у которого право на файл есть.
+  await expect.poll(() => a.evaluate(() => (window.__ferrum?.ui ? 'готово' : 'нет')), { timeout: 90_000 }).toBe('готово');
+  await editorReady(a);
+  await nodes(a, 1);
+  const after = (await api(tab, 'GET', `/api/files/${id}/access`)).body as { version: number; role: string };
+  expect(after.version).toBe(before.version);
+  await a.close();
+  // X возвращается: его правка цела и сливается.
+  await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(tab.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+  await signIn(tab, xMail, '');
+  await expect(tab.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await open(tab, id);
+  await nodes(tab, 2);
+  await tab.context().close();
+});
+
+test('смена входа в другой вкладке: опрос под чужой сессией не снимает плашку и режим просмотра (F-I4)', async ({ browser }, info) => {
+  const yMail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  await a.goto('/?nodes=0#/new');
+  await editorReady(a);
+  const id = fileId(a);
+  await shareWith(a, yMail);
+  await a.context().route('**/content', (r) => (r.request().method() === 'PUT' ? r.abort() : r.continue()));
+  await drawRect(a);
+  await saveKey(a);
+  await expect(toast(a, 'Нет связи с сервером')).toBeVisible();
+  const tab = await a.context().newPage();
+  await testMode(tab);
+  await tab.goto('/');
+  await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(tab.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  await signIn(tab, yMail, 'Другой');
+  await expect(tab.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  expect((await api(tab, 'GET', `/api/files/${id}/access`)).status).toBe(200);
+  // Ответ опроса пришёл, и он отказ: для вкладки X сессии нет, хотя у Y право на файл есть.
+  const polled = a
+    .context()
+    .waitForEvent('response', (r) => r.url().endsWith(`/api/files/${id}/access`) && r.status() !== 200 && r.status() !== 304);
+  await checkAccessNow(a);
+  expect((await polled).status()).toBe(401);
+  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  // Режим просмотра не снят: ядро отвергает правку.
+  await a.evaluate(() => window.__ferrum!.core!.send({ type: 'setDocumentName', name: 'Чужое' }));
+  await expect(a.getByRole('status').filter({ hasText: 'только для чтения' }).first()).toBeVisible();
+  await a.context().close();
+});
+
+test('экран файлов: сессии больше нет — страница показывает вход (T6-Minor9)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await a.context().clearCookies();
+  // Другая вкладка изменила список: экран читает его заново и получает 401.
+  await a.evaluate(() => new BroadcastChannel('ferrum-server-files').postMessage('changed'));
+  await expect(a.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+  await a.context().close();
+});
+
 test('две вкладки одного человека: файл занят, как раньше', async ({ browser }, info) => {
   const a = await person(browser, newEmail(info.project.name));
   const id = await storedFile(a);

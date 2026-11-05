@@ -2,6 +2,7 @@
 // экран файлов и редактор не знают, откуда файлы. Настройки интерфейса и файлы прежней версии остаются
 // в браузере: их ведёт `IdbFileStore`, а всё о серверных файлах — отдельный worker.
 
+import { MAX_FILE_NAME_CHARS } from '@ferrum/protocol';
 import type { FileMeta, IoResults, JournalMark, Section } from '../../core/file-list';
 import type { AccessState } from '../../core/server-files';
 import type { FromServer, ServerOp, ServerResults, ToServer } from '../../core/server-messages';
@@ -82,6 +83,9 @@ export class ServerFileStore implements FileStore, SettingsBackend {
   /** Перенос файла из браузера: байты и журнал передаются, основной поток их не копирует. */
   importLocal(name: string, bytes: ArrayBuffer | null, journal: ArrayBuffer[]) {
     return this.call({ op: 'create', name, bytes, project: null, journal }, [...(bytes ? [bytes] : []), ...journal]);
+  }
+  createFrom(name: string, bytes: ArrayBuffer) {
+    return this.importLocal(name.slice(0, MAX_FILE_NAME_CHARS), bytes, []);
   }
   read(file: string) {
     return this.call({ op: 'read', file });

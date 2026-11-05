@@ -6,6 +6,7 @@
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { detectPlatform } from '../core/core';
+import { NEW_FILE_TAKEN } from '../core/file-list';
 import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
 import { boot, dismissSplash, isTestMode } from './boot';
 import { DesignHeader, FileHeader, PanelToggle, ResizeEdge } from './chrome';
@@ -262,7 +263,7 @@ export function App(props: AppProps) {
 
   const id = props.file.id;
   /** Доступ к файлу потерян, пока он открыт (файл на сервере): снят или сессия кончилась. */
-  const [lost, setLost] = createSignal<'none' | 'session' | null>(null);
+  const [lost, setLost] = createSignal<'none' | 'session' | 'diverged' | null>(null);
   /** Просьба о доступе из плашки «Нет доступа». */
   const [asked, setAsked] = createSignal(false);
   store.setState('fileRole', props.file.role ?? null);
@@ -330,6 +331,7 @@ export function App(props: AppProps) {
     editor()?.send({ type: 'setViewOnly', on: true });
     setLost('session');
   });
+  const [rescuing, setRescuing] = createSignal(false);
   /** Снова войти — это перезагрузка. Что не в журнале (новый файл без записи), с ней пропало бы. */
   const signInAgain = async () => {
     const s = saver;
@@ -443,13 +445,24 @@ export function App(props: AppProps) {
           offText();
           offClipboard();
         };
-        saver = createSaver(ed, props.files, id, version, stored, { ...testIntervals(), journalSession });
+        let diverged = false;
+        saver = createSaver(ed, props.files, id, version, stored, {
+          ...testIntervals(),
+          journalSession,
+          onDiverged: () => {
+            diverged = true;
+            ed.send({ type: 'setViewOnly', on: true });
+            setLost('diverged');
+          },
+        });
         // Роль известна из чтения файла: читатель не правит и пока ответ опроса в пути.
         if (store.state.fileRole === 'viewer') ed.send({ type: 'setViewOnly', on: true });
         // Доступ к файлу меняется, пока он открыт. Этап 3 пришлёт то же событие по соединению файла.
         let toldNewer = false;
         let toldReopen = false;
         offWatch = props.files.watch?.(id, (state) => {
+          // Этот документ в файл уже не ляжет, какими бы ни стали права: плашку снимает только уход.
+          if (diverged) return;
           if (state.kind !== 'role') {
             // Правки — в журнале браузера, плашка предлагает копию на диск; уход спросит о несохранённом.
             ed.send({ type: 'setViewOnly', on: true });
@@ -805,17 +818,33 @@ export function App(props: AppProps) {
           <Show when={lost()}>
             {(kind) => (
               <div class="fe-boot fe-boot--error fe-boot--stopped fe-lost" role="alert">
-                <strong>{kind() === 'none' ? 'Нет доступа' : 'Сессия завершена'}</strong>
+                <strong>{kind() === 'none' ? 'Нет доступа' : kind() === 'diverged' ? 'Файл уже записан' : 'Сессия завершена'}</strong>
                 <span>
                   {kind() === 'none'
                     ? 'Вам больше не открыт этот файл. Несохранённые правки можно сохранить копией на диск'
-                    : 'Войдите снова, правки останутся в этом браузере'}
+                    : kind() === 'diverged'
+                      ? NEW_FILE_TAKEN
+                      : 'Войдите снова, правки останутся в этом браузере'}
                 </span>
                 <span class="fe-lost__actions">
                   <button class="fe-btn fe-btn--secondary" onClick={() => editor()?.send({ type: 'save' })}>
                     Сохранить копию на диск
                   </button>
-                  {kind() === 'none' ? (
+                  {kind() === 'diverged' ? (
+                    <button
+                      class="fe-btn fe-btn--primary"
+                      disabled={rescuing()}
+                      onClick={() => {
+                        setRescuing(true);
+                        void saver?.saveAsNew(`${store.state.documentName} (копия)`).then((meta) => {
+                          setRescuing(false);
+                          if (meta) props.navigate({ kind: 'file', id: meta.id });
+                        });
+                      }}
+                    >
+                      Сохранить новым файлом
+                    </button>
+                  ) : kind() === 'none' ? (
                     <>
                       <Show when={props.files.requestAccess && !asked()}>
                         <button

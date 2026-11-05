@@ -114,6 +114,11 @@ export function FilesScreen(props: FilesScreenProps) {
       },
       (e: unknown) => {
         if (!alive || my !== requestSeq) return;
+        // Сессии больше нет: страница заново показывает вход (раздел 5: без сессии только экран входа).
+        if ((e as { code?: unknown } | null)?.code === 'UNAUTHORIZED') {
+          location.reload();
+          return;
+        }
         const text = `Не удалось прочитать список файлов: ${e instanceof Error ? e.message : String(e)}`;
         // Фоновое перечитывание повторяется: одно сообщение, пока оно не сменится.
         if (failed() !== text) ui.toast(text, 'error');

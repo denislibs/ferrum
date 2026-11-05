@@ -65,6 +65,8 @@ export interface FileStore {
   readonly fullHistory?: boolean;
   /** Запись зависит от сети: неудачная повторяется сама, закрытие вкладки спрашивает о незаписанном. */
   readonly remote?: boolean;
+  /** Новый файл из снимка ядра (буфер передаётся); нет — спасать правки в новый файл негде. */
+  createFrom?(name: string, bytes: ArrayBuffer): Promise<FileMeta>;
   /** Подпись кнопки импорта, если она не «Импорт…». */
   readonly importLabel?: string;
   /** Доступ к открытому файлу (файл на сервере); возвращает отписку. Нет — доступ не меняется. */
