@@ -1,6 +1,7 @@
 // Журнал обновлений (спека подсистемы 4, раздел 7.3): пачки собираются группами каждые 20 мс одной транзакцией;
 // `ack` и рассылка — только после фиксации. Источник правды о порядке — строка `doc_state` под блокировкой: порядок
-// журнала, повторы и непрерывность по пирам держатся и у двух процессов на одной базе.
+// журнала, повторы и непрерывность по пирам держатся и у двух процессов на одной базе. Блокировки — в одном порядке со
+// сжатием и записью файла целиком: строка файла, потом строки документов.
 
 import type { SyncRefusal } from '@ferrum/protocol';
 import { ROLE_RANK } from '@ferrum/protocol';
@@ -23,6 +24,9 @@ export interface Item {
   bytes: Uint8Array;
   start: Record<string, number>;
   end: Record<string, number>;
+  /** Документ проверки, на котором пачка проверена (`Validator`): отказ журнала одной пачке отвергает и следующие этой же
+   * цепочки — их проверяли на документе, где уже была отвергнутая. */
+  chain?: string;
 }
 
 export type Outcome =
@@ -38,8 +42,12 @@ interface Queued {
 
 export interface LogLimits {
   maxLogBytesPerFile: number;
+  maxDocsPerFile: number;
   groupMs: number;
 }
+
+/** Столько отвергнутых цепочек помнит журнал: их пачки в очереди отказывают, новые цепочки идут от загрузки заново. */
+const MAX_POISONED = 4096;
 
 interface DocRow {
   file_id: string;
@@ -59,10 +67,11 @@ const continues = (vv: Record<string, number>, start: Record<string, number>): b
 
 export class UpdateLog {
   private queue: Queued[] = [];
+  private readonly poisoned = new Set<string>();
   private timer: Timer | null = null;
   private flushing = false;
   private stopped = false;
-  /** После фиксации группы: рассылка и сжатие. */
+  /** После фиксации группы: рассылка и сжатие. Размеры журнала — вместе с этой группой. */
   onCommitted: (items: { item: Item; seq: number }[], states: { file: string; doc: string; logCount: number; logBytes: number }[]) => void =
     () => {};
   private readonly limits: LogLimits;
@@ -71,7 +80,7 @@ export class UpdateLog {
     private readonly pool: Pool,
     limits: Partial<LogLimits> = {},
   ) {
-    this.limits = { maxLogBytesPerFile: MAX_LOG_BYTES_PER_FILE, groupMs: GROUP_MS, ...limits };
+    this.limits = { maxLogBytesPerFile: MAX_LOG_BYTES_PER_FILE, maxDocsPerFile: MAX_DOCS_PER_FILE, groupMs: GROUP_MS, ...limits };
   }
 
   submit(item: Item): Promise<Outcome> {
@@ -114,6 +123,9 @@ export class UpdateLog {
       console.error('Журнал обновлений: группа не записана:', e instanceof Error ? e.message : e);
       outcomes = group.map(() => ({ kind: 'refused', code: 'UNAVAILABLE' }));
     }
+    group.forEach((q, i) => {
+      if (outcomes[i].kind === 'refused') this.poison(q.item.chain);
+    });
     this.flushing = false;
     const written: { item: Item; seq: number }[] = [];
     group.forEach((q, i) => {
@@ -134,15 +146,44 @@ export class UpdateLog {
     this.arm();
   }
 
+  /** Цепочка проверки отвергнута: её пачки, ещё ждущие в очереди, отказывают. */
+  private poison(chain: string | undefined): void {
+    if (!chain) return;
+    this.poisoned.add(chain);
+    if (this.poisoned.size > MAX_POISONED) this.poisoned.delete(this.poisoned.values().next().value as string);
+  }
+
   private async write(c: PoolClient, group: Queued[]): Promise<{ outcomes: Outcome[]; states: DocRow[] }> {
-    const pairs = [...new Map(group.map((q) => [`${q.item.file}/${q.item.doc}`, q.item])).values()];
-    // Первая запись в документ, снимка которого нет (новая страница). Счётчик документов — ниже, под блокировкой строк.
-    await c.query(
-      `INSERT INTO doc_state (file_id, doc) SELECT f, d FROM unnest($1::uuid[], $2::text[]) AS u(f, d)
-       ON CONFLICT DO NOTHING`,
+    // Порядок блокировок один на всех (сжатие, запись файла целиком, второй процесс): строки файлов по порядку, потом документов.
+    const files = [...new Set(group.map((q) => q.item.file))].sort();
+    const live = await c.query<{ id: string }>('SELECT id FROM file WHERE id = ANY($1::uuid[]) ORDER BY id FOR NO KEY UPDATE', [files]);
+    const existing = new Set(live.rows.map((r) => r.id));
+    const ranks = await this.ranks(c, group);
+    const mayWrite = (i: Item) => existing.has(i.file) && (ranks.get(`${i.file}/${i.user}`) ?? 0) >= ROLE_RANK.editor;
+    const pairs = [...new Map(group.filter((q) => mayWrite(q.item)).map((q) => [`${q.item.file}/${q.item.doc}`, q.item])).values()].sort(
+      (a, b) => (a.file === b.file ? (a.doc < b.doc ? -1 : 1) : a.file < b.file ? -1 : 1),
+    );
+    // Первая запись в документ без строки (новая страница) — только тому, кто может писать, и в пределе документов файла.
+    const docCount = await this.docCounts(c, files);
+    const known = await c.query<{ file_id: string; doc: string }>(
+      `SELECT s.file_id, s.doc FROM doc_state s JOIN unnest($1::uuid[], $2::text[]) AS u(f, d) ON u.f = s.file_id AND u.d = s.doc`,
       [pairs.map((p) => p.file), pairs.map((p) => p.doc)],
     );
-    // Порядок блокировок один на всех: два процесса не сцепятся.
+    const have = new Set(known.rows.map((r) => `${r.file_id}/${r.doc}`));
+    const fresh: Item[] = [];
+    for (const p of pairs) {
+      if (have.has(`${p.file}/${p.doc}`)) continue;
+      const n = docCount.get(p.file) ?? 0;
+      if (n >= this.limits.maxDocsPerFile) continue;
+      docCount.set(p.file, n + 1);
+      fresh.push(p);
+    }
+    if (fresh.length > 0) {
+      await c.query(
+        `INSERT INTO doc_state (file_id, doc) SELECT f, d FROM unnest($1::uuid[], $2::text[]) AS u(f, d) ON CONFLICT DO NOTHING`,
+        [fresh.map((p) => p.file), fresh.map((p) => p.doc)],
+      );
+    }
     const { rows } = await c.query<DocRow>(
       `SELECT s.file_id, s.doc, s.next_seq, s.vv, s.log_bytes, s.log_count FROM doc_state s
        JOIN unnest($1::uuid[], $2::text[]) AS u(f, d) ON u.f = s.file_id AND u.d = s.doc
@@ -150,28 +191,34 @@ export class UpdateLog {
       [pairs.map((p) => p.file), pairs.map((p) => p.doc)],
     );
     const state = new Map(rows.map((r) => [`${r.file_id}/${r.doc}`, { ...r, next: Number(r.next_seq), dirty: false }]));
-    const ranks = await this.ranks(c, group);
-    const logBytes = await this.fileLogBytes(c, group);
-    const docCount = await this.docCounts(c, group);
+    const logBytes = await this.fileLogBytes(c, files);
     const owners = await this.peers(c, group);
     const claims: { file: string; peer: string; user: string }[] = [];
     const outcomes: Outcome[] = [];
     const inserts: { item: Item; seq: number }[] = [];
+    const refuse = (item: Item, code: SyncRefusal) => {
+      outcomes.push({ kind: 'refused', code });
+      this.poison(item.chain);
+    };
     for (const { item } of group) {
-      const s = state.get(`${item.file}/${item.doc}`)!;
-      const rank = ranks.get(`${item.file}/${item.user}`) ?? 0;
-      if (rank < ROLE_RANK.editor) {
-        outcomes.push({ kind: 'refused', code: 'FORBIDDEN' });
+      if (!mayWrite(item)) {
+        refuse(item, 'FORBIDDEN');
         continue;
       }
-      if ((docCount.get(item.file) ?? 0) > MAX_DOCS_PER_FILE) {
-        outcomes.push({ kind: 'refused', code: 'BAD_UPDATE' });
+      if (item.chain && this.poisoned.has(item.chain)) {
+        refuse(item, 'GAP');
+        continue;
+      }
+      const s = state.get(`${item.file}/${item.doc}`);
+      // Документов в файле больше предела: новые не заводятся, правка ждёт у клиента.
+      if (!s) {
+        refuse(item, 'LOG_FULL');
         continue;
       }
       // Чужой пир: иначе подделка заняла бы чужие счётчики, и настоящие правки того человека Loro бы пропускал.
       const peers = Object.keys(item.end);
       if (peers.some((p) => (owners.get(`${item.file}/${p}`) ?? item.user) !== item.user)) {
-        outcomes.push({ kind: 'refused', code: 'FOREIGN_PEER' });
+        refuse(item, 'FOREIGN_PEER');
         continue;
       }
       if (covers(s.vv, item.end)) {
@@ -179,12 +226,12 @@ export class UpdateLog {
         continue;
       }
       if (!continues(s.vv, item.start)) {
-        outcomes.push({ kind: 'refused', code: 'GAP' });
+        refuse(item, 'GAP');
         continue;
       }
       const used = logBytes.get(item.file) ?? 0;
       if (used + item.bytes.length > this.limits.maxLogBytesPerFile) {
-        outcomes.push({ kind: 'refused', code: 'LOG_FULL' });
+        refuse(item, 'LOG_FULL');
         continue;
       }
       logBytes.set(item.file, used + item.bytes.length);
@@ -241,10 +288,14 @@ export class UpdateLog {
       );
       await c.query('UPDATE file SET edited_at = now() WHERE id = ANY($1::uuid[])', [[...new Set(inserts.map((i) => i.item.file))]]);
     }
-    return { outcomes, states: rows };
+    // Размеры после этой группы: сжатие замечает порог той же записью, что его перешла.
+    return {
+      outcomes,
+      states: [...state.values()].map((s) => ({ ...s, next_seq: String(s.next), log_count: s.log_count, log_bytes: s.log_bytes })),
+    };
   }
 
-  /** Роль проверяется в транзакции записи на каждой группе: снятая только что не запишет ни байта. */
+  /** Роль проверяется в транзакции записи на каждой группе. */
   private async ranks(c: PoolClient, group: Queued[]): Promise<Map<string, number>> {
     const pairs = [...new Map(group.map((q) => [`${q.item.file}/${q.item.user}`, q.item])).values()];
     const { rows } = await c.query<{ f: string; u: string; rank: number | null }>(
@@ -254,8 +305,7 @@ export class UpdateLog {
     return new Map(rows.map((r) => [`${r.f}/${r.u}`, r.rank ?? 0]));
   }
 
-  private async fileLogBytes(c: PoolClient, group: Queued[]): Promise<Map<string, number>> {
-    const files = [...new Set(group.map((q) => q.item.file))];
+  private async fileLogBytes(c: PoolClient, files: string[]): Promise<Map<string, number>> {
     const { rows } = await c.query<{ file_id: string; total: string }>(
       'SELECT file_id, sum(log_bytes) AS total FROM doc_state WHERE file_id = ANY($1::uuid[]) GROUP BY file_id',
       [files],
@@ -263,8 +313,7 @@ export class UpdateLog {
     return new Map(rows.map((r) => [r.file_id, Number(r.total)]));
   }
 
-  private async docCounts(c: PoolClient, group: Queued[]): Promise<Map<string, number>> {
-    const files = [...new Set(group.map((q) => q.item.file))];
+  private async docCounts(c: PoolClient, files: string[]): Promise<Map<string, number>> {
     const { rows } = await c.query<{ file_id: string; n: string }>(
       'SELECT file_id, count(*) AS n FROM doc_state WHERE file_id = ANY($1::uuid[]) GROUP BY file_id',
       [files],
