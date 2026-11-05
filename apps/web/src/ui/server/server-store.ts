@@ -12,6 +12,7 @@ export class ServerFileStore implements FileStore, SettingsBackend {
   /** Файлы, настройки и шрифты в браузере. */
   readonly local = new IdbFileStore(false);
   readonly fullHistory = true;
+  readonly remote = true;
   readonly importLabel = 'Открыть с диска…';
   private readonly worker: Worker;
   private seq = 0;
@@ -57,7 +58,7 @@ export class ServerFileStore implements FileStore, SettingsBackend {
     if (!p) return;
     this.pending.delete(m.id);
     if (m.ok) p.resolve(m.value);
-    else p.reject(new Error(m.message));
+    else p.reject(Object.assign(new Error(m.message), { code: m.code }));
   }
 
   private call<K extends ServerOp['op']>(op: Extract<ServerOp, { op: K }>, transfer: Transferable[] = []): Promise<ServerResults[K]> {

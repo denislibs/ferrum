@@ -72,6 +72,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
   const [view, setView] = createSignal<View>({ kind: 'wait' });
   let leave: (() => Promise<boolean>) | null = null;
   let flushEditor: (() => Promise<boolean>) | null = null;
+  let unsavedEditor: (() => Promise<boolean>) | null = null;
   let markSessionLost: (() => void) | null = null;
   let unlock: (() => void) | null = null;
   let current: Route | null = null;
@@ -267,6 +268,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
   // Выход и смена входа спрашивают у редактора то же, что уход к экрану файлов.
   editorHooks.leave = () => (leave ? leave() : Promise.resolve(true));
   editorHooks.flush = () => (leave && flushEditor ? flushEditor() : Promise.resolve(true));
+  editorHooks.unsaved = () => (leave && unsavedEditor ? unsavedEditor() : Promise.resolve(false));
   editorHooks.sessionLost = () => markSessionLost?.();
   // Настройки — до первого экрана: тема, вид списка и раскладка нужны сразу (экраны
   // получают их готовыми). Хранилище настроек живёт у корня: перезапуск редактора
@@ -287,6 +289,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
     window.removeEventListener('popstate', onPop);
     delete editorHooks.leave;
     delete editorHooks.flush;
+    delete editorHooks.unsaved;
     delete editorHooks.sessionLost;
     release();
     settings?.dispose();
@@ -350,6 +353,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
             navigate={navigate}
             onLeave={(fn) => (leave = fn)}
             onFlush={(fn) => (flushEditor = fn)}
+            onUnsaved={(fn) => (unsavedEditor = fn)}
             onSessionLost={(fn) => (markSessionLost = fn)}
             onOpenFailed={(message) => {
               // Испорченный файл: запись не трогаем, сохранять нечего.

@@ -33,7 +33,7 @@ export const extensions: {
   /** Новый файл из этого раздела попадает в проект. */
   newFileRoute?: (section: Section) => Route;
   /** Кнопка «Поделиться» открытого файла. */
-  shareButton?: Component<{ file: FileMeta; role: () => FileMeta['role']; children?: JSX.Element }>;
+  shareButton?: Component<{ file: FileMeta; role: () => FileMeta['role']; canShare: () => boolean; children?: JSX.Element }>;
 } = {};
 
 /** Связь корня приложения с кодом входа: ставит `Root` (в обеих сборках, это просто два поля),
@@ -44,6 +44,8 @@ export const editorHooks: {
   leave?: () => Promise<boolean>;
   /** Записать открытый файл без вопросов (вкладка сейчас перезагрузится). `false` — не записался. */
   flush?: () => Promise<boolean>;
+  /** Остались правки, которых нет ни в файле, ни в журнале (новый файл без записи): перезагрузка их потеряет. */
+  unsaved?: () => Promise<boolean>;
   /** Сессии больше нет, а файл не записался: редактор остаётся и предлагает копию на диск. */
   sessionLost?: () => void;
 } = {};

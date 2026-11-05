@@ -51,16 +51,17 @@ test.afterEach(() => {
   }
 });
 
-function harness(stored: boolean, journalSession?: number | null, fullHistory?: boolean) {
+function harness(stored: boolean, journalSession?: number | null, fullHistory?: boolean, remote?: boolean) {
   /** Поддельные часы: таймеры `window` и `performance.now()`. */
   let now = 0;
   const timers = new Map<number, { at: number; fn: () => void }>();
+  const windowEvents = new Map<string, (e: unknown) => void>();
   let seq = 0;
   g.window = {
     setTimeout: (fn: () => void, ms = 0) => (timers.set(++seq, { at: now + ms, fn }), seq),
     clearTimeout: (n: number) => timers.delete(n),
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener: (type: string, fn: (e: unknown) => void) => void windowEvents.set(type, fn),
+    removeEventListener: (type: string) => void windowEvents.delete(type),
   };
   // В браузере `clearTimeout` и `window.clearTimeout` — одно; сохранитель зовёт и так.
   const realClear = clearTimeout;
@@ -91,10 +92,12 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
   const writes: ({ session: number; upTo: number } | null)[] = [];
   let failAppend = false;
   let failWrite = false;
+  let writeFailure: Error = new Error('недостаточно места в хранилище браузера');
   let hangAppend = false;
   let warning: string | undefined;
   const files = {
     fullHistory,
+    remote,
     appendJournal: async (_id: string, mark: JournalMark) => {
       if (hangAppend) await new Promise(() => {});
       if (failAppend) throw new Error('нет места');
@@ -102,7 +105,7 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
     },
     write: async (_id: string, _b: ArrayBuffer, _t: unknown, base: number, journal: { session: number; upTo: number } | null) => {
       writes.push(journal);
-      if (failWrite) throw new Error('недостаточно места в хранилище браузера');
+      if (failWrite) throw writeFailure;
       return { version: base + 1, ...(warning ? { warning } : {}) };
     },
   } as unknown as FileStore;
@@ -122,7 +125,11 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
     now: () => now,
     failAppends: (on: boolean) => void (failAppend = on),
     hangAppends: (on: boolean) => void (hangAppend = on),
-    failWrites: (on: boolean) => void (failWrite = on),
+    failWrites: (on: boolean, code?: string) => {
+      failWrite = on;
+      if (code) writeFailure = Object.assign(new Error(code), { code });
+    },
+    windowEvents,
     warnWrites: (text: string | undefined) => void (warning = text),
     stop: () => void ((ed.store as unknown as { state: { stopped: boolean } }).state.stopped = true),
     batch: (batch: number) => emit({ type: 'journal', batch, bytes: new Uint8Array([1, 2]), failed: false }),
@@ -415,4 +422,72 @@ test('`CONFLICT` от сервера: причина для вопроса пр�
   expect(h.saver.failure()).toContain('Не удалось сохранить файл');
   expect(h.saver.version()).toBe(1);
   expect(h.sent.some((c) => c.type === 'markSaved')).toBe(false);
+});
+
+const edit = (h: ReturnType<typeof harness>) => h.emit({ type: 'modified', modified: true });
+/** Снимок на просьбу сохранителя: ядро отвечает сразу. */
+async function answerSnapshot(h: ReturnType<typeof harness>) {
+  await h.tick();
+  h.snapshot(0);
+  await h.tick();
+  await h.tick();
+}
+
+test('запись через сеть: неудачная повторяется сама, отказ, который не исправить, — нет (T6-I4)', async () => {
+  const h = harness(true, null, true, true);
+  edit(h);
+  h.failWrites(true, 'NETWORK');
+  void h.saver.save();
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(1);
+  h.failWrites(false);
+  h.advance(FULL_IDLE_MS);
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(2);
+  expect(h.saver.failure()).toBeNull();
+
+  const c = harness(true, null, true, true);
+  edit(c);
+  c.failWrites(true, 'CONFLICT');
+  void c.saver.save();
+  await answerSnapshot(c);
+  c.failWrites(false);
+  c.advance(FULL_MAX_MS * 2);
+  await answerSnapshot(c);
+  expect(c.writes).toHaveLength(1);
+});
+
+test('запись без сети (автономная сборка): сама не повторяется, закрытие вкладки не спрашивает', async () => {
+  const h = harness(false);
+  expect(h.windowEvents.has('beforeunload')).toBe(false);
+  edit(h);
+  h.failWrites(true);
+  void h.saver.save();
+  await answerSnapshot(h);
+  h.failWrites(false);
+  h.advance(FULL_IDLE_MS);
+  await answerSnapshot(h);
+  expect(h.writes).toHaveLength(1);
+});
+
+test('закрытие вкладки: спрашивает, только пока правки есть лишь в памяти; согласие снимает вопрос (T6-I4)', async () => {
+  const ask = (h: ReturnType<typeof harness>) => {
+    let asked = false;
+    h.windowEvents.get('beforeunload')?.({ preventDefault: () => (asked = true), returnValue: undefined });
+    return asked;
+  };
+  const fresh = harness(false, null, true, true);
+  expect(ask(fresh)).toBe(false);
+  edit(fresh);
+  expect(ask(fresh)).toBe(true);
+  fresh.saver.release();
+  expect(ask(fresh)).toBe(false);
+
+  // У записанного файла правки в журнале: вопрос не нужен.
+  const stored = harness(true, null, true, true);
+  edit(stored);
+  stored.batch(1);
+  await stored.tick();
+  expect(stored.saver.pending()).toBe(false);
+  expect(ask(stored)).toBe(false);
 });

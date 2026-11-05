@@ -45,6 +45,8 @@ export interface UiState {
   documentName: string;
   /** Роль в открытом файле на сервере; нет — файл свой, без ролей. */
   fileRole: FileRole | null;
+  /** Сервер разрешает звать людей в открытый файл (пришедшему по ссылке — нет). */
+  fileCanShare: boolean;
   layers: { start: number; total: number; rows: LayerRow[]; reveal: number | null; revealSeq: number };
   summary: Summary | null;
   pages: { list: PageInfo[]; current: string; background: string | null };
@@ -94,6 +96,7 @@ const initial: UiState = {
   modified: false,
   documentName: '',
   fileRole: null,
+  fileCanShare: false,
   layers: { start: 0, total: 0, rows: [], reveal: null, revealSeq: 0 },
   summary: null,
   pages: { list: [], current: '', background: null },

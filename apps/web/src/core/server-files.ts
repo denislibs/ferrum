@@ -12,6 +12,7 @@ import {
   isFileList,
   isFileMeta,
   isHash,
+  LOST_IMAGES_HEADER,
   parseSection,
   PREVIOUS_WRITE_HEADER,
   scanContainer,
@@ -58,6 +59,8 @@ export function failureMessage(code: Failure): string {
       return 'Слишком много запросов — повторите позже';
     case 'UNAVAILABLE':
       return 'Сервер недоступен — повторите позже';
+    case 'MISSING_IMAGES':
+      return 'Картинки файла не дошли до сервера — повторите позже';
     case 'NETWORK':
       return 'Нет связи с сервером';
     default:
@@ -81,7 +84,10 @@ export const transferTimeout = (bytes: number): number =>
 /** Картинок загружается одновременно. */
 const IMAGE_CONCURRENCY = 4;
 
-export type AccessState = { kind: 'role'; role: FileRole; version: number } | { kind: 'none' } | { kind: 'session' };
+/** `canShare`: сервер разрешает этому человеку звать других (ответа без поля — считаем, что нет).
+ * `own`: идёт своя запись или её исход неизвестен, поэтому новое поколение может быть своим. */
+export type AccessState =
+  { kind: 'role'; role: FileRole; version: number; canShare: boolean; own: boolean } | { kind: 'none' } | { kind: 'session' };
 
 export interface JournalEntries {
   entries: ArrayBuffer[];
@@ -145,6 +151,20 @@ interface Split {
   body: BodyInit;
   size: number;
   images: { hash: string; size: number; part: BlobPart }[];
+  /** Ссылок содержимого, для которых в файле нет байтов: потеряны раньше, загрузить нечего. */
+  lost: number;
+}
+
+/** Хэши картинок, на которые ссылаются страницы. Секции ссылок небольшие. */
+async function imageRefs(source: Pick<Source, 'read'>, spans: SectionSpan[]): Promise<Set<string>> {
+  const hashes = new Set<string>();
+  for (const s of spans) {
+    if (s.kind !== SECTION_PAGE_REFS) continue;
+    for (const line of new TextDecoder().decode(await source.read(s.data, s.data + s.size)).split('\n')) {
+      if (isHash(line)) hashes.add(line);
+    }
+  }
+  return hashes;
 }
 
 /** Картинки уходят отдельными запросами, остальное — как есть, без копии, если картинок нет. */
@@ -157,7 +177,9 @@ async function splitContainer(source: Source, whole: () => BodyInit): Promise<Sp
     throw e;
   }
   const images = spans.filter((s) => s.kind === SECTION_IMAGE && isHash(s.id));
-  if (images.length === 0 && spans.every((s) => s.kind !== SECTION_IMAGE)) return { body: whole(), size: source.size, images: [] };
+  const present = new Set(images.map((s) => s.id));
+  const lost = [...(await imageRefs(source, spans))].filter((h) => !present.has(h)).length;
+  if (images.length === 0 && spans.every((s) => s.kind !== SECTION_IMAGE)) return { body: whole(), size: source.size, images: [], lost };
   const kept = spans.filter((s) => s.kind !== SECTION_IMAGE);
   const parts: BlobPart[] = [containerHeader(kept.length) as Uint8Array<ArrayBuffer>];
   let size = 16;
@@ -169,6 +191,7 @@ async function splitContainer(source: Source, whole: () => BodyInit): Promise<Sp
     body: new Blob(parts),
     size,
     images: images.map((s) => ({ hash: s.id, size: s.size, part: source.part(s.data, s.data + s.size) })),
+    lost,
   };
 }
 
@@ -182,9 +205,17 @@ async function inPool<T>(items: T[], limit: number, work: (item: T) => Promise<v
 }
 
 export class ServerFiles {
-  /** Запись, исход которой неизвестен (сеть оборвалась): следующая несёт её номер, и своя удачная
-   * запись не станет `CONFLICT`. */
-  private readonly uncertain = new Map<string, string>();
+  /** Записи с неизвестным исходом (сеть оборвалась), по порядку: каждая основана на предыдущей, если та
+   * дошла. Следующая несёт номер той, что сделала нынешнее поколение, и своя удачная запись не станет
+   * `CONFLICT`. Решает сервер: он сверяет номер с последней записью файла. */
+  private readonly uncertain = new Map<string, string[]>();
+  /** Идущие и начатые записи файла: ответ опроса, заставший запись, может показывать своё поколение. */
+  private readonly writes = new Map<string, { active: number; begun: number }>();
+  /** Журнал не применён (файл открыт читателем): запись его не стирает, он дождётся открытия. */
+  private readonly heldJournal = new Set<string>();
+  private accessSeq = 0;
+  /** Последний учтённый запрос доступа: опоздавший ответ не отменяет более новый. */
+  private readonly accessAnswered = new Map<string, number>();
   private readonly knownImages = new Map<string, Set<string>>();
   private readonly thumbs = new Map<string, { last: number; pending: ArrayBuffer | null | undefined; timer: unknown }>();
   private readonly lastAccess = new Map<string, string>();
@@ -259,18 +290,52 @@ export class ServerFiles {
     this.events.access(file, state);
   }
 
-  /** Лёгкая проверка: сеть оборвалась — ничего не меняется, это забота следующей попытки. */
+  /** Лёгкая проверка: сеть оборвалась — ничего не меняется, это забота следующей попытки. Ответы
+   * приходят в любом порядке: старый не возвращает прежнюю роль, а снятое наблюдение не оживает. */
   async checkAccess(file: string): Promise<void> {
+    const my = ++this.accessSeq;
+    const fresh = () => {
+      if (my < (this.accessAnswered.get(file) ?? 0)) return false;
+      this.accessAnswered.set(file, my);
+      return true;
+    };
+    const before = this.writes.get(file);
+    const active = before?.active ?? 0;
+    const begun = before?.begun ?? 0;
     try {
       const a = await this.json<FileAccessDto>(`${API_FILES}/${file}/access`, isFileAccess);
-      this.announce(file, { kind: 'role', role: a.role, version: a.version });
+      if (!fresh()) return;
+      const now = this.writes.get(file);
+      const own = active > 0 || (now?.active ?? 0) > 0 || (now?.begun ?? 0) !== begun || this.uncertain.has(file);
+      this.announce(file, { kind: 'role', role: a.role, version: a.version, canShare: a.canShare === true, own });
     } catch (e) {
-      this.note(file, e);
+      if (fresh()) this.note(file, e);
     }
   }
 
+  /** Новое наблюдение начинается с чистого листа: ответы на прежние запросы ему уже не пишут. */
   forgetAccess(file: string): void {
     this.lastAccess.delete(file);
+    this.accessAnswered.set(file, ++this.accessSeq);
+  }
+
+  /** Открытый файл: первое состояние приходит всегда, что бы ни запомнили прежние наблюдения и записи. */
+  watchAccess(file: string): Promise<void> {
+    this.forgetAccess(file);
+    return this.checkAccess(file);
+  }
+
+  /** Запись, которую откатываем: не ответит — операция всё равно завершается. */
+  private async discard(file: string): Promise<void> {
+    const ctl = new AbortController();
+    const timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+    try {
+      await this.http(`${API_FILES}/${file}`, { method: 'DELETE', signal: ctl.signal });
+    } catch {
+      // Откат не удался: пустой файл останется в списке, его можно удалить вручную.
+    } finally {
+      this.clock.clearTimeout(timer);
+    }
   }
 
   async list(section: string, query: string, start: number, count: number): Promise<IoResults['list']> {
@@ -294,18 +359,27 @@ export class ServerFiles {
     let meta = toMeta(await this.post(API_FILES, isFileMeta, { name, projectId: project }));
     if (content) {
       if ((content instanceof Blob ? content.size : content.byteLength) > MAX_OPEN_BYTES) {
-        await this.http(`${API_FILES}/${meta.id}`, { method: 'DELETE' }).catch(() => {});
+        await this.discard(meta.id);
         throw new ServerFailure('TOO_LARGE');
       }
       try {
-        meta = await this.upload(meta.id, 0, content);
+        meta = await this.upload(meta.id, 0, null, content);
       } catch (e) {
-        await this.http(`${API_FILES}/${meta.id}`, { method: 'DELETE' }).catch(() => {});
+        await this.discard(meta.id);
         throw e;
       }
     }
     // Перенос файла из браузера: правки после его байтов становятся журналом нового файла.
-    if (journal) await Promise.all(journal.map((bytes, i) => this.journal.append(meta.id, 1, i, bytes)));
+    // Не дописались — переноса не было: файл без правок не должен выглядеть перенесённым.
+    if (journal) {
+      try {
+        await Promise.all(journal.map((bytes, i) => this.journal.append(meta.id, 1, i, bytes)));
+      } catch (e) {
+        await this.journal.drop(meta.id).catch(() => {});
+        await this.discard(meta.id);
+        throw e;
+      }
+    }
     this.events.changed();
     return meta;
   }
@@ -344,11 +418,24 @@ export class ServerFiles {
     }
   }
 
+  /** Заголовки — как небольшой запрос, тело — по размеру: застывшее соединение не держит заставку. */
   private async image(file: string, hash: string): Promise<ArrayBuffer | null> {
-    const res = await this.http(`${API_FILES}/${file}/images/${hash}`, { signal: AbortSignal.timeout(transferTimeout(MAX_OPEN_BYTES)) });
-    if (res.status === 404) return null;
-    if (!res.ok) throw new ServerFailure(res.status >= 500 ? 'UNAVAILABLE' : 'NETWORK');
-    return res.arrayBuffer();
+    const ctl = new AbortController();
+    let timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+    try {
+      const res = await this.http(`${API_FILES}/${file}/images/${hash}`, { signal: ctl.signal });
+      if (res.status === 404) return null;
+      if (!res.ok) throw new ServerFailure(res.status >= 500 ? 'UNAVAILABLE' : 'NETWORK');
+      const declared = Number(res.headers.get('content-length') ?? 0);
+      this.clock.clearTimeout(timer);
+      timer = this.clock.setTimeout(() => ctl.abort(), transferTimeout(Number.isFinite(declared) ? declared : 0));
+      return await res.arrayBuffer();
+    } catch (e) {
+      if (e instanceof ServerFailure) throw e;
+      throw new ServerFailure('NETWORK');
+    } finally {
+      this.clock.clearTimeout(timer);
+    }
   }
 
   /** Картинки приходят отдельно и встают в контейнер обычными секциями: ядро получает обычный файл.
@@ -363,13 +450,7 @@ export class ServerFiles {
       // Испорченный файл откроет или отвергнет ядро: своё сообщение у него.
       return body;
     }
-    const hashes = new Set<string>();
-    for (const s of spans) {
-      if (s.kind !== SECTION_PAGE_REFS) continue;
-      for (const line of new TextDecoder().decode(source.subarray(s.data, s.data + s.size)).split('\n')) {
-        if (isHash(line)) hashes.add(line);
-      }
-    }
+    const hashes = await imageRefs({ read: async (s, e) => source.subarray(s, e) }, spans);
     if (hashes.size === 0) return body;
     const found: { hash: string; bytes: Uint8Array }[] = [];
     await inPool([...hashes], IMAGE_CONCURRENCY, async (hash) => {
@@ -402,16 +483,21 @@ export class ServerFiles {
   async read(file: string): Promise<IoResults['read']> {
     const m = await this.json(`${API_FILES}/${file}`, isFileMeta);
     const { bytes, version } = await this.download(file);
-    // Читатель правок не применяет: журнал остаётся до тех пор, пока ему вернут право.
-    const j: JournalEntries =
-      bytes && m.role !== 'viewer' ? await this.journal.read(file) : { entries: [], session: null, tooLarge: false };
+    const j: JournalEntries = bytes ? await this.journal.read(file) : { entries: [], session: null, tooLarge: false };
+    // Читатель правок не применяет: журнал остаётся до тех пор, пока ему вернут право. Сеанс нужен и ему:
+    // новые пачки идут после прежних.
+    const held = m.role === 'viewer' && (j.tooLarge || j.entries.length > 0);
+    if (held) this.heldJournal.add(file);
+    else this.heldJournal.delete(file);
+    const applied = m.role !== 'viewer';
     return {
       // Поколение — именно этих байтов: запись на их основе проверяется по нему.
       meta: toMeta({ ...m, version }),
       bytes,
-      journal: j.entries,
+      journal: applied ? j.entries : [],
       session: j.session,
-      journalTooLarge: j.tooLarge,
+      journalTooLarge: applied && j.tooLarge,
+      journalHeld: held,
     };
   }
 
@@ -446,21 +532,42 @@ export class ServerFiles {
     });
   }
 
-  /** Заведомый отказ — раньше передачи: файл могут записать другие, и незачем гнать десятки мегабайт. */
-  private async preflight(file: string, base: number): Promise<void> {
+  /** Заведомый отказ — раньше передачи: файл могут записать другие, и незачем гнать десятки мегабайт.
+   * Поколение показывает, сколько записей с неизвестным исходом дошло: `k`-я сделала его, более поздние
+   * не дошли. Запись идёт поверх неё; если поколение сделал кто-то другой, откажет сервер. */
+  private async preflight(file: string, base: number): Promise<{ base: number; previous: string | null }> {
     const a = await this.json<FileAccessDto>(`${API_FILES}/${file}/access`, isFileAccess);
     if (a.role === 'viewer') throw new ServerFailure('FORBIDDEN');
-    const ours = this.uncertain.has(file) && a.version === base + 1;
-    if (a.version !== base && !ours) throw new ServerFailure('CONFLICT');
+    const chain = this.uncertain.get(file) ?? [];
+    const landed = a.version - base;
+    if (landed === 0) {
+      // Ни одна не дошла к этому моменту; последняя ещё может дойти, поэтому её номер едет с записью.
+      this.uncertain.delete(file);
+      return { base, previous: chain.at(-1) ?? null };
+    }
+    if (landed < 0 || landed > chain.length) throw new ServerFailure('CONFLICT');
+    this.uncertain.set(file, chain.slice(0, landed));
+    return { base: a.version - 1, previous: chain[landed - 1] };
   }
 
-  private async upload(file: string, base: number, content: Blob | ArrayBuffer): Promise<FileMeta> {
+  private async upload(file: string, base: number, previous: string | null, content: Blob | ArrayBuffer): Promise<FileMeta> {
     const source = content instanceof Blob ? blobSource(content) : bytesSource(new Uint8Array(content));
     const split = await splitContainer(source, () => content as BodyInit);
     await this.uploadImages(file, split.images);
+    try {
+      return await this.putContent(file, base, previous, split);
+    } catch (e) {
+      if (!(e instanceof ServerFailure) || e.code !== 'MISSING_IMAGES') throw e;
+    }
+    // Запись не прошла: кэш врёт (очистка сняла картинку, пока вкладка была открыта). Сверяем всё заново.
+    this.images(file).clear();
+    await this.uploadImages(file, split.images);
+    return this.putContent(file, base, previous, split);
+  }
+
+  private async putContent(file: string, base: number, previous: string | null, split: Split): Promise<FileMeta> {
     const write = this.newId();
-    const previous = this.uncertain.get(file);
-    this.uncertain.set(file, write);
+    this.uncertain.set(file, [...(this.uncertain.get(file) ?? []), write]);
     let res: Response;
     try {
       res = await this.http(`${API_FILES}/${file}/content`, {
@@ -469,6 +576,7 @@ export class ServerFiles {
           'If-Match': `"${base}"`,
           [WRITE_ID_HEADER]: write,
           ...(previous ? { [PREVIOUS_WRITE_HEADER]: previous } : {}),
+          ...(split.lost > 0 ? { [LOST_IMAGES_HEADER]: String(split.lost) } : {}),
         },
         body: split.body,
         signal: AbortSignal.timeout(transferTimeout(split.size)),
@@ -488,17 +596,30 @@ export class ServerFiles {
     thumb: ArrayBuffer | null | 'keep',
     base: number,
     journal: { session: number; upTo: number } | null,
-  ): Promise<FileMeta> {
+  ): Promise<FileMeta & { warning?: string }> {
+    const state = this.writes.get(file) ?? { active: 0, begun: 0 };
+    this.writes.set(file, state);
+    state.active++;
+    state.begun++;
     try {
-      await this.preflight(file, base);
-      const meta = await this.upload(file, base, bytes);
-      if (journal) await this.journal.cut(file, journal.session, journal.upTo);
+      const from = await this.preflight(file, base);
+      const meta = await this.upload(file, from.base, from.previous, bytes);
+      let warning: string | undefined;
+      if (journal && !this.heldJournal.has(file)) {
+        // Файл уже записан: сбой здесь не отказ записи. Оставшиеся пачки снимет следующая, а открытие
+        // применит их поверх файла без вреда.
+        await this.journal.cut(file, journal.session, journal.upTo).catch(() => {
+          warning = 'Файл записан, но журнал изменений не очищен';
+        });
+      }
       if (thumb !== 'keep') this.offerThumb(file, thumb);
       this.events.changed();
-      return meta;
+      return warning ? { ...meta, warning } : meta;
     } catch (e) {
       this.note(file, e);
       throw e;
+    } finally {
+      state.active--;
     }
   }
 

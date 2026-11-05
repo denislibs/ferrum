@@ -141,7 +141,11 @@ export function DesignHeader(props: { file?: FileMeta }) {
           <span class="fe-viewonly t-muted">Только просмотр</span>
         </Show>
         {extensions.shareButton && props.file ? (
-          <extensions.shareButton file={props.file} role={() => ed.store.state.fileRole ?? undefined} />
+          <extensions.shareButton
+            file={props.file}
+            role={() => ed.store.state.fileRole ?? undefined}
+            canShare={() => ed.store.state.fileCanShare}
+          />
         ) : (
           <button class="fe-btn fe-btn--primary" aria-disabled="true" data-tip="Совместная работа появится в подсистеме 4">
             Поделиться

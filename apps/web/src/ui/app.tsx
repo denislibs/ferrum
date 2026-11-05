@@ -48,6 +48,8 @@ export interface AppProps {
   onLeave: (leave: () => Promise<boolean>) => void;
   /** Дописать журнал без вопросов: вкладка сейчас перезагрузится (смена входа в другой вкладке). */
   onFlush?: (flush: () => Promise<boolean>) => void;
+  /** Есть ли правки, которых нет ни в файле, ни в журнале: перезагрузка их потеряет. */
+  onUnsaved?: (unsaved: () => Promise<boolean>) => void;
   /** Сессии больше нет (выход в другой вкладке), а файл не записался: как показать это человеку. */
   onSessionLost?: (mark: () => void) => void;
   /** Файл из хранилища не открылся (испорчен): к экрану файлов с этим сообщением. */
@@ -274,11 +276,14 @@ export function App(props: AppProps) {
   let version = props.file.version;
   /** Наибольший сеанс пачек журнала файла: сеанс этого редактора — после него. */
   let journalSession: number | null = null;
+  /** Журнал есть, но не применён (открыт читателем): вернули право — файл открывается заново. */
+  let journalHeld = false;
   const bytes = props.files.read(id).then(
     (r) => {
       stored = r.bytes !== null;
       version = r.meta.version;
       journalSession = r.session;
+      journalHeld = r.journalHeld === true;
       store.setState('fileRole', r.meta.role ?? null);
       if (!r.bytes) return null;
       let journal = r.journal;
@@ -316,6 +321,11 @@ export function App(props: AppProps) {
     // Не только журнал: у нового файла ещё нет записи, и журнал правку не сохранит.
     return saver ? withTimeout(saver.save(), SETTLE_MS, false) : true;
   });
+  props.onUnsaved?.(async () => {
+    if (!saver) return false;
+    await withTimeout(saver.flushJournal(), SETTLE_MS, false);
+    return saver.pending();
+  });
   props.onSessionLost?.(() => {
     editor()?.send({ type: 'setViewOnly', on: true });
     setLost('session');
@@ -328,7 +338,9 @@ export function App(props: AppProps) {
       setAskLeave({
         reason: 'Этот файл ещё ни разу не записан. Сначала сохраните копию на диск',
         answer: (go) => {
-          if (go) location.reload();
+          if (!go) return;
+          s?.release();
+          location.reload();
         },
       });
       return;
@@ -338,6 +350,8 @@ export function App(props: AppProps) {
   const answerLeave = (go: boolean) => {
     const a = askLeave();
     setAskLeave(null);
+    // Человек уже ответил: браузер не спрашивает второй раз, если за уходом идёт перезагрузка.
+    if (go) saver?.release();
     a?.answer(go);
   };
 
@@ -430,18 +444,31 @@ export function App(props: AppProps) {
           offClipboard();
         };
         saver = createSaver(ed, props.files, id, version, stored, { ...testIntervals(), journalSession });
+        // Роль известна из чтения файла: читатель не правит и пока ответ опроса в пути.
+        if (store.state.fileRole === 'viewer') ed.send({ type: 'setViewOnly', on: true });
         // Доступ к файлу меняется, пока он открыт. Этап 3 пришлёт то же событие по соединению файла.
         let toldNewer = false;
+        let toldReopen = false;
         offWatch = props.files.watch?.(id, (state) => {
           if (state.kind !== 'role') {
             // Правки — в журнале браузера, плашка предлагает копию на диск; уход спросит о несохранённом.
             ed.send({ type: 'setViewOnly', on: true });
+            store.setState('fileCanShare', false);
             setLost(state.kind);
             return;
           }
           const before = store.state.fileRole;
           setLost(null);
+          // Читателю вернули право, а его прежние правки ещё не в документе: первая запись прошла бы мимо
+          // них. Файл открывается заново, журнал сливается. До этого режим просмотра.
+          if (journalHeld && state.role !== 'viewer') {
+            if (props.onRestart({ reason: 'role', lost: false, message: 'право правки вернули' })) return;
+            if (!toldReopen) store.toast('Теперь вы можете редактировать файл. Откройте его заново, чтобы продолжить');
+            toldReopen = true;
+            return;
+          }
           store.setState('fileRole', state.role);
+          store.setState('fileCanShare', state.canShare);
           ed.send({ type: 'setViewOnly', on: state.role === 'viewer' });
           if (before !== state.role && state.role === 'viewer') {
             store.toast(
@@ -450,7 +477,8 @@ export function App(props: AppProps) {
                 : 'Теперь вы только смотрите файл',
             );
           } else if (before === 'viewer' && state.role !== 'viewer') store.toast('Теперь вы можете редактировать файл');
-          if (saver && state.version > saver.version() && !toldNewer) {
+          // Своя запись, ответ на которую ещё в пути или потерян, — не «другой человек».
+          if (saver && !state.own && state.version > saver.version() && !toldNewer) {
             toldNewer = true;
             store.toast('Файл изменён в другом окне или другим человеком. Откройте его заново, чтобы увидеть новую версию');
           }

@@ -25,6 +25,8 @@
 // заберёт полный файл. Пока журнал неполон (пачка не собрана или потеряна), правки
 // не отодвигают полный файл дальше `FULL_MAX_MS` от прошлого. После неудачной
 // полной записи следующая сама по себе — не раньше чем через `FULL_IDLE_MS`.
+// Запись через сеть (`files.remote`): после сбоя она повторяется сама через `FULL_IDLE_MS`, кроме отказов,
+// которые повтор не исправит, а закрытие вкладки спрашивает, пока правки есть только в памяти.
 
 import type { CoreEvent } from '../wasm/ferrum_wasm';
 import type { Editor } from './context';
@@ -42,6 +44,17 @@ export const FULL_MAX_MS = 300_000;
 /** После сбоя ядра запись последних пачек ждём не дольше этого: хранилище не
  * отвечает — перезапуск всё равно идёт, а правки считаются потерянными. */
 export const SETTLE_MS = 2500;
+
+/** Коды отказа, которые повтор записи не исправит: нужен человек. */
+const FINAL_FAILURES: ReadonlySet<unknown> = new Set([
+  'CONFLICT',
+  'FORBIDDEN',
+  'NOT_FOUND',
+  'UNAUTHORIZED',
+  'TOO_LARGE',
+  'BAD_CONTAINER',
+  'BAD_REQUEST',
+]);
 
 /** `p` или, если он не успел за `ms`, — `fallback`; таймер снимается в любом случае. */
 export function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -78,6 +91,8 @@ export interface Saver {
   failure(): string | null;
   /** Поколение файла, на котором основана следующая запись. */
   version(): number;
+  /** Человек согласился уйти: закрытие вкладки больше не спрашивает. */
+  release(): void;
   dispose(): void;
 }
 
@@ -309,6 +324,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
       if (!wasStored) dirty = true;
       failedAt = performance.now();
       fail(`Не удалось сохранить файл: ${err instanceof Error ? err.message : String(err)}`);
+      if (files.remote && !FINAL_FAILURES.has((err as { code?: unknown }).code)) armFull();
       return false;
     }
   }
@@ -336,13 +352,21 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   const onVisibility = () => {
     if (document.visibilityState === 'hidden') void flushJournal();
   };
+  const pending = () => dirty || unjournaled() || (!stored && modified);
+  const onBeforeUnload = (e: BeforeUnloadEvent) => {
+    if (!pending()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  };
   window.addEventListener('pagehide', onHide);
   document.addEventListener('visibilitychange', onVisibility);
+  if (files.remote) window.addEventListener('beforeunload', onBeforeUnload);
+  const release = () => window.removeEventListener('beforeunload', onBeforeUnload);
 
   return {
     save,
     flushJournal,
-    pending: () => dirty || unjournaled() || (!stored && modified),
+    pending,
     settled: () =>
       withTimeout(
         appended.then(() => true),
@@ -351,7 +375,9 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
       ),
     failure: () => failure,
     version: () => base,
+    release,
     dispose() {
+      release();
       clearTimeout(journalTimer);
       clearTimeout(fullTimer);
       off();

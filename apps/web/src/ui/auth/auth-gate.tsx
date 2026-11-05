@@ -118,8 +118,14 @@ export function AuthGate(props: { children: JSX.Element }) {
         if (was?.id === now?.id && was?.name === now?.name) return;
         // Спросить человека некому (он в другой вкладке): файл записывается молча.
         const saved = await (editorHooks.flush?.() ?? Promise.resolve(true)).catch(() => false);
-        // Сессии уже нет, файл не записался: перезагрузка потеряла бы то, чего нет в журнале.
-        if (saved || now !== null) location.reload();
+        if (saved) {
+          location.reload();
+          return;
+        }
+        // Файл не записался. Пришёл другой человек, а правки в журнале: перезагрузка их не теряет. Сессии
+        // нет или правки только в памяти (новый файл): редактор остаётся и задаёт вопрос сам.
+        const unsaved = await (editorHooks.unsaved?.() ?? Promise.resolve(false)).catch(() => true);
+        if (now !== null && !unsaved) location.reload();
         else editorHooks.sessionLost?.();
       });
     }),

@@ -4,7 +4,7 @@ import { expect, test, type Browser, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { appScreen, drag, editorReady, fileId, live, testMode } from '../e2e/helpers';
 import { STAND_URL } from '../playwright.server.config';
-import { linksFor, mailCount, mailsFor, newEmail, resetStand, signIn } from './stand';
+import { compose, linksFor, mailCount, mailsFor, newEmail, resetStand, signIn } from './stand';
 
 test.beforeEach(resetStand);
 
@@ -133,7 +133,7 @@ test('файлы разделены по людям: вошедший следу
   await a.context().close();
 });
 
-test('разделы экрана файлов: черновики, корзина, имя; читателю меню без правок', async ({ browser }, info) => {
+test('разделы экрана файлов: черновики, корзина, имя', async ({ browser }, info) => {
   const a = await person(browser, newEmail(info.project.name));
   await storedFile(a);
   await a.goto('/#/drafts');
@@ -663,6 +663,191 @@ test('«Поделиться»: сбой, чужой ответ и запозд�
   resolve();
   await stale;
   await expect(a.getByRole('list', { name: 'Люди с доступом' }).getByText(invited)).toBeVisible();
+  await a.context().close();
+});
+
+test('читатель в режиме просмотра сразу: ответ опроса ещё в пути, а правки уже нет (T6-I1)', async ({ browser }, info) => {
+  const mail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, mail);
+  const id = await storedFile(a);
+  await shareWith(a, mail, 'Может смотреть');
+  // Опрос не отвечает, запись — тоже проверка доступа: окно держится открытым на весь тест.
+  await b.context().route('**/access', () => {});
+  await open(b, id);
+  await nodes(b, 1);
+  await b.locator('canvas').click({ position: { x: 10, y: 10 } });
+  await b.keyboard.press('KeyR');
+  const l = await live(b);
+  await drag(b, await appScreen(b, l, l.cameraX, l.cameraY), 100, 80);
+  await nodes(b, 1);
+  expect(await b.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
+  await a.context().close();
+  await b.context().close();
+});
+
+test('право вернули читателю: журнал не стирается, файл открывается заново с правками (T6-I2)', async ({ browser }, info) => {
+  const mail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, mail);
+  const id = await storedFile(a);
+  await shareWith(a, mail);
+  const entry = async () =>
+    ((await api(a, 'GET', `/api/files/${id}/share`)).body as { people: { id: string; email: string }[] }).people.find(
+      (p) => p.email === mail,
+    )!.id;
+  // Редактор правит, запись не проходит: правка только в журнале. Уходит.
+  await open(b, id);
+  await b.context().route('**/content', (r) => (r.request().method() === 'PUT' ? r.abort() : r.continue()));
+  await drawRect(b);
+  await saveKey(b);
+  await expect(toast(b, 'Нет связи с сервером')).toBeVisible();
+  await b.getByRole('button', { name: 'Назад к файлам' }).click();
+  await b.getByRole('button', { name: 'Уйти' }).click();
+  await expect(title(b)).toHaveText('Недавние');
+  await b.context().unroute('**/content');
+  // Роль понизили: журнал не применён.
+  await api(a, 'PATCH', `/api/files/${id}/share/people/${await entry()}`, { role: 'viewer' });
+  await open(b, id);
+  await nodes(b, 1);
+  await expect(b.getByText('Только просмотр')).toBeVisible();
+  // Роль вернули в той же вкладке: прежняя правка возвращается сразу.
+  await api(a, 'PATCH', `/api/files/${id}/share/people/${await entry()}`, { role: 'editor' });
+  await checkAccessNow(b);
+  await expect(toast(b, 'Ваши несохранённые правки восстановлены')).toBeVisible();
+  await nodes(b, 2);
+  await expect(b.getByText('Только просмотр')).toHaveCount(0);
+  await drawRect(b, 200);
+  await saveKey(b);
+  await saved(b);
+  await b.reload();
+  await editorReady(b);
+  await nodes(b, 3);
+  await a.context().close();
+  await b.context().close();
+});
+
+test('своя запись: ответ ещё в пути, опрос видит новое поколение, «изменён другим» не появляется (T6-Minor5)', async ({
+  browser,
+}, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await storedFile(a);
+  await drawRect(a);
+  const { promise: letGo, resolve } = Promise.withResolvers<void>();
+  const { promise: committed, resolve: done } = Promise.withResolvers<void>();
+  await a.context().route('**/content', async (r) => {
+    if (r.request().method() !== 'PUT') return r.continue();
+    const res = await r.fetch();
+    done();
+    await letGo;
+    await r.fulfill({ response: res });
+  });
+  await saveKey(a);
+  await committed;
+  const polled = a.waitForResponse((r) => r.url().endsWith('/access'));
+  await checkAccessNow(a);
+  await polled;
+  resolve();
+  await saved(a);
+  // Следующий опрос уже после ответа: всё тихо, чужой записи не было.
+  const again = a.waitForResponse((r) => r.url().endsWith('/access'));
+  await checkAccessNow(a);
+  await again;
+  // Без повторов: уведомление исчезает само, и ожидание «его нет» дождалось бы этого.
+  expect(await a.locator('body').innerText()).not.toContain('Файл изменён в другом окне');
+  await a.context().close();
+});
+
+test('неудачная запись повторяется сама; новый файл не закрывается молча (T6-I4)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await a.goto('/?nodes=0&fullSave=200#/new');
+  await editorReady(a);
+  const id = fileId(a);
+  let refused = 0;
+  await a.context().route('**/content', (r) => {
+    if (r.request().method() !== 'PUT' || ++refused > 1) return r.continue();
+    return r.abort();
+  });
+  await drawRect(a);
+  // Без единой правки и нажатия: первая запись оборвалась, вторая прошла сама.
+  await saved(a);
+  expect(refused).toBeGreaterThan(1);
+  expect(((await api(a, 'GET', `/api/files/${id}/access`)).body as { version: number }).version).toBeGreaterThan(0);
+  await a.context().unroute('**/content');
+  // Новый файл, запись не проходит: закрытие вкладки спрашивает.
+  await a.goto('/?nodes=0#/new');
+  await editorReady(a);
+  await a.context().route('**/content', (r) => (r.request().method() === 'PUT' ? r.abort() : r.continue()));
+  await drawRect(a);
+  await saveKey(a);
+  await expect(toast(a, 'Нет связи с сервером')).toBeVisible();
+  const dialog = a.waitForEvent('dialog');
+  const closing = a.close({ runBeforeUnload: true });
+  const shown = await dialog;
+  expect(shown.type()).toBe('beforeunload');
+  await shown.dismiss();
+  await closing;
+  await expect.poll(() => a.isClosed()).toBe(false);
+  await a.context().close();
+});
+
+test('смена входа в другой вкладке: новый файл без записи спрашивает, а не перезагружается (T6-I4)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await a.goto('/?nodes=0#/new');
+  await editorReady(a);
+  await a.context().route('**/content', (r) => (r.request().method() === 'PUT' ? r.abort() : r.continue()));
+  await drawRect(a);
+  await saveKey(a);
+  await expect(toast(a, 'Нет связи с сервером')).toBeVisible();
+  const tab = await a.context().newPage();
+  await testMode(tab);
+  await tab.goto('/');
+  await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(tab.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  // Уже другой человек: правка цела, страница не перезагружена.
+  await signIn(tab, newEmail(info.project.name), 'Другой');
+  await expect(tab.getByRole('heading', { level: 1 })).toHaveText('Недавние');
+  await nodes(a, 1);
+  await expect(a.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  await a.getByRole('button', { name: 'Войти', exact: true }).click();
+  await expect(a.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' })).toContainText('ещё ни разу не записан');
+  await a.context().close();
+});
+
+test('картинку убрали с сервера, вкладка считает её известной: запись догружает её (T6-I3)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await a.goto('/?nodes=0#/new');
+  await editorReady(a);
+  const id = fileId(a);
+  const uploads: string[] = [];
+  a.on('request', (r) => {
+    if (r.method() === 'PUT' && r.url().includes('/images/')) uploads.push(r.url());
+  });
+  await a.evaluate(async () => {
+    const c = new OffscreenCanvas(4, 4);
+    c.getContext('2d')!.fillRect(0, 0, 4, 4);
+    const bytes = new Uint8Array(await (await c.convertToBlob({ type: 'image/png' })).arrayBuffer());
+    window.__ferrum!.core!.send({ type: 'placeImage', bytes });
+  });
+  await expect.poll(() => a.evaluate(() => window.__ferrum!.ui!.tool)).toBe('image');
+  const l = await live(a);
+  const at = await appScreen(a, l, l.cameraX, l.cameraY);
+  await a.mouse.click(at.x, at.y);
+  await nodes(a, 1);
+  await saveKey(a);
+  await saved(a);
+  expect(uploads).toHaveLength(1);
+  const hash = uploads[0].split('/images/')[1];
+  // Как очистка через 30 дней: строки картинки файла больше нет.
+  compose('exec', '-T', 'postgres', 'psql', '-U', 'ferrum', '-d', 'ferrum', '-c', `DELETE FROM file_image WHERE file_id = '${id}'`);
+  await drawRect(a, 300);
+  await saveKey(a);
+  await saved(a);
+  expect(uploads).toHaveLength(2);
+  const image = await a.evaluate(async (u) => (await fetch(u)).status, uploads[1]);
+  expect(image).toBe(200);
+  expect(hash).toHaveLength(64);
   await a.context().close();
 });
 

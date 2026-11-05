@@ -168,7 +168,7 @@ scope.onmessage = (e: MessageEvent<ToServer>) => {
   if (m.t === 'watch') {
     if (m.on) {
       watched.add(m.file);
-      void files?.checkAccess(m.file);
+      void files?.watchAccess(m.file);
     } else {
       watched.delete(m.file);
       files?.forgetAccess(m.file);

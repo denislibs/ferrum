@@ -66,6 +66,7 @@ interface Call {
   method: string;
   headers: Record<string, string>;
   body: unknown;
+  signal?: AbortSignal;
 }
 
 /** Сервер в тесте: ответ по «МЕТОД адрес», неизвестное — падение теста. */
@@ -118,7 +119,13 @@ function stand(replies: Record<string, ((c: Call) => Response | Promise<Response
   const http = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input);
     const method = init.method ?? 'GET';
-    const call: Call = { url, method, headers: (init.headers ?? {}) as Record<string, string>, body: init.body };
+    const call: Call = {
+      url,
+      method,
+      headers: (init.headers ?? {}) as Record<string, string>,
+      body: init.body,
+      signal: init.signal ?? undefined,
+    };
     calls.push(call);
     const r = replies[`${method} ${url}`];
     if (!r) throw new Error(`нет ответа: ${method} ${url}`);
@@ -213,9 +220,10 @@ test('чтение: файл без содержимого, читателю ж�
   s.journal.session = 7;
   expect((await s.files.read('f')).bytes).toBeNull();
   const viewer = await s.files.read('v');
-  expect([viewer.journal, viewer.session]).toEqual([[], null]);
+  // Журнал не применён, но сеанс известен: новые пачки читателя идут после прежних.
+  expect([viewer.journal, viewer.session, viewer.journalHeld]).toEqual([[], 7, true]);
   const editor = await s.files.read('e');
-  expect([editor.journal.length, editor.session]).toEqual([1, 7]);
+  expect([editor.journal.length, editor.session, editor.journalHeld]).toEqual([1, 7, false]);
 });
 
 test('чтение собирает файл с картинками: ядро получает обычный контейнер', async () => {
@@ -310,7 +318,7 @@ test('опрос доступа: только изменения; сбой се�
   const s = stand({ 'GET /api/files/f/access': () => reply() });
   await s.files.checkAccess('f');
   await s.files.checkAccess('f');
-  expect(s.events.access).toEqual([['f', { kind: 'role', role: 'editor', version: 1 }]]);
+  expect(s.events.access).toEqual([['f', { kind: 'role', role: 'editor', version: 1, canShare: false, own: false }]]);
   reply = () => {
     throw new TypeError('сеть');
   };
@@ -318,7 +326,7 @@ test('опрос доступа: только изменения; сбой се�
   expect(s.events.access).toHaveLength(1);
   reply = () => access(1, 'viewer');
   await s.files.checkAccess('f');
-  expect(s.events.access.at(-1)).toEqual(['f', { kind: 'role', role: 'viewer', version: 1 }]);
+  expect(s.events.access.at(-1)).toEqual(['f', { kind: 'role', role: 'viewer', version: 1, canShare: false, own: false }]);
   reply = () => json({ error: 'NOT_FOUND' }, 404);
   await s.files.checkAccess('f');
   expect(s.events.access.at(-1)).toEqual(['f', { kind: 'none' }]);
@@ -405,4 +413,284 @@ test('удаление навсегда снимает журнал файла',
   await s.files.remove('f');
   expect(s.journal.dropped).toEqual(['f']);
   expect(s.events.changed).toBe(1);
+});
+
+/** Ответ, которого тест ждёт сам: `open` — отпустить; сигнал запроса его обрывает. */
+function held() {
+  let open!: (r: Response) => void;
+  const reply = new Promise<Response>((resolve) => (open = resolve));
+  return { reply, open };
+}
+const untilAborted = (c: Call) =>
+  new Promise<Response>((_, reject) => {
+    c.signal?.addEventListener('abort', () => reject(new DOMException('срок', 'AbortError')));
+  });
+const flush = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+};
+
+test('опоздавший ответ опроса: старый не отменяет новый, снятое наблюдение не оживает (T6-I1, T6-Minor5)', async () => {
+  const first = held();
+  const second = held();
+  const replies = [first, second];
+  const s = stand({ 'GET /api/files/f/access': () => replies.shift()!.reply });
+  const a = s.files.checkAccess('f');
+  const b = s.files.checkAccess('f');
+  second.open(access(1, 'viewer'));
+  await b;
+  first.open(access(1, 'editor'));
+  await a;
+  // Старый ответ вернул бы прежнюю роль на целый период опроса.
+  expect(s.events.access.map(([, e]) => (e.kind === 'role' ? e.role : e.kind))).toEqual(['viewer']);
+
+  const late = held();
+  replies.push(late);
+  const c = s.files.checkAccess('f');
+  s.files.forgetAccess('f');
+  late.open(access(1, 'viewer'));
+  await c;
+  // Опоздавший ответ снятого наблюдения не запоминается, и новое наблюдение получит событие.
+  expect(s.events.access).toHaveLength(1);
+  replies.push({ reply: Promise.resolve(access(1, 'viewer')), open: () => {} });
+  await s.files.checkAccess('f');
+  expect(s.events.access).toHaveLength(2);
+});
+
+test('новое наблюдение получает состояние, даже если отказ записи уже запомнил такое же (T6-I1)', async () => {
+  const s = stand({ 'GET /api/files/f/access': () => access(1, 'viewer') });
+  await s.files.checkAccess('f');
+  s.files.forgetAccess('f');
+  // Наблюдение снято, а запись, которая шла, ещё сообщила о доступе: это не должно подавить следующее.
+  await s.files.checkAccess('f');
+  expect(s.events.access).toHaveLength(2);
+  await s.files.watchAccess('f');
+  expect(s.events.access).toHaveLength(3);
+});
+
+test('`canShare` из ответа доступа; нет поля — нет права (T7-I1)', async () => {
+  const s = stand({ 'GET /api/files/f/access': json({ role: 'editor', version: 1, canShare: true }) });
+  await s.files.checkAccess('f');
+  expect(s.events.access[0][1]).toMatchObject({ canShare: true });
+  const t = stand({ 'GET /api/files/f/access': json({ role: 'editor', version: 1 }) });
+  await t.files.checkAccess('f');
+  expect(t.events.access[0][1]).toMatchObject({ canShare: false });
+});
+
+test('поколение, которое может быть своим: идущая запись и потерянный ответ (T6-Minor5)', async () => {
+  const put = held();
+  let version = 1;
+  const s = stand({
+    'GET /api/files/f/access': () => access(version),
+    'PUT /api/files/f/content': () => put.reply,
+  });
+  const write = s.files.write('f', container(ROOT), 'keep', 1, null);
+  await flush();
+  await expect.poll(() => s.calls.some((c) => c.method === 'PUT')).toBe(true);
+  version = 2;
+  await s.files.checkAccess('f');
+  expect(s.events.access.at(-1)![1]).toMatchObject({ version: 2, own: true });
+  put.open(json(meta({ version: 2 })));
+  await write;
+  await s.files.checkAccess('f');
+  expect(s.events.access.at(-1)![1]).toMatchObject({ version: 2, own: false });
+
+  const lost = stand({
+    'GET /api/files/f/access': () => access(version),
+    'PUT /api/files/f/content': () => {
+      throw new TypeError('обрыв');
+    },
+  });
+  version = 1;
+  expect(await code(lost.files.write('f', container(ROOT), 'keep', 1, null))).toBe('NETWORK');
+  version = 2;
+  await lost.files.checkAccess('f');
+  expect(lost.events.access.at(-1)![1]).toMatchObject({ version: 2, own: true });
+});
+
+test('два сбоя подряд: дошедшая запись не становится ложным `CONFLICT` (T6-Minor1)', async () => {
+  const puts: Call[] = [];
+  let version = 1;
+  const s = stand({
+    'GET /api/files/f/access': () => access(version),
+    'PUT /api/files/f/content': (c) => {
+      puts.push(c);
+      // A дошла, ответ потерян. B не дошла. C — как решил бы сервер: номер должен быть у записи A.
+      if (puts.length === 1) version = 2;
+      if (puts.length < 3) throw new TypeError('обрыв');
+      return json(meta({ version: 3 }));
+    },
+  });
+  await code(s.files.write('f', container(ROOT), 'keep', 1, null));
+  await code(s.files.write('f', container(ROOT), 'keep', 1, null));
+  await s.files.write('f', container(ROOT), 'keep', 1, null);
+  expect(puts[2].headers['x-ferrum-previous-write']).toBe('write-1');
+  expect(puts[2].headers['If-Match']).toBe('"1"');
+
+  // Дошли обе: поколение ушло на две, следующая идёт поверх второй.
+  const both: Call[] = [];
+  version = 1;
+  const t = stand({
+    'GET /api/files/f/access': () => access(version),
+    'PUT /api/files/f/content': (c) => {
+      both.push(c);
+      if (both.length < 3) {
+        version++;
+        throw new TypeError('обрыв');
+      }
+      return json(meta({ version: 4 }));
+    },
+  });
+  await code(t.files.write('f', container(ROOT), 'keep', 1, null));
+  await code(t.files.write('f', container(ROOT), 'keep', 1, null));
+  expect((await t.files.write('f', container(ROOT), 'keep', 1, null)).version).toBe(4);
+  expect(both[2].headers['x-ferrum-previous-write']).toBe('write-2');
+  expect(both[2].headers['If-Match']).toBe('"2"');
+});
+
+test('сбой снятия журнала после удачной записи — предупреждение, а не отказ (T6-Minor4)', async () => {
+  const s = stand({
+    'GET /api/files/f/access': access(1),
+    'PUT /api/files/f/content': json(meta({ version: 2 })),
+  });
+  s.journal.cut = async () => {
+    throw new Error('нет места');
+  };
+  const m = await s.files.write('f', container(ROOT), 'keep', 1, { session: 1, upTo: 1 });
+  expect(m.version).toBe(2);
+  expect(m.warning).toBe('Файл записан, но журнал изменений не очищен');
+});
+
+test('журнал, не применённый читателем, запись не стирает; открытие редактором снимает запрет (T6-I2)', async () => {
+  let role = 'viewer';
+  const s = stand({
+    'GET /api/files/f': () => json(meta({ role })),
+    'GET /api/files/f/content': () => new Response(container(ROOT), { headers: { 'x-ferrum-version': '1' } }),
+    'GET /api/files/f/access': () => access(1),
+    'PUT /api/files/f/content': () => json(meta({ version: 1 })),
+  });
+  s.journal.entries = [new ArrayBuffer(1)];
+  s.journal.session = 7;
+  await s.files.read('f');
+  role = 'editor';
+  await s.files.write('f', container(ROOT), 'keep', 1, { session: 8, upTo: 1 });
+  expect(s.journal.cuts).toEqual([]);
+  await s.files.read('f');
+  await s.files.write('f', container(ROOT), 'keep', 1, { session: 9, upTo: 1 });
+  expect(s.journal.cuts).toEqual([['f', 9, 1]]);
+});
+
+test('сервер не нашёл картинку: кэш сброшен, байты загружены заново, запись повторена один раз (T6-I3)', async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  let onServer = true;
+  const contentPuts: Call[] = [];
+  const imagePuts: Call[] = [];
+  const url = `/api/files/f/images/${HASH}`;
+  const s = stand({
+    'GET /api/files/f/access': access(1),
+    [`HEAD ${url}`]: () => new Response(null, { status: onServer ? 200 : 404 }),
+    [`PUT ${url}`]: (c) => {
+      imagePuts.push(c);
+      onServer = true;
+      return json({ ok: true });
+    },
+    'PUT /api/files/f/content': (c) => {
+      contentPuts.push(c);
+      return onServer ? json(meta({ version: 2 })) : json({ error: 'MISSING_IMAGES' }, 409);
+    },
+  });
+  const file = () => container(ROOT, refs(HASH), imageSection(bytes));
+  // Первая запись: картинка есть, хэш попадает в кэш.
+  await s.files.write('f', file(), 'keep', 1, { session: 1, upTo: 1 });
+  expect(imagePuts).toHaveLength(0);
+  // Очистка сняла картинку, кэш об этом не знает: HEAD не спрашивается, запись отказывает.
+  onServer = false;
+  const m = await s.files.write('f', file(), 'keep', 1, { session: 1, upTo: 2 });
+  expect(m.version).toBe(2);
+  expect(imagePuts).toHaveLength(1);
+  expect(contentPuts).toHaveLength(3);
+  expect(s.journal.cuts).toHaveLength(2);
+  // Сервер снова отказал: отказ, а не цикл; журнал цел.
+  const stuck = stand({
+    'GET /api/files/f/access': access(1),
+    [`HEAD ${url}`]: new Response(null, { status: 200 }),
+    'PUT /api/files/f/content': () => json({ error: 'MISSING_IMAGES' }, 409),
+  });
+  expect(await code(stuck.files.write('f', file(), 'keep', 1, { session: 1, upTo: 1 }))).toBe('MISSING_IMAGES');
+  expect(stuck.calls.filter((c) => c.method === 'PUT')).toHaveLength(2);
+  expect(stuck.journal.cuts).toEqual([]);
+});
+
+test('ссылки без байтов в файле считаются потерянными и объявляются серверу (T6-I3)', async () => {
+  const s = stand({
+    'GET /api/files/f/access': access(1),
+    'PUT /api/files/f/content': json(meta({ version: 2 })),
+  });
+  await s.files.write('f', container(ROOT, refs(HASH)), 'keep', 1, null);
+  await s.files.write('f', container(ROOT), 'keep', 1, null);
+  const puts = s.calls.filter((c) => c.method === 'PUT');
+  expect(puts[0].headers['x-ferrum-lost-images']).toBe('1');
+  expect(puts[1].headers['x-ferrum-lost-images']).toBeUndefined();
+});
+
+test('картинка при открытии: застывшие заголовки и тело обрываются по сроку (T6-Minor2)', async () => {
+  const file = () => new Response(container(ROOT, refs(HASH)), { headers: { 'x-ferrum-version': '1' } });
+  const silent = stand({
+    'GET /api/files/f': json(meta()),
+    'GET /api/files/f/content': file,
+    [`GET /api/files/f/images/${HASH}`]: untilAborted,
+  });
+  const a = code(silent.files.read('f'));
+  await expect.poll(() => silent.calls.some((c) => c.url.includes('/images/'))).toBe(true);
+  silent.clock.advance(15_000);
+  expect(await a).toBe('NETWORK');
+
+  const ctl = { signal: null as AbortSignal | null };
+  const frozen = stand({
+    'GET /api/files/f': json(meta()),
+    'GET /api/files/f/content': file,
+    [`GET /api/files/f/images/${HASH}`]: (c) => {
+      ctl.signal = c.signal ?? null;
+      const body = new ReadableStream({
+        start(out) {
+          ctl.signal?.addEventListener('abort', () => out.error(new DOMException('срок', 'AbortError')));
+        },
+      });
+      return new Response(body, { headers: { 'content-length': '1000' } });
+    },
+  });
+  const b = code(frozen.files.read('f'));
+  await expect.poll(() => ctl.signal !== null).toBe(true);
+  await flush();
+  // Срок заголовков снят: на нём тело ещё живёт.
+  frozen.clock.advance(15_000);
+  expect(ctl.signal!.aborted).toBe(false);
+  frozen.clock.advance(transferTimeout(1000));
+  expect(await b).toBe('NETWORK');
+});
+
+test('откат импорта: `DELETE` не ответил — операция всё равно завершается (T6-Minor3)', async () => {
+  const s = stand({
+    'POST /api/files': json(meta({ id: 'n', version: 0 })),
+    'PUT /api/files/n/content': json({ error: 'BAD_CONTAINER' }, 400),
+    'DELETE /api/files/n': untilAborted,
+  });
+  const r = code(s.files.create('Файл', container(ROOT), null));
+  await expect.poll(() => s.calls.some((c) => c.method === 'DELETE')).toBe(true);
+  s.clock.advance(15_000);
+  expect(await r).toBe('BAD_CONTAINER');
+});
+
+test('перенос: сбой журнала откатывает файл целиком (T9-I4)', async () => {
+  const s = stand({
+    'POST /api/files': json(meta({ id: 'n', version: 0 })),
+    'PUT /api/files/n/content': json(meta({ id: 'n', version: 1 })),
+    'DELETE /api/files/n': json({ ok: true }),
+  });
+  s.journal.append = async () => {
+    throw new Error('нет места');
+  };
+  await expect(s.files.create('Файл', container(ROOT), null, [new ArrayBuffer(1)])).rejects.toThrow('нет места');
+  expect(s.calls.some((c) => c.method === 'DELETE' && c.url === '/api/files/n')).toBe(true);
+  expect(s.journal.dropped).toEqual(['n']);
+  expect(s.events.changed).toBe(0);
 });
