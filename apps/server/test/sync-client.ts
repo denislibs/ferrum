@@ -9,6 +9,7 @@ import {
   type ServerFrame,
   type VersionMap,
 } from '@ferrum/protocol';
+import { blake3 } from '@noble/hashes/blake3.js';
 import { LoroDoc } from 'loro-crdt';
 import type { ApiStand, Person } from './api-stand';
 
@@ -129,6 +130,8 @@ export function buildContainer(sections: [number, string, Uint8Array][]): Uint8A
     v.setUint32(1, idb.length, true);
     out.set(idb, 5);
     v.setBigUint64(5 + idb.length, BigInt(bytes.length), true);
+    // Контрольная сумма — как у ядра: копия секции при сжатии должна открываться им же.
+    out.set(blake3(bytes), 13 + idb.length);
     out.set(bytes, 45 + idb.length);
     parts.push(out);
   }

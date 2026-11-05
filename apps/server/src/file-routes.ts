@@ -515,15 +515,16 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
     },
     {
       // «Скачать копию» с экрана файлов: содержимое без журнала было бы старше того, что видят люди. Читателю тоже: экспорт ему
-      // разрешён. Сжатие занимает секунды на большом файле, поэтому общего срока нет.
+      // разрешён. Сжатие занимает секунды на большом файле, поэтому общего срока API нет: свой срок и предел частоты на файл
+      // держит `Compactor.manual`, отказ — 503 с `Retry-After`.
       method: 'POST',
       path: '/api/files/:id/compact',
       access: { kind: 'file', min: 'viewer' },
       limit: 'write',
       stream: true,
       handle: async (ctx) => {
-        const done = deps.compactNow ? await deps.compactNow(ctx.params.id) : true;
-        return done ? ok({ ok: true }) : apiError(503, 'UNAVAILABLE');
+        const done = deps.compactNow ? await deps.compactNow(ctx.params.id) : { ok: true as const };
+        return done.ok ? ok({ ok: true }) : apiError(503, 'UNAVAILABLE', { 'Retry-After': String(done.retryAfter) });
       },
     },
     {

@@ -3,8 +3,10 @@
 import { ContainerError, scanContainer } from '@ferrum/protocol';
 import type { BlobStore } from '../blob-store';
 
-const SECTION_ROOT = 1;
-const SECTION_PAGE = 2;
+/** Секции контейнера, которых нет в `packages/protocol`: корень, страница, кэш сцены (`crates/ferrum-doc/src/container.rs`). */
+export const SECTION_ROOT = 1;
+export const SECTION_PAGE = 2;
+export const SECTION_SCENE = 5;
 
 /** Данные секции документа; файла нет, контейнер чужой или секции нет — `null`. */
 export async function readDocSnapshot(blobs: BlobStore, contentKey: string | null, doc: string): Promise<Uint8Array | null> {

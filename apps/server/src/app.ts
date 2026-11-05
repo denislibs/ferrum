@@ -97,7 +97,7 @@ export function startServer(deps: AppDeps, port: number): Running {
     ...apiDeps(deps),
     afterWrite: (route, ctx) => accessChanged(hub, route, ctx),
     contentReplaced: (file) => hub.forgetFile(file),
-    compactNow: (file) => (compactor ? compactor.compactNow(file) : Promise.resolve(true)),
+    compactNow: (file) => (compactor ? compactor.manual(file) : Promise.resolve({ ok: true as const })),
   };
   const handleApi = apiHandler(apiRoutes(api), api);
   const server = Bun.serve({
