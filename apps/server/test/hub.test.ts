@@ -5,12 +5,13 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { encodeClientFrame, encodeVersion, SYNC_CLOSE, type VersionMap } from '@ferrum/protocol';
 import { LoroDoc } from 'loro-crdt';
-import { SyncHub } from '../src/sync/hub';
+import type { Pool } from 'pg';
+import { SERVER_SCHEMA, SyncHub } from '../src/sync/hub';
 import { apiStand, type Person } from './api-stand';
 import { Client, peers, realContainer } from './sync-client';
 
 const s = await apiStand({
-  syncLimits: { recheckMs: 3_600_000, sessionCheckMs: 3_600_000, helloMs: 300, framesPerSecond: 120, framesBurst: 2000 },
+  syncLimits: { recheckMs: 3_600_000, sessionCheckMs: 3_600_000, helloMs: 300, framesPerSecond: 120, framesBurst: 2000, knownSchema: 9 },
 });
 afterAll(s.stop);
 const owner = await s.signIn('owner@example.com');
@@ -46,11 +47,29 @@ function tab(): LoroDoc {
   return d;
 }
 
-function edit(d: LoroDoc, value: number): Uint8Array {
+function edit(d: LoroDoc, value: number | string): Uint8Array {
   const from = d.oplogVersion();
   d.getMap('meta').set('x', value);
   d.commit();
   return d.export({ mode: 'update', from });
+}
+
+/** Запросы к базе, текст которых подходит: `hold` решает, когда запрос уйдёт и когда вернётся ответ. Только для
+ * подсмотра момента: сам запрос настоящий. */
+function intercept(
+  match: (text: string, params: unknown[]) => boolean,
+  hold: (run: () => Promise<unknown>) => Promise<unknown>,
+): () => void {
+  const pool = s.pool as Pool & { query: (...a: unknown[]) => Promise<unknown> };
+  const real = pool.query.bind(pool) as (...a: unknown[]) => Promise<unknown>;
+  pool.query = ((...a: unknown[]) => {
+    const text = typeof a[0] === 'string' ? a[0] : '';
+    if (!match(text, (a[1] as unknown[]) ?? [])) return real(...a);
+    return hold(() => real(...a));
+  }) as never;
+  return () => {
+    pool.query = real as never;
+  };
 }
 
 beforeEach(async () => {
@@ -146,6 +165,143 @@ test('порядок: подписчик получает записи по по
   await c.wait('updates', (f) => f.seq === 80);
   const seqs = c.frames.flatMap((f) => (f.t === 'updates' ? [f.seq] : []));
   expect(seqs).toEqual(Array.from({ length: 80 }, (_, i) => i + 1));
+});
+
+test('конец догоняния не перепрыгивает запись, зафиксированную во время последнего запроса', async () => {
+  const a = await joined(owner);
+  const d = tab();
+  // Новый подписчик: его запрос журнала прочитан пустым, а ответ ещё не обработан — тут фиксируется правка, и рассылка
+  // её пропускает (подписчик ещё не на рассылке).
+  let held = false;
+  const restore = intercept(
+    (text, params) => !held && text.includes('FROM doc_update') && params[0] === file && params[2] === 0,
+    async (run) => {
+      held = true;
+      const out = await run();
+      a.update('root', 1, edit(d, 1));
+      await a.wait('ack', (f) => f.clientSeq === 1);
+      return out;
+    },
+  );
+  try {
+    const c = await connect(editor);
+    c.subscribe('root', peers(root));
+    await c.wait('subscribed');
+    await c.wait('updates', (f) => f.seq === 1);
+    // И следующая правка идёт рассылкой, без дыры.
+    a.update('root', 2, edit(d, 2));
+    await c.wait('updates', (f) => f.seq === 2);
+    const mine = tab();
+    for (const f of c.frames) if (f.t === 'updates') expect(mine.import(f.bytes).pending ?? null).toBeNull();
+    expect(mine.getMap('meta').get('x')).toBe(2);
+  } finally {
+    restore();
+  }
+});
+
+test('подписка под непрерывной записью: у каждого подписчика все записи по порядку', async () => {
+  const w = await joined(owner);
+  const d = tab();
+  let n = 0;
+  let stop = false;
+  const writing = (async () => {
+    while (!stop) {
+      w.update('root', n, edit(d, n));
+      n++;
+      await Bun.sleep(4);
+    }
+  })();
+  const subs: Client[] = [];
+  for (let i = 0; i < 30; i++) {
+    subs.push(await joined(editor));
+    await Bun.sleep(30);
+  }
+  stop = true;
+  await writing;
+  await w.wait('ack', (f) => f.clientSeq === n - 1, 20_000);
+  for (const c of subs) {
+    await c.wait('updates', (f) => f.seq === n, 20_000);
+    const got = c.frames.flatMap((f) => (f.t === 'updates' ? [f.seq] : []));
+    // Подписчик знает начало по версии подписки; дальше — подряд, без пропусков и повторов.
+    expect(got).toEqual(Array.from({ length: got.length }, (_, i) => n - got.length + 1 + i));
+    const sub = c.frames.find((f) => f.t === 'subscribed')!;
+    expect(sub.t === 'subscribed' && sub.seq).toBeGreaterThanOrEqual(n - got.length);
+  }
+}, 60_000);
+
+test('правка, отправленная, пока строка документа заводится, не заводит её с пустой версией', async () => {
+  const c = await connect(editor);
+  const d = tab();
+  let held = false;
+  const restore = intercept(
+    (text) => !held && text.startsWith('SELECT vv, base_vv FROM doc_state'),
+    async (run) => {
+      held = true;
+      // Подписка ждёт базу, а пачка уже пришла.
+      c.update('root', 1, edit(d, 1));
+      await c.wait('refused', (f) => f.clientSeq === 1);
+      return run();
+    },
+  );
+  try {
+    c.subscribe('root', peers(root));
+    await c.wait('subscribed');
+  } finally {
+    restore();
+  }
+  expect(c.frames.find((f) => f.t === 'refused')).toMatchObject({ code: 'UNAVAILABLE' });
+  const { rows } = await s.pool.query<{ base_vv: Record<string, number> }>('SELECT base_vv FROM doc_state WHERE file_id = $1', [file]);
+  expect(rows[0].base_vv).toEqual(Object.fromEntries(peers(root)));
+  // Следующая правка того же клиента пишется.
+  c.update('root', 2, d.export({ mode: 'update', from: root.oplogVersion() }));
+  await c.wait('ack', (f) => f.clientSeq === 2);
+});
+
+test('сбой проверки при заведении строки: строки с пустой версией нет, соединение переподключится', async () => {
+  const v = s.hub.validator;
+  const real = v.baseVersion.bind(v);
+  v.baseVersion = async () => null;
+  const saved = console.error;
+  console.error = () => {};
+  try {
+    const c = await connect(editor);
+    c.subscribe('root', peers(root));
+    expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.GOING_AWAY);
+  } finally {
+    v.baseVersion = real;
+    console.error = saved;
+  }
+  expect((await s.pool.query('SELECT 1 FROM doc_state WHERE file_id = $1', [file])).rows).toHaveLength(0);
+  const again = await joined(editor);
+  again.update('root', 1, edit(tab(), 1));
+  await again.wait('ack');
+});
+
+test('журнал отверг подделку: зависящая от неё пачка не проходит, ни следом, ни вперемешку', async () => {
+  const a = await joined(owner);
+  const b = await joined(editor);
+  const da = tab();
+  a.update('root', 1, edit(da, 1));
+  await a.wait('ack');
+  // Второй человек подделывает следующую правку пира первого и шлёт свою, зависящую от подделки, не дожидаясь ответа.
+  const forged = edit(da, 'подделка');
+  const mine = tab();
+  mine.import(da.export({ mode: 'update', from: root.oplogVersion() }));
+  const dependent = edit(mine, 'зависит');
+  b.update('root', 1, forged);
+  b.update('root', 2, dependent);
+  expect((await b.wait('refused', (f) => f.clientSeq === 1)).code).toBe('FOREIGN_PEER');
+  expect((await b.wait('refused', (f) => f.clientSeq === 2)).code).toBe('GAP');
+  // И следом, после ответа.
+  b.update('root', 3, dependent);
+  expect((await b.wait('refused', (f) => f.clientSeq === 3)).code).toBe('GAP');
+  // Документ проверки загружен заново: настоящие правки снова пишутся.
+  a.update('root', 2, edit(tab(), 2));
+  await a.wait('ack', (f) => f.clientSeq === 2);
+  // Журнал воспроизводится с нуля без ждущих правок.
+  const replay = tab();
+  for (const r of (await s.pool.query<{ bytes: Uint8Array }>('SELECT bytes FROM doc_update WHERE file_id = $1 ORDER BY seq', [file])).rows)
+    expect(replay.import(r.bytes).pending ?? null).toBeNull();
 });
 
 test('читатель не пишет: отказ, журнал пуст', async () => {
@@ -302,6 +458,46 @@ test('понижение до читателя: сообщение сразу, �
   expect(c.closed).toBeNull();
 });
 
+test('понижение с пачками в пути: отказы не считаются нарушением, соединение живо', async () => {
+  const c = await joined(editor);
+  const { rows } = await s.pool.query<{ id: string }>('SELECT id FROM file_access WHERE file_id = $1 AND user_id = $2', [file, editor.id]);
+  expect((await s.call(owner, 'PATCH', `/api/files/${file}/share/people/${rows[0].id}`, { role: 'viewer' })).status).toBe(200);
+  await c.wait('role', (f) => f.role === 'viewer');
+  const d = tab();
+  for (let i = 0; i < 20; i++) c.update('root', i, edit(d, i));
+  // И пачки в документ, подписку на который сняло `snapshot-needed`.
+  for (let i = 0; i < 20; i++) c.update('9@9', 100 + i, edit(d, i));
+  await c.wait('refused', (f) => f.clientSeq === 119);
+  expect(c.frames.filter((f) => f.t === 'refused')).toHaveLength(40);
+  expect(c.closed).toBeNull();
+});
+
+test('сверка ролей не выгоняет того, кто открыл соединение, пока она шла', async () => {
+  const a = await connect(owner);
+  let opened: Client | null = null;
+  const restore = intercept(
+    (text) => text.includes('unnest($2::text[]) AS x(u)'),
+    async (run) => {
+      // Запрос сверки ушёл; человек открывает файл.
+      opened = await connect(editor);
+      return run();
+    },
+  );
+  try {
+    await s.hub.recheckFile(file);
+  } finally {
+    restore();
+  }
+  const b = opened as Client | null;
+  expect(b).not.toBeNull();
+  // Всё, что сервер послал до ответа на `ping`, уже дошло.
+  b!.send(encodeClientFrame({ t: 'ping' }));
+  await b!.wait('pong');
+  expect(b!.frames.filter((f) => f.t === 'access-revoked')).toEqual([]);
+  expect(b!.closed).toBeNull();
+  expect(a.closed).toBeNull();
+});
+
 test('запись проверяет роль в транзакции: снятая мимо сервера не пишет, даже пока соединение думает иначе', async () => {
   const c = await joined(editor);
   await s.pool.query(`UPDATE file_access SET role = 'viewer' WHERE file_id = $1 AND user_id = $2`, [file, editor.id]);
@@ -449,7 +645,7 @@ test('сбой базы при записи: отказ «повторите», 
   await b.wait('updates');
 });
 
-test('Valkey не отвечает при открытии: 503, а не падение; проверка сессий людей не выгоняет', async () => {
+test('Valkey не отвечает при открытии: 503, а не падение', async () => {
   const hub = new SyncHub(
     s.pool,
     s.blobs,
@@ -459,13 +655,45 @@ test('Valkey не отвечает при открытии: 503, а не пад�
       },
     } as never,
     s.publicUrl,
-    { sessionCheckMs: 10 },
+    { sessionCheckMs: 3_600_000 },
   );
   const refused = await hub.upgrade(new Request(s.publicUrl, { headers: { origin: s.publicUrl } }), s.server, file);
   expect(refused?.status).toBe(503);
   await hub.stop();
-  // Живой сервер: соединение держится, пока Valkey недоступен (`checkSessions` под `catch`).
-  expect((await s.call(owner, 'GET', `/api/files/${file}`)).status).toBe(200);
+});
+
+test('Valkey не отвечает при проверке сессий: люди не выгоняются; сессия снята — соединение закрывается', async () => {
+  const tight = await apiStand({ syncLimits: { sessionCheckMs: 20 } }, true);
+  try {
+    const who = await tight.signIn('valkey@example.com');
+    const f = (await tight.newFile(who)).id;
+    const c = (await Client.open(tight, who, f))!;
+    c.hello();
+    await c.wait('role');
+    const api = tight.auth.api as { getSession: (...a: unknown[]) => Promise<unknown> };
+    const real = api.getSession;
+    let failed = 0;
+    api.getSession = () => {
+      failed++;
+      return Promise.reject(new Error('Valkey недоступен'));
+    };
+    const saved = console.error;
+    console.error = () => {};
+    try {
+      while (failed < 5) await Bun.sleep(10);
+    } finally {
+      api.getSession = real;
+      console.error = saved;
+    }
+    expect(c.closed).toBeNull();
+    // Хранилище вернулось, а сессии больше нет: следующая проверка закрывает.
+    const list = await tight.valkey.get(`active-sessions-${who.id}`);
+    for (const x of JSON.parse(list!) as { token: string }[]) await tight.valkey.del(x.token);
+    await tight.valkey.del(`active-sessions-${who.id}`);
+    expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.SESSION);
+  } finally {
+    await tight.stop();
+  }
 });
 
 test('сессия снята мимо сервера: периодическая проверка закрывает соединение', async () => {
@@ -510,6 +738,70 @@ test('предел соединений и документов на соеди�
   }
 });
 
+test('пределы человека не обнуляются переподключением, открытия ограничены', async () => {
+  const tight = await apiStand(
+    {
+      syncLimits: {
+        userFramesPerSecond: 0.001,
+        userFramesBurst: 8,
+        userOpensPerSecond: 0.001,
+        userOpensBurst: 11,
+        recheckMs: 3_600_000,
+        sessionCheckMs: 3_600_000,
+      },
+    },
+    true,
+  );
+  try {
+    const who = await tight.signIn('reconnect@example.com');
+    const f = (await tight.newFile(who)).id;
+    let subscribed = 0;
+    for (let round = 0; round < 10; round++) {
+      const c = (await Client.open(tight, who, f))!;
+      c.hello();
+      await c.wait('role');
+      for (const doc of ['root', '1@1', '2@1']) c.subscribe(doc);
+      const answered = () => c.frames.filter((x) => x.t === 'subscribed' || x.t === 'pause').length;
+      while (answered() < 3) await Bun.sleep(5);
+      subscribed += c.frames.filter((x) => x.t === 'subscribed').length;
+      c.close();
+      await c.waitClosed();
+    }
+    // Бакет человека один на все его соединения: 8 кадров на десять переподключений.
+    expect(subscribed).toBe(8);
+    // Открытия: 11 за всё время, дальше — отказ, пока бакет не наполнится.
+    expect(await Client.open(tight, who, f)).not.toBeNull();
+    expect(await Client.open(tight, who, f)).toBeNull();
+  } finally {
+    await tight.stop();
+  }
+});
+
+test('подписка платит байтами и хранит только пиры, которые знает сервер', async () => {
+  const big = new Map<string, number>();
+  for (let i = 1; i <= 20_000; i++) big.set(String(i * 1000003), 1);
+  for (const [p, c] of peers(root)) big.set(p, c);
+  const v = await connect(viewer);
+  for (let i = 0; i < 5; i++) v.subscribe(i === 0 ? 'root' : `${i}@1`, big);
+  await v.wait('subscribed', (f) => f.doc === '4@1');
+  // Корень знает одного пира, страницы без снимка — ни одного.
+  expect(s.hub.versionEntries()).toBe(1);
+  const tight = await apiStand({ syncLimits: { userBytesBurst: 300_000, userBytesPerSecond: 1, recheckMs: 3_600_000 } }, true);
+  try {
+    const who = await tight.signIn('bytes@example.com');
+    const f = (await tight.newFile(who)).id;
+    const c = (await Client.open(tight, who, f))!;
+    c.hello();
+    await c.wait('role');
+    for (let i = 0; i < 3; i++) c.subscribe(`${i + 1}@1`, big);
+    await c.wait('pause');
+    expect(c.frames.filter((x) => x.t === 'subscribed').length).toBeLessThan(3);
+    c.close();
+  } finally {
+    await tight.stop();
+  }
+});
+
 test('документы без снимка: читатель не заводит строки, первая запись заводит', async () => {
   const v = await connect(viewer);
   v.subscribe('5@5');
@@ -534,11 +826,47 @@ test('пока идёт журнал, запись файла целиком о�
   expect((await s.pool.query<{ version: string }>('SELECT version FROM file WHERE id = $1', [file])).rows[0].version).toBe('1');
 });
 
-test('schema из hello записывается в файл', async () => {
-  const c = (await Client.open(s, owner, file))!;
-  open.push(c);
-  c.send(encodeClientFrame({ t: 'hello', protocol: 1, schema: 7 }));
-  await c.wait('role');
-  const { rows } = await s.pool.query<{ schema_version: number }>('SELECT schema_version FROM file WHERE id = $1', [file]);
-  expect(rows[0].schema_version).toBe(7);
+test('schema из hello: поднимает только редактор, не выше известной сборке и не вниз', async () => {
+  const schema = async () =>
+    (await s.pool.query<{ schema_version: number }>('SELECT schema_version FROM file WHERE id = $1', [file])).rows[0].schema_version;
+  const hello = async (who: Person, value: number) => {
+    const c = (await Client.open(s, who, file))!;
+    open.push(c);
+    c.send(encodeClientFrame({ t: 'hello', protocol: 1, schema: value }));
+    await c.wait('role');
+  };
+  await hello(viewer, 4_000_000_000);
+  expect(await schema()).toBe(1);
+  await hello(owner, 7);
+  expect(await schema()).toBe(7);
+  await hello(editor, 3);
+  expect(await schema()).toBe(7);
+  await hello(editor, 4_000_000_000);
+  // `knownSchema` стенда — 9.
+  expect(await schema()).toBe(9);
+});
+
+test('сбой базы на hello: соединение закрывается, клиент переподключится, а не ждёт роли вечно', async () => {
+  const restore = intercept(
+    (text) => text.includes('schema_version'),
+    async () => {
+      throw new Error('сбой теста');
+    },
+  );
+  const saved = console.error;
+  console.error = () => {};
+  try {
+    const c = (await Client.open(s, owner, file))!;
+    open.push(c);
+    c.hello();
+    expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.GOING_AWAY);
+  } finally {
+    restore();
+    console.error = saved;
+  }
+});
+
+test('схема сборки сервера — та же, что у ядра', async () => {
+  const rust = await Bun.file(new URL('../../../crates/ferrum-doc/src/document.rs', import.meta.url)).text();
+  expect(rust).toContain(`pub const SCHEMA_VERSION: u32 = ${SERVER_SCHEMA};`);
 });

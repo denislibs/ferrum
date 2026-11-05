@@ -5,6 +5,7 @@
 import {
   encodeServerFrame,
   encodeVersion,
+  MAX_SYNC_FRAME_BYTES,
   parseClientFrame,
   parseVersion,
   RANK_ROLE,
@@ -50,14 +51,16 @@ export interface ConnData {
 }
 
 interface DocSub {
+  /** Что есть у клиента: вектор подписки (только пиры, которые знает сервер) и всё, что ему отправлено после. По нему
+   * видно, покрывает ли клиент снимок, когда сжатие убрало записи из-под догоняния. */
   version: VersionMap;
   /** Последняя запись, которую соединение уже получило. */
   sent: number;
   /** `true` — рассылка идёт напрямую; иначе соединение догоняет из базы. */
   live: boolean;
   pumping: boolean;
-  /** Подписку повторили: идущий проход заканчивается. */
-  generation: number;
+  /** Строка документа заведена: до этого правки не принимаются (журнал завёл бы её с пустой версией). */
+  ready: boolean;
 }
 
 export interface SyncLimits {
@@ -67,6 +70,9 @@ export interface SyncLimits {
   userFramesBurst: number;
   userBytesPerSecond: number;
   userBytesBurst: number;
+  /** Открытий соединения на человека: переподключение не обнуляет пределы, а открытие стоит запроса к Valkey и базе. */
+  userOpensPerSecond: number;
+  userOpensBurst: number;
   connectionsPerUser: number;
   connectionsTotal: number;
   subscribesPerConnection: number;
@@ -79,8 +85,16 @@ export interface SyncLimits {
   helloMs: number;
   recheckMs: number;
   sessionCheckMs: number;
+  /** Новейшая схема документа, которую знает эта сборка: `hello` выше не поднимет `file.schema_version`. */
+  knownSchema: number;
+  /** Записей журнала за один запрос догоняния. */
+  pumpRows: number;
   log: Partial<LogLimits>;
 }
+
+/** Схема документа этой сборки: `SCHEMA_VERSION` ядра (`crates/ferrum-doc/src/document.rs`), сервер и клиент выходят
+ * одной сборкой. Тест сверяет их. */
+export const SERVER_SCHEMA = 1;
 
 /** Настоящая нагрузка и запас (`hub.test.ts` прогоняет перетаскивание, набор и большую вставку через эти пределы):
  * ядро шлёт пачку на документ не чаще 30 раз в секунду, поэтому 120 кадров в секунду с запасом хватает и на правки
@@ -92,6 +106,8 @@ export const SYNC_LIMITS: SyncLimits = {
   userFramesBurst: 4000,
   userBytesPerSecond: 64 * 1024 * 1024,
   userBytesBurst: 256 * 1024 * 1024,
+  userOpensPerSecond: 1,
+  userOpensBurst: 64,
   connectionsPerUser: 64,
   connectionsTotal: 20_000,
   subscribesPerConnection: 4096,
@@ -101,12 +117,17 @@ export const SYNC_LIMITS: SyncLimits = {
   helloMs: 15_000,
   recheckMs: 30_000,
   sessionCheckMs: 60_000,
+  knownSchema: SERVER_SCHEMA,
+  pumpRows: 512,
   log: {},
 };
 
-/** Столько записей журнала за один запрос догоняния и столько их байт. */
-const PUMP_ROWS = 512;
+/** Столько байт записей журнала за один запрос догоняния. */
 const PUMP_BYTES = 8 * 1024 * 1024;
+/** Буфер сокета, сверх которого Bun кадр выбрасывает. Кадр шлётся, только пока буфер не выше `highWaterBytes`, поэтому
+ * предел — это порог, самый большой кадр и запас на служебные кадры: в работе он не достигается, а если достигнут —
+ * соединение закрывается и догонит заново, а не теряет кадр молча. */
+const BACKPRESSURE_LIMIT = 2 * 1024 * 1024 + MAX_SYNC_FRAME_BYTES + 8 * 1024 * 1024;
 
 class Bucket {
   private tokens: number;
@@ -117,22 +138,37 @@ class Bucket {
   ) {
     this.tokens = burst;
   }
+  /** Сколько миллисекунд ждать `n`, ничего не беря. */
+  peek(n: number): number {
+    this.refill();
+    return this.tokens >= n ? 0 : Math.ceil(((n - this.tokens) / this.rate) * 1000);
+  }
   /** Взять `n`; не хватает — сколько миллисекунд ждать. */
   take(n: number): number {
-    const now = performance.now();
-    this.tokens = Math.min(this.burst, this.tokens + ((now - this.last) / 1000) * this.rate);
-    this.last = now;
+    this.refill();
     if (this.tokens >= n) {
       this.tokens -= n;
       return 0;
     }
     return Math.ceil(((n - this.tokens) / this.rate) * 1000);
   }
+  /** Полон: забыть его — то же, что завести заново. */
+  full(): boolean {
+    this.refill();
+    return this.tokens >= this.burst;
+  }
+  private refill(): void {
+    const now = performance.now();
+    this.tokens = Math.min(this.burst, this.tokens + ((now - this.last) / 1000) * this.rate);
+    this.last = now;
+  }
 }
 
+/** Пределы человека живут дольше его соединений: уходят, только когда все бакеты снова полны. */
 interface UserState {
   frames: Bucket;
   bytes: Bucket;
+  opens: Bucket;
   conns: number;
 }
 
@@ -148,6 +184,10 @@ export class SyncHub {
   private seq = 0;
   private readonly timers: Timer[] = [];
   private stopped = false;
+  /** Идущие обработчики кадров и догоняния: остановка ждёт их, прежде чем отдать пул. */
+  private readonly inflight = new Set<Promise<unknown>>();
+  /** Замер §13.1: от прихода кадра до конца его рассылки, мс. */
+  onTiming: ((ms: number) => void) | null = null;
   /** Вызывается после фиксации: сжатие считает записи журнала; при уходе последнего — тоже. */
   onLog: (file: string, doc: string, logCount: number, logBytes: number) => void = () => {};
   onLastLeft: (file: string) => void = () => {};
@@ -168,7 +208,15 @@ export class SyncHub {
     };
     this.timers.push(setInterval(() => void this.recheckEverything().catch(report), this.limits.recheckMs));
     this.timers.push(setInterval(() => void this.checkSessions().catch(report), this.limits.sessionCheckMs));
-    this.timers.push(setInterval(() => this.closeStalled(), Math.min(5000, this.limits.stalledMs)));
+    this.timers.push(
+      setInterval(
+        () => {
+          this.closeStalled();
+          this.sweepUsers();
+        },
+        Math.min(5000, this.limits.stalledMs),
+      ),
+    );
     for (const t of this.timers) t.unref?.();
   }
 
@@ -192,9 +240,12 @@ export class SyncHub {
       return new Response(null, { status: 503 });
     }
     if (!role) return new Response(null, { status: 404 });
-    if (this.total >= this.limits.connectionsTotal || (this.users.get(session.userId)?.conns ?? 0) >= this.limits.connectionsPerUser) {
+    const u = this.user(session.userId);
+    if (this.total >= this.limits.connectionsTotal || u.conns >= this.limits.connectionsPerUser) {
       return new Response(null, { status: 429, headers: { 'Retry-After': '5' } });
     }
+    const wait = u.opens.take(1);
+    if (wait > 0) return new Response(null, { status: 429, headers: { 'Retry-After': String(Math.ceil(wait / 1000)) } });
     const data: ConnData = {
       id: ++this.seq,
       file,
@@ -216,6 +267,27 @@ export class SyncHub {
     return undefined;
   }
 
+  private user(id: string): UserState {
+    let u = this.users.get(id);
+    if (!u) {
+      u = {
+        frames: new Bucket(this.limits.userFramesPerSecond, this.limits.userFramesBurst),
+        bytes: new Bucket(this.limits.userBytesPerSecond, this.limits.userBytesBurst),
+        opens: new Bucket(this.limits.userOpensPerSecond, this.limits.userOpensBurst),
+        conns: 0,
+      };
+      this.users.set(id, u);
+    }
+    return u;
+  }
+
+  /** Человек без соединений с полными бакетами ничем не отличается от нового. */
+  private sweepUsers(): void {
+    for (const [id, u] of this.users) {
+      if (u.conns === 0 && u.frames.full() && u.bytes.full() && u.opens.full()) this.users.delete(id);
+    }
+  }
+
   private async role(file: string, user: string): Promise<FileRole | null> {
     const { rows } = await this.pool.query<{ rank: number | null }>('SELECT file_role_rank($1, $2) AS rank', [file, user]);
     return RANK_ROLE[rows[0]?.rank ?? 0];
@@ -226,9 +298,9 @@ export class SyncHub {
     maxPayloadLength: 16 * 1024 * 1024 + 1024,
     idleTimeout: 120,
     sendPings: true,
-    // Память на медленного читателя: дальше сокет не копит, соединение догонит из базы.
-    backpressureLimit: 8 * 1024 * 1024,
-    closeOnBackpressureLimit: false,
+    // Память на медленного читателя: выше `highWaterBytes` рассылка ему идёт из базы, кадр не теряется.
+    backpressureLimit: BACKPRESSURE_LIMIT,
+    closeOnBackpressureLimit: true,
     open: (ws) => {
       guard(() => this.opened(ws));
     },
@@ -253,16 +325,7 @@ export class SyncHub {
     let set = this.conns.get(d.file);
     if (!set) this.conns.set(d.file, (set = new Set()));
     set.add(d);
-    let u = this.users.get(d.user);
-    if (!u) {
-      u = {
-        frames: new Bucket(this.limits.userFramesPerSecond, this.limits.userFramesBurst),
-        bytes: new Bucket(this.limits.userBytesPerSecond, this.limits.userBytesBurst),
-        conns: 0,
-      };
-      this.users.set(d.user, u);
-    }
-    u.conns++;
+    this.user(d.user).conns++;
     d.helloTimer = setTimeout(() => {
       if (!d.hello) ws.close(SYNC_CLOSE.BAD_FRAME, 'hello');
     }, this.limits.helloMs);
@@ -277,7 +340,7 @@ export class SyncHub {
     for (const w of d.drained.splice(0)) w();
     this.total--;
     const u = this.users.get(d.user);
-    if (u && --u.conns === 0) this.users.delete(d.user);
+    if (u) u.conns--;
     const set = this.conns.get(d.file);
     set?.delete(d);
     if (set?.size === 0) {
@@ -286,13 +349,23 @@ export class SyncHub {
     }
   }
 
-  private send(d: ConnData, frame: ServerFrame): void {
-    this.sendBytes(d, encodeServerFrame(frame));
+  /** Служебный кадр. Сокет его выбросил — соединение закрывается: клиент переподключится и узнает всё заново. */
+  private send(d: ConnData, frame: ServerFrame): boolean {
+    return this.sendBytes(d, encodeServerFrame(frame));
   }
 
-  private sendBytes(d: ConnData, bytes: Uint8Array): number {
-    if (d.closed || !d.ws) return 0;
-    return d.ws.sendBinary(bytes);
+  /** `false` — кадр не ушёл: соединение закрыто или закрывается. */
+  private sendBytes(d: ConnData, bytes: Uint8Array): boolean {
+    if (d.closed || !d.ws) return false;
+    if (d.ws.sendBinary(bytes) !== 0) return true;
+    d.ws.close(SYNC_CLOSE.SLOW, 'slow');
+    return false;
+  }
+
+  /** Обработчик в учёте: остановка дождётся его. */
+  private track(p: Promise<void>): void {
+    this.inflight.add(p);
+    void p.finally(() => this.inflight.delete(p));
   }
 
   private strike(d: ConnData): void {
@@ -305,6 +378,7 @@ export class SyncHub {
       ws.close(SYNC_CLOSE.BAD_FRAME, 'text');
       return;
     }
+    const at = performance.now();
     const frame = parseClientFrame(message);
     if (!frame) {
       ws.close(SYNC_CLOSE.BAD_FRAME, 'frame');
@@ -318,29 +392,42 @@ export class SyncHub {
       ws.close(SYNC_CLOSE.BAD_FRAME, 'hello first');
       return;
     }
-    const u = this.users.get(d.user)!;
-    const wait = Math.max(d.frames.take(1), u.frames.take(1), frame.t === 'update' ? u.bytes.take(frame.bytes.length) : 0);
+    if (frame.t === 'hello') {
+      // Один раз на соединение, а открытия ограничены: пауза на `hello` оставила бы соединение без него навсегда.
+      this.hello(d, frame.protocol, frame.schema);
+      return;
+    }
+    const u = this.user(d.user);
+    // Байты — и у подписки: вектор версий в ней бывает больше пачки.
+    const size = frame.t === 'update' ? frame.bytes.length : frame.t === 'subscribe' ? frame.version.length : 0;
+    // Все бакеты сразу: неудачный кадр не тратит токены одного, пока ждёт другой.
+    const wait = Math.max(d.frames.peek(1), u.frames.peek(1), u.bytes.peek(size));
     if (wait > 0) {
       // Предел частоты — пауза: кадр не принят, клиент пришлёт его снова. Подписка и правка равны перед ним.
       this.send(d, { t: 'pause', ms: Math.min(wait, 30_000) });
       return;
     }
+    d.frames.take(1);
+    u.frames.take(1);
+    u.bytes.take(size);
     switch (frame.t) {
-      case 'hello':
-        this.hello(d, frame.protocol, frame.schema);
-        break;
       case 'subscribe':
-        void this.subscribe(d, frame.doc, frame.version).catch((e: unknown) => {
-          console.error('Подписка:', e instanceof Error ? e.message : e);
-          // База недоступна: соединение закрывается, клиент переподключится и подпишется заново.
-          d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'unavailable');
-        });
+        this.track(
+          this.subscribe(d, frame.doc, frame.version).catch((e: unknown) => {
+            if (d.closed) return;
+            console.error('Подписка:', e instanceof Error ? e.message : e);
+            // База или проверка недоступна: соединение закрывается, клиент переподключится и подпишется заново.
+            d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'unavailable');
+          }),
+        );
         break;
       case 'update':
-        void this.update(d, frame.doc, frame.clientSeq, frame.bytes).catch((e: unknown) => {
-          console.error('Приём пачки:', e instanceof Error ? e.message : e);
-          this.refuse(d, frame.doc, frame.clientSeq, 'UNAVAILABLE');
-        });
+        this.track(
+          this.update(d, frame.doc, frame.clientSeq, frame.bytes, at).catch((e: unknown) => {
+            console.error('Приём пачки:', e instanceof Error ? e.message : e);
+            this.refuse(d, frame.doc, frame.clientSeq, 'UNAVAILABLE');
+          }),
+        );
         break;
       case 'ephemeral':
         // Присутствие — этап 4: кадр известен, сервер его пока не рассылает.
@@ -358,35 +445,54 @@ export class SyncHub {
     d.hello = true;
     if (d.helloTimer) clearTimeout(d.helloTimer);
     d.helloTimer = null;
-    void this.pool
-      .query<{ version: string; member: number; schema_version: number }>(
-        `UPDATE file SET schema_version = GREATEST(schema_version, $3) WHERE id = $1
-         RETURNING version, file_member_rank(id, $2) AS member, schema_version`,
-        [d.file, d.user, Math.min(schema, 1_000_000)],
-      )
-      .then(({ rows }) => {
-        if (rows[0])
+    // Схему поднимает только тот, кто может писать, и не выше известной этой сборке; без изменения строка не трогается.
+    this.track(
+      this.pool
+        .query<{ version: string; member: number }>(
+          `WITH f AS (SELECT id, version, file_role_rank(id, $2) AS rank, file_member_rank(id, $2) AS member FROM file WHERE id = $1),
+                up AS (UPDATE file SET schema_version = $3 FROM f
+                       WHERE file.id = f.id AND f.rank >= $4 AND file.schema_version < $3 RETURNING 1)
+           SELECT version, member FROM f`,
+          [d.file, d.user, Math.min(schema, this.limits.knownSchema), ROLE_RANK.editor],
+        )
+        .then(({ rows }) => {
+          if (!rows[0]) {
+            this.revoke(d, 'access');
+            return;
+          }
           this.send(d, { t: 'role', role: d.role, canShare: rows[0].member >= ROLE_RANK.editor, version: Number(rows[0].version) });
-      })
-      .catch(report);
+        })
+        .catch((e: unknown) => {
+          if (d.closed) return;
+          report(e);
+          // Без `role` клиент не начнёт работу: пусть переподключится.
+          d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'unavailable');
+        }),
+    );
   }
 
   private refuse(d: ConnData, doc: string, clientSeq: number, code: SyncRefusal): void {
     this.send(d, { t: 'refused', doc, clientSeq, code });
   }
 
-  private async update(d: ConnData, doc: string, clientSeq: number, frame: Uint8Array): Promise<void> {
+  private async update(d: ConnData, doc: string, clientSeq: number, frame: Uint8Array, at: number): Promise<void> {
     // Буфер кадра живёт только на время обработчика сокета: дальше — своя копия.
     const bytes = frame.slice();
-    // Читатель не пишет: и по последней роли соединения, и в транзакции записи.
+    // Читатель не пишет: и по последней роли соединения, и в транзакции записи. Не удар: после понижения пачки в пути
+    // приходят от настоящего клиента.
     if (ROLE_RANK[d.role] < ROLE_RANK.editor) {
-      this.strike(d);
       this.refuse(d, doc, clientSeq, 'FORBIDDEN');
       return;
     }
-    if (!d.docs.has(doc)) {
-      this.strike(d);
+    const sub = d.docs.get(doc);
+    // Подписки нет (её сняло `snapshot-needed`, пачки уже были в пути) — клиент подпишется заново.
+    if (!sub) {
       this.refuse(d, doc, clientSeq, 'GAP');
+      return;
+    }
+    // Строка документа ещё не заведена: журнал завёл бы её с пустой версией вместо версии снимка.
+    if (!sub.ready) {
+      this.refuse(d, doc, clientSeq, 'UNAVAILABLE');
       return;
     }
     const verdict = await this.validator.validate(d.file, doc, bytes);
@@ -406,6 +512,7 @@ export class SyncHub {
     d.strikes = 0;
     const item: Item = { file: d.file, doc, user: d.user, bytes, start: verdict.start, end: verdict.end, chain: verdict.chain };
     (item as ItemFrom).from = d;
+    (item as ItemFrom).at = at;
     const outcome = await this.log.submit(item);
     if (outcome.kind === 'refused') {
       // Документ проверки уже принял пачку, а журнал нет: он больше не равен журналу.
@@ -428,7 +535,7 @@ export class SyncHub {
       if (d === from) {
         // Своя правка: соединению она не нужна, а номер двигается, иначе догоняние пошлёт её обратно.
         if (sub.live && sub.sent === seq - 1) sub.sent = seq;
-        for (const [peer, counter] of Object.entries(item.end)) sub.version.set(peer, Math.max(sub.version.get(peer) ?? 0, counter));
+        merge(sub.version, item.end);
         continue;
       }
       if (!sub.live) continue;
@@ -438,14 +545,12 @@ export class SyncHub {
         continue;
       }
       frame ??= encodeServerFrame({ t: 'updates', doc: item.doc, seq, bytes: item.bytes });
-      const sent = this.sendBytes(d, frame);
-      if (sent === 0) {
-        // Сокет отказал: кадр не ушёл, догонит из базы.
-        this.goLag(d, item.doc, sub);
-        continue;
-      }
+      if (!this.sendBytes(d, frame)) continue;
       sub.sent = seq;
+      merge(sub.version, item.end);
     }
+    const at = (item as ItemFrom).at;
+    if (at !== undefined) this.onTiming?.(performance.now() - at);
   }
 
   private slow(d: ConnData): boolean {
@@ -455,19 +560,21 @@ export class SyncHub {
   private goLag(d: ConnData, doc: string, sub: DocSub): void {
     sub.live = false;
     if (!d.lagSince) d.lagSince = performance.now();
-    if (!sub.pumping) void this.pump(d, doc, sub, sub.generation, false).catch((e: unknown) => this.pumpFailed(d, e));
+    if (!sub.pumping) this.track(this.pump(d, doc, sub, false).catch((e: unknown) => this.pumpFailed(d, e)));
   }
 
   private pumpFailed(d: ConnData, e: unknown): void {
+    if (d.closed) return;
     console.error('Догоняние:', e instanceof Error ? e.message : e);
     d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'unavailable');
   }
 
-  /** Сокет освободился; не занят — сразу. */
-  private whenWritable(d: ConnData): Promise<void> {
-    if (d.closed || !this.slow(d)) return Promise.resolve();
-    if (!d.lagSince) d.lagSince = performance.now();
-    return new Promise((resolve) => d.drained.push(resolve));
+  /** Сокет не выше порога. `drain` будит всех ждущих разом, а кадр одного снова заполняет буфер: проверка — после каждого. */
+  private async whenWritable(d: ConnData): Promise<void> {
+    while (!d.closed && this.slow(d)) {
+      if (!d.lagSince) d.lagSince = performance.now();
+      await new Promise<void>((resolve) => d.drained.push(resolve));
+    }
   }
 
   private async subscribe(d: ConnData, doc: string, raw: Uint8Array): Promise<void> {
@@ -478,24 +585,30 @@ export class SyncHub {
       d.ws?.close(SYNC_CLOSE.BAD_FRAME, 'too many docs');
       return;
     }
-    const sub: DocSub = { version, sent: 0, live: false, pumping: false, generation: (old?.generation ?? 0) + 1 };
+    const sub: DocSub = { version: new Map(), sent: 0, live: false, pumping: false, ready: false };
     d.docs.set(doc, sub);
     const state = await this.docState(d.file, doc);
     if (d.closed || d.docs.get(doc) !== sub) return;
     // Клиент отстал сильнее журнала: снимок вобрал правки, которых у него нет.
     if (state && !versionIncludes(version, toMap(state.base_vv))) {
-      d.docs.delete(doc);
-      this.send(d, { t: 'snapshot-needed', doc, url: snapshotPath(d.file, doc) });
+      this.needSnapshot(d, doc);
       return;
     }
-    await this.pump(d, doc, sub, sub.generation, true);
+    // Память на подписку — по пирам документа на сервере, а не по вектору клиента: пиры, которых сервер не знает, ни
+    // одну запись не покрывают.
+    for (const peer of Object.keys(state?.vv ?? {})) {
+      const c = version.get(peer);
+      if (c !== undefined) sub.version.set(peer, c);
+    }
+    sub.ready = true;
+    await this.pump(d, doc, sub, true);
   }
 
   /** Строка документа; первая подписка заводит её с версией снимка файла. Читатель новых строк не заводит: у документа
    * без снимка (страница, в которую ещё не писали) журнала нет, и версия у него пустая. */
-  private async docState(file: string, doc: string): Promise<{ base_vv: Record<string, number> } | null> {
-    const found = await this.pool.query<{ base_vv: Record<string, number> }>(
-      'SELECT base_vv FROM doc_state WHERE file_id = $1 AND doc = $2',
+  private async docState(file: string, doc: string): Promise<{ vv: Record<string, number>; base_vv: Record<string, number> } | null> {
+    const found = await this.pool.query<{ vv: Record<string, number>; base_vv: Record<string, number> }>(
+      'SELECT vv, base_vv FROM doc_state WHERE file_id = $1 AND doc = $2',
       [file, doc],
     );
     if (found.rows[0]) return found.rows[0];
@@ -509,71 +622,106 @@ export class SyncHub {
       `INSERT INTO doc_state (file_id, doc, vv, base_vv) VALUES ($1, $2, $3::jsonb, $3::jsonb) ON CONFLICT DO NOTHING`,
       [file, doc, JSON.stringify(base)],
     );
-    return { base_vv: base };
+    return { vv: base, base_vv: base };
   }
 
   /** Догоняние: всё, что есть в журнале сверх `sub.sent` и не покрыто версией клиента, кусками и с учётом сокета. Когда
-   * догнал — соединение снова получает рассылку напрямую. `announce` — конец подписки: клиенту сообщают версию сервера. */
-  private async pump(d: ConnData, doc: string, sub: DocSub, generation: number, announce: boolean): Promise<void> {
+   * догнал — соединение снова получает рассылку напрямую. `announce` — конец подписки: клиенту сообщают версию сервера.
+   *
+   * Каждый проход — один запрос: записи и строка документа одним снимком базы. Записей между `sent` и первой найденной
+   * нет — их убрало сжатие: клиент, чья версия не покрывает снимок, получает `snapshot-needed`. Рассылка включается до
+   * последнего запроса, и он должен быть пуст: группа, зафиксированная между ними, либо видна запросу, либо уже идёт
+   * рассылкой. */
+  private async pump(d: ConnData, doc: string, sub: DocSub, announce: boolean): Promise<void> {
     if (sub.pumping) return;
     sub.pumping = true;
+    const stale = () => d.closed || d.docs.get(doc) !== sub;
     try {
+      let armed = false;
       for (;;) {
-        if (d.closed || sub.generation !== generation || d.docs.get(doc) !== sub) return;
-        const { rows } = await this.pool.query<{ seq: string; end_vv: Record<string, number>; size: number }>(
-          `SELECT seq, end_vv, octet_length(bytes) AS size FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq > $3 ORDER BY seq LIMIT $4`,
-          [d.file, doc, sub.sent, PUMP_ROWS],
+        if (stale()) return;
+        const pass = await this.pool.query<{
+          next_seq: string | null;
+          vv: Record<string, number> | null;
+          base_vv: Record<string, number> | null;
+          seq: string | null;
+          end_vv: Record<string, number> | null;
+          size: number | null;
+        }>(
+          `SELECT s.next_seq, s.vv, s.base_vv, u.seq, u.end_vv, u.size
+           FROM (SELECT 1) AS one
+           LEFT JOIN doc_state s ON s.file_id = $1 AND s.doc = $2
+           LEFT JOIN LATERAL (SELECT seq, end_vv, octet_length(bytes) AS size FROM doc_update
+                              WHERE file_id = $1 AND doc = $2 AND seq > $3 ORDER BY seq LIMIT $4) u ON true
+           ORDER BY u.seq`,
+          [d.file, doc, sub.sent, this.limits.pumpRows],
         );
-        if (rows.length === 0) {
-          const head = await this.pool.query<{ next_seq: string; vv: Record<string, number> }>(
-            'SELECT next_seq, vv FROM doc_state WHERE file_id = $1 AND doc = $2',
-            [d.file, doc],
-          );
-          if (d.closed || sub.generation !== generation) return;
-          const seq = head.rows[0] ? Number(head.rows[0].next_seq) - 1 : 0;
-          // Журнал пуст после сжатия, а версия клиента покрывает снимок: писать нечего.
-          if (seq > sub.sent) sub.sent = seq;
-          sub.live = true;
-          d.lagSince = 0;
-          if (announce) {
-            this.send(d, { t: 'subscribed', doc, seq, version: encodeVersion(toMap(head.rows[0]?.vv ?? {})) });
+        if (stale()) return;
+        // Рассылка отстала, пока шёл запрос: проход не последний.
+        if (armed && !sub.live) armed = false;
+        const head = pass.rows[0];
+        // Пока шёл запрос, рассылка могла отправить часть найденного.
+        const rows = pass.rows.filter((r) => r.seq !== null && Number(r.seq) > sub.sent);
+        const last = head.next_seq === null ? 0 : Number(head.next_seq) - 1;
+        const first = rows.length > 0 ? Number(rows[0].seq) : last + 1;
+        if (first > sub.sent + 1) {
+          if (!versionIncludes(sub.version, toMap(head.base_vv ?? {}))) {
+            this.needSnapshot(d, doc);
+            return;
           }
-          return;
+          // Клиент знает всё, что вошло в снимок.
+          sub.sent = first - 1;
         }
+        if (rows.length === 0) {
+          if (armed) {
+            d.lagSince = 0;
+            if (announce) this.send(d, { t: 'subscribed', doc, seq: sub.sent, version: encodeVersion(toMap(head.vv ?? {})) });
+            return;
+          }
+          sub.live = true;
+          armed = true;
+          continue;
+        }
+        sub.live = false;
+        armed = false;
         const need: number[] = [];
         let bytes = 0;
         for (const r of rows) {
+          const end = r.end_vv ?? {};
           // Клиент уже знает: не шлём, но и не останавливаемся.
-          if (versionIncludes(sub.version, toMap(r.end_vv))) {
+          if (versionIncludes(sub.version, toMap(end))) {
             if (need.length === 0) sub.sent = Number(r.seq);
             continue;
           }
-          if (need.length > 0 && bytes + r.size > PUMP_BYTES) break;
+          if (need.length > 0 && bytes + (r.size ?? 0) > PUMP_BYTES) break;
           need.push(Number(r.seq));
-          bytes += r.size;
+          bytes += r.size ?? 0;
         }
         if (need.length === 0) continue;
-        const got = await this.pool.query<{ seq: string; bytes: Uint8Array }>(
-          'SELECT seq, bytes FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq = ANY($3::bigint[]) ORDER BY seq',
+        const got = await this.pool.query<{ seq: string; bytes: Uint8Array; end_vv: Record<string, number> }>(
+          'SELECT seq, bytes, end_vv FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq = ANY($3::bigint[]) ORDER BY seq',
           [d.file, doc, need],
         );
-        for (const r of got.rows) {
+        // Сжатие убрало записи между запросами: следующий проход увидит дыру и сверит снимок.
+        for (const [i, r] of got.rows.entries()) {
+          if (Number(r.seq) !== need[i]) break;
           await this.whenWritable(d);
-          if (d.closed || sub.generation !== generation) return;
-          this.send(d, { t: 'updates', doc, seq: Number(r.seq), bytes: r.bytes });
+          if (stale()) return;
+          if (!this.send(d, { t: 'updates', doc, seq: Number(r.seq), bytes: r.bytes })) return;
           sub.sent = Number(r.seq);
-        }
-        // Сжатие убрало записи посреди прохода: всё, что до них, вошло в снимок. Клиент подпишется заново и получит его.
-        if (got.rows.length < need.length) {
-          d.docs.delete(doc);
-          this.send(d, { t: 'snapshot-needed', doc, url: snapshotPath(d.file, doc) });
-          return;
+          merge(sub.version, r.end_vv);
         }
         // Рядом с `sent` могли лежать записи, которые клиент знает: следующий запрос их пропустит.
       }
     } finally {
       sub.pumping = false;
     }
+  }
+
+  /** Клиент отстал сильнее журнала: снимок вобрал правки, которых у него нет. Он подпишется заново после снимка. */
+  private needSnapshot(d: ConnData, doc: string): void {
+    d.docs.delete(doc);
+    this.send(d, { t: 'snapshot-needed', doc, url: snapshotPath(d.file, doc) });
   }
 
   /** Роль соединений файла заново: снята — закрыть сразу, понижена — сообщить. Зовут маршруты после правки доступа;
@@ -591,14 +739,16 @@ export class SyncHub {
     const by = new Map(rows.map((r) => [r.u, r]));
     for (const d of set) {
       const r = by.get(d.user);
-      const role = RANK_ROLE[r?.rank ?? 0];
+      // Соединение открыто, пока шёл запрос: его роль проверена при открытии, следующая сверка его увидит.
+      if (!r) continue;
+      const role = RANK_ROLE[r.rank ?? 0];
       if (!role) {
         this.revoke(d, 'access');
         continue;
       }
       if (role !== d.role) {
         d.role = role;
-        this.send(d, { t: 'role', role, canShare: (r?.member ?? 0) >= ROLE_RANK.editor, version: Number(r?.version ?? 0) });
+        this.send(d, { t: 'role', role, canShare: (r.member ?? 0) >= ROLE_RANK.editor, version: Number(r.version ?? 0) });
       }
     }
   }
@@ -669,6 +819,13 @@ export class SyncHub {
     return n;
   }
 
+  /** Сколько пиров хранят векторы подписок: тесты памяти на подписку. */
+  versionEntries(): number {
+    let n = 0;
+    for (const set of this.conns.values()) for (const d of set) for (const sub of d.docs.values()) n += sub.version.size;
+    return n;
+  }
+
   /** Сколько соединений: тесты и проба памяти. */
   connections(): number {
     return this.total;
@@ -680,11 +837,17 @@ export class SyncHub {
     for (const t of this.timers) clearInterval(t);
     await this.log.stop();
     for (const set of this.conns.values()) for (const d of set) d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'restart');
+    // Обработчики, начатые до закрытия, дописывают своё раньше, чем пул закроется.
+    while (this.inflight.size > 0) await Promise.allSettled(this.inflight);
     this.validator.stop();
   }
 }
 
-type ItemFrom = Item & { from?: ConnData };
+type ItemFrom = Item & { from?: ConnData; at?: number };
+
+function merge(version: VersionMap, end: Record<string, number>): void {
+  for (const [peer, counter] of Object.entries(end)) version.set(peer, Math.max(version.get(peer) ?? 0, counter));
+}
 
 function report(e: unknown): void {
   console.error('Синхронизация:', e instanceof Error ? e.message : e);
