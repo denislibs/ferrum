@@ -29,9 +29,9 @@ import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import { systemFonts } from './system-fonts';
 import { isTauri, saveExport } from './tauri';
 import type { Backend, MenuActionDto } from '../wasm/ferrum_wasm';
-import { restartText, type Restart } from './restart';
+import { restartText, takenByOther, type Restart } from './restart';
 import type { Route } from './router';
-import { createSaver, SETTLE_MS, withTimeout, type Saver, type SaverOptions } from './saver';
+import { createSaver, SERVER_REFUSED, SETTLE_MS, withTimeout, type Saver, type SaverOptions } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
 import { installClipboard } from './system-clipboard';
 import { installTextInput } from './text-input';
@@ -450,6 +450,15 @@ export function App(props: AppProps) {
           offClipboard();
         };
         let diverged = false;
+        /** Почему сервер правки сейчас не примет: уход и «Сохранить» говорят это сразу, а не «уйдут при открытии» через 5 с. */
+        const serverRefusal = (): string | null => {
+          const l = lost();
+          // Сессия кончилась: правки в журнале браузера уйдут, когда человек войдёт снова и откроет файл.
+          if (l === 'session') return null;
+          if (l === 'none' || l === 'rejected' || store.state.syncStatus === 'rejected' || store.state.fileRole === 'viewer')
+            return SERVER_REFUSED;
+          return null;
+        };
         /** Соединение файла: как только файл есть на сервере. Само не падает, сбои — состоянием. */
         const startSync = () => {
           if (syncHandle || disposed || !props.files.sync) return;
@@ -474,7 +483,8 @@ export function App(props: AppProps) {
           sync: !!props.files.sync,
           viewer: store.state.fileRole === 'viewer',
           onStored: startSync,
-          onTaken: () => void props.onRestart({ reason: 'role', lost: false, message: 'файл уже записан другим' }),
+          refused: serverRefusal,
+          onTaken: () => void props.onRestart({ reason: 'reopen', lost: false, message: 'файл уже записан другим' }),
           onDiverged: () => {
             diverged = true;
             ed.send({ type: 'setViewOnly', on: true });
@@ -493,6 +503,8 @@ export function App(props: AppProps) {
             // Правки — в журнале браузера, плашка предлагает копию на диск; уход спросит о несохранённом.
             ed.send({ type: 'setViewOnly', on: true });
             store.setState('fileCanShare', false);
+            // Соединение снято вместе с доступом: индикатор не застывает на «Синхронизировано».
+            if (props.files.sync) store.setState('syncStatus', 'rejected');
             setLost(state.kind);
             return;
           }
@@ -520,10 +532,8 @@ export function App(props: AppProps) {
           // Файл без записи записали, пока он был открыт, а своих правок нет: его содержимое и есть правда.
           if (
             saver &&
-            !saver.stored() &&
-            !store.state.modified &&
-            state.version > 0 &&
-            props.onRestart({ reason: 'role', lost: false, message: 'файл записан другим' })
+            takenByOther(state, { stored: saver.stored(), modified: saver.modified() }) &&
+            props.onRestart({ reason: 'reopen', lost: false, message: 'файл записан другим' })
           )
             return;
           if (saver && !props.files.sync && !state.own && state.version > saver.version() && !toldNewer) {

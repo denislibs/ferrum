@@ -8,8 +8,9 @@
 import type { Backend } from '../wasm/ferrum_wasm';
 
 export interface Restart {
-  /** `role`: файл открывали читателем, право вернули, и журнал нужно применить. */
-  reason: 'crash' | 'gpu' | 'role';
+  /** `role`: файл открывали читателем, право вернули, и журнал нужно применить. `reopen`: файл без записи записал другой участник,
+   * своих правок не было — его содержимое и есть правда. */
+  reason: 'crash' | 'gpu' | 'role' | 'reopen';
   /** Были правки ни в журнале, ни в файле — они потеряны. */
   lost: boolean;
   /** Бэкенд нового ядра (после потери GPU — запасной). */
@@ -34,9 +35,16 @@ const LOST = 'Правки последних секунд не сохранил
 /** Уведомление в новом редакторе. */
 export function restartText(r: Restart): string {
   if (r.reason === 'role') return 'Теперь вы можете редактировать файл. Ваши несохранённые правки восстановлены';
+  if (r.reason === 'reopen') return 'Файл записан другим участником — открыт заново';
   if (r.reason === 'gpu') {
     const name = r.backend === 'webgl' ? 'WebGL2' : r.backend === 'webgpu' ? 'WebGPU' : 'на процессоре';
     return `Видеокарта недоступна — редактор перезапущен с рендером ${name}${r.lost ? `. ${LOST}` : ''}`;
   }
   return r.lost ? `Редактор перезапущен. ${LOST}` : 'Редактор перезапущен, изменения сохранены';
+}
+
+/** Файл без записи записал другой, пока он был открыт, а своих правок нет: открыть заново. Своя запись в пути или с неизвестным
+ * исходом (`own`) — не «другой»: новое поколение может быть своим. */
+export function takenByOther(access: { version: number; own: boolean }, saver: { stored: boolean; modified: boolean }): boolean {
+  return !saver.stored && !saver.modified && !access.own && access.version > 0;
 }
