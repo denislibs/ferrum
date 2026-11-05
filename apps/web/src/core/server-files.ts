@@ -568,6 +568,12 @@ export class ServerFiles {
     } catch {
       throw new ServerFailure('NETWORK');
     }
+    // Сервер сжимает файл или недавно сжал: просит подождать (`Retry-After`), а не недоступен.
+    const retry = Number(compacted.headers.get('retry-after'));
+    if (compacted.status === 503 && Number.isFinite(retry) && retry > 0) {
+      void compacted.body?.cancel().catch(() => {});
+      throw new ServerFailure('UNAVAILABLE', `Копия собирается — повторите через ${Math.ceil(retry)} с`);
+    }
     if (!compacted.ok) await this.readReply(compacted, (_v): _v is never => false);
     const { bytes } = await this.download(file);
     return bytes ? new Blob([bytes], { type: 'application/x-ferrum' }) : null;
@@ -745,22 +751,40 @@ export class ServerFiles {
     return this.image(file, hash);
   }
 
-  /** Снимок одного документа: клиент отстал сильнее журнала. Сверх предела частоты ждёт, сколько просит сервер. */
+  /** Снимок одного документа: клиент отстал сильнее журнала. Сверх предела частоты ждёт, сколько просит сервер. Сроки — как у
+   * картинки: заголовки — как небольшой запрос, тело — по размеру; застывший ответ не держит отправку правок. */
   async fetchSnapshot(path: string): Promise<ArrayBuffer> {
-    let res: Response;
+    const ctl = new AbortController();
+    let timer: unknown;
     try {
-      res = await this.paced(() => this.http(path));
-    } catch {
-      throw new ServerFailure('NETWORK');
-    }
-    if (!res.ok) {
-      await this.readReply(res, (_v): _v is never => false);
-      throw new ServerFailure('NETWORK');
-    }
-    try {
-      return await res.arrayBuffer();
-    } catch {
-      throw new ServerFailure('NETWORK');
+      let res: Response;
+      try {
+        // Срок — только на сам запрос: пауза после 429 бывает дольше него и обрывом не считается.
+        res = await this.paced(async () => {
+          timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+          const reply = await this.http(path, { signal: ctl.signal });
+          this.clock.clearTimeout(timer);
+          return reply;
+        });
+      } catch {
+        throw new ServerFailure('NETWORK');
+      }
+      timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+      if (!res.ok) {
+        await this.readReply(res, (_v): _v is never => false);
+        throw new ServerFailure('NETWORK');
+      }
+      const declared = Number(res.headers.get('content-length') ?? 0);
+      if (declared > MAX_OPEN_BYTES) throw new ServerFailure('TOO_LARGE');
+      this.clock.clearTimeout(timer);
+      timer = this.clock.setTimeout(() => ctl.abort(), transferTimeout(Number.isFinite(declared) ? declared : 0));
+      try {
+        return await res.arrayBuffer();
+      } catch {
+        throw new ServerFailure('NETWORK');
+      }
+    } finally {
+      this.clock.clearTimeout(timer);
     }
   }
 
@@ -776,17 +800,14 @@ export class ServerFiles {
     }
   }
 
-  /** Сервер подтвердил правки журнала. `upTo` 0 — то, что было прочитано при открытии; иначе — пачки этого сеанса до `upTo`. Чужие
-   * сеансы не трогает: это другая вкладка, а её правки могут быть ещё только здесь. */
+  /** Сервер подтвердил правки журнала до пачки `upTo` этого сеанса (0 — только прочитанное при открытии). Прочитанное при открытии
+   * снимается при любом `upTo`: ядро подтверждает отметки по порядку и сообщает последнюю, так что отметка N значит и отметку 0.
+   * Чужие сеансы не трогает: это другая вкладка, а её правки могут быть ещё только здесь. */
   async cutJournal(file: string, session: number, upTo: number): Promise<void> {
-    if (upTo === 0) {
-      const keys = this.readKeys.get(file) ?? [];
-      this.readKeys.delete(file);
-      if (keys.length > 0) await this.journal.cutExact(keys);
-      return;
-    }
+    const keys = this.readKeys.get(file) ?? [];
+    this.readKeys.delete(file);
     const own: JournalKey[] = Array.from({ length: upTo }, (_, i): JournalKey => [file, session, i + 1]);
-    await this.journal.cutExact(own);
+    if (keys.length + own.length > 0) await this.journal.cutExact([...keys, ...own]);
   }
 
   /** Превью при правках журналом: файл целиком больше не пишется. */
