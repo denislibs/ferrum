@@ -7,10 +7,21 @@ import { dirname, join, resolve } from 'node:path';
 export class BlobTooLarge extends Error {}
 export class BlobStalled extends Error {}
 
+/** Наименьшая скорость загрузки: каждый принятый байт продлевает срок. Обрыв связи на минуту переживает и
+ * медленный клиент, а капля байтов не держит запись часами. */
+export interface UploadPace {
+  graceMs: number;
+  bytesPerSecond: number;
+}
+
 export interface PutStreamOptions {
   maxBytes: number;
   /** Дольше этого между кусками — обрыв: зависший клиент не держит запись без конца. */
   idleMs: number;
+  /** Отстал от наименьшей скорости — тот же обрыв. */
+  pace?: UploadPace;
+  /** Тесты: часы для `pace`. */
+  now?: () => number;
   /** Каждый кусок до записи: проверка содержимого. Исключение отменяет запись. */
   onChunk?: (chunk: Uint8Array) => void;
 }
@@ -107,11 +118,21 @@ export class FsBlobStore implements BlobStore {
     let size = 0;
     await this.atomically(key, async (file) => {
       const reader = body.getReader();
+      const now = options.now ?? Date.now;
+      const started = now();
+      /** Сколько ещё можно ждать: простой или срок по уже принятым байтам, что раньше. */
+      const patience = () => {
+        const pace = options.pace;
+        if (!pace) return options.idleMs;
+        return Math.min(options.idleMs, started + pace.graceMs + (size / pace.bytesPerSecond) * 1000 - now());
+      };
       try {
         for (;;) {
+          const wait = patience();
+          if (wait <= 0) throw new BlobStalled();
           let timer: Timer | undefined;
           const stalled = new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new BlobStalled()), options.idleMs);
+            timer = setTimeout(() => reject(new BlobStalled()), wait);
           });
           const next = await Promise.race([reader.read(), stalled]).finally(() => clearTimeout(timer));
           if (next.done) {

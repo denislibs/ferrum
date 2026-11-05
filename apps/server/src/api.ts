@@ -6,7 +6,7 @@ import { ROLE_RANK, RANK_ROLE, isHash, isUuid, type ApiErrorBody, type ApiErrorC
 import type { Pool } from 'pg';
 import type { Auth } from './auth';
 import { originAllowed } from './auth-routes';
-import type { BlobStore } from './blob-store';
+import type { BlobStore, UploadPace } from './blob-store';
 import type { Mailer } from './mail';
 import { valkeyStorage } from './secondary-storage';
 
@@ -18,6 +18,8 @@ export const MAX_JSON_BYTES = 16 * 1024;
 /** Группы пределов частоты на человека: окно в секундах и число запросов. */
 export const LIMITS = {
   read: { max: 1200, windowSeconds: 60 },
+  /** Картинки файла, каждая отдельным запросом: файл на `MAX_IMAGE_REFS` картинок должен открываться. */
+  images: { max: 6000, windowSeconds: 60 },
   /** Опрос открытого файла: раз в 15 с на вкладку. */
   poll: { max: 120, windowSeconds: 60 },
   write: { max: 300, windowSeconds: 60 },
@@ -48,6 +50,7 @@ export interface ApiDeps {
   limits?: Partial<Limits>;
   deadlineMs?: number;
   uploadIdleMs?: number;
+  uploadPace?: UploadPace;
   maxContentBytes?: number;
 }
 
@@ -89,9 +92,12 @@ export interface Route {
   handle(ctx: Ctx): Promise<Response>;
 }
 
-export function apiError(status: number, error: ApiErrorCode): Response {
-  return Response.json({ error } satisfies ApiErrorBody, { status, headers: { 'Cache-Control': 'no-store' } });
+export function apiError(status: number, error: ApiErrorCode, headers: Record<string, string> = {}): Response {
+  return Response.json({ error } satisfies ApiErrorBody, { status, headers: { 'Cache-Control': 'no-store', ...headers } });
 }
+
+/** Слоты загрузок заняты: они освобождаются быстро, клиент повторит сам. */
+export const busy = (): Response => apiError(429, 'BUSY', { 'Retry-After': '5' });
 
 export function ok(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -176,8 +182,13 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
     if (!session) refuse(401, 'UNAUTHORIZED');
     const user: ApiUser = { id: session.user.id, email: session.user.email, name: session.user.name };
     const limit = limits[route.limit];
-    const used = await storage.increment!(`api:${route.limit}:${user.id}`, limit.windowSeconds);
-    if (used > limit.max) refuse(429, 'TOO_MANY_REQUESTS');
+    const counter = `api:${route.limit}:${user.id}`;
+    const used = await storage.increment!(counter, limit.windowSeconds);
+    if (used > limit.max) {
+      // Сколько ждать, знает только счётчик: клиент не гадает и не долбит сервер.
+      const left = await deps.valkey.ttl(counter);
+      throw new Refused(apiError(429, 'TOO_MANY_REQUESTS', { 'Retry-After': String(left > 0 ? left : limit.windowSeconds) }));
+    }
     const ctx: Ctx = { req, url, params, user, role: 'viewer', teamRole: 'member', teamId: '' };
     const access = route.access;
     if (access.kind === 'file') {

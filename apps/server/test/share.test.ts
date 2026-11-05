@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { INVITES_PER_ADDRESS } from '../src/invites';
+import type { ApiDeps } from '../src/api';
+import { INVITES_PER_ADDRESS, sendInvite } from '../src/invites';
 import { apiStand, container, type Person } from './api-stand';
 
 const s = await apiStand();
@@ -14,6 +15,7 @@ beforeEach(async () => {
   // Счётчики писем на адрес: тесты не должны делить их между собой.
   for (const key of (await s.valkey.send('KEYS', ['invite-to:*'])) as string[]) await s.valkey.del(key);
   for (const key of (await s.valkey.send('KEYS', ['request-access:*'])) as string[]) await s.valkey.del(key);
+  for (const key of (await s.valkey.send('KEYS', ['api:mail:*'])) as string[]) await s.valkey.del(key);
 });
 
 const json = async (res: Response) => (await res.json()) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -204,6 +206,41 @@ test('письма приглашений на один адрес ограни�
   await s.waitMail('many@example.com', INVITES_PER_ADDRESS - 1);
   await Bun.sleep(30);
   expect(s.mails.filter((m) => m.to === 'many@example.com')).toHaveLength(INVITES_PER_ADDRESS);
+});
+
+test('предел писем считается по ящику: варианты адреса отвергаются или делят счётчик', async () => {
+  const f = await s.newFile(owner);
+  // Варианты строки, которые дошли бы до того же ящика, адресом не считаются.
+  for (const variant of ['x<box@example.com>', 'z,box@example.com', '(c)box@example.com', 'q:box@example.com;']) {
+    const res = await invite(owner, f.id, variant, 'viewer');
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'BAD_REQUEST' });
+  }
+  expect((await share(owner, f.id)).people.map((p: { email: string }) => p.email)).toEqual(['owner@example.com']);
+  for (const to of ['box@example.com', 'box+1@example.com', 'b.ox@example.com', 'box+2@example.com', 'box+3@example.com']) {
+    expect((await invite(owner, f.id, to, 'viewer')).status).toBe(200);
+  }
+  expect((await invite(owner, f.id, 'BOX+4@example.com', 'viewer')).status).toBe(200);
+  // Письмо уходит после ответа; счётчик дошёл до шести — решение о шестом принято.
+  for (let i = 0; i < 500 && (await s.valkey.get('invite-to:box@example.com')) !== '6'; i++) await Bun.sleep(10);
+  expect(await s.valkey.get('invite-to:box@example.com')).toBe('6');
+  const boxed = () => s.mails.filter((m) => /^b\.?ox/.test(m.to));
+  for (let i = 0; i < 500 && boxed().length < INVITES_PER_ADDRESS; i++) await Bun.sleep(10);
+  expect(boxed()).toHaveLength(INVITES_PER_ADDRESS);
+});
+
+test('письмо уходит только на проверенный адрес', async () => {
+  const sent: string[] = [];
+  const deps = {
+    valkey: s.valkey,
+    mailer: { send: async (m: { to: string }) => void sent.push(m.to) },
+    allowedEmails: [],
+  } as unknown as ApiDeps;
+  const mail = (to: string) => ({ to, subject: '', text: '', html: '' });
+  sendInvite(deps, 'x<trap@example.com>', mail('x<trap@example.com>'));
+  sendInvite(deps, 'clean@example.com', mail('clean@example.com'));
+  for (let i = 0; i < 500 && sent.length === 0; i++) await Bun.sleep(10);
+  expect(sent).toEqual(['clean@example.com']);
 });
 
 test('адрес вне `ALLOWED_EMAILS`: ответ тот же, письма нет', async () => {

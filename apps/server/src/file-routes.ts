@@ -5,6 +5,7 @@
 import {
   ContainerError,
   ContainerWalker,
+  TooManyImages,
   MAX_CONTENT_BYTES,
   MAX_THUMB_BYTES,
   RANK_ROLE,
@@ -23,12 +24,15 @@ import {
 } from '@ferrum/protocol';
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
-import { apiError, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
-import { BlobStalled, BlobTooLarge } from './blob-store';
+import { apiError, busy, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
+import { BlobStalled, BlobTooLarge, type UploadPace } from './blob-store';
 import { inTransaction } from './db';
 
 /** Клиент молчит дольше этого посреди загрузки — обрыв. */
 export const UPLOAD_IDLE_MS = 60_000;
+/** Загрузка медленнее этого держит слот зря: 512 МБ укладываются в 4,6 часа, вдвое дольше срока клиента
+ * (`transferTimeout`, от 64 КиБ/с), поэтому законную загрузку на медленном канале сервер не обрывает. */
+export const UPLOAD_PACE: UploadPace = { graceMs: 60_000, bytesPerSecond: 32 * 1024 };
 /** Байты заменённого файла удаляются не сразу: читатель, начавший раньше, успевает дочитать. */
 export const BLOB_GRACE_SECONDS = 120;
 /** Одновременных загрузок: на человека и на сервер. Памяти загрузка не занимает, занимает диск и поток. */
@@ -182,6 +186,7 @@ export type UploadGate = ReturnType<typeof uploadGate>;
 /** Ответ на неудачную загрузку потоком. Неизвестное — сбой маршрута, его показывает конвейер. */
 export function uploadFailure(e: unknown): Response | null {
   if (e instanceof BlobTooLarge) return apiError(413, 'TOO_LARGE');
+  if (e instanceof TooManyImages) return apiError(400, 'TOO_MANY_IMAGES');
   if (e instanceof ContainerError) return apiError(400, 'BAD_CONTAINER');
   if (e instanceof BlobStalled) return apiError(408, 'UNAVAILABLE');
   return null;
@@ -204,6 +209,7 @@ async function missingImages(c: PoolClient, file: string, refs: string[], lost: 
 export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
   const { pool, blobs } = deps;
   const idle = deps.uploadIdleMs ?? UPLOAD_IDLE_MS;
+  const pace = deps.uploadPace ?? UPLOAD_PACE;
   const maxContent = deps.maxContentBytes ?? MAX_CONTENT_BYTES;
   const fresh = async (ctx: Ctx) => {
     const meta = await loadFile(pool, ctx.params.id, ctx.user.id);
@@ -435,7 +441,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         );
         if (!before.rows[0]) return apiError(404, 'NOT_FOUND');
         if (!writeAllowed(before.rows[0], write.base, write.previous)) return apiError(409, 'CONFLICT');
-        if (!gate.enter(ctx.user.id)) return apiError(429, 'BUSY');
+        if (!gate.enter(ctx.user.id)) return busy();
         const key = `files/${ctx.params.id}/content-${randomUUID()}`;
         try {
           await beginUpload(pool, key);
@@ -445,6 +451,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             ({ size } = await blobs.putStream(key, ctx.req.body, {
               maxBytes: maxContent,
               idleMs: idle,
+              pace,
               onChunk: (chunk) => walker.feed(chunk),
             }));
             walker.finish();
@@ -513,7 +520,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       stream: true,
       handle: async (ctx) => {
         if (!ctx.req.body) return apiError(400, 'BAD_REQUEST');
-        if (!gate.enter(ctx.user.id)) return apiError(429, 'BUSY');
+        if (!gate.enter(ctx.user.id)) return busy();
         const key = `files/${ctx.params.id}/thumb-${randomUUID()}`;
         try {
           await beginUpload(pool, key);
@@ -522,6 +529,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             await blobs.putStream(key, ctx.req.body, {
               maxBytes: MAX_THUMB_BYTES,
               idleMs: idle,
+              pace,
               onChunk: (chunk) => {
                 for (let i = 0; i < chunk.length && seen < PNG_SIGNATURE.length; i++, seen++) {
                   if (chunk[i] !== PNG_SIGNATURE[seen]) throw new ContainerError('не PNG');

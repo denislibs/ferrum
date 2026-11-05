@@ -174,3 +174,43 @@ test('новая папка: каталоги синхронизируются �
   await s.put('images/hash/key', new Uint8Array(1));
   expect(synced).toEqual(['images/hash', 'images', '']);
 });
+
+test('наименьшая скорость: срок растёт с байтами, отставший обрывается, успевающий нет', async () => {
+  const { s } = store();
+  const pace = { graceMs: 1000, bytesPerSecond: 100 };
+  let time = 0;
+  // Каждый кусок приходит на поддельных часах: 100 байт за `step` мс.
+  const dripping = (step: number, chunks: number) =>
+    new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (chunks-- === 0) {
+          c.close();
+          return;
+        }
+        time += step;
+        c.enqueue(new Uint8Array(100));
+      },
+    });
+  // Ровно по пределу: каждые 100 байт дают секунду, а первая секунда — про запас.
+  await expect(s.putStream('files/a', dripping(990, 20), { maxBytes: 1e6, idleMs: 1e6, pace, now: () => time })).resolves.toEqual({
+    size: 2000,
+  });
+  time = 0;
+  // Вдвое медленнее: срок кончается посреди загрузки, простой тут ни при чём.
+  await expect(s.putStream('files/b', dripping(2000, 20), { maxBytes: 1e6, idleMs: 1e6, pace, now: () => time })).rejects.toBeInstanceOf(
+    BlobStalled,
+  );
+  expect(await s.get('files/b')).toBeNull();
+});
+
+test('наименьшая скорость: капля за первым куском не держит запись до простоя', async () => {
+  const { s } = store();
+  const silent = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(new Uint8Array(1));
+    },
+  });
+  await expect(
+    s.putStream('files/a', silent, { maxBytes: 8, idleMs: 30_000, pace: { graceMs: 20, bytesPerSecond: 1000 } }),
+  ).rejects.toBeInstanceOf(BlobStalled);
+});

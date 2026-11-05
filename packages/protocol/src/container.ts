@@ -16,9 +16,15 @@ export const SECTION_SUFFIX_BYTES = 40;
 const MAX_SECTION_ID_BYTES = 1024;
 const MAX_REFS_BYTES = 1024 * 1024;
 const MAX_SECTIONS = 1_000_000;
+/** Разных картинок в файле. Настоящий большой файл — тысячи; предел держит память записи постоянной: список
+ * ссылок копится весь проход, а один файл до 512 МБ вместил бы миллионы. См. также `LIMITS.images` сервера:
+ * файл на пределе открывается и записывается меньше чем за две минуты. */
+export const MAX_IMAGE_REFS = 10_000;
 const HASH_LINE_RE = /^[0-9a-f]{64}$/;
 
 export class ContainerError extends Error {}
+/** Контейнер верный, но картинок в нём больше `MAX_IMAGE_REFS`. */
+export class TooManyImages extends ContainerError {}
 
 const utf8 = new TextDecoder();
 
@@ -129,7 +135,9 @@ export class ContainerWalker {
 
   private takeRefs(): void {
     for (const line of utf8.decode(this.refs).split('\n')) {
-      if (HASH_LINE_RE.test(line)) this.imageRefs.add(line);
+      if (!HASH_LINE_RE.test(line)) continue;
+      this.imageRefs.add(line);
+      if (this.imageRefs.size > MAX_IMAGE_REFS) throw new TooManyImages('слишком много картинок');
     }
     this.refs = new Uint8Array(0);
   }

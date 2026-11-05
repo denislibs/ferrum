@@ -24,6 +24,8 @@ export const API_ERROR_CODES = [
   'NOT_EMPTY',
   /** Содержимое ссылается на картинку, которой у файла нет: сначала её байты, потом запись. */
   'MISSING_IMAGES',
+  /** Картинок в файле больше `MAX_IMAGE_REFS`. */
+  'TOO_MANY_IMAGES',
   /** Слишком много одновременных загрузок. */
   'BUSY',
 ] as const;

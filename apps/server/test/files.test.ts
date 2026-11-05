@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { MAX_CONTENT_BYTES } from '@ferrum/protocol';
+import { MAX_CONTENT_BYTES, MAX_IMAGE_REFS } from '@ferrum/protocol';
 import { LIMITS, MAX_JSON_BYTES } from '../src/api';
 import { uploadGate } from '../src/file-routes';
 import { runGc } from '../src/gc';
@@ -318,6 +318,48 @@ test('простой клиента посреди загрузки: обрыв 
   expect(res.status).toBe(408);
   expect(readdirSync(join(slow.dataDir, 'files', f.id))).toEqual([]);
   await slow.stop();
+});
+
+test('загрузка медленнее наименьшей скорости освобождает слот, хотя простоя нет', async () => {
+  const slow = await apiStand({ uploadPace: { graceMs: 30, bytesPerSecond: 1_000_000 } }, true);
+  const who = await slow.signIn('drip@example.com');
+  const f = await slow.newFile(who);
+  const silent = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(container().subarray(0, 8));
+    },
+  });
+  const res = await fetch(`${slow.publicUrl}/api/files/${f.id}/content`, {
+    method: 'PUT',
+    headers: { origin: slow.publicUrl, cookie: who.cookie, 'if-match': '"0"', 'x-ferrum-write': crypto.randomUUID() },
+    body: silent,
+  });
+  expect(res.status).toBe(408);
+  expect(readdirSync(join(slow.dataDir, 'files', f.id))).toEqual([]);
+  await slow.stop();
+});
+
+test('картинок в файле больше предела: 400 в формате ошибок, файл не записан', async () => {
+  const f = await s.newFile(owner);
+  const hashes = Array.from({ length: MAX_IMAGE_REFS + 1 }, (_, i) => i.toString(16).padStart(64, '0'));
+  const res = await s.writeContent(owner, f.id, 0, container(hashes));
+  expect(res.status).toBe(400);
+  expect(await res.json()).toEqual({ error: 'TOO_MANY_IMAGES' });
+  expect(readdirSync(join(s.dataDir, 'files', f.id))).toEqual([]);
+  expect(await json(await s.call(owner, 'GET', `/api/files/${f.id}/access`))).toMatchObject({ version: 0 });
+});
+
+test('сверх предела частоты: ответ говорит, сколько ждать', async () => {
+  const tight = await apiStand({ limits: { read: { max: 1, windowSeconds: 60 } } }, true);
+  const a = await tight.signIn('wait@example.com');
+  const path = '/api/files?section=drafts&start=0&count=1';
+  expect((await tight.call(a, 'GET', path)).status).toBe(200);
+  const limited = await tight.call(a, 'GET', path);
+  expect(limited.status).toBe(429);
+  const wait = Number(limited.headers.get('retry-after'));
+  expect(wait).toBeGreaterThan(0);
+  expect(wait).toBeLessThanOrEqual(60);
+  await tight.stop();
 });
 
 test('неизвестный маршрут API и метод — 404 в формате ошибок', async () => {

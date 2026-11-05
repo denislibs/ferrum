@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test';
 import {
   ContainerError,
   ContainerWalker,
+  MAX_IMAGE_REFS,
+  TooManyImages,
   containerHeader,
   imageSectionHeader,
   isFileMeta,
@@ -55,6 +57,22 @@ test('проход кусками любого размера находит с�
   for (const chunk of [1, 7, 64, 65_536, file.length]) {
     expect([...walk(file, chunk).imageRefs].sort()).toEqual([HASH_A, HASH_B]);
   }
+});
+
+test('разных картинок больше предела: отказ, повторы и мусор не считаются', () => {
+  const hash = (i: number) => i.toString(16).padStart(64, '0');
+  const hashes = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => hash(from + i));
+  const parts = (list: string[]) => {
+    const out: Uint8Array[] = [];
+    for (let i = 0; i < list.length; i += 8000) out.push(refs(...list.slice(i, i + 8000)));
+    return out;
+  };
+  const full = hashes(0, MAX_IMAGE_REFS);
+  const atLimit = container(...parts(full));
+  expect(walk(atLimit).imageRefs.size).toBe(MAX_IMAGE_REFS);
+  expect(walk(container(...parts(full), refs(hash(0), 'мусор', hash(1)))).imageRefs.size).toBe(MAX_IMAGE_REFS);
+  expect(() => walk(container(...parts(hashes(0, MAX_IMAGE_REFS + 1))))).toThrow(TooManyImages);
+  expect(new TooManyImages('x')).toBeInstanceOf(ContainerError);
 });
 
 test('неверный контейнер: чужие байты, версия, картинка внутри, обрыв, хвост', () => {

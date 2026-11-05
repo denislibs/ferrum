@@ -7,7 +7,7 @@ import { MAX_IMAGE_BYTES } from '@ferrum/protocol';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { randomUUID } from 'node:crypto';
-import { apiError, ok, type ApiDeps, type Route } from './api';
+import { apiError, busy, ok, type ApiDeps, type Route } from './api';
 import { inTransaction } from './db';
 import {
   beginUpload,
@@ -17,12 +17,14 @@ import {
   trashBlob,
   uploadFailure,
   UPLOAD_IDLE_MS,
+  UPLOAD_PACE,
   type UploadGate,
 } from './file-routes';
 
 export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
   const { pool, blobs } = deps;
   const idle = deps.uploadIdleMs ?? UPLOAD_IDLE_MS;
+  const pace = deps.uploadPace ?? UPLOAD_PACE;
   const linked = (file: string, hash: string) =>
     pool.query<{ blob_key: string; size: string }>(
       'SELECT i.blob_key, i.size FROM file_image l JOIN image i ON i.hash = l.hash WHERE l.file_id = $1 AND l.hash = $2',
@@ -34,7 +36,7 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       method: 'HEAD',
       path: '/api/files/:id/images/:hash',
       access: { kind: 'file', min: 'viewer' },
-      limit: 'read',
+      limit: 'images',
       handle: async (ctx) => {
         const { rows } = await linked(ctx.params.id, ctx.params.hash);
         return new Response(null, {
@@ -47,7 +49,7 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       method: 'GET',
       path: '/api/files/:id/images/:hash',
       access: { kind: 'file', min: 'viewer' },
-      limit: 'read',
+      limit: 'images',
       handle: async (ctx) => {
         const { rows } = await linked(ctx.params.id, ctx.params.hash);
         if (!rows[0]) return apiError(404, 'NOT_FOUND');
@@ -68,12 +70,12 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       method: 'PUT',
       path: '/api/files/:id/images/:hash',
       access: { kind: 'file', min: 'editor' },
-      limit: 'upload',
+      limit: 'images',
       stream: true,
       handle: async (ctx) => {
         if (!ctx.req.body) return apiError(400, 'BAD_REQUEST');
         if (Number(ctx.req.headers.get('content-length') ?? 0) > MAX_IMAGE_BYTES) return apiError(413, 'TOO_LARGE');
-        if (!gate.enter(ctx.user.id)) return apiError(429, 'BUSY');
+        if (!gate.enter(ctx.user.id)) return busy();
         const key = `images/${ctx.params.hash}/${randomUUID()}`;
         try {
           await beginUpload(pool, key);
@@ -83,6 +85,7 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             ({ size } = await blobs.putStream(key, ctx.req.body, {
               maxBytes: MAX_IMAGE_BYTES,
               idleMs: idle,
+              pace,
               onChunk: (chunk) => void hasher.update(chunk),
             }));
           } catch (e) {

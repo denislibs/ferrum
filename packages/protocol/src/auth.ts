@@ -20,7 +20,11 @@ export const MAGIC_LINK_TTL_SECONDS = 15 * 60;
 export const RESEND_SECONDS = 60;
 /** Токен ссылки: столько букв выдаёт плагин `magicLink`. */
 const TOKEN_RE = /^[A-Za-z]{32}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Адрес без отображаемого имени, комментариев, списков и маршрутов почты: `x<box@d>`, `z,box@d`, `(c)box@d` и
+ * `q:box@d;` доходят до ящика `box@d`, поэтому не должны считаться разными адресами. Спецсимволы только те, что
+ * встречаются в настоящих адресах; `%` и `!` — старая маршрутизация почты. */
+const EMAIL_RE =
+  /^[\p{L}\p{M}\p{N}#$&'*+/=?^_`{|}~-]+(?:\.[\p{L}\p{M}\p{N}#$&'*+/=?^_`{|}~-]+)*@[\p{L}\p{M}\p{N}](?:[\p{L}\p{M}\p{N}-]*[\p{L}\p{M}\p{N}])?(?:\.[\p{L}\p{M}\p{N}](?:[\p{L}\p{M}\p{N}-]*[\p{L}\p{M}\p{N}])?)+$/u;
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 
@@ -77,12 +81,19 @@ function record(v: unknown): Record<string, unknown> | null {
   return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
-/** Адрес приводится к нижнему регистру: `Ivan@x.ru` и `ivan@x.ru` — один человек. */
+/** Адрес приводится к одной форме: `Ivan@x.ru` и `ivan@x.ru` — один человек, широкие и составные буквы — те же. */
 export function parseEmail(v: unknown): string | null {
   if (typeof v !== 'string') return null;
-  const email = v.trim().toLowerCase();
+  const email = v.trim().normalize('NFKC').toLowerCase();
   if (new TextEncoder().encode(email).length > MAX_EMAIL_BYTES) return null;
   return EMAIL_RE.test(email) && !CONTROL_RE.test(email) ? email : null;
+}
+
+/** Почтовый ящик проверенного адреса для счётчиков: `box+a@d` и `b.ox@d` обычно попадают в тот же ящик. Для доставки
+ * это неверно, поэтому только для пределов: два настоящих адреса делят счётчик, письмо важнее не становится. */
+export function mailbox(email: string): string {
+  const at = email.lastIndexOf('@');
+  return `${email.slice(0, at).split('+')[0].replaceAll('.', '')}@${email.slice(at + 1)}`;
 }
 
 /** Только маршрут самого приложения (`#/…`): ссылка из письма не уведёт на чужой адрес. */

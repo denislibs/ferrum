@@ -1,6 +1,7 @@
 // Приглашения по адресу: письма и переход в доступ при первом входе. Счётчики — на адрес получателя,
 // отдельно от писем входа: чужие приглашения не должны закрывать человеку вход.
 
+import { mailbox, parseEmail } from '@ferrum/protocol';
 import type { Pool } from 'pg';
 import type { ApiDeps } from './api';
 import { emailAllowed } from './auth';
@@ -15,10 +16,13 @@ const HOUR = 60 * 60;
 /** Письмо уходит после ответа: ответ приглашающему не зависит от адреса (`ALLOWED_EMAILS`, предел).
  * Адрес вне списка и сверх предела письма не получает, но запись остаётся: при входе он её получит. */
 export function sendInvite(deps: ApiDeps, to: string, mail: Mail): void {
+  // Адрес разбирал маршрут, а адрес из базы — вход; всё равно: письмо уходит только на проверенный адрес.
+  const address = parseEmail(to);
+  if (!address) return;
   setTimeout(() => {
     void (async () => {
-      const sent = await valkeyStorage(deps.valkey).increment!(`invite-to:${to}`, HOUR);
-      if (sent > INVITES_PER_ADDRESS || !emailAllowed(to, deps.allowedEmails)) return;
+      const sent = await valkeyStorage(deps.valkey).increment!(`invite-to:${mailbox(address)}`, HOUR);
+      if (sent > INVITES_PER_ADDRESS || !emailAllowed(address, deps.allowedEmails)) return;
       await deps.mailer.send(mail);
     })().catch((e: unknown) => console.error('Не удалось отправить приглашение:', mailFailure(e)));
   }, 0);

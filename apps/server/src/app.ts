@@ -6,7 +6,7 @@ import type { Pool } from 'pg';
 import { apiHandler, type ApiDeps, type Limits, type Route } from './api';
 import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
-import type { BlobStore } from './blob-store';
+import type { BlobStore, UploadPace } from './blob-store';
 import { fileRoutes, uploadGate } from './file-routes';
 import { imageRoutes } from './image-routes';
 import { shareRoutes } from './share-routes';
@@ -32,6 +32,7 @@ export interface AppDeps {
   limits?: Partial<Limits>;
   apiDeadlineMs?: number;
   uploadIdleMs?: number;
+  uploadPace?: UploadPace;
   maxContentBytes?: number;
 }
 
