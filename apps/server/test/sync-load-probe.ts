@@ -68,7 +68,16 @@ if (mode === 'clients') {
 }
 
 const s = await apiStand(
-  { syncLimits: { connectionsPerUser: 100_000, userOpensBurst: 100_000, framesBurst: 1_000_000, userFramesBurst: 1_000_000 } },
+  {
+    syncLimits: {
+      connectionsPerUser: 100_000,
+      userOpensBurst: 100_000,
+      framesBurst: 1_000_000,
+      userFramesBurst: 1_000_000,
+      // Окно группы журнала для сравнения (спека: 20 мс): `PROBE_GROUP_MS=1 bun test/sync-load-probe.ts latency …`.
+      log: process.env.PROBE_GROUP_MS ? { groupMs: Number(process.env.PROBE_GROUP_MS) } : {},
+    },
+  },
   true,
 );
 const who = await s.signIn(`load-${Date.now()}@example.com`);
