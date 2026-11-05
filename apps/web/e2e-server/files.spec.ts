@@ -386,6 +386,51 @@ test('приглашение адреса без учётной записи: п
   await context.close();
 });
 
+test('команда: проект, файл в проекте у участника; ушедший теряет доступ', async ({ browser }, info) => {
+  const memberMail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, memberMail);
+  await a.getByRole('button', { name: 'Команды…' }).click();
+  await a.getByLabel('Имя новой команды').fill('Студия');
+  await a.getByRole('button', { name: 'Создать' }).click();
+  await a.getByLabel('Имя нового проекта').fill('Сайт');
+  await a.getByRole('button', { name: 'Добавить проект' }).click();
+  await expect(a.getByRole('list', { name: 'Проекты команды' }).getByText('Сайт')).toBeVisible();
+  await a.getByLabel('Адрес нового участника').fill(memberMail);
+  await a.getByRole('button', { name: 'Пригласить' }).click();
+  await expect(a.getByRole('list', { name: 'Участники команды' }).getByText(memberMail)).toBeVisible();
+  await a.getByRole('button', { name: 'Закрыть' }).click();
+  await a.getByRole('option', { name: 'Сайт' }).click();
+  await expect(title(a)).toHaveText('Сайт');
+  await a.getByRole('button', { name: 'Новый файл' }).first().click();
+  await editorReady(a);
+  const id = fileId(a);
+  await drawRect(a);
+  await saveKey(a);
+  await saved(a);
+  // Участник видит проект и правит файл.
+  await b.reload();
+  await expect(b.getByRole('option', { name: 'Сайт' })).toBeVisible();
+  await b.getByRole('option', { name: 'Сайт' }).click();
+  await expect(b.getByRole('option', { name: 'Без названия' })).toBeVisible();
+  await open(b, id);
+  await expect(b.getByText('Только просмотр')).toHaveCount(0);
+  await drawRect(b);
+  await saveKey(b);
+  await saved(b);
+  const members = (
+    await api(a, 'GET', `/api/teams/${((await api(a, 'GET', '/api/teams')).body as { teams: { id: string }[] }).teams[0].id}/members`)
+  ).body as {
+    members: { id: string; email: string }[];
+  };
+  const teamId = ((await api(a, 'GET', '/api/teams')).body as { teams: { id: string }[] }).teams[0].id;
+  await api(a, 'DELETE', `/api/teams/${teamId}/members/${members.members.find((m) => m.email === memberMail)!.id}`);
+  await checkAccessNow(b);
+  await expect(b.getByRole('alert').getByText('Нет доступа', { exact: true })).toBeVisible();
+  await a.context().close();
+  await b.context().close();
+});
+
 test('картинки: отдельными запросами, файл на сервере без них, после открытия они на месте', async ({ browser }, info) => {
   const a = await person(browser, newEmail(info.project.name));
   await a.goto('/?nodes=0#/new');
