@@ -1,7 +1,7 @@
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import { appScreen, drag, editorReady, live, mainMenu, testMode } from '../e2e/helpers';
 import { STAND_URL } from '../playwright.server.config';
-import { linksFor, mailCount, newEmail, resetStand, valkey } from './stand';
+import { linksFor, mailCount, newEmail, requestLink, resetStand, signIn, valkey } from './stand';
 
 test.beforeEach(resetStand);
 
@@ -10,32 +10,12 @@ test.beforeEach(resetStand);
 function watchConsole(page: Page): string[] {
   const errors: string[] = [];
   page.on('console', (m) => {
-    if (m.type() === 'error' && !m.location().url.endsWith('/favicon.ico')) errors.push(`${m.text()} ${m.location().url}`);
+    // Firefox: шрифт, загрузку которого оборвал переход на другой адрес (NS_BINDING_ABORTED), — не потеря.
+    const aborted = m.text().includes('status=2152398850');
+    if (m.type() === 'error' && !aborted && !m.location().url.endsWith('/favicon.ico')) errors.push(`${m.text()} ${m.location().url}`);
   });
   page.on('pageerror', (e) => errors.push(e.message));
   return errors;
-}
-
-async function requestLink(page: Page, email: string): Promise<void> {
-  await page.getByLabel('Электронная почта').fill(email);
-  await page.getByRole('button', { name: 'Получить ссылку' }).click();
-  await expect(page.getByRole('heading', { name: 'Проверьте почту' })).toBeVisible();
-  await expect(page.getByText(email)).toBeVisible();
-}
-
-/** Вход целиком: от экрана входа до приложения. */
-async function signIn(page: Page, email: string, name = 'Иван Петров'): Promise<void> {
-  // Новое письмо, а не одно из прежних: оно уходит после ответа сервера и приходит не сразу.
-  const before = await mailCount(email);
-  await requestLink(page, email);
-  const [link] = await linksFor(email, before + 1);
-  await page.goto(link);
-  await page.getByRole('button', { name: 'Войти', exact: true }).click();
-  if (name) {
-    await expect(page.getByRole('heading', { name: 'Как вас зовут?' })).toBeVisible();
-    await page.getByLabel('Имя').fill(name);
-    await page.getByRole('button', { name: 'Продолжить' }).click();
-  }
 }
 
 const newContext = async (browser: Browser) => (await browser.newContext({ baseURL: STAND_URL })).newPage();
@@ -387,7 +367,6 @@ test('ссылка из письма в той же вкладке в редак
   await drawRect(page);
   // Сразу, не дожидаясь журнала: приложение должно записать правку само.
   await pasteHash(page, link);
-  await expect(enter(page)).toBeVisible();
   await enter(page).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Недавние');
   await page.goto(url);
@@ -495,7 +474,8 @@ test('выход, когда запись не удалась: вопрос, «�
   await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
   await editorReady(page);
   await drawRect(page);
-  await page.evaluate(() => window.__ferrumFiles!.store.failWrites(true));
+  // Запись на сервер не проходит: и в worker'е файлов, и из любой вкладки контекста.
+  await page.context().route('**/api/files/*/content', (r) => r.abort());
   await mainMenu(page, 'Настройки', 'Настройки…');
   await page.getByRole('tab', { name: 'Аккаунт' }).click();
   await page.getByRole('tabpanel', { name: 'Аккаунт' }).getByRole('button', { name: 'Выйти', exact: true }).click();
@@ -647,7 +627,32 @@ test('сбой сервера при подтверждении: новая сс
   await expect(page).toHaveURL(/#\/trash$/);
 });
 
-test('выход в другой вкладке: новый файл успевает записаться, правка не теряется', async ({ page, context }, info) => {
+test('выход в другой вкладке: новый файл не записан, редактор остаётся и предлагает копию', async ({ page, context }, info) => {
+  const email = newEmail(info.project.name);
+  await testMode(page);
+  await page.goto('/?nodes=0');
+  await signIn(page, email);
+  await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
+  await editorReady(page);
+  const tab = await context.newPage();
+  await tab.goto('/');
+  await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible();
+  await drawRect(page);
+  // Сразу: у нового файла ещё нет записи, а сессии уже нет, сервер её не примет.
+  await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(page.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  await nodesAre(page, 1);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Сохранить копию на диск' }).click();
+  expect((await download).suggestedFilename()).toMatch(/\.ferrum$/);
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  const ask = page.getByRole('dialog', { name: 'Изменения не сохранены — уйти?' });
+  await expect(ask).toContainText('ещё ни разу не записан');
+  await ask.getByRole('button', { name: 'Уйти' }).click();
+  await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
+});
+
+test('выход в другой вкладке: записанный файл, правка возвращается из журнала после входа', async ({ page, context }, info) => {
   const email = newEmail(info.project.name);
   await testMode(page);
   await page.goto('/?nodes=0');
@@ -655,15 +660,19 @@ test('выход в другой вкладке: новый файл успев�
   await page.locator('header').getByRole('button', { name: 'Новый файл' }).click();
   await editorReady(page);
   const url = page.url();
+  await drawRect(page);
+  await page.keyboard.press('ControlOrMeta+KeyS');
+  await expect.poll(() => page.evaluate(() => window.__ferrum!.ui!.modified)).toBe(false);
   const tab = await context.newPage();
   await tab.goto('/');
   await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible();
   await drawRect(page);
-  // Сразу: у нового файла ещё нет записи, журнал ему не поможет.
   await tab.getByRole('button', { name: 'Выйти' }).click();
+  await expect(page.getByRole('alert').getByText('Сессия завершена')).toBeVisible();
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Вход в Ferrum' })).toBeVisible();
   await signIn(page, email, '');
   await expect(page).toHaveURL(url);
   await editorReady(page);
-  await nodesAre(page, 1);
+  await nodesAre(page, 2);
 });

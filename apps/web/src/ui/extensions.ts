@@ -1,7 +1,14 @@
 // Части интерфейса, которые есть только в рабочей сборке. Их ставит `main.tsx` в ветке, которую
 // автономная сборка выбрасывает, поэтому код входа в неё не попадает, а экраны о нём не знают.
 
-import type { Component } from 'solid-js';
+import type { Component, JSX } from 'solid-js';
+import type { FileMeta, Section } from '../core/file-list';
+import type { IconName } from './icons';
+import type { MenuItem } from './menu';
+import type { Route } from './router';
+
+/** Строка панели разделов: раздел или подпись группы. */
+export type NavEntry = { kind: 'section'; id: Section; title: string; icon: IconName } | { kind: 'label'; title: string };
 
 export const extensions: {
   /** Вкладка «Аккаунт» настроек. */
@@ -11,6 +18,22 @@ export const extensions: {
   /** Адрес ведёт не приложение (ссылка из письма): `Root` его пропускает. В автономной сборке
    * таких адресов нет, любой адрес — его. */
   ownsHash?: (hash: string) => boolean;
+  /** Адрес `?debug` не включает тестовый режим: страница рабочей сборки не раскрывает ядро по ссылке. */
+  noDebugParam?: boolean;
+  /** Раздел по части адреса, если у этой сборки есть другие разделы. */
+  parseSection?: (path: string) => Section | null;
+  /** Заголовок такого раздела. */
+  sectionTitle?: (section: Section) => string | null;
+  /** Строки панели разделов между «Черновиками» и «Корзиной». */
+  filesNav?: () => NavEntry[];
+  /** Под панелью разделов: команды, файлы прежней версии. */
+  filesNavExtra?: Component<{ navigate: (r: Route) => void }>;
+  /** Дополнительные пункты меню файла. */
+  fileMenu?: (file: FileMeta) => MenuItem[];
+  /** Новый файл из этого раздела попадает в проект. */
+  newFileRoute?: (section: Section) => Route;
+  /** Кнопка «Поделиться» открытого файла. */
+  shareButton?: Component<{ file: FileMeta; role: () => FileMeta['role']; children?: JSX.Element }>;
 } = {};
 
 /** Связь корня приложения с кодом входа: ставит `Root` (в обеих сборках, это просто два поля),
@@ -19,6 +42,8 @@ export const editorHooks: {
   /** Протокол ухода редактора: дописать файл, а если не вышло — спросить человека.
    * `false` — человек остался, уходить нельзя. Без редактора — `true`. */
   leave?: () => Promise<boolean>;
-  /** Записать открытый файл без вопросов (вкладка сейчас перезагрузится). */
-  flush?: () => Promise<void>;
+  /** Записать открытый файл без вопросов (вкладка сейчас перезагрузится). `false` — не записался. */
+  flush?: () => Promise<boolean>;
+  /** Сессии больше нет, а файл не записался: редактор остаётся и предлагает копию на диск. */
+  sessionLost?: () => void;
 } = {};

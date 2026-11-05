@@ -117,8 +117,10 @@ export function AuthGate(props: { children: JSX.Element }) {
         const now = r.value.user;
         if (was?.id === now?.id && was?.name === now?.name) return;
         // Спросить человека некому (он в другой вкладке): файл записывается молча.
-        await editorHooks.flush?.().catch(() => {});
-        location.reload();
+        const saved = await (editorHooks.flush?.() ?? Promise.resolve(true)).catch(() => false);
+        // Сессии уже нет, файл не записался: перезагрузка потеряла бы то, чего нет в журнале.
+        if (saved || now !== null) location.reload();
+        else editorHooks.sessionLost?.();
       });
     }),
   );

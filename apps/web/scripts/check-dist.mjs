@@ -10,6 +10,12 @@ import { fileURLToPath } from 'node:url';
 export const LOCAL_MARKER = 'ferrumLocal';
 /** Адреса входа: код входа есть только в рабочей сборке. */
 export const AUTH_MARKER = '/api/auth/';
+/** Команда `TauriFileStore`: в рабочей сборке её нет. */
+export const TAURI_STORE_MARKER = 'files_open_dialog';
+/** Тестовый доступ к локальному хранилищу. */
+export const TEST_STORE_MARKER = '__ferrumFiles';
+/** Адреса API файлов: код сервера есть только в рабочей сборке. */
+export const FILES_MARKER = '/api/files';
 
 /** Проблема сборки словами или `null`. `mode` — `standalone` или `server`. */
 export function checkDist(dist, mode) {
@@ -27,8 +33,12 @@ export function checkDist(dist, mode) {
   const auth = has(AUTH_MARKER);
   if (mode === 'standalone' && !local) return 'в автономной сборке нет автономного режима: проверьте VITE_FERRUM_LOCAL (.env.standalone)';
   if (mode === 'standalone' && auth) return 'в автономной сборке есть код входа: проверьте условия по VITE_FERRUM_LOCAL';
+  if (mode === 'standalone' && has(FILES_MARKER)) return 'в автономной сборке есть код файлов на сервере: проверьте импорты `ui/server`';
+  if (mode === 'server' && !has(FILES_MARKER)) return 'в рабочей сборке нет кода файлов на сервере';
   if (mode === 'server' && local) return 'в рабочей сборке есть код автономного режима: VITE_FERRUM_LOCAL задан при сборке?';
   if (mode === 'server' && !auth) return 'в рабочей сборке нет кода входа';
+  if (mode === 'server' && has(TAURI_STORE_MARKER)) return 'в рабочей сборке есть хранилище десктопа: проверьте импорты `tauri.ts`';
+  if (mode === 'server' && has(TEST_STORE_MARKER)) return 'в рабочей сборке есть тестовый доступ к хранилищу';
   return null;
 }
 

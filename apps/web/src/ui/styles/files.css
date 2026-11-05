@@ -226,3 +226,11 @@
     animation: none !important;
   }
 }
+
+/* Подпись группы в панели разделов: команда над своими проектами. */
+.fe-files__nav-label {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

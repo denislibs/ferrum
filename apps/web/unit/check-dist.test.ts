@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AUTH_MARKER, checkDist, LOCAL_MARKER } from '../scripts/check-dist.mjs';
+import { AUTH_MARKER, checkDist, FILES_MARKER, LOCAL_MARKER, TAURI_STORE_MARKER, TEST_STORE_MARKER } from '../scripts/check-dist.mjs';
 
 function dist(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'ferrum-dist-'));
@@ -21,18 +21,31 @@ test('автономная сборка: обе страницы и призна
   );
 });
 
+test('автономная сборка: без кода файлов на сервере', () => {
+  const files = { 'index.html': INDEX, 'debug.html': DEBUG, 'assets/main.js': `x.${LOCAL_MARKER}=1;f('${FILES_MARKER}')` };
+  expect(checkDist(dist(files), 'standalone')).toContain('код файлов на сервере');
+});
+
 test('автономная сборка: без кода входа', () => {
   const files = { 'index.html': INDEX, 'debug.html': DEBUG, 'assets/main.js': `x.${LOCAL_MARKER}=1;f('${AUTH_MARKER}')` };
   expect(checkDist(dist(files), 'standalone')).toContain('есть код входа');
 });
 
 test('рабочая сборка: без стенда и кода автономного режима', () => {
-  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `f('${AUTH_MARKER}session')` }), 'server')).toBeNull();
-  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': 'x' }), 'server')).toContain('нет кода входа');
-  expect(checkDist(dist({ 'index.html': INDEX, 'debug.html': DEBUG, 'assets/main.js': `f('${AUTH_MARKER}')` }), 'server')).toContain(
+  const server = `f('${AUTH_MARKER}session');g('${FILES_MARKER}')`;
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': server }), 'server')).toBeNull();
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `f('${AUTH_MARKER}session')` }), 'server')).toContain('нет кода файлов');
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `${server};h('${TAURI_STORE_MARKER}')` }), 'server')).toContain(
+    'хранилище десктопа',
+  );
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `${server};w.${TEST_STORE_MARKER}=1` }), 'server')).toContain(
+    'тестовый доступ',
+  );
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `g('${FILES_MARKER}')` }), 'server')).toContain('нет кода входа');
+  expect(checkDist(dist({ 'index.html': INDEX, 'debug.html': DEBUG, 'assets/main.js': server }), 'server')).toContain(
     'debug.html в рабочей сборке',
   );
-  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `x.${LOCAL_MARKER}=1;f('${AUTH_MARKER}')` }), 'server')).toContain(
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `x.${LOCAL_MARKER}=1;${server}` }), 'server')).toContain(
     'есть код автономного режима',
   );
 });

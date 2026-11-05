@@ -51,7 +51,7 @@ test.afterEach(() => {
   }
 });
 
-function harness(stored: boolean, journalSession?: number | null) {
+function harness(stored: boolean, journalSession?: number | null, fullHistory?: boolean) {
   /** Поддельные часы: таймеры `window` и `performance.now()`. */
   let now = 0;
   const timers = new Map<number, { at: number; fn: () => void }>();
@@ -94,6 +94,7 @@ function harness(stored: boolean, journalSession?: number | null) {
   let hangAppend = false;
   let warning: string | undefined;
   const files = {
+    fullHistory,
     appendJournal: async (_id: string, mark: JournalMark) => {
       if (hangAppend) await new Promise(() => {});
       if (failAppend) throw new Error('нет места');
@@ -391,4 +392,27 @@ test('запись удалась с предупреждением (превь�
   h.snapshot(0);
   await saved;
   expect(h.toasts).toHaveLength(2);
+});
+
+test('снимок полный только там, где хранилище этого просит: файл на сервере', () => {
+  const asked = (fullHistory?: boolean) => {
+    const h = harness(true, null, fullHistory);
+    h.emit({ type: 'modified', modified: true });
+    void h.saver.save();
+    return h.sent.find((c) => c.type === 'snapshot');
+  };
+  expect(asked()).toEqual({ type: 'snapshot', thumbnail: true });
+  expect(asked(true)).toEqual({ type: 'snapshot', thumbnail: true, full: true });
+});
+
+test('`CONFLICT` от сервера: причина для вопроса при уходе, признак не снят, поколение прежнее', async () => {
+  const h = harness(true);
+  h.emit({ type: 'modified', modified: true });
+  h.failWrites(true);
+  const saving = h.saver.save();
+  h.snapshot(0);
+  expect(await saving).toBe(false);
+  expect(h.saver.failure()).toContain('Не удалось сохранить файл');
+  expect(h.saver.version()).toBe(1);
+  expect(h.sent.some((c) => c.type === 'markSaved')).toBe(false);
 });

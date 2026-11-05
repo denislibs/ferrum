@@ -55,34 +55,36 @@ export function PropertiesPanel(props: { theme: 'dark' | 'light' }) {
 
   return (
     <div class="fe-props" id="panel-design" role="tabpanel" aria-labelledby="tab-design" tabindex="-1">
-      <Show
-        when={count() > 0}
-        fallback={
-          <Show
-            when={ed.store.state.text.editing && ed.store.state.textStyle}
-            fallback={
-              <>
-                <MissingFontsSection />
-                <PageSection theme={props.theme} />
-              </>
-            }
-          >
-            {/* Новый текст (инструмент T) до первого символа: стиль — заранее. */}
+      <div class="fe-props__body" inert={ed.store.state.fileRole === 'viewer'}>
+        <Show
+          when={count() > 0}
+          fallback={
+            <Show
+              when={ed.store.state.text.editing && ed.store.state.textStyle}
+              fallback={
+                <>
+                  <MissingFontsSection />
+                  <PageSection theme={props.theme} />
+                </>
+              }
+            >
+              {/* Новый текст (инструмент T) до первого символа: стиль — заранее. */}
+              <TextSection />
+            </Show>
+          }
+        >
+          <Show when={ed.store.state.tool === 'scale'}>
+            <ScaleSection />
+          </Show>
+          <PositionSection edit={edit} val={val} />
+          <AppearanceSection edit={edit} />
+          <Show when={ed.store.state.textStyle}>
             <TextSection />
           </Show>
-        }
-      >
-        <Show when={ed.store.state.tool === 'scale'}>
-          <ScaleSection />
+          <FillsSection />
+          <StrokesSection />
         </Show>
-        <PositionSection edit={edit} val={val} />
-        <AppearanceSection edit={edit} />
-        <Show when={ed.store.state.textStyle}>
-          <TextSection />
-        </Show>
-        <FillsSection />
-        <StrokesSection />
-      </Show>
+      </div>
       <ExportSection />
     </div>
   );

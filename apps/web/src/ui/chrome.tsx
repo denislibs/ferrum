@@ -1,6 +1,8 @@
 // Шапки панелей (PanelHeader), главное меню, зум, «Поделиться», вкладки, края
 // панелей для изменения ширины.
 
+import type { FileMeta } from '../core/file-list';
+import { extensions } from './extensions';
 import { createSignal, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import { useEditor } from './context';
 import { Caret, Icon } from './icons';
@@ -20,6 +22,8 @@ export function FileHeader(props: {
   open: boolean;
   onOpen: (open: boolean) => void;
   onBack?: () => void;
+  /** Где лежит файл; нет — «Черновики». */
+  location?: string;
   /** Панель свёрнута в полосу: остаются логотип с меню и кнопка разворота. */
   collapsed?: boolean;
   onCollapse?: (collapsed: boolean) => void;
@@ -74,7 +78,7 @@ export function FileHeader(props: {
               returnFocus={() => file.querySelector<HTMLElement>('.fe-panel-head__name')}
             />
           </Show>
-          <span class="fe-panel-head__project">Черновики</span>
+          <span class="fe-panel-head__project">{props.location ?? 'Черновики'}</span>
         </div>
         <Show when={props.onBack}>
           {(back) => (
@@ -99,7 +103,7 @@ export function FileHeader(props: {
 
 const ZOOMS = [0.5, 1, 2];
 
-export function DesignHeader() {
+export function DesignHeader(props: { file?: FileMeta }) {
   const ed = useEditor();
   let tabs!: HTMLDivElement;
   onMount(() => onCleanup(roving(tabs, '[role="tab"]')));
@@ -133,9 +137,16 @@ export function DesignHeader() {
           <span class="t-num">{Math.round(ed.store.state.live.zoom * 100)}%</span>
           <Caret />
         </button>
-        <button class="fe-btn fe-btn--primary" aria-disabled="true" data-tip="Совместная работа появится в подсистеме 4">
-          Поделиться
-        </button>
+        <Show when={ed.store.state.fileRole === 'viewer'}>
+          <span class="fe-viewonly t-muted">Только просмотр</span>
+        </Show>
+        {extensions.shareButton && props.file ? (
+          <extensions.shareButton file={props.file} role={() => ed.store.state.fileRole ?? undefined} />
+        ) : (
+          <button class="fe-btn fe-btn--primary" aria-disabled="true" data-tip="Совместная работа появится в подсистеме 4">
+            Поделиться
+          </button>
+        )}
         <Show when={menu()}>{(a) => <Menu label="Масштаб" items={zoomItems()} anchor={a()} onClose={() => setMenu(null)} />}</Show>
       </div>
       <div ref={tabs} class="fe-tabs" role="tablist" aria-label="Режим панели">

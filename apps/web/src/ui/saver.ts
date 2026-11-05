@@ -76,6 +76,8 @@ export interface Saver {
   settled(): Promise<boolean>;
   /** Почему не удалась последняя запись (для вопроса при уходе); `null` — удалась. */
   failure(): string | null;
+  /** Поколение файла, на котором основана следующая запись. */
+  version(): number;
   dispose(): void;
 }
 
@@ -274,7 +276,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     const snap = await new Promise<Snapshot | null>((resolve) => {
       waiting = resolve;
       failWaiting = () => resolve(null);
-      ed.send({ type: 'snapshot', thumbnail: true });
+      ed.send(files.fullHistory ? { type: 'snapshot', thumbnail: true, full: true } : { type: 'snapshot', thumbnail: true });
     });
     waiting = null;
     failWaiting = null;
@@ -348,6 +350,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
         false,
       ),
     failure: () => failure,
+    version: () => base,
     dispose() {
       clearTimeout(journalTimer);
       clearTimeout(fullTimer);
