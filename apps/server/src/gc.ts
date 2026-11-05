@@ -46,10 +46,12 @@ async function sweepPending(pool: Pool): Promise<void> {
   );
 }
 
-/** Сколько байтов-записей удалено. Один проход на все процессы: сервер один, но блокировка дешевле ошибки. */
+/** Сколько байтов-записей удалено. Один проход за раз: сервер один, а `startGc` не запускает второй поверх первого. */
 export async function runGc(pool: Pool, blobs: BlobStore): Promise<number> {
-  await sweepPending(pool);
-  await sweepImages(pool);
+  // Шаги независимы: сбой одного (скажем, срок запроса на большой таблице картинок) не оставляет диск неубранным.
+  for (const sweep of [sweepPending, sweepImages]) {
+    await sweep(pool).catch((e: unknown) => console.error('Очистка:', e instanceof Error ? e.message : e));
+  }
   const { rows } = await pool.query<{ key: string }>(
     'SELECT key FROM blob_trash WHERE delete_after <= now() ORDER BY delete_after LIMIT $1',
     [BATCH],

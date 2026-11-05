@@ -14,15 +14,19 @@ export const INVITES_PER_ADDRESS = 5;
 const HOUR = 60 * 60;
 
 /** Письмо уходит после ответа: ответ приглашающему не зависит от адреса (`ALLOWED_EMAILS`, предел).
- * Адрес вне списка и сверх предела письма не получает, но запись остаётся: при входе он её получит. */
-export function sendInvite(deps: ApiDeps, to: string, mail: Mail): void {
+ * Адрес вне списка и сверх предела письма не получает, но запись остаётся: при входе он её получит.
+ * `onDropped` — письмо не ушло: то, что считало его отправленным, должно это забыть. */
+export function sendInvite(deps: ApiDeps, to: string, mail: Mail, onDropped?: () => Promise<unknown>): void {
   // Адрес разбирал маршрут, а адрес из базы — вход; всё равно: письмо уходит только на проверенный адрес.
   const address = parseEmail(to);
   if (!address) return;
   setTimeout(() => {
     void (async () => {
       const sent = await valkeyStorage(deps.valkey).increment!(`invite-to:${mailbox(address)}`, HOUR);
-      if (sent > INVITES_PER_ADDRESS || !emailAllowed(address, deps.allowedEmails)) return;
+      if (sent > INVITES_PER_ADDRESS || !emailAllowed(address, deps.allowedEmails)) {
+        await onDropped?.();
+        return;
+      }
       await deps.mailer.send(mail);
     })().catch((e: unknown) => console.error('Не удалось отправить приглашение:', mailFailure(e)));
   }, 0);

@@ -62,6 +62,7 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             'Content-Disposition': 'attachment',
             'Cache-Control': 'no-store',
             'Content-Length': String(blob.size),
+            'Cross-Origin-Resource-Policy': 'same-origin',
           },
         });
       },
@@ -76,7 +77,8 @@ export function imageRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         if (!ctx.req.body) return apiError(400, 'BAD_REQUEST');
         if (Number(ctx.req.headers.get('content-length') ?? 0) > MAX_IMAGE_BYTES) return apiError(413, 'TOO_LARGE');
         if (!gate.enter(ctx.user.id)) return busy();
-        const key = `images/${ctx.params.hash}/${randomUUID()}`;
+        // Плоско: неудачная загрузка не оставляет каталога на каждую картинку.
+        const key = `images/${ctx.params.hash}-${randomUUID()}`;
         try {
           await beginUpload(pool, key);
           const hasher = blake3.create();

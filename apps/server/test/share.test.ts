@@ -229,6 +229,24 @@ test('предел писем считается по ящику: вариант
   expect(boxed()).toHaveLength(INVITES_PER_ADDRESS);
 });
 
+test('запрос доступа съел предел адреса владельца: письма нет, но повторить можно', async () => {
+  const f = await s.newFile(owner);
+  await s.valkey.set('invite-to:owner@example.com', String(INVITES_PER_ADDRESS));
+  const ask = () => s.call(guest, 'POST', `/api/files/${f.id}/request-access`);
+  expect((await ask()).status).toBe(200);
+  const key = `request-access:${f.id}:${guest.id}`;
+  for (let i = 0; i < 500 && (await s.valkey.get(key)) !== null; i++) await Bun.sleep(10);
+  expect(await s.valkey.get(key)).toBeNull();
+  await s.valkey.del('invite-to:owner@example.com');
+  const seen = s.mails.filter((m) => m.to === owner.email).length;
+  expect((await ask()).status).toBe(200);
+  await s.waitMail(owner.email, seen);
+  expect(s.mails.filter((m) => m.to === owner.email)).toHaveLength(seen + 1);
+  // Письмо ушло — второго сутки нет.
+  expect((await ask()).status).toBe(200);
+  expect(await s.valkey.get(key)).toBe('2');
+});
+
 test('письмо уходит только на проверенный адрес', async () => {
   const sent: string[] = [];
   const deps = {

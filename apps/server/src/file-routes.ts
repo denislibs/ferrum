@@ -419,6 +419,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             'Content-Type': 'application/octet-stream',
             'Content-Disposition': 'attachment',
             'Content-Length': String(blob.size),
+            'Cross-Origin-Resource-Policy': 'same-origin',
           },
         });
       },
@@ -508,7 +509,12 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         const blob = rows[0]?.thumb_key ? await blobs.open(rows[0].thumb_key) : null;
         if (!blob) return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
         return new Response(blob, {
-          headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'Content-Length': String(blob.size) },
+          headers: {
+            'Content-Type': 'image/png',
+            'Cache-Control': 'no-store',
+            'Content-Length': String(blob.size),
+            'Cross-Origin-Resource-Policy': 'same-origin',
+          },
         });
       },
     },

@@ -1,8 +1,10 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { MAX_IMAGE_REFS } from '@ferrum/protocol';
+import { LIMITS } from '../src/api';
 import { runGc } from '../src/gc';
 import { apiStand, container, type Person } from './api-stand';
 
@@ -28,21 +30,35 @@ test('загрузка и чтение: хэш сверяется, байты т
   const res = await get(owner, f.id, hash);
   expect(res.headers.get('content-type')).toBe('application/octet-stream');
   expect(res.headers.get('content-disposition')).toBe('attachment');
+  expect(res.headers.get('cross-origin-resource-policy')).toBe('same-origin');
   expect(new Uint8Array(await res.arrayBuffer())).toEqual(img);
 });
 
 test('байты не совпали с хэшем: 400, ни записи, ни байтов', async () => {
   const f = await s.newFile(owner);
+  const onDisk = () => (existsSync(join(s.dataDir, 'images')) ? readdirSync(join(s.dataDir, 'images')).sort() : []);
+  const before = onDisk();
   const res = await put(owner, f.id, hashOf(bytes(1)), bytes(2));
   expect(res.status).toBe(400);
   expect(await res.json()).toEqual({ error: 'HASH_MISMATCH' });
   expect((await s.pool.query('SELECT 1 FROM image')).rowCount).toBe(0);
   expect((await head(owner, f.id, hashOf(bytes(1)))).status).toBe(404);
   // Ни байтов на диске, ни намерения загрузки: очистке дожидаться нечего.
-  const files = readdirSync(join(s.dataDir, 'images'), { recursive: true, withFileTypes: true }).filter((e) => e.isFile());
-  expect(files).toEqual([]);
+  // И пустых каталогов на каждую картинку тоже нет.
+  expect(onDisk()).toEqual(before);
   expect((await s.pool.query('SELECT 1 FROM blob_pending')).rowCount).toBe(0);
 });
+
+test('предел частоты картинок свой: файл на 1300 картинок не упирается в чтение списков и не мешает им', async () => {
+  const who = await s.signIn('many@example.com');
+  const f = await s.newFile(who);
+  for (let batch = 0; batch < 13; batch++) {
+    const replies = await Promise.all(Array.from({ length: 100 }, () => head(who, f.id, 'a'.repeat(64))));
+    expect(replies.every((r) => r.status === 404)).toBe(true);
+  }
+  expect(LIMITS.images.max).toBeGreaterThanOrEqual(MAX_IMAGE_REFS / 2);
+  expect((await s.call(who, 'GET', '/api/files?section=drafts&start=0&count=1')).status).toBe(200);
+}, 30_000);
 
 test('сверх предела размера: 413 по `Content-Length`', async () => {
   const f = await s.newFile(owner);
@@ -163,11 +179,8 @@ test('очистка снимает отметку с картинки, у ко�
 const imagePath = (file: string, hash: string) => `/api/files/${file}/images/${hash}`;
 /** Байты этой картинки на диске. */
 const imageFiles = (hash: string) => {
-  try {
-    return readdirSync(join(s.dataDir, 'images', hash)).length;
-  } catch {
-    return 0;
-  }
+  const dir = join(s.dataDir, 'images');
+  return existsSync(dir) ? readdirSync(dir).filter((name) => name.startsWith(`${hash}-`)).length : 0;
 };
 const pending = async () => (await s.pool.query('SELECT 1 FROM blob_pending')).rowCount;
 
@@ -299,4 +312,19 @@ test('байты не совпали с хэшем: и файла на диск�
   expect((await put(owner, f.id, hash, bytes(14))).status).toBe(400);
   expect(imageFiles(hash)).toBe(0);
   expect(await pending()).toBe(0);
+});
+
+test('сбой очистки картинок не мешает убрать байты из списка на удаление', async () => {
+  const f = await s.newFile(owner);
+  await s.writeContent(owner, f.id, 0);
+  await s.writeContent(owner, f.id, 1);
+  await s.pool.query(`UPDATE blob_trash SET delete_after = now() - interval '1 hour'`);
+  const before = (await s.pool.query('SELECT 1 FROM blob_trash')).rows.length;
+  expect(before).toBeGreaterThan(0);
+  await s.pool.query(
+    `INSERT INTO image (hash, size, blob_key, orphaned_at) VALUES ('${'b'.repeat(64)}', 1, 'images/старый', now() - interval '90 days')`,
+  );
+  const removed = await s.failing('image', 'DELETE', () => runGc(s.pool, s.blobs));
+  expect(removed).toBe(before);
+  expect((await s.pool.query('SELECT 1 FROM image')).rowCount).toBe(1);
 });

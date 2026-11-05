@@ -234,10 +234,14 @@ export function shareRoutes(deps: ApiDeps): Route[] {
         );
         const r = rows[0];
         if (r && r.rank === 0 && !r.trashed) {
-          const once = await valkeyStorage(deps.valkey).increment!(`request-access:${file}:${ctx.user.id}`, DAY);
+          const key = `request-access:${file}:${ctx.user.id}`;
+          const once = await valkeyStorage(deps.valkey).increment!(key, DAY);
           if (once === 1) {
             const from = ctx.user.name || ctx.user.email;
-            sendInvite(deps, r.email, accessRequestMail(r.email, from, r.name, `${deps.publicUrl}/#/file/${file}`));
+            // Письмо съел предел адреса владельца: человеку ответили «отправлено», повторить он сможет.
+            sendInvite(deps, r.email, accessRequestMail(r.email, from, r.name, `${deps.publicUrl}/#/file/${file}`), () =>
+              deps.valkey.del(key),
+            );
           }
         }
         return ok({ ok: true });
