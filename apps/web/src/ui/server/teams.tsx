@@ -5,6 +5,7 @@
 import { MAX_TEAM_NAME_CHARS, parseEmail, type TeamDto, type TeamMembersDto } from '@ferrum/protocol';
 import { createSignal, For, onCleanup, Show } from 'solid-js';
 import type { Section } from '../../core/file-list';
+import { ConfirmDialog } from '../dialog';
 import type { NavEntry } from '../extensions';
 import type { MenuItem } from '../menu';
 import type { FileMeta } from '../../core/file-list';
@@ -24,22 +25,28 @@ import {
   type ApiResult,
 } from './server-api';
 
-const [teams, setTeams] = createSignal<TeamDto[]>([]);
+/** `null` — список ещё ни разу не пришёл. */
+const [teams, setTeams] = createSignal<TeamDto[] | null>(null);
+/** Последнее чтение не удалось: прежний список остаётся, панель и диалог говорят об этом. */
+const [teamsFailure, setTeamsFailure] = createSignal<string | null>(null);
 /** Поколение: ответ на прежний запрос списка не затирает новый. */
 let teamsGeneration = 0;
 
-export async function refreshTeams(): Promise<string | null> {
+export async function refreshTeams(): Promise<void> {
   const my = ++teamsGeneration;
   const r = await getTeams();
-  if (my !== teamsGeneration) return null;
-  if (!r.ok) return apiFailureText(r.failure);
+  if (my !== teamsGeneration) return;
+  if (!r.ok) {
+    setTeamsFailure(apiFailureText(r.failure));
+    return;
+  }
+  setTeamsFailure(null);
   setTeams(r.value.teams);
-  return null;
 }
 
 export function teamNavEntries(): NavEntry[] {
   const out: NavEntry[] = [];
-  for (const t of teams()) {
+  for (const t of teams() ?? []) {
     out.push({ kind: 'label', title: t.name });
     for (const p of t.projects) out.push({ kind: 'section', id: `project:${p.id}`, title: p.name, icon: 'file' });
   }
@@ -51,11 +58,14 @@ export function teamSectionTitle(section: Section): string | null {
   if (section === 'shared') return 'Доступные мне';
   if (!section.startsWith('project:')) return null;
   const id = section.slice(8);
-  for (const t of teams()) {
+  const list = teams();
+  // Список ещё не пришёл (или не пришёл совсем): имени пока нет, и говорить, что проекта нет, рано.
+  if (!list) return 'Проект';
+  for (const t of list) {
     const p = t.projects.find((x) => x.id === id);
     if (p) return p.name;
   }
-  return 'Проект';
+  return 'Проект удалён или недоступен';
 }
 
 /** Панель разделов: кнопка команд. Команды читаются при появлении экрана файлов. */
@@ -67,6 +77,14 @@ export function TeamsEntry() {
       <button class="fe-btn fe-files__extra-btn" onClick={() => setOpen(true)}>
         Команды…
       </button>
+      <Show when={teamsFailure()}>
+        <p class="fe-files__extra-note" role="alert">
+          Команды не загрузились{' '}
+          <button class="fe-btn" onClick={() => void refreshTeams()}>
+            Повторить
+          </button>
+        </p>
+      </Show>
       <Show when={open()}>
         <TeamsDialog onClose={() => setOpen(false)} />
       </Show>
@@ -81,8 +99,10 @@ function TeamsDialog(props: { onClose: () => void }) {
   const [busy, setBusy] = createSignal(false);
   let closed = false;
   onCleanup(() => (closed = true));
-  const team = () => teams().find((t) => t.id === selected()) ?? null;
-  void refreshTeams().then((e) => !closed && e && setError(e));
+  const team = () => teams()?.find((t) => t.id === selected()) ?? null;
+  /** Вопрос перед необратимым действием: окно поверх диалога, вне его обработчиков клавиш. */
+  const [ask, setAsk] = createSignal<Ask | null>(null);
+  void refreshTeams();
   const add = async (e: Event) => {
     e.preventDefault();
     if (!name().trim()) return;
@@ -96,68 +116,113 @@ function TeamsDialog(props: { onClose: () => void }) {
       return;
     }
     setName('');
+    // Страница откроется, когда команда появится в списке; не загрузился — сообщение и «Повторить».
+    setSelected(r.value.id);
     await refreshTeams();
-    if (!closed) setSelected(r.value.id);
   };
   return (
-    <Modal title="Команды" onClose={props.onClose}>
-      <Show when={error()}>
-        <p class="fe-share__error" role="alert">
-          {error()}
-        </p>
-      </Show>
-      <Show
-        when={team()}
-        fallback={
-          <>
-            <ul class="fe-share__people" aria-label="Ваши команды">
-              <For each={teams()} fallback={<li class="t-muted">Команд пока нет</li>}>
-                {(t) => (
-                  <li class="fe-share__person">
-                    <span class="fe-share__who t-strong">{t.name}</span>
-                    <button class="fe-btn fe-btn--secondary" onClick={() => setSelected(t.id)}>
-                      Открыть
-                    </button>
-                  </li>
+    <>
+      <Modal title="Команды" onClose={props.onClose}>
+        <Show when={error()}>
+          <p class="fe-share__error" role="alert">
+            {error()}
+          </p>
+        </Show>
+        <Show when={teamsFailure()}>
+          <p class="fe-share__error" role="alert">
+            {teamsFailure()}{' '}
+            <button class="fe-btn fe-btn--secondary" onClick={() => void refreshTeams()}>
+              Повторить
+            </button>
+          </p>
+        </Show>
+        <Show
+          when={team()}
+          fallback={
+            <>
+              <Show
+                when={teams()}
+                fallback={
+                  <Show when={!teamsFailure()}>
+                    <p class="t-muted">Загрузка…</p>
+                  </Show>
+                }
+              >
+                {(list) => (
+                  <ul class="fe-share__people" aria-label="Ваши команды">
+                    <For each={list()} fallback={<li class="t-muted">Команд пока нет</li>}>
+                      {(t) => (
+                        <li class="fe-share__person">
+                          <span class="fe-share__who t-strong">{t.name}</span>
+                          <button class="fe-btn fe-btn--secondary" onClick={() => setSelected(t.id)}>
+                            Открыть
+                          </button>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
                 )}
-              </For>
-            </ul>
-            <form class="fe-share__invite" novalidate onSubmit={(e) => void add(e)}>
-              <div class="fe-field fe-field--text fe-share__email">
-                <input
-                  aria-label="Имя новой команды"
-                  placeholder="Новая команда"
-                  maxlength={MAX_TEAM_NAME_CHARS}
-                  value={name()}
-                  onInput={(e) => setName(e.currentTarget.value)}
-                />
-              </div>
-              <button class="fe-btn fe-btn--primary" type="submit" disabled={busy()}>
-                Создать
-              </button>
-            </form>
-          </>
-        }
-        keyed
-      >
-        {(t) => <TeamPage team={t} onBack={() => setSelected(null)} />}
+              </Show>
+              <form class="fe-share__invite" novalidate onSubmit={(e) => void add(e)}>
+                <div class="fe-field fe-field--text fe-share__email">
+                  <input
+                    aria-label="Имя новой команды"
+                    placeholder="Новая команда"
+                    maxlength={MAX_TEAM_NAME_CHARS}
+                    value={name()}
+                    onInput={(e) => setName(e.currentTarget.value)}
+                  />
+                </div>
+                <button class="fe-btn fe-btn--primary" type="submit" disabled={busy()}>
+                  Создать
+                </button>
+              </form>
+            </>
+          }
+        >
+          {/* Без `keyed`: новый объект команды из списка не пересоздаёт страницу, ввод и фокус остаются. */}
+          {(t) => <TeamPage team={t} ask={setAsk} onBack={() => setSelected(null)} />}
+        </Show>
+        <div class="fe-dialog__actions">
+          <button class="fe-btn" onClick={props.onClose}>
+            Закрыть
+          </button>
+        </div>
+      </Modal>
+      <Show when={ask()}>
+        {(a) => (
+          <ConfirmDialog
+            title={a().title}
+            text={a().text}
+            confirm={a().confirm}
+            cancel="Отмена"
+            onCancel={() => setAsk(null)}
+            onConfirm={() => {
+              const go = a().go;
+              setAsk(null);
+              go();
+            }}
+          />
+        )}
       </Show>
-      <div class="fe-dialog__actions">
-        <button class="fe-btn" onClick={props.onClose}>
-          Закрыть
-        </button>
-      </div>
-    </Modal>
+    </>
   );
 }
 
-function TeamPage(props: { team: TeamDto; onBack: () => void }) {
-  const id = props.team.id;
-  const owner = () => props.team.role === 'owner';
+interface Ask {
+  title: string;
+  text: string;
+  confirm: string;
+  go: () => void;
+}
+
+function TeamPage(props: { team: () => TeamDto; ask: (a: Ask) => void; onBack: () => void }) {
+  const id = props.team().id;
+  const owner = () => props.team().role === 'owner';
   const [members, setMembers] = createSignal<TeamMembersDto['members'] | null>(null);
   const [email, setEmail] = createSignal('');
   const [project, setProject] = createSignal('');
-  const [teamName, setTeamName] = createSignal(props.team.name);
+  const [teamName, setTeamName] = createSignal(props.team().name);
   const [error, setError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   let generation = 0;
@@ -174,7 +239,8 @@ function TeamPage(props: { team: TeamDto; onBack: () => void }) {
     else setError(apiFailureText(r.failure));
   }
   const showMembers = (v: TeamMembersDto) => setMembers(v.members);
-  void run(() => getMembers(id), showMembers);
+  const loadMembers = () => void run(() => getMembers(id), showMembers);
+  loadMembers();
   return (
     <>
       <button class="fe-btn" onClick={props.onBack}>
@@ -185,7 +251,7 @@ function TeamPage(props: { team: TeamDto; onBack: () => void }) {
           {error()}
         </p>
       </Show>
-      <Show when={owner()} fallback={<h3 class="t-strong">{props.team.name}</h3>}>
+      <Show when={owner()} fallback={<h3 class="t-strong">{props.team().name}</h3>}>
         <form
           class="fe-share__invite"
           novalidate
@@ -213,7 +279,7 @@ function TeamPage(props: { team: TeamDto; onBack: () => void }) {
       </Show>
       <h3 class="t-strong">Проекты</h3>
       <ul class="fe-share__people" aria-label="Проекты команды">
-        <For each={props.team.projects} fallback={<li class="t-muted">Проектов пока нет</li>}>
+        <For each={props.team().projects} fallback={<li class="t-muted">Проектов пока нет</li>}>
           {(p) => (
             <li class="fe-share__person">
               <span class="fe-share__who">{p.name}</span>
@@ -223,10 +289,16 @@ function TeamPage(props: { team: TeamDto; onBack: () => void }) {
                   aria-label={`Удалить проект: ${p.name}`}
                   disabled={busy()}
                   onClick={() =>
-                    void run(
-                      () => deleteProject(p.id),
-                      () => void refreshTeams(),
-                    )
+                    props.ask({
+                      title: 'Удалить проект?',
+                      text: `Проект «${p.name}» будет удалён без возможности восстановления`,
+                      confirm: 'Удалить',
+                      go: () =>
+                        void run(
+                          () => deleteProject(p.id),
+                          () => void refreshTeams(),
+                        ),
+                    })
                   }
                 >
                   Удалить
@@ -266,7 +338,19 @@ function TeamPage(props: { team: TeamDto; onBack: () => void }) {
       </form>
       <h3 class="t-strong">Участники</h3>
       <ul class="fe-share__people" aria-label="Участники команды">
-        <For each={members() ?? []}>
+        <For
+          each={members() ?? []}
+          fallback={
+            <li class="t-muted">
+              <Show when={!busy() && error()} fallback="Загрузка…">
+                Список не загрузился{' '}
+                <button class="fe-btn fe-btn--secondary" onClick={loadMembers}>
+                  Повторить
+                </button>
+              </Show>
+            </li>
+          }
+        >
           {(m) => (
             <li class="fe-share__person">
               <span class="fe-share__who t-muted">{m.email}</span>
@@ -276,7 +360,14 @@ function TeamPage(props: { team: TeamDto; onBack: () => void }) {
                   class="fe-btn"
                   aria-label={`Убрать: ${m.email}`}
                   disabled={busy()}
-                  onClick={() => void run(() => removeMember(id, m.id), showMembers)}
+                  onClick={() =>
+                    props.ask({
+                      title: 'Убрать участника?',
+                      text: `${m.email} потеряет доступ к файлам команды, а его файлы перейдут владельцу команды`,
+                      confirm: 'Убрать',
+                      go: () => void run(() => removeMember(id, m.id), showMembers),
+                    })
+                  }
                 >
                   Убрать
                 </button>
@@ -323,13 +414,19 @@ function TeamPage(props: { team: TeamDto; onBack: () => void }) {
           class="fe-btn"
           disabled={busy()}
           onClick={() =>
-            void run(
-              () => deleteTeam(id),
-              () => {
-                void refreshTeams();
-                props.onBack();
-              },
-            )
+            props.ask({
+              title: 'Удалить команду?',
+              text: `Команда «${props.team().name}» будет удалена без возможности восстановления`,
+              confirm: 'Удалить',
+              go: () =>
+                void run(
+                  () => deleteTeam(id),
+                  () => {
+                    void refreshTeams();
+                    props.onBack();
+                  },
+                ),
+            })
           }
         >
           Удалить команду
@@ -377,7 +474,7 @@ export function MoveDialog() {
                 Сюда
               </button>
             </li>
-            <For each={teams().flatMap((t) => t.projects.map((p) => ({ ...p, team: t.name })))}>
+            <For each={(teams() ?? []).flatMap((t) => t.projects.map((p) => ({ ...p, team: t.name })))}>
               {(p) => (
                 <li class="fe-share__person">
                   <span class="fe-share__who">

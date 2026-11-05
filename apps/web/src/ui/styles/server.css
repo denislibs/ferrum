@@ -85,6 +85,11 @@
   margin: 0;
   color: var(--danger, #e5484d);
 }
+.fe-files__extra-note {
+  margin: 4px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+}
 .fe-files__extra-btn {
   width: 100%;
   justify-content: flex-start;

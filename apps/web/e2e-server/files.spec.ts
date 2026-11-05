@@ -964,6 +964,221 @@ test('картинку убрали с сервера, вкладка счита
   await a.context().close();
 });
 
+const closeDialog = (p: Page) => p.getByRole('button', { name: 'Закрыть' }).click();
+
+/** Команда с проектом у владельца; диалог остаётся на странице команды. */
+async function teamWithProject(a: Page, project = 'Сайт'): Promise<void> {
+  await a.getByRole('button', { name: 'Команды…' }).click();
+  await a.getByLabel('Имя новой команды').fill('Студия');
+  await a.getByRole('button', { name: 'Создать' }).click();
+  await a.getByLabel('Имя нового проекта').fill(project);
+  await a.getByRole('button', { name: 'Добавить проект' }).click();
+  await expect(a.getByRole('list', { name: 'Проекты команды' }).getByText(project)).toBeVisible();
+}
+
+const changed = (p: Page) =>
+  p.evaluate(() => {
+    const c = new BroadcastChannel('ferrum-server-files');
+    c.postMessage('changed');
+    c.close();
+  });
+
+test('страница команды: обновление списка не стирает ввод, фокус и участников (T8-I1)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await teamWithProject(a);
+  await expect(a.getByRole('list', { name: 'Участники команды' }).getByText('Владелец')).toBeVisible();
+  const field = a.getByLabel('Адрес нового участника');
+  await field.fill('наполовину@');
+  await field.focus();
+  let members = 0;
+  a.on('request', (r) => {
+    if (r.url().endsWith('/members')) members++;
+  });
+  const list = a.waitForResponse((r) => r.url().endsWith('/api/teams'));
+  await changed(a);
+  await list;
+  // Новый объект команды дошёл до экрана: имя нового проекта появилось бы, а поле то же.
+  await a.getByLabel('Имя нового проекта').fill('Ещё');
+  await field.focus();
+  const list2 = a.waitForResponse((r) => r.url().endsWith('/api/teams'));
+  await changed(a);
+  await list2;
+  await expect(field).toHaveValue('наполовину@');
+  await expect(field).toBeFocused();
+  await expect(a.getByLabel('Имя нового проекта')).toHaveValue('Ещё');
+  await expect(a.getByRole('list', { name: 'Участники команды' }).getByText('Владелец')).toBeVisible();
+  expect(members).toBe(0);
+  await a.context().close();
+});
+
+test('команды: загрузка, сбой и пусто различимы, фоновый сбой виден, есть «Повторить» (T8-I2, T8-I3, T8-I4)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  // Сбой при первом чтении: панель говорит об этом, диалог не обещает «Команд пока нет».
+  await a
+    .context()
+    .route('**/api/teams', (r) => (r.request().method() === 'GET' ? r.fulfill({ status: 503, body: 'сбой' }) : r.continue()));
+  await a.reload();
+  await expect(a.getByRole('alert').getByText('Команды не загрузились')).toBeVisible();
+  await a.getByRole('button', { name: 'Команды…' }).click();
+  const dialog = a.getByRole('dialog', { name: 'Команды' });
+  await expect(dialog.getByRole('alert')).toContainText('Сервер недоступен');
+  await expect(dialog.getByText('Команд пока нет')).toHaveCount(0);
+  await a.context().unroute('**/api/teams');
+  await dialog.getByRole('button', { name: 'Повторить' }).click();
+  await expect(dialog.getByText('Команд пока нет')).toBeVisible();
+  await expect(a.getByText('Команды не загрузились')).toHaveCount(0);
+  // Загрузка — не «пусто».
+  await closeDialog(a);
+  const { promise: letGo, resolve } = Promise.withResolvers<void>();
+  await a.context().route('**/api/teams', async (r) => {
+    await letGo;
+    await r.continue();
+  });
+  await a.reload();
+  await a.getByRole('button', { name: 'Команды…' }).click();
+  await expect(dialog.getByText('Загрузка…')).toBeVisible();
+  await expect(dialog.getByText('Команд пока нет')).toHaveCount(0);
+  resolve();
+  await expect(dialog.getByText('Команд пока нет')).toBeVisible();
+  await a.context().unroute('**/api/teams');
+  // Команда создана, а список не прочитался: сообщение, повтор открывает её страницу.
+  await a.context().route('**/api/teams', (r) => (r.request().method() === 'GET' ? r.abort() : r.continue()));
+  await dialog.getByLabel('Имя новой команды').fill('Студия');
+  await dialog.getByRole('button', { name: 'Создать' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Нет связи с сервером');
+  await a.context().unroute('**/api/teams');
+  await dialog.getByRole('button', { name: 'Повторить' }).click();
+  await expect(dialog.getByLabel('Имя нового проекта')).toBeVisible();
+  // Участники не загрузились: не пустой список, а повтор.
+  await dialog.getByRole('button', { name: '← Все команды' }).click();
+  await a.context().route('**/members', (r) => r.fulfill({ status: 503, body: 'сбой' }));
+  await dialog.getByRole('button', { name: 'Открыть' }).click();
+  await expect(dialog.getByText('Список не загрузился')).toBeVisible();
+  await a.context().unroute('**/members');
+  await dialog.getByRole('button', { name: 'Повторить' }).click();
+  await expect(dialog.getByRole('list', { name: 'Участники команды' }).getByText('Владелец')).toBeVisible();
+  await closeDialog(a);
+  // Фоновый сбой при показанном списке: строка в панели, раздел команды на месте.
+  await a.context().route('**/api/teams', (r) => r.abort());
+  await changed(a);
+  await expect(a.getByRole('alert').getByText('Команды не загрузились')).toBeVisible();
+  await a.context().unroute('**/api/teams');
+  await a.getByRole('alert').getByRole('button', { name: 'Повторить' }).click();
+  await expect(a.getByText('Команды не загрузились')).toHaveCount(0);
+  await a.context().close();
+});
+
+test('диалог команды: убрать, переименовать, удалить, неверный адрес, вид участника, отказ и сбой (T8-I5)', async ({ browser }, info) => {
+  const mail = newEmail(info.project.name);
+  const a = await person(browser, newEmail(info.project.name));
+  const b = await person(browser, mail);
+  await teamWithProject(a);
+  const dialog = a.getByRole('dialog', { name: 'Команды' });
+  // Неверный адрес — без запроса.
+  await dialog.getByLabel('Адрес нового участника').fill('не адрес');
+  await dialog.getByRole('button', { name: 'Пригласить' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Проверьте адрес');
+  // Отказ сервера и сбой сети дают понятный текст.
+  await a.context().route('**/invite', (r) => r.fulfill({ status: 403, contentType: 'application/json', body: '{"error":"FORBIDDEN"}' }));
+  await dialog.getByLabel('Адрес нового участника').fill(mail);
+  await dialog.getByRole('button', { name: 'Пригласить' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Недостаточно прав');
+  await a.context().unroute('**/invite');
+  await a.context().route('**/invite', (r) => r.abort());
+  await dialog.getByRole('button', { name: 'Пригласить' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Нет связи с сервером');
+  await a.context().unroute('**/invite');
+  await dialog.getByRole('button', { name: 'Пригласить' }).click();
+  await expect(dialog.getByRole('list', { name: 'Участники команды' }).getByText(mail)).toBeVisible();
+  // Переименование видно в панели.
+  await dialog.getByLabel('Имя команды').fill('Мастерская');
+  await dialog.getByRole('button', { name: 'Переименовать' }).click();
+  await expect(a.getByText('Мастерская').first()).toBeVisible();
+  // Вид участника: без форм управления.
+  await b.reload();
+  await b.getByRole('button', { name: 'Команды…' }).click();
+  const theirs = b.getByRole('dialog', { name: 'Команды' });
+  await theirs.getByRole('button', { name: 'Открыть' }).click();
+  await expect(theirs.getByRole('list', { name: 'Участники команды' }).getByText(mail)).toBeVisible();
+  await expect(theirs.getByLabel('Имя команды')).toHaveCount(0);
+  await expect(theirs.getByLabel('Адрес нового участника')).toHaveCount(0);
+  await expect(theirs.getByRole('button', { name: /^Убрать/ })).toHaveCount(0);
+  await expect(theirs.getByRole('button', { name: 'Удалить команду' })).toHaveCount(0);
+  await expect(theirs.getByRole('button', { name: /^Удалить проект/ })).toHaveCount(0);
+  await theirs.getByRole('button', { name: '← Все команды' }).click();
+  await expect(theirs.getByRole('list', { name: 'Ваши команды' })).toBeVisible();
+  await b.getByRole('button', { name: 'Закрыть' }).click();
+  // «Убрать»: сначала вопрос; отмена ничего не делает, согласие снимает доступ.
+  await dialog.getByRole('button', { name: `Убрать: ${mail}` }).click();
+  const ask = a.getByRole('dialog', { name: 'Убрать участника?' });
+  await ask.getByRole('button', { name: 'Отмена' }).click();
+  await expect(dialog.getByRole('list', { name: 'Участники команды' }).getByText(mail)).toBeVisible();
+  await dialog.getByRole('button', { name: `Убрать: ${mail}` }).click();
+  await ask.getByRole('button', { name: 'Убрать' }).click();
+  await expect(dialog.getByRole('list', { name: 'Участники команды' }).getByText(mail)).toHaveCount(0);
+  await b.reload();
+  await b.getByRole('button', { name: 'Команды…' }).click();
+  await expect(b.getByRole('dialog', { name: 'Команды' }).getByText('Команд пока нет')).toBeVisible();
+  // Удаление проекта с вопросом; команду с проектом удалить нельзя — объяснение.
+  await dialog.getByRole('button', { name: 'Удалить команду' }).click();
+  await a.getByRole('dialog', { name: 'Удалить команду?' }).getByRole('button', { name: 'Удалить' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Сначала уберите то, что внутри');
+  await dialog.getByRole('button', { name: 'Удалить проект: Сайт' }).click();
+  await a.getByRole('dialog', { name: 'Удалить проект?' }).getByRole('button', { name: 'Удалить' }).click();
+  await expect(dialog.getByText('Проектов пока нет')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Удалить команду' }).click();
+  await a.getByRole('dialog', { name: 'Удалить команду?' }).getByRole('button', { name: 'Удалить' }).click();
+  await expect(dialog.getByText('Команд пока нет')).toBeVisible();
+  await a.context().close();
+  await b.context().close();
+});
+
+test('«Переместить…»: в проект и обратно, текущее место недоступно, сбой — сообщение (T8-I5)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await teamWithProject(a);
+  await closeDialog(a);
+  await storedFile(a);
+  await a.goto('/#/drafts');
+  const row = () => a.getByRole('option', { name: 'Без названия' });
+  await row().click({ button: 'right' });
+  await a.getByRole('menuitem', { name: 'Переместить…' }).click();
+  const move = a.getByRole('dialog', { name: 'Переместить: Без названия' });
+  const places = move.getByRole('list', { name: 'Куда переместить' }).getByRole('listitem');
+  await expect(places.filter({ hasText: 'Черновики' }).getByRole('button', { name: 'Сюда' })).toBeDisabled();
+  await a.context().route('**/move', (r) => r.abort());
+  await places.filter({ hasText: 'Студия: Сайт' }).getByRole('button', { name: 'Сюда' }).click();
+  await expect(move.getByRole('alert')).toContainText('Нет связи с сервером');
+  await a.context().unroute('**/move');
+  await places.filter({ hasText: 'Студия: Сайт' }).getByRole('button', { name: 'Сюда' }).click();
+  await expect(move).toHaveCount(0);
+  await expect(a.getByText('Здесь пока нет файлов')).toBeVisible();
+  await a.getByRole('option', { name: 'Сайт' }).click();
+  await expect(row()).toBeVisible();
+  await row().click({ button: 'right' });
+  await a.getByRole('menuitem', { name: 'Переместить…' }).click();
+  await expect(places.filter({ hasText: 'Студия: Сайт' }).getByRole('button', { name: 'Сюда' })).toBeDisabled();
+  await places.filter({ hasText: 'Черновики' }).getByRole('button', { name: 'Сюда' }).click();
+  await expect(a.getByText('Здесь пока нет файлов')).toBeVisible();
+  await a.context().close();
+});
+
+test('раздел удалённого проекта: заголовок говорит об этом, а не «Проект» (T8-Minor)', async ({ browser }, info) => {
+  const a = await person(browser, newEmail(info.project.name));
+  await teamWithProject(a);
+  const dialog = a.getByRole('dialog', { name: 'Команды' });
+  await closeDialog(a);
+  await a.getByRole('option', { name: 'Сайт' }).click();
+  await expect(title(a)).toHaveText('Сайт');
+  await a.getByRole('button', { name: 'Команды…' }).click();
+  await dialog.getByRole('button', { name: 'Открыть' }).click();
+  await dialog.getByRole('button', { name: 'Удалить проект: Сайт' }).click();
+  await a.getByRole('dialog', { name: 'Удалить проект?' }).getByRole('button', { name: 'Удалить' }).click();
+  await expect(dialog.getByText('Проектов пока нет')).toBeVisible();
+  await closeDialog(a);
+  await expect(title(a)).toHaveText('Проект удалён или недоступен');
+  await a.context().close();
+});
+
 test('файл 100 000 узлов: запись и чтение через сервер, основной поток не занят @big', async ({ browser }, info) => {
   test.skip(info.project.name === 'server-firefox', 'размер проверяется в одном браузере');
   test.setTimeout(240_000);
