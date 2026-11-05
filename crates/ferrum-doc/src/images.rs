@@ -46,6 +46,13 @@ impl ImageStore {
         self.by_hash.insert(hash, bytes);
     }
 
+    /// Картинка из журнала файла на сервере: сервер мог её не видеть (вкладка упала до отправки, правка
+    /// сделана без сети), а правку со ссылкой на неё журнал отправит. Выгрузка идемпотентна.
+    pub(crate) fn insert_unsynced(&mut self, hash: String, bytes: Vec<u8>) {
+        self.sync_fresh.push(hash.clone());
+        self.by_hash.insert(hash, bytes);
+    }
+
     fn fresh_list(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
         self.fresh.lock().unwrap_or_else(|e| e.into_inner())
     }

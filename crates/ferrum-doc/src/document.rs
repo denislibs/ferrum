@@ -880,7 +880,11 @@ impl Document {
             }
         }
         for (hash, bytes) in images {
-            self.images.insert_verified(hash, bytes);
+            if self.catches_up {
+                self.images.insert_unsynced(hash, bytes);
+            } else {
+                self.images.insert_verified(hash, bytes);
+            }
         }
         if skipped_read_only {
             out.warnings

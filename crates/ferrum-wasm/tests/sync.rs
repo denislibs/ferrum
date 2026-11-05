@@ -5,6 +5,7 @@
 
 use ferrum_doc::SyncVersion;
 use ferrum_editor::{Input, Modifiers, Platform, PointerEvent};
+use ferrum_render::CpuBackend;
 use ferrum_wasm::core::Core;
 use ferrum_wasm::protocol::*;
 use kurbo::Size;
@@ -347,3 +348,91 @@ fn foreign_image_reference_is_requested_and_bytes_are_checked() {
     });
     assert!(b.editor().document().images.get(&hash).is_some());
 }
+
+fn drag(c: &mut Core, from: (f64, f64), to: (f64, f64), t: f64) {
+    c.handle(Input::PointerDown(PointerEvent::new(
+        from,
+        Modifiers::NONE,
+        t,
+    )));
+    c.handle(Input::PointerMove(PointerEvent::new(
+        to,
+        Modifiers::NONE,
+        t + 100.0,
+    )));
+    c.handle(Input::PointerUp(PointerEvent::new(
+        to,
+        Modifiers::NONE,
+        t + 200.0,
+    )));
+}
+
+/// Файл на сервере и журнал браузера с картинкой и правкой, которую сервер не видел.
+fn journal_with_image(bytes: &[u8]) -> Vec<u8> {
+    let mut a = opened(bytes);
+    a.command(Command::PlaceImage {
+        bytes: ByteBuf::from(tiny_png()),
+    });
+    drag(&mut a, (100.0, 100.0), (200.0, 200.0), 1000.0);
+    a.command(Command::FlushJournal);
+    a.take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Journal { bytes: Some(b), .. } => Some(b.into_vec()),
+            _ => None,
+        })
+        .expect("пачка журнала")
+}
+
+fn reopened(bytes: &[u8], journal: Vec<u8>) -> Core {
+    let mut c = Core::new(
+        Platform::Windows,
+        Size::new(800.0, 600.0),
+        1.0,
+        Backend::Cpu,
+    );
+    c.command(Command::OpenWithJournal {
+        bytes: ByteBuf::from(bytes.to_vec()),
+        journal: vec![ByteBuf::from(journal)],
+        remote: Some(true),
+    });
+    c.command(Command::SyncStart);
+    c
+}
+
+/// Ответы сервера, который знает только чистый файл: версии берутся у открывшего этот файл.
+fn clean_versions(bytes: &[u8]) -> Vec<(String, ByteBuf)> {
+    let mut x = opened(bytes);
+    x.command(Command::SyncReset);
+    x.command(Command::SyncFlush);
+    x.take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            CoreEvent::SyncSubscribe { doc, version } => Some((doc, version)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn image_restored_from_journal_goes_to_server_before_the_edit() {
+    let bytes = file();
+    let journal = journal_with_image(&bytes);
+    let mut c = reopened(&bytes, journal);
+    c.command(Command::SyncFlush);
+    c.take_events();
+    for (doc, version) in clean_versions(&bytes) {
+        c.command(Command::SyncSubscribed { doc, version });
+    }
+    c.command(Command::SyncFlush);
+    let ev = c.take_events();
+    let image = ev
+        .iter()
+        .position(|e| matches!(e, CoreEvent::LocalImage { .. }));
+    let update = ev
+        .iter()
+        .position(|e| matches!(e, CoreEvent::LocalUpdates { .. }));
+    assert!(image.is_some() && update.is_some(), "{ev:?}");
+    assert!(image < update, "байты раньше ссылки: {ev:?}");
+}
+
