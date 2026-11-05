@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import { createPool } from '../src/db';
 import { tcpProxy, TEST_DATABASE_URL } from './helpers';
 
@@ -43,3 +44,21 @@ test('база зависла после подключения: запрос о
   await expect(pool.query('SELECT 2')).rejects.toThrow('timeout');
   expect(Date.now() - started).toBeLessThan(1500);
 });
+
+test('обрыв занятого соединения: запрос получает 503, процесс и пул живут, Valkey тоже переживает обрыв', async () => {
+  const probe = Bun.spawn(['bun', 'run', join(import.meta.dir, 'connection-drop-probe.ts')], { stdout: 'pipe', stderr: 'inherit' });
+  const [text, code] = await Promise.all([new Response(probe.stdout).text(), probe.exited]);
+  expect(code).toBe(0);
+  const out = JSON.parse(text.trim().split('\n').at(-1)!);
+  expect(out).toMatchObject({
+    transaction: 503,
+    transactionError: { error: 'UNAVAILABLE' },
+    afterTransaction: 200,
+    query: 503,
+    afterQuery: 200,
+    invites: 'отказ',
+    afterInvites: 200,
+    next: 200,
+    afterValkey: 200,
+  });
+}, 60_000);

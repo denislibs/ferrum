@@ -25,6 +25,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { apiError, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
 import { BlobStalled, BlobTooLarge } from './blob-store';
+import { inTransaction } from './db';
 
 /** Клиент молчит дольше этого посреди загрузки — обрыв. */
 export const UPLOAD_IDLE_MS = 60_000;
@@ -34,21 +35,6 @@ export const BLOB_GRACE_SECONDS = 120;
 export const MAX_UPLOADS_PER_USER = 8;
 export const MAX_UPLOADS = 32;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-
-export async function inTransaction<T>(pool: Pool, work: (c: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const out = await work(client);
-    await client.query('COMMIT');
-    return out;
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw e;
-  } finally {
-    client.release();
-  }
-}
 
 export const trashBlob = (c: PoolClient, key: string | null) =>
   key

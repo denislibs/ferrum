@@ -7,7 +7,7 @@ import { createAuth } from './auth';
 import { FsBlobStore } from './blob-store';
 import { loadConfig } from './config';
 import { startGc } from './gc';
-import { createPool } from './db';
+import { createPool, guardPool } from './db';
 import { smtpMailer } from './mail';
 import { migrate } from './migrate';
 import { connectValkey } from './valkey';
@@ -20,7 +20,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => st
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
 // Миграции — своим соединением, без сроков запросов: ожидание блокировки и долгий файл не сбой.
-const migrations = new Pool({ connectionString: config.databaseUrl, max: 1 });
+const migrations = guardPool(new Pool({ connectionString: config.databaseUrl, max: 1 }));
 const applied = await migrate(migrations, join(import.meta.dir, '../migrations')).finally(() => migrations.end());
 if (applied.length > 0) console.log(`Миграции применены: ${applied.join(', ')}`);
 console.log('Подключение к Valkey…');

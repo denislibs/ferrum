@@ -8,11 +8,11 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { randomUUID } from 'node:crypto';
 import { apiError, ok, type ApiDeps, type Route } from './api';
+import { inTransaction } from './db';
 import {
   beginUpload,
   commitRefusal,
   dropUpload,
-  inTransaction,
   settleUpload,
   trashBlob,
   uploadFailure,

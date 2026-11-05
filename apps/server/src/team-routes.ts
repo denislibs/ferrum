@@ -13,7 +13,7 @@ import {
 } from '@ferrum/protocol';
 import type { PoolClient } from 'pg';
 import { apiError, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
-import { inTransaction } from './file-routes';
+import { inTransaction } from './db';
 import { sendInvite, teamInviteMail } from './invites';
 
 /** Кто в команде: и участники, и приглашённые. Только адреса: список не выдаёт, есть ли учётная запись. */

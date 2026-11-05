@@ -16,7 +16,8 @@ import {
 } from '@ferrum/protocol';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { apiError, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
-import { inTransaction, loadFile } from './file-routes';
+import { inTransaction } from './db';
+import { loadFile } from './file-routes';
 import { accessRequestMail, fileInviteMail, sendInvite } from './invites';
 import { valkeyStorage } from './secondary-storage';
 
