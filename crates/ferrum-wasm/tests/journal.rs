@@ -70,6 +70,7 @@ fn reopen(file: &[u8], batches: &[Vec<u8>]) -> (Core, Vec<CoreEvent>) {
     c.command(Command::OpenWithJournal {
         bytes: ByteBuf::from(file.to_vec()),
         journal: batches.iter().cloned().map(ByteBuf::from).collect(),
+        remote: None,
     });
     let ev = c.take_events();
     (c, ev)
@@ -203,6 +204,7 @@ fn too_many_batches_is_an_error_and_keeps_the_document() {
     c.command(Command::OpenWithJournal {
         bytes: ByteBuf::from(file),
         journal: vec![ByteBuf::new(); MAX_JOURNAL_BATCHES + 1],
+        remote: None,
     });
     let ev = c.take_events();
     assert!(ev.iter().any(|e| matches!(e, CoreEvent::Error { message }

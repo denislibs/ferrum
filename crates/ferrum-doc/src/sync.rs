@@ -15,6 +15,8 @@ pub const MAX_SYNC_BATCH_BYTES: usize = 16 * 1024 * 1024 - 1024;
 /// Больше стольких записей в векторе версий файл не принимает: столько сеансов правки на один
 /// документ не набирается, а чужой кадр не должен задавать размер разбора.
 pub const MAX_VERSION_PEERS: usize = 65_536;
+/// За один вызов `take_sync_updates`: вставка на сотни мегабайт идёт порциями, по мере места в сокете.
+pub const MAX_SYNC_FLUSH_BYTES: usize = 32 * 1024 * 1024;
 
 /// Единица синхронизации: корневой документ или страница.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,19 +174,21 @@ pub(crate) struct SyncCursors {
     pub subscribed: std::collections::HashSet<DocKey>,
 }
 
-/// Обновления `from` … текущая версия кусками не больше `limit` байт. Куски идут в порядке
-/// счётчиков внутри пира, старые сеансы (пиры прошлых открытий) раньше нынешнего: правки нынешнего
-/// могут зависеть от них.
+/// Операций за раз, больше которых незачем пробовать собирать одним куском: на большой вставке целый
+/// экспорт стоил бы сотни мегабайт на каждый вызов.
+const FIRST_STEP_OPS: i32 = 200_000;
+
+/// Обновления `from` … текущая версия кусками не больше `limit` байт, всего — примерно до `budget` байт
+/// за вызов: остальное заберёт следующий. Куски идут в порядке счётчиков внутри пира, старые сеансы
+/// (пиры прошлых открытий) раньше нынешнего: правки нынешнего могут зависеть от них. Второе значение
+/// куска — версия, которую сервер узнает, приняв его.
 pub(crate) fn split_updates(
     doc: &LoroDoc,
     from: &VersionVector,
     limit: usize,
+    budget: usize,
 ) -> DocResult<Vec<(Vec<u8>, VersionVector)>> {
     let vv = doc.oplog_vv();
-    let whole = doc.export(ExportMode::updates(from))?;
-    if whole.len() <= limit {
-        return Ok(vec![(whole, vv)]);
-    }
     let own = doc.peer_id();
     let mut spans: Vec<(u64, i32, i32)> = vv
         .iter()
@@ -193,13 +197,24 @@ pub(crate) fn split_updates(
             (*c > start).then_some((*p, start, *c))
         })
         .collect();
+    let total: i64 = spans.iter().map(|(_, a, b)| (*b - *a) as i64).sum();
+    if total <= FIRST_STEP_OPS as i64 {
+        let whole = doc.export(ExportMode::updates(from))?;
+        if whole.len() <= limit {
+            return Ok(vec![(whole, vv)]);
+        }
+    }
     spans.sort_by_key(|(p, ..)| (*p == own, *p));
     let mut out = Vec::new();
     let mut end = from.clone();
+    let mut size = 0usize;
     for (peer, start, stop) in spans {
         let mut at = start;
-        let mut step = (stop - start).max(1);
+        let mut step = (stop - start).clamp(1, FIRST_STEP_OPS);
         while at < stop {
+            if size >= budget {
+                return Ok(out);
+            }
             let upto = (at + step).min(stop);
             let span = loro::IdSpan::new(peer, at, upto);
             let bytes = doc.export(ExportMode::updates_in_range(vec![span]))?;
@@ -209,6 +224,7 @@ pub(crate) fn split_updates(
                 continue;
             }
             end.extend_to_include_last_id(ID::new(peer, upto - 1));
+            size += bytes.len();
             out.push((bytes, end.clone()));
             at = upto;
         }

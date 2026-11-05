@@ -21,6 +21,7 @@ fn commands() -> Vec<Command> {
         Command::OpenWithJournal {
             bytes: bytes(b"FERRUM"),
             journal: vec![bytes(b"FERRUMJ"), bytes(b"")],
+            remote: None,
         },
         Command::FlushJournal,
         Command::Execute {

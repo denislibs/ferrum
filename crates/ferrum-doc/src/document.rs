@@ -741,6 +741,11 @@ impl Document {
         self.changes.remove(&page).unwrap_or_default()
     }
 
+    /// Изменения страницы, ещё не забранные `take_changes`.
+    pub fn pending_changes(&self, page: PageId) -> Option<&Changes> {
+        self.changes.get(&page)
+    }
+
     /// Забывает историю отмены и повтора: документ, собранный программно (пример,
     /// шаблон), открывается как только что прочитанный файл — без шага «создать всё».
     pub fn clear_history(&mut self) {
@@ -978,18 +983,20 @@ impl Document {
                 DocKey::Page(id) => self.loaded.get(id).map(|p| p.loro().clone()),
             };
             let Some(doc) = doc else { continue };
-            let vv = doc.oplog_vv();
-            if c.sent.includes_vv(&vv) {
+            if c.sent.includes_vv(&doc.oplog_vv()) {
                 continue;
             }
-            for (bytes, end) in sync::split_updates(&doc, &c.sent, limit)? {
+            for (bytes, end) in
+                sync::split_updates(&doc, &c.sent, limit, sync::MAX_SYNC_FLUSH_BYTES)?
+            {
+                // Отправлено ровно то, что собрано: остаток заберёт следующий вызов.
+                sync::merge(&mut c.sent, &end);
                 out.push(SyncBatch {
                     doc: *key,
                     bytes,
                     end: SyncVersion(end),
                 });
             }
-            sync::merge(&mut c.sent, &vv);
         }
         Ok(out)
     }
@@ -1001,18 +1008,18 @@ impl Document {
         }
     }
 
-    /// Текущие версии документов с подпиской: отметка пачки журнала, которую потом можно снять.
+    /// Текущие версии документов: отметка пачки журнала, которую потом можно снять.
     pub fn sync_versions(&self) -> Vec<(DocKey, SyncVersion)> {
-        let Some(s) = &self.sync else {
+        if self.sync.is_none() {
             return Vec::new();
-        };
-        s.docs
-            .keys()
-            .filter_map(|k| match k {
-                DocKey::Root => Some((*k, SyncVersion(self.root.oplog_vv()))),
-                DocKey::Page(id) => self.loaded.get(id).map(|p| (*k, SyncVersion(p.oplog_vv()))),
-            })
-            .collect()
+        }
+        let mut out = vec![(DocKey::Root, SyncVersion(self.root.oplog_vv()))];
+        out.extend(
+            self.loaded
+                .iter()
+                .map(|(id, p)| (DocKey::Page(*id), SyncVersion(p.oplog_vv()))),
+        );
+        out
     }
 
     /// Сервер подтвердил всё, что было в документе на момент отметки.
@@ -1032,9 +1039,10 @@ impl Document {
         let Some(s) = &self.sync else {
             return false;
         };
+        // Сервера ещё не спрашивали: своё ли там, неизвестно, значит, не подтверждено.
         let behind = |key: DocKey, vv: &VersionVector| match s.docs.get(&key) {
             Some(c) => !c.acked.includes_vv(vv),
-            None => false,
+            None => true,
         };
         behind(DocKey::Root, &self.root.oplog_vv())
             || self

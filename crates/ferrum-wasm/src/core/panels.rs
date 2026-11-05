@@ -760,6 +760,14 @@ impl Core {
             | Command::LoadFont { .. }
             | Command::ReplaceMissingFont { .. }
             | Command::TestCreateText { .. }
+            | Command::SyncStart
+            | Command::SyncReset
+            | Command::SyncSubscribed { .. }
+            | Command::SyncAcked { .. }
+            | Command::SyncFlush
+            | Command::ApplyRemote { .. }
+            | Command::AddRemoteImage { .. }
+            | Command::Thumbnail
             | Command::TextEditStart { .. }
             | Command::TextEditEnd
             | Command::TextInput { .. }

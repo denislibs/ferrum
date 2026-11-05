@@ -12,6 +12,8 @@ pub struct ImageStore {
     /// Под `Mutex`: полное сохранение (`&Document`) возвращает сюда картинки, которых
     /// нет в файле.
     fresh: Mutex<Vec<String>>,
+    /// Добавленные, чьи байты сервер ещё не видел (`take_sync_fresh`): журнал считает их отдельно.
+    sync_fresh: Vec<String>,
 }
 
 impl ImageStore {
@@ -21,6 +23,7 @@ impl ImageStore {
         if let Entry::Vacant(e) = self.by_hash.entry(hash.clone()) {
             e.insert(bytes);
             self.fresh_list().push(hash.clone());
+            self.sync_fresh.push(hash.clone());
         }
         hash
     }
@@ -57,6 +60,26 @@ impl ImageStore {
                 fresh.push(hash.clone());
             }
         }
+    }
+
+    /// Новые изображения для сервера: они уходят раньше правки, которая на них ссылается.
+    pub fn take_sync_fresh(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.sync_fresh)
+            .into_iter()
+            .filter_map(|h| {
+                let bytes = self.by_hash.get(&h)?.clone();
+                Some((h, bytes))
+            })
+            .collect()
+    }
+
+    /// Байты, скачанные по чужой ссылке: хэш проверяется, чужое имя не пройдёт. Сервер их уже знает.
+    pub fn add_remote(&mut self, hash: &str, bytes: Vec<u8>) -> bool {
+        if blake3::hash(&bytes).to_hex().as_str() != hash {
+            return false;
+        }
+        self.by_hash.insert(hash.to_string(), bytes);
+        true
     }
 
     /// Изображения, добавленные с прошлого вызова, — для пачки журнала.

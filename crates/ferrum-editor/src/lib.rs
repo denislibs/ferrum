@@ -25,6 +25,7 @@ pub mod pages;
 pub mod panel;
 pub mod presets;
 pub mod props_clip;
+mod remote;
 pub mod scale;
 pub mod selection;
 pub mod snap;
@@ -54,6 +55,7 @@ pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,
 };
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
+pub use remote::{RemoteEffects, PAGE_REMOVED_BY_OTHER, VECTOR_CHANGED_BY_OTHER};
 pub use text::{fit_size, MissingFont, TextError, TextPending};
 pub use text_edit::{EnterAt, TextEditInfo, CARET_BLINK_MS};
 pub use text_input::TextInputKind;

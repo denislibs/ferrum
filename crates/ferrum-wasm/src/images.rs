@@ -52,6 +52,16 @@ pub struct DocImages {
     inner: RefCell<Inner>,
 }
 
+impl DocImages {
+    /// Байты картинки появились позже заглушки (чужая ссылка, скачанная по запросу): декодировать заново.
+    pub fn forget(&self, hash: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(e) = inner.map.remove(hash) {
+            inner.bytes = inner.bytes.saturating_sub(e.bytes());
+        }
+    }
+}
+
 impl Default for DocImages {
     fn default() -> DocImages {
         DocImages::with_limit(IMAGE_CACHE_BYTES)
