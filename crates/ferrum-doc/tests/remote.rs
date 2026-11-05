@@ -1330,14 +1330,15 @@ enum TextOp {
     Redo {
         who: usize,
     },
-    /// Свои пачки в журнал, часть журнала — случайному участнику, в перемешанном порядке и с повторами.
+    /// Свои пачки в журнал, журнал — всем или часть одному, в перемешанном порядке и с повторами.
     Deliver {
         seed: u64,
     },
 }
 
 fn text_op() -> impl Strategy<Value = TextOp> {
-    let at = 0usize..64;
+    // Позиции близко друг к другу: вся суть теста в правках одного места, в том числе в ничьих.
+    let at = 0usize..6;
     prop_oneof![
         5 => (0usize..3, at.clone(), 1usize..4).prop_map(|(who, at, n)| TextOp::Insert { who, at, n }),
         3 => (0usize..3, at.clone(), 1usize..4).prop_map(|(who, at, n)| TextOp::Delete { who, at, n }),
@@ -1366,126 +1367,154 @@ fn foreign_chars(text: &str, who: usize) -> String {
         .collect()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
-
-    /// Спека, раздел 8: отменяются только свои шаги. Три участника правят один текст, отмена и повтор
-    /// вперемешку с импортом в любом порядке; чужие символы отмена не трогает, зеркало совпадает с
-    /// полной сборкой, а в конце все приходят к одному тексту.
-    #[test]
-    fn random_text_undo_keeps_foreign_chars_and_converges(ops in proptest::collection::vec(text_op(), 1..80)) {
-        let mut seed = Document::new();
-        let page = seed.pages()[0].0;
-        let id = text_node(&mut seed, page);
-        insert(&mut seed, page, id, 0, "........");
-        let bytes = encode_full(&seed).unwrap();
-        let mut docs: Vec<Document> = (0..3).map(|_| decode(&bytes).unwrap().document).collect();
-        for d in &mut docs {
-            d.sync_start();
-            d.page(page).unwrap();
-            for (k, v) in d.take_sync_subscribes() {
-                d.sync_subscribed(k, v);
-            }
+/// Спека, раздел 8: отменяются только свои шаги. Три участника правят один текст, отмена и повтор
+/// вперемешку с импортом в любом порядке; чужие символы отмена не трогает, зеркало совпадает с
+/// полной сборкой, а в конце все приходят к одному тексту.
+fn text_scenario(ops: &[TextOp]) -> Result<(), TestCaseError> {
+    let mut seed = Document::new();
+    let page = seed.pages()[0].0;
+    let id = text_node(&mut seed, page);
+    insert(&mut seed, page, id, 0, "...");
+    let bytes = encode_full(&seed).unwrap();
+    let mut docs: Vec<Document> = (0..3).map(|_| decode(&bytes).unwrap().document).collect();
+    for d in &mut docs {
+        d.sync_start();
+        d.page(page).unwrap();
+        for (k, v) in d.take_sync_subscribes() {
+            d.sync_subscribed(k, v);
         }
-        let mut log: Vec<(DocKey, Vec<u8>)> = Vec::new();
-        let mut counter = 0u32;
-        for o in &ops {
-            counter += 1;
-            match o {
-                TextOp::Insert { who, at, n } => {
-                    let d = &mut docs[*who];
-                    let len = text_of(d, page, id).chars().count();
-                    let s: String = (0..*n as u32).map(|i| glyph(*who, counter + i)).collect();
-                    insert(d, page, id, at % len, &s);
+    }
+    let mut log: Vec<(DocKey, Vec<u8>)> = Vec::new();
+    for (counter, o) in (1u32..).zip(ops) {
+        match o {
+            TextOp::Insert { who, at, n } => {
+                let d = &mut docs[*who];
+                let len = text_of(d, page, id).chars().count();
+                let s: String = (0..*n as u32).map(|i| glyph(*who, counter + i)).collect();
+                insert(d, page, id, at % len, &s);
+            }
+            TextOp::Delete { who, at, n } => {
+                let d = &mut docs[*who];
+                let chars: Vec<char> = text_of(d, page, id).chars().collect();
+                // Последний перевод строки не символ пользователя.
+                let last = chars.len() - 1;
+                let start = at % chars.len();
+                let end = (start + n).min(last);
+                let own = |c: &char| matches!(class_of(*c), Some(k) if k == *who) || *c == '.';
+                if start < end && chars[start..end].iter().all(own) {
+                    delete(d, page, id, start..end);
                 }
-                TextOp::Delete { who, at, n } => {
-                    let d = &mut docs[*who];
-                    let chars: Vec<char> = text_of(d, page, id).chars().collect();
-                    // Последний перевод строки не символ пользователя.
-                    let last = chars.len() - 1;
-                    let start = at % chars.len();
-                    let end = (start + n).min(last);
-                    let own = |c: &char| matches!(class_of(*c), Some(k) if k == *who) || *c == '.';
-                    if start < end && chars[start..end].iter().all(own) {
-                        delete(d, page, id, start..end);
-                    }
-                }
-                TextOp::Format { who, at, n, size } => {
-                    let d = &mut docs[*who];
-                    let len = text_of(d, page, id).chars().count();
-                    let start = at % len;
-                    let end = (start + n).min(len - 1);
-                    if start < end {
-                        let set = TextAttrs { size: Some(*size as f64), ..Default::default() };
-                        d.transact(page, vec![id], |tx| {
-                            tx.format_text(id, start..end, &set, &[])?;
-                            Ok(vec![id])
-                        }).unwrap();
-                    }
-                }
-                TextOp::InsertRenamed { who, at } => {
-                    let d = &mut docs[*who];
-                    let len = text_of(d, page, id).chars().count();
+            }
+            TextOp::Format { who, at, n, size } => {
+                let d = &mut docs[*who];
+                let len = text_of(d, page, id).chars().count();
+                let start = at % len;
+                let end = (start + n).min(len - 1);
+                if start < end {
+                    let set = TextAttrs {
+                        size: Some(*size as f64),
+                        ..Default::default()
+                    };
                     d.transact(page, vec![id], |tx| {
-                        tx.set_props(id, &PropsPatch {
+                        tx.format_text(id, start..end, &set, &[])?;
+                        Ok(vec![id])
+                    })
+                    .unwrap();
+                }
+            }
+            TextOp::InsertRenamed { who, at } => {
+                let d = &mut docs[*who];
+                let len = text_of(d, page, id).chars().count();
+                d.transact(page, vec![id], |tx| {
+                    tx.set_props(
+                        id,
+                        &PropsPatch {
                             name: Some(format!("имя {counter}")),
                             ..Default::default()
-                        })?;
-                        tx.insert_text(id, at % len, &glyph(*who, counter).to_string(), None)?;
-                        Ok(vec![id])
-                    }).unwrap();
-                }
-                TextOp::Undo { who } => {
-                    let d = &mut docs[*who];
-                    let before = foreign_chars(&text_of(d, page, id), *who);
-                    d.undo().unwrap();
-                    prop_assert_eq!(foreign_chars(&text_of(d, page, id), *who), before, "отмена задела чужие");
-                }
-                TextOp::Redo { who } => {
-                    let d = &mut docs[*who];
-                    let before = foreign_chars(&text_of(d, page, id), *who);
-                    d.redo().unwrap();
-                    prop_assert_eq!(foreign_chars(&text_of(d, page, id), *who), before, "повтор задел чужие");
-                }
-                TextOp::Deliver { seed } => {
-                    for d in docs.iter_mut() {
-                        for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
-                            log.push((b.doc, b.bytes));
-                        }
+                        },
+                    )?;
+                    tx.insert_text(id, at % len, &glyph(*who, counter).to_string(), None)?;
+                    Ok(vec![id])
+                })
+                .unwrap();
+            }
+            TextOp::Undo { who } => {
+                let d = &mut docs[*who];
+                let before = foreign_chars(&text_of(d, page, id), *who);
+                d.undo().unwrap();
+                prop_assert_eq!(
+                    foreign_chars(&text_of(d, page, id), *who),
+                    before,
+                    "отмена задела чужие"
+                );
+            }
+            TextOp::Redo { who } => {
+                let d = &mut docs[*who];
+                let before = foreign_chars(&text_of(d, page, id), *who);
+                d.redo().unwrap();
+                prop_assert_eq!(
+                    foreign_chars(&text_of(d, page, id), *who),
+                    before,
+                    "повтор задел чужие"
+                );
+            }
+            TextOp::Deliver { seed } => {
+                for d in docs.iter_mut() {
+                    for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+                        log.push((b.doc, b.bytes));
                     }
-                    let mut part = log.clone();
-                    shuffle(&mut part, *seed);
+                }
+                let mut part = log.clone();
+                shuffle(&mut part, *seed);
+                // Чаще всё всем: чужая правка доходит до стека отмены; иначе часть и одному.
+                if seed % 4 == 0 {
                     part.truncate(part.len() / 2 + 1);
-                    let to = *seed as usize % 3;
+                    let to = (*seed >> 8) as usize % 3;
                     for (doc, bytes) in part {
                         docs[to].apply_remote(doc, &[&bytes]).unwrap();
                     }
-                }
-            }
-            for d in &mut docs {
-                assert_mirror(d, page);
-            }
-        }
-        for d in docs.iter_mut() {
-            for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
-                log.push((b.doc, b.bytes));
-            }
-        }
-        for _ in 0..2 {
-            for (doc, bytes) in &log {
-                for d in &mut docs {
-                    d.apply_remote(*doc, &[bytes]).unwrap();
+                } else {
+                    for (doc, bytes) in part {
+                        for d in docs.iter_mut() {
+                            d.apply_remote(doc, &[&bytes]).unwrap();
+                        }
+                    }
                 }
             }
         }
-        let want = text_of(&mut docs[0], page, id);
         for d in &mut docs {
             assert_mirror(d, page);
-            prop_assert_eq!(&text_of(d, page, id), &want);
         }
-        let props = nodes(&mut docs[0], page);
-        for d in &mut docs {
-            prop_assert_eq!(&nodes(d, page), &props);
+    }
+    for d in docs.iter_mut() {
+        for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+            log.push((b.doc, b.bytes));
         }
+    }
+    for _ in 0..2 {
+        for (doc, bytes) in &log {
+            for d in &mut docs {
+                d.apply_remote(*doc, &[bytes]).unwrap();
+            }
+        }
+    }
+    let want = text_of(&mut docs[0], page, id);
+    for d in &mut docs {
+        assert_mirror(d, page);
+        prop_assert_eq!(&text_of(d, page, id), &want);
+    }
+    let props = nodes(&mut docs[0], page);
+    for d in &mut docs {
+        prop_assert_eq!(&nodes(d, page), &props);
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    #[test]
+    fn random_text_undo_keeps_foreign_chars_and_converges(ops in proptest::collection::vec(text_op(), 1..80)) {
+        text_scenario(&ops)?;
     }
 }
