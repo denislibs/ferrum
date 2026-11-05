@@ -682,6 +682,52 @@ fn unknown_kind_from_other_makes_read_only_with_rebuild() {
     assert!(later.unwrap().has_unknown_nodes());
 }
 
+/// Правка узлов другим редактором прямо в Loro: то, что наш код сам не записывает.
+fn foreign_raw_edit(doc: &mut Document, page: PageId, edit: impl FnOnce(&loro::LoroTree)) -> Vec<u8> {
+    let snapshot = doc.page(page).unwrap().export_full_snapshot().unwrap();
+    let raw = loro::LoroDoc::from_snapshot(&snapshot).unwrap();
+    let from = raw.oplog_vv();
+    edit(&raw.get_tree("nodes"));
+    raw.commit();
+    raw.export(loro::ExportMode::updates(&from)).unwrap()
+}
+
+#[test]
+fn non_string_type_hides_node_and_keeps_batch_and_file_whole() {
+    let (mut a, mut b, page) = pair();
+    let keep = rect(&mut a, page);
+    let bad = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    b.take_changes(page);
+    let tid = |t: &loro::LoroTree, want: NodeId| {
+        t.children(loro::TreeParentId::Root)
+            .unwrap()
+            .into_iter()
+            .find(|k| k.to_string() == want.to_string())
+            .unwrap()
+    };
+    let blob = foreign_raw_edit(&mut b, page, |t| {
+        t.get_meta(tid(t, keep)).unwrap().insert("x", 777.0).unwrap();
+        t.get_meta(tid(t, bad)).unwrap().insert("x", 777.0).unwrap();
+        t.get_meta(tid(t, bad)).unwrap().insert("type", 5i64).unwrap();
+    });
+    let o = b.apply_remote(DocKey::Page(page), &[&blob]).unwrap();
+    assert!(o.rebuilt && o.became_read_only && !o.failed, "{o:?}");
+    let doc = b.page(page).unwrap();
+    assert_eq!(doc.props(keep).unwrap().x, 777.0, "пачка применена целиком");
+    assert!(!doc.contains(bad), "узел скрыт");
+    assert!(b.is_read_only());
+    assert_mirror(&mut b, page);
+    assert!(
+        b.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap().is_empty(),
+        "чужое обратно не отправляется"
+    );
+    assert!(!b.sync_unacked(), "курсор сдвинут: чужое подтверждено");
+    // Файл открывается у всех.
+    let later = PageDoc::from_snapshot(&b.page(page).unwrap().export_full_snapshot().unwrap());
+    assert!(later.unwrap().has_unknown_nodes());
+}
+
 #[test]
 fn broken_bytes_are_reported_without_harm() {
     let (mut a, mut b, page) = pair();

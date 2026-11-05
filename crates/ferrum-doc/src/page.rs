@@ -454,7 +454,7 @@ impl PageDoc {
 
     /// Применяет чужие правки и обновляет зеркало только там, где они что-то изменили (спека
     /// подсистемы 4, раздел 8). Сбой одной пачки не мешает следующим и не роняет документ.
-    pub(crate) fn apply_remote(&self, batches: &[&[u8]]) -> DocResult<RemoteApplied> {
+    pub(crate) fn apply_remote(&self, batches: &[&[u8]]) -> RemoteApplied {
         self.listen();
         let mut out = RemoteApplied::default();
         for data in batches {
@@ -473,17 +473,19 @@ impl PageDoc {
         self.from_cache.set(false);
         let tree: HashSet<TreeID> = dirty.tree.into_iter().collect();
         let props: HashSet<TreeID> = dirty.props.into_iter().collect();
-        // Скрытые узлы и двойники зеркало по частям не ведёт, это редкость: сборка заново.
+        // Скрытые узлы и двойники зеркало по частям не ведёт, это редкость: сборка заново. Байты уже
+        // в Loro, поэтому и сбой сверки чинится сборкой, а не потерей грязных узлов.
         let whole = self.unknown_nodes.get()
             || self.duplicates.get()
             || tree.len() + props.len() > REBUILD_ABOVE
-            || !self.reconcile(&tree, &props, &mut out)?;
+            || !self.reconcile(&tree, &props, &mut out).unwrap_or(false);
         if whole {
             out.changes = Changes::default();
             out.images.clear();
             out.vectors.clear();
             out.rebuilt = true;
-            self.rebuild_from_loro()?;
+            // Не собралось: человеку — «обновите страницу», курсор всё равно сдвигается за принятое.
+            out.failed |= self.rebuild_from_loro().is_err();
         }
         let state = self.state.borrow();
         out.text = dirty
@@ -491,7 +493,8 @@ impl PageDoc {
             .into_iter()
             .filter_map(|(tid, d)| Some((*state.by_tree.get(&tid)?, d)))
             .collect();
-        Ok(out)
+        drop(state);
+        out
     }
 
     /// Сверяет с Loro узлы, которых коснулись события. События при параллельных правках бывают

@@ -140,10 +140,13 @@ fn read_boolean_op(map: &LoroMap, id: &NodeId) -> DocResult<BooleanOp> {
 /// Тип узла читается отдельно: по нему выбираются значения по умолчанию.
 pub(crate) fn read_kind(map: &LoroMap, id: &NodeId) -> DocResult<NodeKind> {
     let raw = value(map, key::TYPE)
-        .as_ref()
-        .and_then(as_str)
         .ok_or_else(|| DocError::Corrupted(format!("у узла {id} не записан тип")))?;
-    NodeKind::parse(&raw).ok_or_else(|| DocError::UnknownKind(id.to_string(), raw))
+    // Не строка — чужой или более новый редактор: как неизвестный тип, узел скрыт, файл открывается
+    // только для чтения. Ошибка здесь сделала бы файл неоткрываемым для всех.
+    let Some(name) = as_str(&raw) else {
+        return Err(DocError::UnknownKind(id.to_string(), format!("{raw:?}")));
+    };
+    NodeKind::parse(&name).ok_or_else(|| DocError::UnknownKind(id.to_string(), name))
 }
 
 /// Отсутствующие ключи заменяются значениями по умолчанию для типа узла,

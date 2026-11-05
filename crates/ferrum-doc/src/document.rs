@@ -1057,7 +1057,7 @@ impl Document {
     pub fn apply_remote(&mut self, doc: DocKey, batches: &[&[u8]]) -> DocResult<RemoteOutcome> {
         let mut out = match doc {
             DocKey::Root => self.apply_remote_root(batches),
-            DocKey::Page(id) => self.apply_remote_page(id, batches)?,
+            DocKey::Page(id) => self.apply_remote_page(id, batches),
         };
         // Принесённое сервером отправлять незачем, и оно уже подтверждено.
         if let Some(c) = self.sync.as_mut().and_then(|s| s.docs.get_mut(&doc)) {
@@ -1129,14 +1129,14 @@ impl Document {
         out
     }
 
-    fn apply_remote_page(&mut self, id: PageId, batches: &[&[u8]]) -> DocResult<RemoteOutcome> {
+    fn apply_remote_page(&mut self, id: PageId, batches: &[&[u8]]) -> RemoteOutcome {
         // Страница, которую уже удалили, или ещё не загруженная: подписки на неё нет,
         // а опоздавший кадр догонит журнал при открытии.
         let Some(page) = self.loaded.get(&id) else {
-            return Ok(RemoteOutcome::default());
+            return RemoteOutcome::default();
         };
         let was_read_only = self.is_read_only();
-        let applied = page.apply_remote(batches)?;
+        let applied = page.apply_remote(batches);
         let mut out = RemoteOutcome {
             page: Some(id),
             failed: applied.failed,
@@ -1157,11 +1157,15 @@ impl Document {
         if applied.rebuilt {
             // Сцена строится заново, частичные изменения ей не нужны; сверить все хэши дешевле, чем помнить их.
             self.changes.remove(&id);
-            let refs = page.image_refs()?;
-            out.missing_images = refs
-                .into_iter()
-                .filter(|h| self.images.get(h).is_none())
-                .collect();
+            match page.image_refs() {
+                Ok(refs) => {
+                    out.missing_images = refs
+                        .into_iter()
+                        .filter(|h| self.images.get(h).is_none())
+                        .collect();
+                }
+                Err(_) => out.failed = true,
+            }
         } else {
             out.missing_images = applied
                 .images
@@ -1173,7 +1177,7 @@ impl Document {
         for (node, delta) in &applied.text {
             self.history.transform_text(id, *node, delta);
         }
-        Ok(out)
+        out
     }
 
     pub fn can_undo(&self) -> bool {
