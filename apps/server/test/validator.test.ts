@@ -170,6 +170,22 @@ test('версия снимка — без загрузки документа, 
   expect(await v.baseVersion(null)).toEqual({});
 });
 
+test('версия секции: её байты в очереди проверки с начала чтения, очередь полна — «занято», секция не читается', async () => {
+  let reads = 0;
+  const whole = new Blob([base]);
+  const blob = { size: whole.size, slice: (a?: number, b?: number) => (reads++, whole.slice(a, b)) } as Blob;
+  const section = { blob, start: 0, size: base.length };
+  const tight = new Validator(s.pool, s.blobs, { maxQueueBytes: base.length - 1 });
+  try {
+    expect(await tight.baseOf(section)).toBe('busy');
+    expect(reads).toBe(0);
+  } finally {
+    tight.stop();
+  }
+  expect(Object.keys((await v.baseOf(section)) ?? {})).toEqual(['1']);
+  expect(reads).toBe(1);
+});
+
 test("сбой worker'а при версии снимка — «повторите», а не пустая версия", async () => {
   const f = faulty();
   try {

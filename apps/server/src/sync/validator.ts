@@ -8,7 +8,7 @@
 
 import type { Pool } from 'pg';
 import type { BlobStore } from '../blob-store';
-import { readDocSnapshot } from './container-read';
+import { readDocSnapshot, readSection, type DocSection } from './container-read';
 import type { FromValidator, ToValidator } from './validator.worker';
 
 /** Больше этого в очереди проверки: клиент получает паузу, сервер не копит байты без конца. */
@@ -34,6 +34,8 @@ export interface ValidatorOptions {
   quarantineMs: number;
   /** Журнал читается кусками не больше этого: одна запись бывает до 16 МБ, кусок — не меньше одной записи. */
   logChunkBytes: number;
+  /** Байт в очереди проверки: пачки и снимки для версии снимка. */
+  maxQueueBytes: number;
   /** Тесты подменяют worker. */
   workerUrl: URL;
 }
@@ -47,6 +49,7 @@ const DEFAULTS: ValidatorOptions = {
   reloadMs: 1000,
   quarantineMs: 60_000,
   logChunkBytes: 16 * 1024 * 1024,
+  maxQueueBytes: MAX_VALIDATOR_QUEUE_BYTES,
   workerUrl: new URL('./validator.worker.ts', import.meta.url),
 };
 
@@ -417,7 +420,7 @@ export class Validator {
   /** Вердикт по пачке. Вызовы одного документа отвечают в порядке вызова. Байты должны жить до ответа. `user` — чья пачка:
    * загрузка документа, если нужна, идёт в его очередь. */
   async validate(file: string, doc: string, bytes: Uint8Array, user = ''): Promise<Verdict> {
-    if (this.queued + bytes.length > MAX_VALIDATOR_QUEUE_BYTES) return { kind: 'retry' };
+    if (this.queued + bytes.length > this.options.maxQueueBytes) return { kind: 'retry' };
     const key = `${file}/${doc}`;
     const held = this.quarantine.get(key);
     if (held && held.until > performance.now()) return { kind: 'retry' };
@@ -480,7 +483,26 @@ export class Validator {
   /** Вектор версий снимка, без загрузки документа. Чужие байты — пустой вектор; сбой worker'а — `null`, повторить позже. */
   async baseVersion(snapshot: Uint8Array | null): Promise<Record<string, number> | null> {
     if (!snapshot || snapshot.length === 0) return {};
-    const r = await this.send(this.slot(), { op: 'base', snapshot } as Omit<ToValidator, 'id'>);
+    return this.base(snapshot, snapshot.length, []);
+  }
+
+  /** Вектор версий секции документа. Её байты — в очереди проверки с начала чтения: очередь полна — `busy`, байты не
+   * читаются. В worker они уходят передачей, без копии. */
+  async baseOf(section: DocSection): Promise<Record<string, number> | null | 'busy'> {
+    if (section.size === 0) return {};
+    if (this.stopped || this.queued + section.size > this.options.maxQueueBytes) return 'busy';
+    this.queued += section.size;
+    let bytes: Uint8Array;
+    try {
+      bytes = await readSection(section);
+    } finally {
+      this.queued -= section.size;
+    }
+    return this.base(bytes, bytes.length, [bytes.buffer as ArrayBuffer]);
+  }
+
+  private async base(snapshot: Uint8Array, size: number, transfer: ArrayBuffer[]): Promise<Record<string, number> | null> {
+    const r = await this.send(this.slot(), { op: 'base', snapshot } as Omit<ToValidator, 'id'>, size, transfer);
     if (!r || !r.ok || !('base' in r)) return null;
     return r.base ?? {};
   }

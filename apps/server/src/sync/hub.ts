@@ -23,7 +23,8 @@ import type { Pool } from 'pg';
 import type { Auth } from '../auth';
 import { authorizeUpgrade, type UpgradeSession } from '../auth-routes';
 import type { BlobStore } from '../blob-store';
-import { readDocSnapshot } from './container-read';
+import { inTransaction } from '../db';
+import { findDocSection } from './container-read';
 import { UpdateLog, type Item, type LogLimits } from './update-log';
 import { Validator } from './validator';
 
@@ -83,6 +84,8 @@ export interface SyncLimits {
   userFaultsBurst: number;
   connectionsPerUser: number;
   connectionsTotal: number;
+  /** Строк документов, которые человек заводит разом: каждая читает снимок документа целиком. Остальные подписки ждут. */
+  userDocStatesAtOnce: number;
   subscribesPerConnection: number;
   /** Буфер сокета: выше — рассылка этому соединению идёт с паузой и из базы. */
   highWaterBytes: number;
@@ -122,6 +125,7 @@ export const SYNC_LIMITS: SyncLimits = {
   userFaultsBurst: 3,
   connectionsPerUser: 64,
   connectionsTotal: 20_000,
+  userDocStatesAtOnce: 2,
   subscribesPerConnection: 4096,
   highWaterBytes: 1024 * 1024,
   stalledMs: 120_000,
@@ -184,6 +188,15 @@ interface UserState {
   subscribeBytes: Bucket;
   faults: Bucket;
   conns: number;
+  /** Строки документов, которые заводятся сейчас, и подписки, ждущие места. */
+  creating: number;
+  creatingQueue: (() => void)[];
+}
+
+/** Строка документа: версия сервера и версия снимка. */
+interface DocRowState {
+  vv: Record<string, number>;
+  base_vv: Record<string, number>;
 }
 
 const toMap = (o: Record<string, number>): VersionMap => new Map(Object.entries(o));
@@ -200,6 +213,8 @@ export class SyncHub {
   private stopped = false;
   /** Идущие обработчики кадров и догоняния: остановка ждёт их, прежде чем отдать пул. */
   private readonly inflight = new Set<Promise<unknown>>();
+  /** Строки документов, которые заводятся сейчас: подписки на тот же документ ждут ту же, а не читают снимок снова. */
+  private readonly creating = new Map<string, Promise<DocRowState | null | 'busy'>>();
   /** Замер §13.1: от прихода кадра до конца его рассылки, мс. */
   onTiming: ((ms: number) => void) | null = null;
   /** Вызывается после фиксации: сжатие считает записи журнала; при уходе последнего — тоже. */
@@ -294,6 +309,8 @@ export class SyncHub {
         subscribeBytes: new Bucket(this.limits.userSubscribeBytesPerSecond, this.limits.userSubscribeBytesBurst),
         faults: new Bucket(this.limits.userFaultsPerSecond, this.limits.userFaultsBurst),
         conns: 0,
+        creating: 0,
+        creatingQueue: [],
       };
       this.users.set(id, u);
     }
@@ -303,7 +320,15 @@ export class SyncHub {
   /** Человек без соединений с полными бакетами ничем не отличается от нового. */
   private sweepUsers(): void {
     for (const [id, u] of this.users) {
-      if (u.conns === 0 && u.frames.full() && u.bytes.full() && u.opens.full() && u.subscribeBytes.full() && u.faults.full())
+      if (
+        u.conns === 0 &&
+        u.creating === 0 &&
+        u.frames.full() &&
+        u.bytes.full() &&
+        u.opens.full() &&
+        u.subscribeBytes.full() &&
+        u.faults.full()
+      )
         this.users.delete(id);
     }
   }
@@ -557,8 +582,9 @@ export class SyncHub {
       // Документ проверки уже принял пачку, а журнал нет: он больше не равен журналу.
       this.validator.reject(verdict.chain);
       this.refuse(d, doc, clientSeq, outcome.code);
-      // Чужой пир настоящий клиент не шлёт, а подделка отравляет цепочку проверки соавторам: их пачки получают `GAP`.
-      if (outcome.code === 'FOREIGN_PEER') this.fault(d, 'foreign peer');
+      // Чужой пир настоящий клиент не шлёт, а подделка отравляет цепочку проверки соавторам: их пачки получают `GAP`. Пир
+      // снимка — не удар: его шлёт и честный клиент (правки прошлого открытия).
+      if (outcome.fault) this.fault(d, 'foreign peer');
       return;
     }
     this.send(d, { t: 'ack', doc, clientSeq, seq: outcome.seq });
@@ -629,8 +655,14 @@ export class SyncHub {
     }
     const sub: DocSub = { version: new Map(), sent: 0, live: false, pumping: false, ready: false };
     d.docs.set(doc, sub);
-    const state = await this.docState(d.file, doc);
+    const state = await this.docState(d, doc);
     if (d.closed || d.docs.get(doc) !== sub) return;
+    // Очередь проверки полна снимками: подписка не принята, клиент повторит после паузы.
+    if (state === 'busy') {
+      d.docs.delete(doc);
+      this.send(d, { t: 'pause', ms: 1000 });
+      return;
+    }
     // Клиент отстал сильнее журнала: снимок вобрал правки, которых у него нет.
     if (state && Object.entries(state.base_vv).some(([peer, c]) => counterOf(raw, peer) < c)) {
       this.needSnapshot(d, doc);
@@ -646,25 +678,69 @@ export class SyncHub {
     await this.pump(d, doc, sub, true);
   }
 
-  /** Строка документа; первая подписка заводит её с версией снимка файла. Читатель новых строк не заводит: у документа
-   * без снимка (страница, в которую ещё не писали) журнала нет, и версия у него пустая. */
-  private async docState(file: string, doc: string): Promise<{ vv: Record<string, number>; base_vv: Record<string, number> } | null> {
-    const found = await this.pool.query<{ vv: Record<string, number>; base_vv: Record<string, number> }>(
-      'SELECT vv, base_vv FROM doc_state WHERE file_id = $1 AND doc = $2',
-      [file, doc],
-    );
+  /** Строка документа. Нет её — заводится с версией снимка файла: одна на документ, сколько бы подписок её ни ждали, и не
+   * больше `userDocStatesAtOnce` разом у человека. Заводит и читатель: версия снимка верна для всех, а строк не больше, чем
+   * документов в контейнере. У документа без снимка (страница, в которую ещё не писали) строки нет, её заведёт первая запись. */
+  private async docState(d: ConnData, doc: string): Promise<DocRowState | null | 'busy'> {
+    const found = await this.pool.query<DocRowState>('SELECT vv, base_vv FROM doc_state WHERE file_id = $1 AND doc = $2', [d.file, doc]);
     if (found.rows[0]) return found.rows[0];
-    const { rows } = await this.pool.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1', [file]);
-    const snapshot = await readDocSnapshot(this.blobs, rows[0]?.content_key ?? null, doc);
-    if (!snapshot) return null;
-    // Сбой проверки — не пустая версия: строка с пустой версией дала бы `GAP` на каждую правку. Подписка повторится.
-    const base = await this.validator.baseVersion(snapshot);
-    if (!base) throw new Error('проверка недоступна');
-    await this.pool.query(
-      `INSERT INTO doc_state (file_id, doc, vv, base_vv) VALUES ($1, $2, $3::jsonb, $3::jsonb) ON CONFLICT DO NOTHING`,
-      [file, doc, JSON.stringify(base)],
-    );
-    return { vv: base, base_vv: base };
+    const key = `${d.file}/${doc}`;
+    let going = this.creating.get(key);
+    if (!going) {
+      const made = this.createDocState(this.user(d.user), d.file, doc).finally(() => {
+        if (this.creating.get(key) === made) this.creating.delete(key);
+      });
+      this.creating.set(key, made);
+      going = made;
+    }
+    return going;
+  }
+
+  private async createDocState(u: UserState, file: string, doc: string): Promise<DocRowState | null | 'busy'> {
+    if (u.creating < this.limits.userDocStatesAtOnce) u.creating++;
+    // Место передаётся из рук в руки: счётчик не меняется.
+    else await new Promise<void>((resolve) => u.creatingQueue.push(resolve));
+    try {
+      // Файл записали целиком, пока шло чтение: снимок прежний, строка с его версией была бы неверной.
+      for (let attempt = 0; ; attempt++) {
+        const { rows } = await this.pool.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1', [file]);
+        const contentKey = rows[0]?.content_key ?? null;
+        const section = await findDocSection(this.blobs, contentKey, doc);
+        if (!section) return null;
+        const base = await this.validator.baseOf(section);
+        if (base === 'busy') return 'busy';
+        // Сбой проверки — не пустая версия: строка с пустой версией дала бы `GAP` на каждую правку. Подписка повторится.
+        if (!base) throw new Error('проверка недоступна');
+        const made = await inTransaction(this.pool, async (c) => {
+          // Порядок блокировок общий: строка файла, потом строки документов. Запись файла целиком (`FOR UPDATE`) ждёт этой
+          // транзакции, а прошедшая видна по `content_key`.
+          const f = await c.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1 FOR KEY SHARE', [file]);
+          if ((f.rows[0]?.content_key ?? null) !== contentKey) return 'changed' as const;
+          const put = await c.query(
+            `INSERT INTO doc_state (file_id, doc, vv, base_vv) VALUES ($1, $2, $3::jsonb, $3::jsonb) ON CONFLICT DO NOTHING`,
+            [file, doc, JSON.stringify(base)],
+          );
+          if (put.rowCount === 0) {
+            const had = await c.query<DocRowState>('SELECT vv, base_vv FROM doc_state WHERE file_id = $1 AND doc = $2', [file, doc]);
+            return had.rows[0] ?? ('changed' as const);
+          }
+          // Пиры снимка — ничьи: продолжать их не может никто, иначе первый пишущий занял бы пир автора (подделка его
+          // истории). Уже занятые журналом остаются за своими людьми.
+          await c.query(
+            `INSERT INTO doc_peer (file_id, peer, user_id) SELECT $1::uuid, p::numeric, NULL FROM jsonb_object_keys($2::jsonb) AS p
+             ON CONFLICT DO NOTHING`,
+            [file, JSON.stringify(base)],
+          );
+          return { vv: base, base_vv: base };
+        });
+        if (made !== 'changed') return made;
+        if (attempt >= 2) throw new Error('содержимое файла меняется');
+      }
+    } finally {
+      const next = u.creatingQueue.shift();
+      if (next) next();
+      else u.creating--;
+    }
   }
 
   /** Догоняние: всё, что есть в журнале сверх `sub.sent` и не покрыто версией клиента, кусками и с учётом сокета. Когда

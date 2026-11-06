@@ -26,7 +26,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { apiError, busy, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
 import { BlobStalled, BlobTooLarge, type UploadPace } from './blob-store';
-import { readDocSnapshot } from './sync/container-read';
+import { findDocSection } from './sync/container-read';
 import { inTransaction } from './db';
 
 /** Клиент молчит дольше этого посреди загрузки — обрыв. */
@@ -41,6 +41,11 @@ export const BLOB_GRACE_SECONDS = 120;
  * несколько аккаунтов, переподключаясь без единого байта. 1024 слота требуют 128 аккаунтов. */
 export const MAX_UPLOADS_PER_USER = 8;
 export const MAX_UPLOADS = 1024;
+/** Одновременных отдач снимка документа: на человека и на сервер. Отдача идёт потоком и памяти не держит, держит дескриптор
+ * файла и поток. Клиент качает снимок на документ, когда отстал сильнее журнала, — при открытии давно не открытого файла это
+ * несколько страниц разом; сверх предела — 429 `BUSY`, клиент повторит. */
+export const MAX_SNAPSHOTS_PER_USER = 16;
+export const MAX_SNAPSHOTS = 1024;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 export const trashBlob = (c: PoolClient, key: string | null) =>
@@ -165,13 +170,13 @@ function sectionWhere(q: ListQuery): { from: string; where: string; order: strin
 const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /** Счётчики одновременных загрузок: живут в процессе, сервер один. */
-export function uploadGate() {
+export function uploadGate(perUserMax = MAX_UPLOADS_PER_USER, totalMax = MAX_UPLOADS) {
   const perUser = new Map<string, number>();
   let total = 0;
   return {
     enter(user: string): boolean {
       const mine = perUser.get(user) ?? 0;
-      if (mine >= MAX_UPLOADS_PER_USER || total >= MAX_UPLOADS) return false;
+      if (mine >= perUserMax || total >= totalMax) return false;
       perUser.set(user, mine + 1);
       total++;
       return true;
@@ -185,6 +190,35 @@ export function uploadGate() {
   };
 }
 export type UploadGate = ReturnType<typeof uploadGate>;
+
+/** Поток, который зовёт `done` один раз — дочитан, оборван или сломан. */
+function untilDone(source: ReadableStream<Uint8Array>, done: () => void): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let over = false;
+  const finish = () => {
+    if (over) return;
+    over = true;
+    done();
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(c) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          finish();
+          c.close();
+        } else c.enqueue(next.value);
+      } catch (e) {
+        finish();
+        c.error(e);
+      }
+    },
+    cancel(reason) {
+      finish();
+      return reader.cancel(reason);
+    },
+  });
+}
 
 /** Ответ на неудачную загрузку потоком. Неизвестное — сбой маршрута, его показывает конвейер. */
 export function uploadFailure(e: unknown): Response | null {
@@ -220,6 +254,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
   const idle = deps.uploadIdleMs ?? UPLOAD_IDLE_MS;
   const pace = deps.uploadPace ?? UPLOAD_PACE;
   const maxContent = deps.maxContentBytes ?? MAX_CONTENT_BYTES;
+  const snapshots = uploadGate(MAX_SNAPSHOTS_PER_USER, MAX_SNAPSHOTS);
   const fresh = async (ctx: Ctx) => {
     const meta = await loadFile(pool, ctx.params.id, ctx.user.id);
     return meta ? ok(meta) : apiError(404, 'NOT_FOUND');
@@ -532,16 +567,21 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       },
     },
     {
-      // Клиент отстал сильнее журнала (спека, раздел 7.3): снимок одного документа, поверх него — журнал.
+      // Клиент отстал сильнее журнала (спека, раздел 7.3): снимок одного документа, поверх него — журнал. Кусок файла идёт
+      // потоком, как `content`: секция бывает в сотни мегабайт, а медленный читатель держал бы её в памяти целиком. Поток свой,
+      // чтобы место в пределе освобождалось с концом отдачи; `Content-Length` Bun у такого потока не ставит (идёт `chunked`).
       method: 'GET',
       path: '/api/files/:id/docs/:doc/snapshot',
       access: { kind: 'file', min: 'viewer' },
       limit: 'read',
       handle: async (ctx) => {
         const { rows } = await pool.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1', [ctx.params.id]);
-        const bytes = await readDocSnapshot(blobs, rows[0]?.content_key ?? null, ctx.params.doc);
-        if (!bytes) return apiError(404, 'NOT_FOUND');
-        return new Response(bytes as Uint8Array<ArrayBuffer>, {
+        const section = await findDocSection(blobs, rows[0]?.content_key ?? null, ctx.params.doc);
+        if (!section) return apiError(404, 'NOT_FOUND');
+        if (!snapshots.enter(ctx.user.id)) return busy();
+        const user = ctx.user.id;
+        const body = untilDone(section.blob.slice(section.start, section.start + section.size).stream(), () => snapshots.leave(user));
+        return new Response(body, {
           headers: {
             'Content-Type': 'application/octet-stream',
             'Content-Disposition': 'attachment',

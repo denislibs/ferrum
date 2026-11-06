@@ -37,7 +37,9 @@ export type Outcome =
   | { kind: 'written'; seq: number }
   /** Сервер всё это уже знал: повтор. */
   | { kind: 'known'; seq: number }
-  | { kind: 'refused'; code: SyncRefusal };
+  /** `fault` — чужой пир человека: настоящий клиент его не шлёт. Пир снимка (ничей) шлёт и честный клиент — правки прошлого
+   * открытия: отказ без удара. */
+  | { kind: 'refused'; code: SyncRefusal; fault?: boolean };
 
 interface Queued {
   item: Item;
@@ -203,8 +205,8 @@ export class UpdateLog {
     const claims: { file: string; peer: string; user: string }[] = [];
     const outcomes: Outcome[] = [];
     const inserts: { item: Item; seq: number }[] = [];
-    const refuse = (item: Item, code: SyncRefusal) => {
-      outcomes.push({ kind: 'refused', code });
+    const refuse = (item: Item, code: SyncRefusal, fault = false) => {
+      outcomes.push(fault ? { kind: 'refused', code, fault } : { kind: 'refused', code });
       this.poison(item.chain);
     };
     for (const { item } of group) {
@@ -224,7 +226,16 @@ export class UpdateLog {
       }
       // Чужой пир: иначе подделка заняла бы чужие счётчики, и настоящие правки того человека Loro бы пропускал.
       const peers = Object.keys(item.end);
-      if (peers.some((p) => (owners.get(`${item.file}/${p}`) ?? item.user) !== item.user)) {
+      const owner = (p: string) => {
+        const k = `${item.file}/${p}`;
+        return owners.has(k) ? owners.get(k)! : item.user;
+      };
+      if (peers.some((p) => owner(p) !== null && owner(p) !== item.user)) {
+        refuse(item, 'FOREIGN_PEER', true);
+        continue;
+      }
+      // Пир снимка ничей: его счётчики продолжать нельзя никому. Уже известное — просто повтор.
+      if (peers.some((p) => owner(p) === null && item.end[p] > (s.vv[p] ?? 0))) {
         refuse(item, 'FOREIGN_PEER');
         continue;
       }
@@ -330,10 +341,11 @@ export class UpdateLog {
     return new Map(rows.map((r) => [r.file_id, Number(r.n)]));
   }
 
-  private async peers(c: PoolClient, group: Queued[]): Promise<Map<string, string>> {
+  /** Владельцы пиров; `null` — пир снимка, ничей. */
+  private async peers(c: PoolClient, group: Queued[]): Promise<Map<string, string | null>> {
     const asked = [...new Set(group.flatMap((q) => Object.keys(q.item.end).map((p) => `${q.item.file}/${p}`)))];
     if (asked.length === 0) return new Map();
-    const { rows } = await c.query<{ file_id: string; peer: string; user_id: string }>(
+    const { rows } = await c.query<{ file_id: string; peer: string; user_id: string | null }>(
       `SELECT p.file_id, p.peer::text AS peer, p.user_id FROM doc_peer p
        JOIN unnest($1::uuid[], $2::numeric[]) AS x(f, n) ON x.f = p.file_id AND x.n = p.peer`,
       [asked.map((a) => a.split('/')[0]), asked.map((a) => a.split('/')[1])],

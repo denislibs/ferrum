@@ -259,8 +259,8 @@ test('правка, отправленная, пока строка докуме
 
 test('сбой проверки при заведении строки: строки с пустой версией нет, соединение переподключится', async () => {
   const v = s.hub.validator;
-  const real = v.baseVersion.bind(v);
-  v.baseVersion = async () => null;
+  const real = v.baseOf.bind(v);
+  v.baseOf = async () => null;
   const saved = console.error;
   console.error = () => {};
   try {
@@ -268,7 +268,7 @@ test('сбой проверки при заведении строки: стро
     c.subscribe('root', peers(root));
     expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.GOING_AWAY);
   } finally {
-    v.baseVersion = real;
+    v.baseOf = real;
     console.error = saved;
   }
   expect((await s.pool.query('SELECT 1 FROM doc_state WHERE file_id = $1', [file])).rows).toHaveLength(0);
@@ -348,7 +348,8 @@ test('паника Loro на пачке: отказ, файл цел, остал
   // Пачка уронила Loro и на свежем worker'е: соединение закрыто, клиент переподключится.
   expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.BAD_FRAME);
   console.error = saved;
-  const good = await data('loro-good.update');
+  // Своим пиром: пир снимка ничей, продолжить его нельзя.
+  const good = edit(LoroDoc.fromSnapshot(base), 1);
   const again = await connect(owner, f);
   again.subscribe('root', version);
   await again.wait('subscribed');
@@ -514,6 +515,145 @@ test('отстал сильнее журнала: snapshot-needed и снимо�
   expect(snapshot.getMap('meta').get('name')).toBe('файл');
   // Чужой — нет, как у любого маршрута файла.
   expect((await s.call(stranger, 'GET', need.url)).status).toBe(404);
+});
+
+/** Чтения байтов файлов стенда: `hold` держит их до `release`. */
+function countOpens(hold = false) {
+  const real = s.blobs.open.bind(s.blobs);
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+  const seen = { n: 0, restore: () => void (s.blobs.open = real), release };
+  s.blobs.open = async (k: string) => {
+    seen.n++;
+    if (hold) await gate;
+    return real(k);
+  };
+  return seen;
+}
+
+test('подписки на документ без строки: одно чтение секции и одна версия снимка на всех, а не копия на подписку', async () => {
+  let selects = 0;
+  const { promise: all, resolve: allSeen } = Promise.withResolvers<void>();
+  const restore = intercept(
+    (text) => text.startsWith('SELECT vv, base_vv FROM doc_state'),
+    async (run) => {
+      const out = await run();
+      if (++selects === 200) allSeen();
+      return out;
+    },
+  );
+  const opens = countOpens(true);
+  try {
+    const c = await connect(viewer);
+    for (let i = 0; i < 200; i++) c.subscribe('root', peers(root));
+    // Все 200 не нашли строку, пока первая заводится.
+    await all;
+    opens.release();
+    await c.wait('subscribed');
+  } finally {
+    opens.restore();
+    restore();
+  }
+  expect(opens.n).toBe(1);
+});
+
+test('строки документов человек заводит не больше двух разом: остальные подписки ждут, а не читают снимки', async () => {
+  const pages = ['1@7', '2@7', '3@7'];
+  const page = new LoroDoc();
+  page.getMap('m').set('a', 1);
+  page.commit();
+  const bytes = page.export({ mode: 'snapshot' });
+  expect(
+    (
+      await s.writeContent(
+        owner,
+        file,
+        1,
+        realContainer(
+          root.export({ mode: 'snapshot' }),
+          pages.map((p) => [p, bytes]),
+        ),
+      )
+    ).status,
+  ).toBe(200);
+  const opens = countOpens(true);
+  try {
+    const c = await connect(viewer);
+    for (const p of pages) c.subscribe(p, peers(page));
+    for (let i = 0; i < 400 && opens.n < 2; i++) await Bun.sleep(5);
+    expect(opens.n).toBe(2);
+    // Третья не читает снимок, пока две идут.
+    for (let i = 0; i < 40 && opens.n < 3; i++) await Bun.sleep(5);
+    expect(opens.n).toBe(2);
+    opens.release();
+    for (const p of pages) await c.wait('subscribed', (f) => f.doc === p);
+  } finally {
+    opens.restore();
+  }
+});
+
+test('пиры снимка не занимает никто: продолжение пира снимка — отказ без удара по человеку', async () => {
+  const c = await joined(editor);
+  const { rows } = await s.pool.query<{ user_id: string | null }>('SELECT user_id FROM doc_peer WHERE file_id = $1 AND peer = $2', [
+    file,
+    String(root.peerId),
+  ]);
+  expect(rows).toEqual([{ user_id: null }]);
+  // Пир того, кто записал файл целиком: продолжить его нельзя ни соавтору, ни ему самому.
+  const forged = tab();
+  forged.setPeerId(root.peerId);
+  c.update('root', 1, edit(forged, 1));
+  expect((await c.wait('refused', (f) => f.clientSeq === 1)).code).toBe('FOREIGN_PEER');
+  const a = await joined(owner);
+  const own = tab();
+  own.setPeerId(root.peerId);
+  a.update('root', 1, edit(own, 2));
+  expect((await a.wait('refused', (f) => f.clientSeq === 1)).code).toBe('FOREIGN_PEER');
+  // Удара нет: так бывает и у честного клиента (правки прошлого открытия). Соединения живы, свои правки пишутся.
+  c.update('root', 2, edit(tab(), 3));
+  await c.wait('ack', (f) => f.clientSeq === 2);
+  expect(c.closed).toBeNull();
+  expect(a.closed).toBeNull();
+  expect((await s.pool.query('SELECT 1 FROM doc_update WHERE file_id = $1', [file])).rows).toHaveLength(1);
+});
+
+test('снимок документа идёт потоком, загрузок разом у человека не больше предела', async () => {
+  const big = new Uint8Array(16 * 1024 * 1024).fill(3);
+  expect((await s.writeContent(owner, file, 1, realContainer(root.export({ mode: 'snapshot' }), [['1@9', big]]))).status).toBe(200);
+  const path = `/api/files/${file}/docs/1@9/snapshot`;
+  const one = await s.call(viewer, 'GET', path);
+  expect(new Uint8Array(await one.arrayBuffer())).toEqual(big);
+  // Медленные читатели: соединение открыто, тело не читается.
+  const { connect: tcp } = await import('node:net');
+  const port = Number(new URL(s.publicUrl).port);
+  const slow = Array.from({ length: 16 }, () => {
+    const sock = tcp(port, '127.0.0.1');
+    sock.write(`GET ${path} HTTP/1.1\r\nHost: localhost\r\nCookie: ${viewer.cookie}\r\n\r\n`);
+    sock.pause();
+    return sock;
+  });
+  try {
+    let refused: Response | null = null;
+    for (let i = 0; i < 200 && !refused; i++) {
+      const r = await s.call(viewer, 'GET', path);
+      if (r.status === 429) refused = r;
+      else await r.arrayBuffer();
+    }
+    expect(refused?.status).toBe(429);
+    expect(await refused?.json()).toEqual({ error: 'BUSY' });
+    // У другого — своё место.
+    expect((await s.call(editor, 'GET', path)).status).toBe(200);
+  } finally {
+    for (const sock of slow) sock.destroy();
+  }
+  // Ушедший читатель освобождает место.
+  let after = 0;
+  for (let i = 0; i < 200 && after !== 200; i++) {
+    const r = await s.call(viewer, 'GET', path);
+    after = r.status;
+    if (after === 200) await r.arrayBuffer();
+    else await Bun.sleep(10);
+  }
+  expect(after).toBe(200);
 });
 
 test('снятие роли закрывает соединение сразу', async () => {
@@ -863,7 +1003,7 @@ test('подписка платит байтами и хранит только 
   for (const [p, c] of peers(root)) big.set(p, c);
   const v = await connect(viewer);
   for (let i = 0; i < 5; i++) v.subscribe(i === 0 ? 'root' : `${i}@1`, big);
-  await v.wait('subscribed', (f) => f.doc === '4@1');
+  for (let i = 0; i < 5; i++) await v.wait('subscribed', (f) => f.doc === (i === 0 ? 'root' : `${i}@1`));
   // Корень знает одного пира, страницы без снимка — ни одного.
   expect(s.hub.versionEntries()).toBe(1);
   const tight = await apiStand(

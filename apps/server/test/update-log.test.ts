@@ -81,9 +81,11 @@ test('роль проверяется в транзакции записи: сн
 test('чужой пир: первый писатель пира его занимает, подделка не проходит', async () => {
   const log = new UpdateLog(s.pool, { groupMs: 1 });
   await log.submit(item({ start: { '77': 0 }, end: { '77': 1 } }));
+  // Подделка — удар по человеку.
   expect(await log.submit(item({ user: other.id, start: { '77': 1 }, end: { '77': 2 } }))).toEqual({
     kind: 'refused',
     code: 'FOREIGN_PEER',
+    fault: true,
   });
   expect(await log.submit(item({ start: { '77': 1 }, end: { '77': 2 } }))).toMatchObject({ kind: 'written' });
   // Пир u64 не теряет младших разрядов.
@@ -93,6 +95,27 @@ test('чужой пир: первый писатель пира его зани�
     file,
   ]);
   expect(p.map((x) => x.peer)).toEqual(['77', big]);
+  await log.stop();
+});
+
+test('пир снимка ничей: продолжить его нельзя никому, без удара; уже известное — повтор', async () => {
+  await s.pool.query(`INSERT INTO doc_state (file_id, doc, vv, base_vv) VALUES ($1, 'root', '{"9":3}', '{"9":3}')`, [file]);
+  await s.pool.query(`INSERT INTO doc_peer (file_id, peer, user_id) VALUES ($1, 9, NULL)`, [file]);
+  const log = new UpdateLog(s.pool, { groupMs: 1 });
+  for (const user of [owner.id, other.id]) {
+    expect(await log.submit(item({ user, start: { '9': 3 }, end: { '9': 4 } }))).toEqual({ kind: 'refused', code: 'FOREIGN_PEER' });
+  }
+  expect(await log.submit(item({ start: { '9': 0 }, end: { '9': 3 } }))).toEqual({ kind: 'known', seq: 0 });
+  // Пачка, где пир снимка только в известной части, а дальше — свой пир, пишется.
+  expect(await log.submit(item({ start: { '9': 3, '1': 0 }, end: { '9': 3, '1': 1 } }))).toMatchObject({ kind: 'written' });
+  const { rows: p } = await s.pool.query<{ peer: string; user_id: string | null }>(
+    'SELECT peer::text AS peer, user_id FROM doc_peer WHERE file_id = $1 ORDER BY peer',
+    [file],
+  );
+  expect(p).toEqual([
+    { peer: '1', user_id: owner.id },
+    { peer: '9', user_id: null },
+  ]);
   await log.stop();
 });
 
@@ -216,7 +239,7 @@ test('отказ журнала отвергает и пачки той же п�
     log.submit(item({ user: other.id, chain: 'k#1', start: { '77': 1 }, end: { '77': 2 } })),
     log.submit(item({ user: other.id, chain: 'k#1', start: { '5': 0 }, end: { '5': 1 } })),
   ]);
-  expect(forged).toEqual({ kind: 'refused', code: 'FOREIGN_PEER' });
+  expect(forged).toEqual({ kind: 'refused', code: 'FOREIGN_PEER', fault: true });
   expect(dependent).toEqual({ kind: 'refused', code: 'GAP' });
   // И в следующей группе.
   expect(await log.submit(item({ user: other.id, chain: 'k#1', start: { '6': 0 }, end: { '6': 1 } }))).toEqual({
