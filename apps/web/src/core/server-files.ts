@@ -781,7 +781,8 @@ export class ServerFiles {
         await this.readReply(res, (_v): _v is never => false);
         throw new ServerFailure('NETWORK');
       }
-      const declared = Number(res.headers.get('content-length') ?? 0);
+      // Снимок идёт потоком без `Content-Length`: длину сервер называет своим заголовком.
+      const declared = Number(res.headers.get('content-length') ?? res.headers.get('x-ferrum-size') ?? 0);
       if (declared > MAX_OPEN_BYTES) throw new ServerFailure('TOO_LARGE');
       this.clock.clearTimeout(timer);
       timer = this.clock.setTimeout(() => ctl.abort(), transferTimeout(Number.isFinite(declared) ? declared : 0));

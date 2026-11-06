@@ -451,11 +451,10 @@ test('удалённая страница, ожившая параллельны
   // Содержимое страницы на месте, строка документа тоже: правки в неё идут.
   const res = await s.call(editor, 'GET', `/api/files/${file}/docs/${pageId}/snapshot`);
   expect(res.status).toBe(200);
-  expect(
-    LoroDoc.fromSnapshot(new Uint8Array(await res.arrayBuffer()))
-      .getTree('nodes')
-      .getNodes().length,
-  ).toBe(3);
+  const body = new Uint8Array(await res.arrayBuffer());
+  // Поток без `Content-Length`: длину называет свой заголовок, по ней клиент считает срок.
+  expect(res.headers.get('x-ferrum-size')).toBe(String(body.byteLength));
+  expect(LoroDoc.fromSnapshot(body).getTree('nodes').getNodes().length).toBe(3);
   await writes(1, d, c);
 });
 

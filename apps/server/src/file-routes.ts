@@ -590,6 +590,8 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             'Content-Disposition': 'attachment',
             'Cache-Control': 'no-store',
             'Cross-Origin-Resource-Policy': 'same-origin',
+            // Длина потока без `Content-Length`: по ней клиент считает срок на тело.
+            'X-Ferrum-Size': String(section.size),
           },
         });
       },

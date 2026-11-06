@@ -927,6 +927,33 @@ test('снимок документа: застывшие заголовки и 
   expect(await b).toBe('NETWORK');
 });
 
+test('снимок документа потоком без `Content-Length`: срок на тело — по длине из `X-Ferrum-Size`, а не 60 с', async () => {
+  const path = '/api/files/f/docs/root/snapshot';
+  const size = 40 * 1024 * 1024;
+  const ctl = { signal: null as AbortSignal | null };
+  const slow = stand({
+    [`GET ${path}`]: (c) => {
+      ctl.signal = c.signal ?? null;
+      const body = new ReadableStream({
+        start(out) {
+          ctl.signal?.addEventListener('abort', () => out.error(new DOMException('срок', 'AbortError')));
+        },
+      });
+      return new Response(body, { headers: { 'x-ferrum-size': String(size) } });
+    },
+  });
+  const a = code(slow.files.fetchSnapshot(path));
+  await expect.poll(() => ctl.signal !== null).toBe(true);
+  await flush();
+  slow.clock.advance(transferTimeout(0) + 1);
+  expect(ctl.signal!.aborted).toBe(false);
+  slow.clock.advance(transferTimeout(size));
+  expect(await a).toBe('NETWORK');
+
+  const big = stand({ [`GET ${path}`]: () => new Response('', { headers: { 'x-ferrum-size': String(2 ** 40) } }) });
+  expect(await code(big.files.fetchSnapshot(path))).toBe('TOO_LARGE');
+});
+
 test('«Скачать копию»: сервер просит подождать — «повторите через N с», а не «сервер недоступен»', async () => {
   const s = stand({
     'POST /api/files/f/compact': new Response(JSON.stringify({ error: 'UNAVAILABLE' }), {
