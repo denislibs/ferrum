@@ -62,6 +62,11 @@ impl Editor {
         self.doc.take_sync_updates(limit)
     }
 
+    /// Документы, чьи правки не собрались для сервера, с причиной: см. `Document::take_sync_failures`.
+    pub fn take_sync_failures(&mut self) -> Vec<(DocKey, String)> {
+        self.doc.take_sync_failures()
+    }
+
     pub fn sync_acked(&mut self, doc: DocKey, end: &SyncVersion) {
         self.doc.sync_acked(doc, end);
     }

@@ -1518,3 +1518,88 @@ proptest! {
         text_scenario(&ops)?;
     }
 }
+
+/// Пиры, чьи правки лежат в пачке.
+fn peers_of(bytes: &[u8]) -> std::collections::HashSet<u64> {
+    let meta = loro::LoroDoc::decode_import_blob_meta(bytes, false).unwrap();
+    meta.partial_end_vv.iter().map(|(p, _)| *p).collect()
+}
+
+/// Новый документ сервер не знает: подписка отвечает пустой версией.
+fn subscribe_new(d: &mut Document) {
+    for (k, _) in d.take_sync_subscribes() {
+        d.sync_subscribed(k, SyncVersion::default());
+    }
+}
+
+#[test]
+fn redo_of_duplicate_sends_only_own_peer_and_keeps_later_steps() {
+    // Анна дублирует страницу и рисует на копии, Борис тоже рисует на копии. Анна отменяет свою фигуру и дубль, потом
+    // повторяет оба шага. Копия возвращается под новым id страницы — для сервера это новый документ: в его пачках не должно
+    // быть пира Бориса, иначе сервер ответит `FOREIGN_PEER`.
+    let (mut a, mut b, page) = pair();
+    let q = a.duplicate_page(page, "Копия", page, vec![]).unwrap();
+    subscribe_new(&mut a);
+    deliver(&mut a, &mut [&mut b]);
+    subscribe_new(&mut b);
+    let own = rect(&mut a, q);
+    deliver(&mut a, &mut [&mut b]);
+    let foreign = rect(&mut b, q);
+    let mut b_peers = std::collections::HashSet::new();
+    for batch in b.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+        b_peers.extend(peers_of(&batch.bytes));
+        a.apply_remote(batch.doc, &[&batch.bytes]).unwrap();
+        b.sync_acked(batch.doc, &batch.end);
+    }
+    assert!(!b_peers.is_empty());
+
+    a.undo().unwrap();
+    a.undo().unwrap();
+    assert_eq!(a.pages().len(), 1, "дубль отменён");
+    a.redo().unwrap();
+    let restored = a.pages()[1].0;
+    assert_ne!(restored, q, "копия вернулась под новым id");
+    assert!(
+        a.page(restored).unwrap().contains(foreign),
+        "правка Бориса в копии осталась"
+    );
+    assert!(!a.page(restored).unwrap().contains(own));
+    // Шаг после дубля повторяется: узлы копии — под прежними `NodeId`.
+    a.redo().unwrap();
+    assert!(a.page(restored).unwrap().contains(own));
+    assert_mirror(&mut a, restored);
+
+    subscribe_new(&mut a);
+    let mut batches = a.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap();
+    // Корень раньше: страницу, которой ещё нет в корне, Борис не знает (на сервере он подпишется на неё позже).
+    batches.sort_by_key(|x| x.doc != DocKey::Root);
+    let mut sent_page = false;
+    for batch in &batches {
+        if batch.doc == DocKey::Page(restored) {
+            sent_page = true;
+            let peers = peers_of(&batch.bytes);
+            assert!(
+                peers.is_disjoint(&b_peers),
+                "в документе новой страницы — правки пира Бориса: {peers:?}"
+            );
+        }
+        b.apply_remote(batch.doc, &[&batch.bytes]).unwrap();
+        a.sync_acked(batch.doc, &batch.end);
+    }
+    assert!(sent_page, "копия ушла на сервер");
+    assert!(!a.sync_unacked());
+    // Борис видит ту же копию.
+    assert_eq!(b.pages().len(), 2);
+    assert_eq!(nodes(&mut a, restored), nodes(&mut b, restored));
+    assert_mirror(&mut b, restored);
+
+    // Второй круг отмены и повтора — так же.
+    a.undo().unwrap();
+    a.undo().unwrap();
+    a.redo().unwrap();
+    a.redo().unwrap();
+    let again = a.pages()[1].0;
+    assert!(a.page(again).unwrap().contains(own));
+    assert!(a.page(again).unwrap().contains(foreign));
+    assert_mirror(&mut a, again);
+}
