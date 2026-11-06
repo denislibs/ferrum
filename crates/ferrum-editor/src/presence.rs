@@ -825,18 +825,23 @@ impl Editor {
         })
     }
 
-    /// **(поведение)** Сцена без чужого превью для того, что панели показывают как свой документ
-    /// (сводка выделения, как в Figma): `f` получает сцену и выделение. Слой снимается и
+    /// **(поведение)** Редактор без чужого превью для того, что панели показывают как свой
+    /// документ (сводка выделения, сводка стиля текста — как в Figma). Слой снимается и
     /// накладывается заново, только если он задевает выделенные узлы или их потомков (ревью
-    /// безопасности, L4); событий нет — сцена после вызова та же.
-    pub fn with_document_scene<R>(&mut self, f: impl FnOnce(&Scene, &[NodeId]) -> R) -> R {
+    /// безопасности, L4; повторное ревью, N5); событий нет — сцена после вызова та же.
+    pub fn with_document<R>(&mut self, f: impl FnOnce(&Self) -> R) -> R {
         if !self.selection_under_remote_preview() {
-            return f(&self.scene, &self.selection);
+            return f(self);
         }
         self.drop_remote_preview();
-        let r = f(&self.scene, &self.selection);
+        let r = f(self);
         self.sync_remote_preview();
         r
+    }
+
+    /// `with_document` для того, кому нужны только сцена и выделение.
+    pub fn with_document_scene<R>(&mut self, f: impl FnOnce(&Scene, &[NodeId]) -> R) -> R {
+        self.with_document(|me| f(&me.scene, &me.selection))
     }
 
     /// Задевает ли слой чужого превью выделенные узлы или их потомков.
