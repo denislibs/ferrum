@@ -163,6 +163,11 @@ pub struct SelectTool {
     cache: Option<SelCache>,
     /// Инструмент «Масштаб» (K): ручки масштабируют выделение со свойствами.
     scale: bool,
+    /// Рамка выделения, какой её видно при нажатии на ручку или зону поворота (со слоем чужого
+    /// превью), и поправка точки указателя на жест: разница между точкой нажатия на этой рамке и
+    /// той же точкой рамки по документу (`Tool::rebase`). Без чужого сдвига — ноль.
+    press_box: Option<SelectionBox>,
+    grab: Vec2,
 }
 
 /// Что наведение берёт из выделения: рамку редактируемых выделенных и родителей
@@ -214,6 +219,8 @@ impl SelectTool {
             last_click: None,
             cache: None,
             scale: false,
+            press_box: None,
+            grab: Vec2::ZERO,
         }
     }
 
@@ -368,7 +375,7 @@ impl SelectTool {
     }
 
     fn begin(&mut self, cx: &mut Ctx, press: Press, e: &PointerEvent) {
-        let world = press.world;
+        let world = press.world + self.grab;
         self.state = match press.target {
             Target::Node { id, .. } => {
                 let ids = editable(cx, &top_level(cx.scene, cx.selection));
@@ -466,7 +473,8 @@ impl SelectTool {
     }
 
     fn update(&mut self, cx: &mut Ctx, e: &PointerEvent) {
-        let p = cx.to_world(e.point);
+        // Ручки и поворот под чужим превью — от точки рамки по документу (`grab`).
+        let p = cx.to_world(e.point) + self.grab;
         let mods = e.modifiers;
         let threshold = SNAP_THRESHOLD_PX / cx.camera.zoom();
         let view = cx.view();
@@ -792,6 +800,30 @@ pub(crate) fn gesture_patches(
             }
         }
     })
+}
+
+/// Точка `p` рамки `from` — то же место (доли сторон) рамки `to`. У нулевой стороны — тот же
+/// сдвиг от её начала. Нечисловой ответ (вырожденная матрица) — `p`.
+fn same_place(from: SelectionBox, to: SelectionBox, p: Point) -> Point {
+    let l = from.to_world.inverse() * p;
+    let along = |v: f64, a0: f64, a1: f64, b0: f64, b1: f64| {
+        if (a1 - a0).abs() > 1e-9 {
+            b0 + (v - a0) / (a1 - a0) * (b1 - b0)
+        } else {
+            b0 + (v - a0)
+        }
+    };
+    let (f, t) = (from.rect, to.rect);
+    let q = to.to_world
+        * Point::new(
+            along(l.x, f.x0, f.x1, t.x0, t.x1),
+            along(l.y, f.y0, f.y1, t.y0, t.y1),
+        );
+    if q.x.is_finite() && q.y.is_finite() {
+        q
+    } else {
+        p
+    }
 }
 
 /// Какие потомки меняет жест вместе с узлом: никакие, поддерево групп (ресайз, `bases` с
@@ -1144,11 +1176,32 @@ impl Tool for SelectTool {
             }
         };
         *cx.hover = None;
+        self.grab = Vec2::ZERO;
+        self.press_box = match target {
+            Target::Handle(_) | Target::Rotate => sbox,
+            _ => None,
+        };
         self.state = State::Pressed(Press {
             screen: e.point,
             world,
             target,
         });
+    }
+
+    /// **(поведение)** Ручка или зона поворота выбраны на рамке, какой её видно (со слоем чужого
+    /// превью), а жест считается по рамке документа: точка нажатия переносится в то же место
+    /// рамки по документу, и размер или угол меняются только на своё движение — без скачка на
+    /// чужой сдвиг (финальное ревью, Important 2).
+    fn rebase(&mut self, cx: &mut Ctx) {
+        let State::Pressed(press) = &self.state else {
+            return;
+        };
+        let (Some(seen), world) = (self.press_box, press.world) else {
+            return;
+        };
+        if let Some(doc) = self.sel_cache(cx).sbox {
+            self.grab = same_place(seen, doc, world) - world;
+        }
     }
 
     fn pointer_move(&mut self, cx: &mut Ctx, e: &PointerEvent) {

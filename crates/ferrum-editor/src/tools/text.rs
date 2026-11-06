@@ -119,8 +119,11 @@ impl Tool for TextTool {
         });
     }
 
+    /// **(поведение)** Как у фигур (`DrawTool::rebase`): родитель — заново по документу в точке
+    /// мира, где начат текст, и текст виден, где его пишут.
     fn rebase(&mut self, cx: &mut Ctx) {
         if let State::Pressed(start) = &mut self.state {
+            start.parent = drop_frame_at(cx.scene, start.world, cx.tolerance(), &HashSet::new());
             start.parent_world = parent_world(cx, start.parent);
         }
     }

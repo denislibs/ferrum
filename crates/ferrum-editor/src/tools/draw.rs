@@ -265,8 +265,13 @@ impl Tool for DrawTool {
         });
     }
 
+    /// **(поведение)** Слоя чужого превью нет: родитель выбирается заново по документу в той же
+    /// точке мира. Фигура встаёт там, где её рисуют, и видна и во время рисования, и после
+    /// отпускания участника: фрейм, который он тянет, режет содержимое, и фигура в его осях по
+    /// документу оказалась бы невидимой (финальное ревью, Important 2).
     fn rebase(&mut self, cx: &mut Ctx) {
         if let State::Pressed(start) = &mut self.state {
+            start.parent = drop_frame_at(cx.scene, start.world, cx.tolerance(), &HashSet::new());
             (start.parent_world, start.snapper) = bases(cx, start.parent);
         }
     }

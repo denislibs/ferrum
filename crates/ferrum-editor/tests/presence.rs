@@ -478,26 +478,83 @@ fn text_style_edit_under_peer_drag_keeps_document_position() {
     assert_eq!(h.props(t).x, 100.0);
 }
 
+/// (поведение) Рисование там, где фрейм виден под чужим перетаскиванием: родитель — по
+/// документу в точке мира, где начата фигура. Фрейм режет содержимое, и фигура в его осях
+/// по документу была бы невидимой и во время рисования, и после отпускания участника.
 #[test]
-fn drawing_under_peer_drag_of_a_frame_goes_into_the_visible_frame_by_document() {
+fn drawing_under_peer_drag_of_a_frame_is_placed_where_drawn() {
     let mut h = H::new();
     let f = h.frame(None, 0.0, 0.0, 400.0, 300.0);
     join(&mut h, 1);
     drag_by(&mut h, 1, &[f], 500.0);
     assert_eq!(h.ed.scene().node(f).unwrap().props.x, 500.0);
-    // Фрейм виден у 500…900: нажатие у 600 — в нём (цель по виду). Опоры — по документу:
-    // фрейм в документе в начале мира, и прямоугольник встаёт в точку мира, где начат.
+    // Фрейм виден у 500…900, в документе — у 0…400: в точке 600 его по документу нет.
     h.ed.set_tool(ToolKind::Rect);
     h.drag((600.0, 100.0), (650.0, 150.0), none());
     let r = h.sel()[0];
-    assert_eq!(
-        h.parent(r),
-        Some(f),
-        "фрейм под указателем — тот, что видно"
-    );
+    assert_eq!(h.parent(r), None, "родитель — по документу в точке мира");
     assert_eq!((h.props(r).x, h.props(r).y), (600.0, 100.0));
     assert_eq!((h.props(r).w, h.props(r).h), (50.0, 50.0));
     assert_eq!(h.props(f).x, 0.0);
+    // Во фрейме по документу (у 100) — фигура в нём, в его осях.
+    h.ed.set_tool(ToolKind::Rect);
+    h.drag((100.0, 100.0), (150.0, 150.0), none());
+    let r = h.sel()[0];
+    assert_eq!(h.parent(r), Some(f));
+    assert_eq!((h.props(r).x, h.props(r).y), (100.0, 100.0));
+}
+
+/// (поведение) То же у инструмента «Текст».
+#[test]
+fn text_tool_under_peer_drag_of_a_frame_is_placed_where_clicked() {
+    let mut h = common::text::text_h();
+    let f = h.frame(None, 0.0, 0.0, 400.0, 300.0);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[f], 500.0);
+    h.ed.set_tool(ToolKind::Text);
+    h.click(600.0, 100.0, none());
+    h.ed.text_input(TextInputKind::Insert, "A").unwrap();
+    let t = common::text::info(&h).id;
+    assert_eq!(h.parent(t), None, "родитель — по документу в точке мира");
+    assert_eq!(h.props(t).x, 600.0);
+    assert_eq!(h.props(f).x, 0.0);
+}
+
+/// Финальное ревью, Important 2: ручка ресайза (и зона поворота), видная сдвинутой чужим перетаскиванием, —
+/// точка нажатия сдвигается на чужой сдвиг, и размер меняется только на своё движение.
+#[test]
+fn resize_and_rotate_under_peer_drag_have_no_jump() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 100.0, 50.0);
+    h.ed.select(&[a]);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[a], 100.0);
+    // Правый нижний угол виден у (200, 50).
+    h.down(200.0, 50.0, none());
+    for x in [205.0, 210.0] {
+        h.mv(x, 60.0, none());
+    }
+    h.up(210.0, 60.0, none());
+    let p = h.props(a);
+    assert_eq!(
+        (p.x, p.y, p.w, p.h),
+        (0.0, 0.0, 110.0, 60.0),
+        "размер — на своё движение"
+    );
+    // Поворот — то же: центр и точка нажатия — на рамке по документу в том же месте, и
+    // четверть оборота указателя вокруг видного центра — четверть оборота узла.
+    let a2 = h.rect(None, 0.0, 200.0, 100.0, 100.0);
+    h.ed.select(&[a2]);
+    h.ed.presence_left(1);
+    join(&mut h, 2);
+    drag_by(&mut h, 2, &[a2], 100.0);
+    // Чуть снаружи правого верхнего угла (виден у 200, 200; центр — у 150, 250).
+    h.down(206.0, 194.0, none());
+    h.mv(206.0, 250.0, none());
+    h.mv(206.0, 306.0, none());
+    h.up(206.0, 306.0, none());
+    let r = h.props(a2).rotation;
+    assert!((r.rem_euclid(180.0) - 90.0).abs() < 1e-6, "поворот {r}");
 }
 
 #[test]
