@@ -289,6 +289,8 @@ impl Core {
     pub fn set_time(&mut self, now_ms: f64) {
         self.now_ms = now_ms;
         self.editor.set_time(now_ms);
+        // Своё присутствие — по времени кадра: не чаще 20 раз в секунду и только при изменении.
+        self.presence_flush();
         let overdue = self
             .font_state
             .waiting_since

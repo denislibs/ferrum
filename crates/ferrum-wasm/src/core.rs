@@ -11,6 +11,7 @@
 
 mod fonts;
 mod panels;
+pub mod presence;
 mod sync;
 mod text;
 
@@ -102,6 +103,8 @@ pub struct Core {
     modified_sent: Option<bool>,
     /// Синхронизация с сервером: не включена у локальных файлов.
     sync: sync::SyncCore,
+    /// Своё присутствие для других участников: что и когда сказано.
+    presence: presence::PresenceOut,
     /// Ревизия правок: растёт с каждой правкой и заменой документа. Снимок несёт её,
     /// а `MarkSaved` снимает `modified`, только если с тех пор она не сменилась.
     revision: u64,
@@ -207,6 +210,8 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::ApplyRemote { .. }
             | Command::AddRemoteImage { .. }
             | Command::Thumbnail
+            | Command::Presence { .. }
+            | Command::PresenceReset
             | Command::Demo { .. }
             | Command::DemoText { .. }
             | Command::FlushJournal
@@ -215,6 +220,7 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements
+            | Command::ReadPresence
             | Command::SetTheme { .. }
             | Command::LayersWindow { .. }
             | Command::ExpandLayer { .. }
@@ -286,6 +292,7 @@ impl Core {
             revision: 0,
             journal_batch: 0,
             sync: sync::SyncCore::default(),
+            presence: Default::default(),
             fonts,
             font_state: fonts::FontState::default(),
             text_state: text::TextState::default(),
@@ -718,7 +725,19 @@ impl Core {
     fn run_input(&mut self, input: Input) {
         self.editor.take_text_pending();
         let retry = input.clone();
+        // Нажатие, отпускание и клавиши могут править: чужого превью в сцене на это время нет.
+        // Движение, колесо и щипок не правят (жест уже держит превью снятым сам).
+        let hold = !matches!(
+            input,
+            Input::PointerMove(_) | Input::Wheel(_) | Input::Pinch { .. } | Input::PointerLeave
+        );
+        if hold {
+            self.editor.presence_hold();
+        }
         self.editor.handle(input);
+        if hold {
+            self.editor.presence_release();
+        }
         if self.editor.take_text_pending() {
             self.wait(fonts::Waiting::Input(retry));
         }
@@ -755,10 +774,19 @@ impl Core {
     /// документ, выделение, камеру или правку, встают в очередь за ним
     /// (`waits_behind_fonts`): порядок действий пользователя сохраняется.
     pub fn command(&mut self, cmd: Command) {
+        // Команда может править документ по свойствам из сцены: чужого превью в ней нет, пока
+        // она идёт (спека подсистемы 4, раздел 9).
+        let hold = presence::holds(&cmd);
+        if hold {
+            self.editor.presence_hold();
+        }
         if self.fonts_awaited() && waits_behind_fonts(&cmd) {
             self.wait(fonts::Waiting::Command(cmd));
         } else {
             self.run_command(cmd);
+        }
+        if hold {
+            self.editor.presence_release();
         }
         self.drain_editor();
     }
@@ -790,6 +818,9 @@ impl Core {
                 self.add_remote_image(&hash, bytes.into_vec())
             }
             Command::Thumbnail => self.push_thumbnail(),
+            Command::Presence { items } => self.presence_items(items),
+            Command::PresenceReset => self.presence_reset(),
+            Command::Follow { participant } => self.editor.follow(participant),
             Command::FlushJournal => {
                 self.settle_waiting_fonts();
                 self.flush_journal(true);
@@ -875,6 +906,7 @@ impl Core {
                 self.pixels = Some(reference);
                 self.dirty = true;
             }
+            Command::ReadPresence => self.read_presence(),
             Command::ReadMeasurements => {
                 use ferrum_render::MeasureKind;
                 let all = self.editor.overlay().measurements;
@@ -997,8 +1029,9 @@ impl Core {
                 }),
                 EditorEvent::CommandStates(changed) => self.push_command_states(changed),
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
-                // Интерфейсу о следовании скажет следующая задача.
-                EditorEvent::Following(_) => {}
+                EditorEvent::Following(participant) => {
+                    self.events.push(CoreEvent::Following { participant })
+                }
             }
         }
         if let Some(ids) = selection {

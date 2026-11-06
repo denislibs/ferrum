@@ -755,6 +755,7 @@ impl Core {
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements
+            | Command::ReadPresence
             | Command::DemoText { .. }
             | Command::FontsAvailable { .. }
             | Command::LoadFont { .. }
@@ -768,6 +769,9 @@ impl Core {
             | Command::ApplyRemote { .. }
             | Command::AddRemoteImage { .. }
             | Command::Thumbnail
+            | Command::Presence { .. }
+            | Command::PresenceReset
+            | Command::Follow { .. }
             | Command::TextEditStart { .. }
             | Command::TextEditEnd
             | Command::TextInput { .. }

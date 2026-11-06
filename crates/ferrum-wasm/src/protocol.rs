@@ -453,6 +453,106 @@ pub struct TextStyleDto {
     pub range: bool,
 }
 
+/// Наибольшее число записей присутствия в одной команде и участников, которых держит ядро.
+pub const PRESENCE_ITEMS_MAX: usize = 4096;
+pub const PRESENCE_PEERS_MAX: usize = 1024;
+/// Узлов в одной части выделения: 2 КБ кадра — не больше байта на узел и заголовка.
+pub const PRESENCE_PART_IDS_MAX: usize = 2048;
+
+/// Выделение участника: версия, сколько узлов, частей и общая рамка.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceSelectionDto {
+    pub rev: u32,
+    pub count: u32,
+    pub parts: u8,
+    pub bounds: [f64; 4],
+}
+
+/// Вид жеста участника.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub enum GestureKindDto {
+    Move,
+    Resize,
+    Rotate,
+    Scale,
+}
+
+/// Жест участника: матрица `[a, b, c, d, e, f]`, рамка на начало, коэффициент «Масштаба».
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceGestureDto {
+    pub kind: GestureKindDto,
+    pub transform: [f64; 6],
+    pub frame: [f64; 6],
+    pub k: f64,
+}
+
+/// Запись присутствия от сервера: пришёл, состояние, часть выделения, ушёл. `color` —
+/// `0xRRGGBB` из палитры протокола.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(
+    tag = "k",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum PresenceItemDto {
+    Join {
+        participant: u32,
+        user: String,
+        name: String,
+        color: u32,
+    },
+    State {
+        participant: u32,
+        page: String,
+        view: [f64; 4],
+        #[serde(default)]
+        #[tsify(type = "[number, number] | undefined")]
+        cursor: Option<[f64; 2]>,
+        #[serde(default)]
+        #[tsify(type = "PresenceSelectionDto | undefined")]
+        selection: Option<PresenceSelectionDto>,
+        #[serde(default)]
+        #[tsify(type = "PresenceGestureDto | undefined")]
+        gesture: Option<PresenceGestureDto>,
+    },
+    Part {
+        participant: u32,
+        rev: u32,
+        index: u8,
+        parts: u8,
+        ids: Vec<String>,
+    },
+    Left {
+        participant: u32,
+    },
+}
+
+/// Участник на холсте (тестовая `ReadPresence`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct PresenceMarkDto {
+    pub name: String,
+    pub color: String,
+    #[tsify(type = "[number, number] | undefined")]
+    pub cursor: Option<[f64; 2]>,
+    #[tsify(type = "[number, number, number, number] | undefined")]
+    pub frame: Option<[f64; 4]>,
+    pub boxes: u32,
+}
+
+/// Узел под чужим превью: где он в сцене (тестовая `ReadPresence`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewedNodeDto {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+}
+
 /// Правка выделения из панели свойств.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(
@@ -610,6 +710,19 @@ pub enum Command {
     },
     /// Только превью первой страницы для экрана файлов (ответ — `Thumbnail`): файл пишет журнал сервера.
     Thumbnail,
+    /// Присутствие других участников (спека подсистемы 4, раздел 9): записи пачки сервера, уже
+    /// разобранные `sync.worker`. Не больше `PRESENCE_ITEMS_MAX` за команду.
+    Presence {
+        items: Vec<PresenceItemDto>,
+    },
+    /// Соединение заново: прежние участники уходят, новые придут с сервера.
+    PresenceReset,
+    /// Следовать за участником (`None` — перестать).
+    Follow {
+        #[serde(default)]
+        #[tsify(type = "number | undefined")]
+        participant: Option<u32>,
+    },
     /// Отдать журналу правки с прошлой пачки: ответ — `Journal` (и без правок).
     FlushJournal,
     /// Команда редактора по ключу таблицы команд (`edit.undo`, `tool.rect`…).
@@ -679,6 +792,9 @@ pub enum Command {
         reference: bool,
     },
     /// Измерения с Alt в текущем оверлее (для тестов): ответ — `Measurements`.
+    /// Тестовая: курсоры и рамки других участников в оверлее, за кем следуем, узлы под их живым
+    /// превью (ответ — `PresenceMarks`).
+    ReadPresence,
     ReadMeasurements,
     // ——— Этап 5: панели ———
     /// Окно строк панели слоёв, которое сейчас видно (с запасом).
@@ -1210,6 +1326,25 @@ pub enum CoreEvent {
         bytes: Option<ByteBuf>,
         keep: bool,
     },
+    /// Своё присутствие для других (`sync.worker`): не чаще 20 раз в секунду и только при
+    /// изменении. `parts` — узлы выделения частями, когда сменилась его версия.
+    Presence {
+        page: String,
+        view: [f64; 4],
+        #[tsify(type = "[number, number] | undefined")]
+        cursor: Option<[f64; 2]>,
+        #[tsify(type = "PresenceSelectionDto | undefined")]
+        selection: Option<PresenceSelectionDto>,
+        #[tsify(type = "Uint8Array[] | undefined")]
+        parts: Option<Vec<ByteBuf>>,
+        #[tsify(type = "PresenceGestureDto | undefined")]
+        gesture: Option<PresenceGestureDto>,
+    },
+    /// Следование за участником началось или кончилось (действие на холсте, уход участника).
+    Following {
+        #[tsify(type = "number | undefined")]
+        participant: Option<u32>,
+    },
     /// Перед `Opened`: поверх файла применены пачки журнала — правки, которые не
     /// успели попасть в файл (документ изменён).
     Recovered {
@@ -1249,6 +1384,14 @@ pub enum CoreEvent {
     Measurements {
         values: Vec<f64>,
         guides: u32,
+    },
+    /// Ответ на `ReadPresence`: участники на холсте (имя, цвет `#rrggbb`, курсор и общая рамка в
+    /// мире, рамок узлов), за кем следуем, узлы под чужим превью с их `x` и `y` в сцене.
+    PresenceMarks {
+        marks: Vec<PresenceMarkDto>,
+        #[tsify(type = "number | undefined")]
+        following: Option<u32>,
+        preview: Vec<PreviewedNodeDto>,
     },
     /// Пиксели кадра RGBA, строки сверху вниз.
     Pixels {
