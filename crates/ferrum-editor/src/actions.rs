@@ -94,9 +94,7 @@ impl Editor {
     /// сообщается интерфейсу. Правка текста и вектора шлют эти же команды своим
     /// жестам (удалить точку, символ): уведомление — только про слои.
     pub(crate) fn run(&mut self, cmd: CommandId) {
-        // Команда может править по свойствам из сцены: чужого превью в ней на это время нет,
-        // `emit` в конце вернёт его поверх нового документа.
-        self.drop_remote_preview();
+        self.own_action();
         let notice =
             undo_notice(cmd).filter(|_| self.text_edit.is_none() && self.vector_edit.is_none());
         let before = self.doc.last_step();
@@ -742,6 +740,8 @@ impl Editor {
     /// Копия выделения в формате буфера обмена Ferrum; `None` — нечего копировать.
     /// Новая копия начинает счёт повторных вставок заново.
     pub fn copy(&mut self) -> Option<Vec<u8>> {
+        // Копия берёт положение из сцены, а вставка запишет его в документ.
+        self.own_action();
         let ids = self.ordered_selection();
         if ids.is_empty() {
             return None;

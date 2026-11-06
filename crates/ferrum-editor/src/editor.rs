@@ -679,6 +679,15 @@ impl Editor {
         ) {
             self.cancel_panel();
         }
+        // Нажатие, отпускание и клавиши — своё действие (`own_action`): попадание, базы
+        // инструмента и правка — по документу. Движение, колесо и щипок не правят, а
+        // идущий жест и так держит слой снятым.
+        if !matches!(
+            input,
+            Input::PointerMove(_) | Input::Wheel(_) | Input::Pinch { .. } | Input::PointerLeave
+        ) {
+            self.own_action();
+        }
         // Действие на холсте кончает следование за участником (поведение, как в Figma):
         // нажатие, колесо, щипок, клавиша. Движение указателя — не действие.
         match &input {
@@ -1045,8 +1054,7 @@ impl Editor {
     pub(crate) fn begin_doc_edit(&mut self) {
         self.finish_pen_path();
         self.cancel_gesture();
-        // Правка читает свойства из сцены: чужого превью в ней быть не должно.
-        self.drop_remote_preview();
+        self.own_action();
     }
 
     /// Выбирает инструмент (тулбар, горячая клавиша). Жест текущего отменяется.

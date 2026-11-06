@@ -229,15 +229,16 @@ fn own_drag_of_a_node_under_peer_preview_writes_only_own_move() {
     join(&mut h, 1);
     drag_by(&mut h, 1, &[a], 100.0);
     assert_eq!(h.ed.scene().node(a).unwrap().props.x, 110.0);
-    // Нажатие там, где узел виден (под чужим превью), и перетаскивание на 20: во время своего
-    // жеста чужого превью нет, записывается только свой сдвиг от документа.
-    h.down(130.0, 30.0, none());
+    // Нажатие — своё действие: чужой слой снимается до попадания, узел — на месте в документе
+    // (как и в ядре, `presence_hold` вокруг ввода). Перетаскивание на 20: записывается только
+    // свой сдвиг от документа.
+    h.down(30.0, 30.0, none());
     assert!(
         !h.ed.scene().has_remote_preview(),
         "свой жест — чужое превью снято"
     );
     assert_eq!(h.sel(), vec![a]);
-    for x in [135.0, 140.0, 150.0] {
+    for x in [35.0, 40.0, 50.0] {
         h.mv(x, 30.0, none());
     }
     assert_eq!(
@@ -245,7 +246,7 @@ fn own_drag_of_a_node_under_peer_preview_writes_only_own_move() {
         30.0,
         "превью жеста — от документа"
     );
-    h.up(150.0, 30.0, none());
+    h.up(50.0, 30.0, none());
     assert_eq!(h.props(a).x, 30.0, "в документе — только свой сдвиг");
     // После своего жеста чужое превью возвращается — сдвиг участника от нового документа.
     assert_eq!(h.ed.scene().node(a).unwrap().props.x, 130.0);
@@ -389,4 +390,100 @@ fn own_presence_reports_cursor_selection_and_gesture() {
     h.up(70.0, 30.0, none());
     assert_eq!(h.ed.own_presence().gesture, None);
     assert_eq!(h.props(a).x, 50.0);
+}
+
+#[test]
+fn panel_edit_under_peer_drag_writes_only_own_change() {
+    let mut h = H::new();
+    let a = h.rect(None, 10.0, 10.0, 50.0, 40.0);
+    h.ed.select(&[a]);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[a], 100.0);
+    assert_eq!(h.ed.scene().node(a).unwrap().props.x, 110.0);
+    let x5 = PanelEdit::Number {
+        field: NumField::X,
+        value: 5.0,
+        relative: true,
+    };
+    // Перетаскивание подписи поля X: превью и запись — от документа, без чужого сдвига.
+    h.ed.edit_selection(&x5, Phase::Preview);
+    assert_eq!(
+        h.ed.scene().node(a).unwrap().props.x,
+        15.0,
+        "превью поля — от документа"
+    );
+    h.ed.edit_selection(&x5, Phase::Commit);
+    assert_eq!(h.props(a).x, 15.0, "в документе — только своя правка");
+    assert_eq!(
+        h.ed.scene().node(a).unwrap().props.x,
+        115.0,
+        "чужое превью вернулось поверх нового документа"
+    );
+    // Ввод в поле — одна запись без превью.
+    h.ed.edit_selection(&x5, Phase::Commit);
+    assert_eq!(h.props(a).x, 20.0);
+    // Те же поля по заданным узлам.
+    h.ed.edit_nodes(&x5, Phase::Commit, &[a]);
+    assert_eq!(h.props(a).x, 25.0);
+}
+
+#[test]
+fn copy_under_peer_drag_takes_document_position() {
+    let mut h = H::new();
+    let a = h.rect(None, 10.0, 10.0, 50.0, 40.0);
+    h.ed.select(&[a]);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[a], 100.0);
+    let bytes = h.ed.copy().expect("есть что копировать");
+    h.ed.paste_with(&bytes, PasteMode::Over).unwrap();
+    let pasted = h.sel();
+    assert_eq!(pasted.len(), 1);
+    assert_ne!(pasted[0], a);
+    assert_eq!(h.props(pasted[0]).x, 10.0, "копия — с места в документе");
+}
+
+#[test]
+fn text_style_edit_under_peer_drag_keeps_document_position() {
+    let mut h = common::text::text_h();
+    let t = common::text::add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    h.ed.select(&[t]);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[t], 100.0);
+    let size = |v: f64| TextStylePatch {
+        size: Some(v),
+        ..Default::default()
+    };
+    // Выбор в списке — одна запись; перетаскивание — превью, затем запись.
+    h.ed.edit_text_style(&size(32.0), Phase::Commit, None)
+        .unwrap();
+    assert_eq!(h.props(t).text.unwrap().props.style.size, 32.0);
+    h.ed.edit_text_style(&size(40.0), Phase::Preview, None)
+        .unwrap();
+    h.ed.edit_text_style(&size(40.0), Phase::Commit, None)
+        .unwrap();
+    assert_eq!(h.props(t).x, 100.0);
+    assert_eq!(h.props(t).text.unwrap().props.style.size, 40.0);
+    let center = TextPropsPatch {
+        align_h: Some(ferrum_doc::AlignH::Center),
+        ..Default::default()
+    };
+    h.ed.edit_text_props(&center, Phase::Commit, None).unwrap();
+    assert_eq!(h.props(t).x, 100.0);
+}
+
+#[test]
+fn drawing_under_peer_drag_of_a_frame_places_by_document() {
+    let mut h = H::new();
+    let f = h.frame(None, 0.0, 0.0, 400.0, 300.0);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[f], 500.0);
+    assert_eq!(h.ed.scene().node(f).unwrap().props.x, 500.0);
+    // Нажатие — своё действие: чужой слой снимается до него, фрейм — на месте в документе,
+    // и прямоугольник у точки 600 рисуется мимо него, на холсте.
+    h.ed.set_tool(ToolKind::Rect);
+    h.drag((600.0, 100.0), (650.0, 150.0), none());
+    let r = h.sel()[0];
+    assert_eq!(h.parent(r), None, "фрейм в документе — не под указателем");
+    assert_eq!((h.props(r).x, h.props(r).y), (600.0, 100.0));
+    assert_eq!(h.props(f).x, 0.0);
 }
