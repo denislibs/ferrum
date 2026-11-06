@@ -181,6 +181,14 @@ impl H {
         assert_eq!(snapshot(self.ed.scene()), snapshot(&fresh));
     }
 
+    /// Сцена — документ и поверх него нынешний слой чужого превью: как если бы слой наложили на
+    /// свежую сцену.
+    pub fn assert_scene_is_document_with_remote_layer(&mut self) {
+        let mut fresh = Scene::from_page(self.ed.page_doc());
+        fresh.set_remote_preview(&self.ed.scene().remote_patches());
+        assert_eq!(snapshot(self.ed.scene()), snapshot(&fresh));
+    }
+
     /// Жест дал ровно один шаг истории: отмена возвращает `before`, повтор — `after`.
     pub fn assert_one_step(&mut self, steps_before: u64, before: &DocState) {
         assert_eq!(self.ed.step_count(), steps_before + 1, "один шаг истории");

@@ -184,6 +184,9 @@ pub(crate) struct Presence {
     applied: Option<PreviewKey>,
     /// Участники, чьё превью сейчас в слое (остальные с жестом — за пределами).
     previewed: Vec<u32>,
+    /// В слое только переносы: матрицы под ним отличаются от документа лишь сдвигом, и следующий
+    /// перенос считается поверх слоя без его снятия (`move_patches_over_layer`).
+    layer_moves: bool,
     /// Своё действие идёт (`Editor::presence_hold`): слоя нет.
     holds: u32,
     /// Идёт пачка записей (`Editor::presence_batch`): `emit` — в её конце.
@@ -556,10 +559,54 @@ impl Editor {
         if self.presence.applied == Some(self.preview_key()) {
             return;
         }
-        // Базы — из документа: прежний слой сначала снимается.
-        if self.scene.has_remote_preview() {
-            self.scene.set_remote_preview(&[]);
+        // Базы — из документа. Если в слое и в новых жестах только переносы, правки считаются по
+        // базе слоя без его снятия: одна пересборка на пачку. Иначе прежний слой сначала
+        // снимается. Своя рамка для других считается по документу — тоже без слоя.
+        let key = self.own_bounds_key();
+        let bounds_fresh = self.presence.own_bounds.is_some_and(|(k, _)| k == key);
+        let over_layer =
+            (self.scene.has_remote_preview() && self.presence.layer_moves && bounds_fresh)
+                .then(|| self.collect_remote_preview(true))
+                .flatten();
+        let (patches, previewed) = match over_layer {
+            Some(c) => c,
+            None => {
+                if self.scene.has_remote_preview() {
+                    self.scene.set_remote_preview(&[]);
+                }
+                let c = self
+                    .collect_remote_preview(false)
+                    .expect("без слоя правки считаются всегда");
+                // Сцена сейчас — документ: рамка — только если слой будет и она устарела (проход
+                // по своему выделению, до 100 000 узлов, — не на каждый кадр участника).
+                if !c.0.is_empty() && !bounds_fresh {
+                    self.presence.own_bounds = Some((key, self.selection_world_bounds()));
+                }
+                c
+            }
+        };
+        self.presence.layer_moves = previewed.iter().all(|id| {
+            self.presence
+                .peers
+                .get(id)
+                .and_then(|p| p.state.as_ref()?.gesture)
+                .is_some_and(|g| g.kind == GestureKind::Move)
+        });
+        self.presence.previewed = previewed;
+        if !patches.is_empty() || self.scene.has_remote_preview() {
+            self.scene.set_remote_preview(&patches);
         }
+        self.presence.applied = Some(self.preview_key());
+    }
+
+    /// Правки слоя чужого превью по жестам участников этой страницы в пределах `PREVIEW_*` и
+    /// кто попал в слой. `over_layer` — поверх наложенного слоя (`move_patches_over_layer`):
+    /// `None`, если так нельзя хотя бы у одного участника.
+    #[allow(clippy::type_complexity)]
+    fn collect_remote_preview(
+        &self,
+        over_layer: bool,
+    ) -> Option<(Vec<(NodeId, PropsPatch)>, Vec<u32>)> {
         let mut patches: Vec<(NodeId, PropsPatch)> = Vec::new();
         let mut previewed = Vec::new();
         for (id, p) in &self.presence.peers {
@@ -578,28 +625,18 @@ impl Editor {
             if ids.len() > budget {
                 continue;
             }
-            let Some(own) =
+            let own = if over_layer {
+                crate::tools::select::move_patches_over_layer(&self.scene, ids, &g, budget)?
+            } else {
                 crate::tools::select::gesture_patches(&self.scene, ids, &g, &self.fonts, budget)
-            else {
-                continue;
             };
+            let Some(own) = own else { continue };
             if !own.is_empty() {
                 patches.extend(own);
                 previewed.push(*id);
             }
         }
-        self.presence.previewed = previewed;
-        if !patches.is_empty() {
-            // Сцена сейчас — документ: своя рамка для других считается здесь, а не под слоем, и
-            // только если с прошлого раза сменились выделение или документ — не на каждый кадр
-            // участника (проход по своему выделению, до 100 000 узлов).
-            let key = self.own_bounds_key();
-            if self.presence.own_bounds.is_none_or(|(k, _)| k != key) {
-                self.presence.own_bounds = Some((key, self.selection_world_bounds()));
-            }
-            self.scene.set_remote_preview(&patches);
-        }
-        self.presence.applied = Some(self.preview_key());
+        Some((patches, previewed))
     }
 
     fn preview_key(&self) -> PreviewKey {

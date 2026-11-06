@@ -734,8 +734,10 @@ impl SelectTool {
 /// своего жеста этого вида, по выделению участника и матрице его жеста. Привязки и пиксели
 /// участник уже учёл в матрице. Сцена — без чужого превью: базы берутся из документа.
 ///
-/// `budget` — сколько узлов жест может менять (с поддеревом у ресайза групп и «Масштаба»):
-/// больше — `None`, и правки не считаются (пределы живого превью, `presence::PREVIEW_*`).
+/// `budget` — сколько узлов слоя может стоить жест: узлы с **всем** поддеревом при любом виде
+/// жеста — сцена пересчитывает мировые матрицы и рамки поддерева каждого изменённого узла,
+/// так что перенос фрейма с 10 000 потомков стоит как 10 001 узел. Больше — `None`, и правки
+/// не считаются (пределы живого превью, `presence::PREVIEW_*`).
 pub(crate) fn gesture_patches(
     scene: &ferrum_scene::Scene,
     selection: &[NodeId],
@@ -743,44 +745,15 @@ pub(crate) fn gesture_patches(
     fonts: &ferrum_text::SharedFonts,
     budget: usize,
 ) -> Option<Vec<(NodeId, PropsPatch)>> {
-    let ids: Vec<NodeId> = top_level(scene, selection)
-        .into_iter()
-        .filter(|id| {
-            scene
-                .slot(*id)
-                .is_some_and(|s| !scene.is_draft(*id) && !locked(scene, s))
-        })
-        .collect();
+    let ids = gesture_ids(scene, selection);
     if ids.is_empty() {
         return Some(Vec::new());
     }
-    let descend = match g.kind {
-        GestureKind::Move | GestureKind::Rotate => Descend::No,
-        GestureKind::Resize => Descend::Groups,
-        GestureKind::Scale => Descend::All,
-    };
-    if !nodes_within(scene, &ids, descend, budget) {
+    if !nodes_within(scene, &ids, budget) {
         return None;
     }
     Some(match g.kind {
-        GestureKind::Move => {
-            let delta = g.transform.translation();
-            ids.iter()
-                .filter_map(|id| {
-                    let n = scene.node(*id)?;
-                    let parent_world = n.parent.map_or(Affine::IDENTITY, |p| scene.at(p).world);
-                    let dl = local_delta(parent_world, delta);
-                    Some((
-                        *id,
-                        PropsPatch {
-                            x: Some(n.props.x + dl.x),
-                            y: Some(n.props.y + dl.y),
-                            ..Default::default()
-                        },
-                    ))
-                })
-                .collect()
-        }
+        GestureKind::Move => move_patches(scene, &ids, g.transform.translation()),
         GestureKind::Rotate => rigid_patches(&bases(scene, &ids, false), g.transform, false),
         GestureKind::Resize => {
             let bases = bases(scene, &ids, true);
@@ -826,51 +799,83 @@ fn same_place(from: SelectionBox, to: SelectionBox, p: Point) -> Point {
     }
 }
 
-/// Какие потомки меняет жест вместе с узлом: никакие, поддерево групп (ресайз, `bases` с
-/// детьми групп) или всё поддерево («Масштаб», `bases_deep`).
-#[derive(Clone, Copy, PartialEq)]
-enum Descend {
-    No,
-    Groups,
-    All,
+/// Узлы чужого жеста: верхние в выделении, есть в сцене, не черновики, не заблокированные.
+fn gesture_ids(scene: &ferrum_scene::Scene, selection: &[NodeId]) -> Vec<NodeId> {
+    top_level(scene, selection)
+        .into_iter()
+        .filter(|id| {
+            scene
+                .slot(*id)
+                .is_some_and(|s| !scene.is_draft(*id) && !locked(scene, s))
+        })
+        .collect()
 }
 
-/// Узлов, которые меняет жест над `ids`, не больше `budget`. Обход кончается, как только
-/// предел превышен: поддерево в 100 000 узлов не обходится целиком.
-fn nodes_within(
+/// Правки переноса на мировой `delta`: от свойств узла в документе — под слоем чужого превью
+/// это его база (`Scene::remote_base`), иначе свойства сцены.
+fn move_patches(
     scene: &ferrum_scene::Scene,
     ids: &[NodeId],
-    descend: Descend,
+    delta: Vec2,
+) -> Vec<(NodeId, PropsPatch)> {
+    ids.iter()
+        .filter_map(|id| {
+            let slot = scene.slot(*id)?;
+            let n = scene.at(slot);
+            let props = scene.remote_base(slot).unwrap_or(&n.props);
+            let parent_world = n.parent.map_or(Affine::IDENTITY, |p| scene.at(p).world);
+            let dl = local_delta(parent_world, delta);
+            Some((
+                *id,
+                PropsPatch {
+                    x: Some(props.x + dl.x),
+                    y: Some(props.y + dl.y),
+                    ..Default::default()
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Перенос по документу поверх наложенного слоя чужого превью, без его снятия: свойства узлов —
+/// из базы слоя (`Scene::remote_base`), а перевод мирового сдвига в оси родителя берёт только
+/// линейную часть его матрицы (`local_delta`), которую слой из одних переносов не меняет. Так
+/// слой пересобирается один раз на пачку, а не дважды (снять и наложить). `None` — не перенос:
+/// правки — после снятия слоя (`gesture_patches`); `Some(None)` — больше `budget`.
+pub(crate) fn move_patches_over_layer(
+    scene: &ferrum_scene::Scene,
+    selection: &[NodeId],
+    g: &Gesture,
     budget: usize,
-) -> bool {
-    let into = |s: Slot| match descend {
-        Descend::No => false,
-        Descend::Groups => scene.at(s).props.kind.is_group_like(),
-        Descend::All => true,
-    };
+) -> Option<Option<Vec<(NodeId, PropsPatch)>>> {
+    if g.kind != GestureKind::Move {
+        return None;
+    }
+    let ids = gesture_ids(scene, selection);
+    if !nodes_within(scene, &ids, budget) {
+        return Some(None);
+    }
+    Some(Some(move_patches(scene, &ids, g.transform.translation())))
+}
+
+/// Узлов с поддеревьями `ids` не больше `budget`. Обход кончается, как только предел превышен:
+/// поддерево в 100 000 узлов не обходится целиком.
+fn nodes_within(scene: &ferrum_scene::Scene, ids: &[NodeId], budget: usize) -> bool {
     let mut n = 0usize;
     let mut stack = Vec::new();
     for id in ids {
         let Some(slot) = scene.slot(*id) else {
             continue;
         };
-        n += 1;
-        if n > budget {
-            return false;
-        }
-        if into(slot) {
-            stack.push(slot);
-        }
+        stack.push(slot);
         while let Some(s) = stack.pop() {
-            for &c in &scene.at(s).children {
-                n += 1;
-                if n > budget {
-                    return false;
-                }
-                if into(c) {
-                    stack.push(c);
-                }
+            n += 1;
+            let children = &scene.at(s).children;
+            // Всё, что в стеке, будет посчитано: сверх предела — сразу, не копируя детей.
+            if n + stack.len() + children.len() > budget {
+                return false;
             }
+            stack.extend_from_slice(children);
         }
     }
     true

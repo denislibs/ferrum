@@ -1318,6 +1318,11 @@ impl Scene {
         !self.remote.is_empty()
     }
 
+    /// Свойства узла из документа, если узел под слоем чужого превью (`None` — не под слоем).
+    pub fn remote_base(&self, slot: Slot) -> Option<&Props> {
+        self.remote.get(&slot).map(|(doc, _)| doc)
+    }
+
     /// Чужое превью как список правок: пересборка сцены его сохраняет.
     pub fn remote_patches(&self) -> Vec<(NodeId, PropsPatch)> {
         self.remote

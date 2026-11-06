@@ -453,6 +453,95 @@ fn presence_hostile_batch(
     ed.take_events();
 }
 
+/// Чужой жест кадром участника: страница, выделение одной частью версии 1 и сдвиг на `k`.
+fn peer_move(page: ferrum_doc::PageId, count: usize, k: Option<f64>) -> ferrum_editor::PeerState {
+    use ferrum_editor::{Gesture, GestureKind, PeerSelection, PeerState};
+    use kurbo::{Affine, Rect};
+    PeerState {
+        page: Some(page),
+        view: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+        cursor: Some(Point::new(k.unwrap_or(0.0), 0.0)),
+        selection: Some(PeerSelection {
+            rev: 1,
+            count: count as u32,
+            parts: 1,
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+        }),
+        gesture: k.map(|k| Gesture {
+            kind: GestureKind::Move,
+            transform: Affine::translate((k, 0.0)),
+            frame: Affine::IDENTITY,
+            k: 1.0,
+        }),
+    }
+}
+
+/// Перенос фрейма с `children` потомками другим участником (финальное повторное ревью, N1):
+/// цена пачки — пересборка поддерева, поэтому в предел превью идёт всё поддерево. `shown` —
+/// ожидается ли превью (честный артборд в пределах) — проверка без времени.
+fn presence_frame_drag(report: &mut Report, children: usize, shown: bool, limit_ms: f64) {
+    use ferrum_doc::NodeKind;
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let frame = doc
+        .transact(page, vec![], |tx| {
+            let f = tx.create_node(None, None, NodeKind::Frame)?;
+            tx.set_props(
+                f,
+                &PropsPatch {
+                    w: Some(4000.0),
+                    h: Some(4000.0),
+                    ..Default::default()
+                },
+            )?;
+            for i in 0..children {
+                let id = tx.create_node(Some(f), None, NodeKind::Rect)?;
+                tx.set_props(
+                    id,
+                    &PropsPatch {
+                        x: Some((i % 300) as f64 * 12.0),
+                        y: Some((i / 300) as f64 * 12.0),
+                        w: Some(10.0),
+                        h: Some(10.0),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(vec![f])
+        })
+        .unwrap()[0];
+    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    ed.presence_join(7, "u-7", "Участник", ferrum_editor::peer_color(0x0d74ce));
+    ed.presence_part(7, 1, 0, 1, vec![frame]);
+    ed.presence_state(7, peer_move(page, 1, None));
+    ed.take_events();
+    let runs: Vec<Duration> = (1..=MOVES)
+        .map(|i| {
+            let t = Instant::now();
+            ed.presence_batch(|ed| ed.presence_state(7, peer_move(page, 1, Some(i as f64))));
+            let d = t.elapsed();
+            ed.take_events();
+            d
+        })
+        .collect();
+    report.gate_median(
+        &format!("Чужой перенос фрейма с {children} потомками: пачка"),
+        &runs,
+        limit_ms,
+    );
+    let has = ed.scene().has_remote_preview();
+    report.check(
+        &format!("Чужой перенос фрейма с {children} потомками: превью"),
+        has == shown,
+        format!("{has}"),
+        if shown {
+            "есть"
+        } else {
+            "нет (больше предела)"
+        },
+    );
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -514,6 +603,9 @@ fn main() {
     presence_hostile_batch(&mut report, &mut ed, &ids, (10, 1000, 16.0));
     presence_hostile_batch(&mut report, &mut ed, &ids, (10, 3000, 16.0));
     presence_hostile_batch(&mut report, &mut ed, &ids, (50, 1900, 16.0));
+    presence_frame_drag(&mut report, 1500, true, 8.0);
+    presence_frame_drag(&mut report, 10_000, false, 8.0);
+    presence_frame_drag(&mut report, 50_000, false, 8.0);
     ed.select(&children);
 
     // 2. Запись перетаскивания 1000 узлов одной транзакцией и её отмена.

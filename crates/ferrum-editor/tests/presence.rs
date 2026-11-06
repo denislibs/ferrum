@@ -724,6 +724,117 @@ fn batch_of_peer_frames_rebuilds_preview_once() {
         let x = h.props(id).x;
         assert_eq!(h.ed.scene().node(id).unwrap().props.x, x + dx);
     }
+    // Следующая пачка поверх наложенного слоя: перенос считается по базе слоя, без его снятия, —
+    // одна пересборка, а не две (повторное ревью, N1).
+    let before = remote_changes(&h);
+    h.ed.presence_batch(|ed| {
+        for p in 1..=3u32 {
+            let mine = &ids[(p as usize - 1) * 10..p as usize * 10];
+            let s = moving(ed, mine, 100.0);
+            ed.presence_state(p, s);
+        }
+    });
+    assert_eq!(remote_changes(&h) - before, 1, "слой наложен один раз");
+    for id in [ids[0], ids[10], ids[20]] {
+        let x = h.props(id).x;
+        assert_eq!(h.ed.scene().node(id).unwrap().props.x, x + 100.0);
+    }
+    h.assert_scene_is_document_with_remote_layer();
+}
+
+/// Поверх слоя считается только перенос и только поверх переносов: после чужого поворота фрейма
+/// перенос его ребёнка другим участником считается по документу, а не по повёрнутому слою.
+#[test]
+fn move_over_a_rotated_layer_is_taken_by_document() {
+    let mut h = H::new();
+    let f = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    let c = h.rect(Some(f), 10.0, 10.0, 20.0, 20.0);
+    join(&mut h, 1);
+    join(&mut h, 2);
+    h.ed.presence_part(1, 1, 0, 1, vec![f]);
+    h.ed.presence_part(2, 1, 0, 1, vec![c]);
+    let turned = |ed: &Editor, kind, t| {
+        let mut s = select(ed, &[f], 1);
+        s.gesture = Some(Gesture {
+            kind,
+            transform: t,
+            frame: Affine::IDENTITY,
+            k: 1.0,
+        });
+        s
+    };
+    h.ed.presence_batch(|ed| {
+        let s = turned(
+            ed,
+            GestureKind::Rotate,
+            Affine::rotate(std::f64::consts::FRAC_PI_2),
+        );
+        ed.presence_state(1, s);
+        let s = moving(ed, &[c], 10.0);
+        ed.presence_state(2, s);
+    });
+    // Участник 1 сменил поворот на перенос на месте, участник 2 тянет дальше.
+    h.ed.presence_batch(|ed| {
+        let s = turned(ed, GestureKind::Move, Affine::IDENTITY);
+        ed.presence_state(1, s);
+        let s = moving(ed, &[c], 20.0);
+        ed.presence_state(2, s);
+    });
+    let n = h.ed.scene().node(c).unwrap();
+    assert_eq!(
+        (n.props.x, n.props.y),
+        (30.0, 10.0),
+        "сдвиг в осях фрейма из документа"
+    );
+    h.assert_scene_is_document_with_remote_layer();
+}
+
+/// Повторное ревью, N1 (поведение): в предел превью идёт всё поддерево узла при любом жесте —
+/// сцена пересчитывает его целиком. Честный артборд с 1500 потомками — в пределах.
+#[test]
+fn peer_frame_move_counts_its_subtree() {
+    let mut h = H::new();
+    let big = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    many(&mut h, Some(big), PREVIEW_PEER_NODES);
+    let board = h.frame(None, 1000.0, 0.0, 400.0, 400.0);
+    many(&mut h, Some(board), 1500);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[big], 500.0);
+    assert!(
+        !h.ed.scene().has_remote_preview(),
+        "перенос фрейма с {} узлами поддерева",
+        PREVIEW_PEER_NODES + 1
+    );
+    assert_eq!(
+        h.ed.overlay().remote[0].frame,
+        Some(Rect::new(500.0, 0.0, 501.0, 1.0)),
+        "рамка из кадра, сдвинутая жестом"
+    );
+    join(&mut h, 2);
+    drag_by(&mut h, 2, &[board], 500.0);
+    assert_eq!(
+        h.ed.scene().node(board).unwrap().props.x,
+        1500.0,
+        "артборд с 1500 потомками"
+    );
+    // Поворот и ресайз — так же.
+    for kind in [GestureKind::Rotate, GestureKind::Resize] {
+        let mut s = select(&h.ed, &[big], 1);
+        s.gesture = Some(Gesture {
+            kind,
+            transform: Affine::rotate(0.5),
+            frame: Affine::IDENTITY,
+            k: 1.0,
+        });
+        h.ed.presence_state(1, s);
+        assert!(
+            h.ed.scene()
+                .remote_patches()
+                .iter()
+                .all(|(id, _)| *id != big),
+            "{kind:?}"
+        );
+    }
 }
 
 /// (поведение) Пределы живого превью: выделение участника больше `PREVIEW_PEER_NODES` (с
