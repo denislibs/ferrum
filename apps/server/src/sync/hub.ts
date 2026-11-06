@@ -7,7 +7,6 @@ import {
   encodeVersion,
   MAX_SYNC_FRAME_BYTES,
   parseClientFrame,
-  parseVersion,
   RANK_ROLE,
   ROLE_RANK,
   snapshotPath,
@@ -73,6 +72,15 @@ export interface SyncLimits {
   /** Открытий соединения на человека: переподключение не обнуляет пределы, а открытие стоит запроса к Valkey и базе. */
   userOpensPerSecond: number;
   userOpensBurst: number;
+  /** Байты векторов подписки: свой бакет, маленький. Вектор держится в памяти, пока подписка ждёт базу, а настоящему
+   * клиенту хватает килобайт. */
+  userSubscribeBytesPerSecond: number;
+  userSubscribeBytesBurst: number;
+  /** Грубые нарушения, которых настоящий клиент не делает: пачка, роняющая Loro (стоит двух замен общего worker'а
+   * проверки), и подделка чужого пира. Каждое закрывает соединение; годная пачка их не прощает. Бакет пуст — человек не
+   * открывает соединений, пока он не наполнится. */
+  userFaultsPerSecond: number;
+  userFaultsBurst: number;
   connectionsPerUser: number;
   connectionsTotal: number;
   subscribesPerConnection: number;
@@ -108,6 +116,10 @@ export const SYNC_LIMITS: SyncLimits = {
   userBytesBurst: 256 * 1024 * 1024,
   userOpensPerSecond: 1,
   userOpensBurst: 64,
+  userSubscribeBytesPerSecond: 4 * 1024 * 1024,
+  userSubscribeBytesBurst: 16 * 1024 * 1024,
+  userFaultsPerSecond: 1 / 300,
+  userFaultsBurst: 3,
   connectionsPerUser: 64,
   connectionsTotal: 20_000,
   subscribesPerConnection: 4096,
@@ -169,6 +181,8 @@ interface UserState {
   frames: Bucket;
   bytes: Bucket;
   opens: Bucket;
+  subscribeBytes: Bucket;
+  faults: Bucket;
   conns: number;
 }
 
@@ -244,6 +258,9 @@ export class SyncHub {
     if (this.total >= this.limits.connectionsTotal || u.conns >= this.limits.connectionsPerUser) {
       return new Response(null, { status: 429, headers: { 'Retry-After': '5' } });
     }
+    // Грубые нарушения исчерпали бакет: до его пополнения соединений нет.
+    const banned = u.faults.peek(1);
+    if (banned > 0) return new Response(null, { status: 429, headers: { 'Retry-After': String(Math.ceil(banned / 1000)) } });
     const wait = u.opens.take(1);
     if (wait > 0) return new Response(null, { status: 429, headers: { 'Retry-After': String(Math.ceil(wait / 1000)) } });
     const data: ConnData = {
@@ -274,6 +291,8 @@ export class SyncHub {
         frames: new Bucket(this.limits.userFramesPerSecond, this.limits.userFramesBurst),
         bytes: new Bucket(this.limits.userBytesPerSecond, this.limits.userBytesBurst),
         opens: new Bucket(this.limits.userOpensPerSecond, this.limits.userOpensBurst),
+        subscribeBytes: new Bucket(this.limits.userSubscribeBytesPerSecond, this.limits.userSubscribeBytesBurst),
+        faults: new Bucket(this.limits.userFaultsPerSecond, this.limits.userFaultsBurst),
         conns: 0,
       };
       this.users.set(id, u);
@@ -284,7 +303,8 @@ export class SyncHub {
   /** Человек без соединений с полными бакетами ничем не отличается от нового. */
   private sweepUsers(): void {
     for (const [id, u] of this.users) {
-      if (u.conns === 0 && u.frames.full() && u.bytes.full() && u.opens.full()) this.users.delete(id);
+      if (u.conns === 0 && u.frames.full() && u.bytes.full() && u.opens.full() && u.subscribeBytes.full() && u.faults.full())
+        this.users.delete(id);
     }
   }
 
@@ -372,6 +392,17 @@ export class SyncHub {
     if (++d.strikes >= this.limits.strikes) d.ws?.close(SYNC_CLOSE.BAD_FRAME, 'bad frames');
   }
 
+  /** Грубое нарушение: соединение закрывается сразу, нарушение копится на человеке. Годная пачка его не прощает: иначе
+   * чередование с ней роняло бы общий worker проверки без конца. Бакет исчерпан — закрываются все соединения человека. */
+  private fault(d: ConnData, reason: string): void {
+    const u = this.user(d.user);
+    u.faults.take(1);
+    if (u.faults.peek(1) > 0) {
+      for (const set of this.conns.values()) for (const x of set) if (x.user === d.user) x.ws?.close(SYNC_CLOSE.BAD_FRAME, reason);
+    }
+    d.ws?.close(SYNC_CLOSE.BAD_FRAME, reason);
+  }
+
   private received(ws: Bun.ServerWebSocket<ConnData>, message: string | Buffer): void {
     const d = ws.data;
     if (typeof message === 'string') {
@@ -398,10 +429,11 @@ export class SyncHub {
       return;
     }
     const u = this.user(d.user);
-    // Байты — и у подписки: вектор версий в ней бывает больше пачки.
-    const size = frame.t === 'update' ? frame.bytes.length : frame.t === 'subscribe' ? frame.version.length : 0;
+    // Байты правки — в общий бакет; вектор подписки — в свой, маленький: он живёт в памяти, пока подписка ждёт базу.
+    const size = frame.t === 'update' ? frame.bytes.length : 0;
+    const vector = frame.t === 'subscribe' ? frame.version.length : 0;
     // Все бакеты сразу: неудачный кадр не тратит токены одного, пока ждёт другой.
-    const wait = Math.max(d.frames.peek(1), u.frames.peek(1), u.bytes.peek(size));
+    const wait = Math.max(d.frames.peek(1), u.frames.peek(1), u.bytes.peek(size), u.subscribeBytes.peek(vector));
     if (wait > 0) {
       // Предел частоты — пауза: кадр не принят, клиент пришлёт его снова. Подписка и правка равны перед ним.
       this.send(d, { t: 'pause', ms: Math.min(wait, 30_000) });
@@ -410,6 +442,7 @@ export class SyncHub {
     d.frames.take(1);
     u.frames.take(1);
     u.bytes.take(size);
+    u.subscribeBytes.take(vector);
     switch (frame.t) {
       case 'subscribe':
         this.track(
@@ -448,19 +481,23 @@ export class SyncHub {
     // Схему поднимает только тот, кто может писать, и не выше известной этой сборке; без изменения строка не трогается.
     this.track(
       this.pool
-        .query<{ version: string; member: number }>(
+        .query<{ version: string; member: number; rank: number | null }>(
           `WITH f AS (SELECT id, version, file_role_rank(id, $2) AS rank, file_member_rank(id, $2) AS member FROM file WHERE id = $1),
                 up AS (UPDATE file SET schema_version = $3 FROM f
                        WHERE file.id = f.id AND f.rank >= $4 AND file.schema_version < $3 RETURNING 1)
-           SELECT version, member FROM f`,
+           SELECT version, member, rank FROM f`,
           [d.file, d.user, Math.min(schema, this.limits.knownSchema), ROLE_RANK.editor],
         )
         .then(({ rows }) => {
-          if (!rows[0]) {
+          // Роль — по этому запросу, а не по открытию: сверка ролей пропускает соединение, открытое пока она шла, и роль,
+          // прочитанная до снятия, иначе жила бы до следующей сверки.
+          const role = rows[0] ? RANK_ROLE[rows[0].rank ?? 0] : null;
+          if (!role) {
             this.revoke(d, 'access');
             return;
           }
-          this.send(d, { t: 'role', role: d.role, canShare: rows[0].member >= ROLE_RANK.editor, version: Number(rows[0].version) });
+          d.role = role;
+          this.send(d, { t: 'role', role, canShare: rows[0].member >= ROLE_RANK.editor, version: Number(rows[0].version) });
         })
         .catch((e: unknown) => {
           if (d.closed) return;
@@ -495,10 +532,12 @@ export class SyncHub {
       this.refuse(d, doc, clientSeq, 'UNAVAILABLE');
       return;
     }
-    const verdict = await this.validator.validate(d.file, doc, bytes);
+    const verdict = await this.validator.validate(d.file, doc, bytes, d.user);
     if (verdict.kind === 'bad') {
-      this.strike(d);
       this.refuse(d, doc, clientSeq, 'BAD_UPDATE');
+      // Пачка уронила Loro дважды, на свежем worker'е тоже: это не ошибка разбора, а удар по всему серверу.
+      if (verdict.fatal) this.fault(d, 'panic');
+      else this.strike(d);
       return;
     }
     if (verdict.kind === 'retry') {
@@ -518,6 +557,8 @@ export class SyncHub {
       // Документ проверки уже принял пачку, а журнал нет: он больше не равен журналу.
       this.validator.reject(verdict.chain);
       this.refuse(d, doc, clientSeq, outcome.code);
+      // Чужой пир настоящий клиент не шлёт, а подделка отравляет цепочку проверки соавторам: их пачки получают `GAP`.
+      if (outcome.code === 'FOREIGN_PEER') this.fault(d, 'foreign peer');
       return;
     }
     this.send(d, { t: 'ack', doc, clientSeq, seq: outcome.seq });
@@ -577,9 +618,10 @@ export class SyncHub {
     }
   }
 
-  private async subscribe(d: ConnData, doc: string, raw: Uint8Array): Promise<void> {
-    const version = parseVersion(raw);
-    if (!version) return;
+  private async subscribe(d: ConnData, doc: string, frame: Uint8Array): Promise<void> {
+    // Вектор не разбирается в `Map` до ответа базы: разобранный он в восемь раз больше кадра и жил бы через `await`. Байты
+    // кадра — своя копия: буфер сокета живёт только на время обработчика. Разбор уже проверен `parseClientFrame`.
+    const raw = frame.slice();
     const old = d.docs.get(doc);
     if (!old && d.docs.size >= this.limits.subscribesPerConnection) {
       d.ws?.close(SYNC_CLOSE.BAD_FRAME, 'too many docs');
@@ -590,15 +632,15 @@ export class SyncHub {
     const state = await this.docState(d.file, doc);
     if (d.closed || d.docs.get(doc) !== sub) return;
     // Клиент отстал сильнее журнала: снимок вобрал правки, которых у него нет.
-    if (state && !versionIncludes(version, toMap(state.base_vv))) {
+    if (state && Object.entries(state.base_vv).some(([peer, c]) => counterOf(raw, peer) < c)) {
       this.needSnapshot(d, doc);
       return;
     }
     // Память на подписку — по пирам документа на сервере, а не по вектору клиента: пиры, которых сервер не знает, ни
     // одну запись не покрывают.
     for (const peer of Object.keys(state?.vv ?? {})) {
-      const c = version.get(peer);
-      if (c !== undefined) sub.version.set(peer, c);
+      const c = counterOf(raw, peer);
+      if (c > 0) sub.version.set(peer, c);
     }
     sub.ready = true;
     await this.pump(d, doc, sub, true);
@@ -844,6 +886,23 @@ export class SyncHub {
 }
 
 type ItemFrom = Item & { from?: ConnData; at?: number };
+
+/** Счётчик пира в закодированном векторе (`encodeVersion`: пиры по возрастанию, по 12 байт) без разбора всего вектора. */
+function counterOf(raw: Uint8Array, peer: string): number {
+  const v = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const want = BigInt(peer);
+  let lo = 0;
+  let hi = v.getUint32(0, true) - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const at = 4 + mid * 12;
+    const p = v.getBigUint64(at, true);
+    if (p === want) return v.getUint32(at + 8, true);
+    if (p < want) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return 0;
+}
 
 function merge(version: VersionMap, end: Record<string, number>): void {
   for (const [peer, counter] of Object.entries(end)) version.set(peer, Math.max(version.get(peer) ?? 0, counter));

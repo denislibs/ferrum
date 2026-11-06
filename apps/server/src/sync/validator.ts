@@ -1,5 +1,9 @@
 // Сторона сервера у worker'а проверки: очередь с пределом, замена worker'а после паники и срока, загрузка документа
 // по первому требованию. Основной поток Loro не загружает: паника wasm не задевает приём запросов.
+//
+// Worker один на сервер, поэтому чужие документы не должны его занимать: загрузок у человека — одна разом, очередь
+// загрузок — по людям и со сроком, документ перезагружается не чаще раза в `reloadMs`, а документ, чей журнал роняет
+// Loro, ждёт на карантине и worker больше не роняет.
 
 import type { Pool } from 'pg';
 import type { BlobStore } from '../blob-store';
@@ -19,6 +23,14 @@ export interface ValidatorOptions {
   memoryLimitBytes: number;
   /** Загрузок документов разом: каждая держит соединение пула и снимок в памяти основного потока. */
   loadsAtOnce: number;
+  /** Загрузок разом у одного человека: свои документы не занимают всю очередь. */
+  loadsPerUser: number;
+  /** Дольше этого загрузка не ждёт очереди: пачка получает «повторите». */
+  loadWaitMs: number;
+  /** Документ загружается заново не чаще: пачка с разрывом сбрасывает документ, и иначе каждая стоила бы полной загрузки. */
+  reloadMs: number;
+  /** Карантин документа после паники при загрузке; каждая следующая — вдвое дольше, до часа. */
+  quarantineMs: number;
   /** Журнал читается кусками не больше этого: одна запись бывает до 16 МБ, кусок — не меньше одной записи. */
   logChunkBytes: number;
   /** Тесты подменяют worker. */
@@ -29,6 +41,10 @@ const DEFAULTS: ValidatorOptions = {
   budgetBytes: 256 * 1024 * 1024,
   memoryLimitBytes: 2 * 1024 * 1024 * 1024,
   loadsAtOnce: 2,
+  loadsPerUser: 1,
+  loadWaitMs: 10_000,
+  reloadMs: 1000,
+  quarantineMs: 60_000,
   logChunkBytes: 16 * 1024 * 1024,
   workerUrl: new URL('./validator.worker.ts', import.meta.url),
 };
@@ -36,7 +52,8 @@ const DEFAULTS: ValidatorOptions = {
 export type Verdict =
   /** `chain` — загрузка документа, на которой пачка проверена: отказ журнала отзывает её (`reject`). */
   | { kind: 'ok'; start: Record<string, number>; end: Record<string, number>; pending: boolean; chain: string }
-  | { kind: 'bad' }
+  /** `fatal` — пачка роняет Loro и на новом worker'е с заново загруженным документом: её вина доказана. */
+  | { kind: 'bad'; fatal: boolean }
   /** Worker заменён не по вине этой пачки или очередь полна: повторить. */
   | { kind: 'retry' };
 
@@ -54,6 +71,19 @@ interface Slot {
 
 /** Загрузка шла в worker, который сменили по памяти. */
 class Moved extends Error {}
+/** Снимок или журнал документа роняет Loro: документ на карантин. */
+class LoadPanic extends Error {}
+/** Очередь загрузок не дошла до этой в срок. */
+class LoadLate extends Error {}
+
+/** Наибольший карантин документа. */
+const MAX_QUARANTINE_MS = 3_600_000;
+
+interface LoadTurn {
+  user: string;
+  go: () => void;
+  late: (e: Error) => void;
+}
 
 export class Validator {
   /** Заводится по первой работе: сервер без открытых файлов память wasm не держит. */
@@ -64,7 +94,16 @@ export class Validator {
   private queued = 0;
   private readonly loading = new Map<string, { p: Promise<void>; cancelled: boolean }>();
   private loadsRunning = 0;
-  private readonly loadQueue: (() => void)[] = [];
+  /** Загрузок у каждого человека сейчас. */
+  private readonly loadsBy = new Map<string, number>();
+  private readonly loadQueue: LoadTurn[] = [];
+  /** Когда документ начал загружаться в последний раз. */
+  private readonly loadedAt = new Map<string, number>();
+  /** Документ ушёл из worker'а из-за пачки (ждала неизвестного или её отверг журнал): следующая загрузка — не раньше срока.
+   * Замена worker'а и вытеснение по памяти сюда не входят: в них человек не виноват. */
+  private readonly dropped = new Set<string>();
+  /** Документы, чей снимок или журнал роняет Loro: до `until` пачки получают «повторите», worker не трогается. */
+  private readonly quarantine = new Map<string, { until: number; times: number }>();
   private readonly watchdog: Timer;
   private stopped = false;
   private readonly options: ValidatorOptions;
@@ -151,6 +190,12 @@ export class Validator {
 
   private checkHung(): void {
     const now = performance.now();
+    for (const [key, at] of this.loadedAt) {
+      if (now - at <= this.options.reloadMs) continue;
+      this.loadedAt.delete(key);
+      this.dropped.delete(key);
+    }
+    for (const [key, q] of this.quarantine) if (now - q.until > MAX_QUARANTINE_MS) this.quarantine.delete(key);
     for (const slot of [...this.retiring, ...(this.current ? [this.current] : [])]) {
       for (const w of slot.waiting.values()) {
         if (now - w.at > WORK_DEADLINE_MS) {
@@ -177,40 +222,94 @@ export class Validator {
     });
   }
 
-  private ensureLoaded(file: string, doc: string): Promise<void> {
+  private ensureLoaded(file: string, doc: string, user: string): Promise<void> {
     const key = `${file}/${doc}`;
     const going = this.loading.get(key);
     if (going) return going.p;
     const entry = { p: Promise.resolve(), cancelled: false };
-    entry.p = this.load(file, doc, key, entry).finally(() => {
+    entry.p = this.load(file, doc, key, entry, user).finally(() => {
       if (this.loading.get(key) === entry) this.loading.delete(key);
     });
     this.loading.set(key, entry);
     return entry.p;
   }
 
-  /** Очередь загрузок: не больше `loadsAtOnce` разом. */
-  private async gate<T>(work: () => Promise<T>): Promise<T> {
-    if (this.loadsRunning >= this.options.loadsAtOnce) await new Promise<void>((r) => this.loadQueue.push(r));
+  private mayStart(user: string): boolean {
+    return this.loadsRunning < this.options.loadsAtOnce && (this.loadsBy.get(user) ?? 0) < this.options.loadsPerUser;
+  }
+
+  private admit(user: string): void {
     this.loadsRunning++;
+    this.loadsBy.set(user, (this.loadsBy.get(user) ?? 0) + 1);
+  }
+
+  /** Свободное место — тому из ждущих, у кого меньше всего загрузок идёт; среди равных — кто раньше. */
+  private next(): void {
+    for (;;) {
+      let best = -1;
+      for (const [i, t] of this.loadQueue.entries()) {
+        if (!this.mayStart(t.user)) continue;
+        if (best < 0 || (this.loadsBy.get(t.user) ?? 0) < (this.loadsBy.get(this.loadQueue[best].user) ?? 0)) best = i;
+      }
+      if (best < 0) return;
+      const [turn] = this.loadQueue.splice(best, 1);
+      this.admit(turn.user);
+      turn.go();
+    }
+  }
+
+  /** Очередь загрузок: не больше `loadsAtOnce` разом и `loadsPerUser` у человека, ожидание — не дольше `loadWaitMs`. */
+  private async gate<T>(user: string, work: () => Promise<T>): Promise<T> {
+    if (this.mayStart(user) && this.loadQueue.length === 0) this.admit(user);
+    else {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const at = this.loadQueue.indexOf(turn);
+          if (at >= 0) this.loadQueue.splice(at, 1);
+          reject(new LoadLate('загрузка не дождалась очереди'));
+        }, this.options.loadWaitMs);
+        const turn: LoadTurn = {
+          user,
+          go: () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          late: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        };
+        this.loadQueue.push(turn);
+        this.next();
+      });
+    }
     try {
       return await work();
     } finally {
       this.loadsRunning--;
-      this.loadQueue.shift()?.();
+      const n = (this.loadsBy.get(user) ?? 1) - 1;
+      if (n > 0) this.loadsBy.set(user, n);
+      else this.loadsBy.delete(user);
+      this.next();
     }
   }
 
-  private load(file: string, doc: string, key: string, entry: { cancelled: boolean }): Promise<void> {
-    return this.gate(async () => {
+  private async load(file: string, doc: string, key: string, entry: { cancelled: boolean }, user: string): Promise<void> {
+    // Пачка с разрывом сбрасывает документ: подряд такие стоили бы полной загрузки каждая.
+    const last = this.dropped.delete(key) ? this.loadedAt.get(key) : undefined;
+    const pause = last === undefined ? 0 : last + this.options.reloadMs - performance.now();
+    if (pause > 0) await Bun.sleep(pause);
+    return this.gate(user, async () => {
       if (entry.cancelled) throw new Error('загрузка отменена');
+      this.loadedAt.set(key, performance.now());
       this.loads++;
       const slot = this.slot();
       const epoch = ++this.epoch;
       const fail = (r: FromValidator | null) => {
         if (r?.ok) return;
         if (!r && slot !== this.current && !this.stopped) throw new Moved();
-        throw new Error(r && !r.ok && r.reason === 'fatal' ? `паника: ${r.message}` : 'worker заменён');
+        if (r && !r.ok && r.reason === 'fatal') throw new LoadPanic(`паника: ${r.message}`);
+        throw new Error('worker заменён');
       };
       const client = await this.pool.connect();
       try {
@@ -274,31 +373,48 @@ export class Validator {
     });
   }
 
-  /** Вердикт по пачке. Вызовы одного документа отвечают в порядке вызова. Байты должны жить до ответа. */
-  async validate(file: string, doc: string, bytes: Uint8Array): Promise<Verdict> {
+  /** Вердикт по пачке. Вызовы одного документа отвечают в порядке вызова. Байты должны жить до ответа. `user` — чья пачка:
+   * загрузка документа, если нужна, идёт в его очередь. */
+  async validate(file: string, doc: string, bytes: Uint8Array, user = ''): Promise<Verdict> {
     if (this.queued + bytes.length > MAX_VALIDATOR_QUEUE_BYTES) return { kind: 'retry' };
     const key = `${file}/${doc}`;
+    const held = this.quarantine.get(key);
+    if (held && held.until > performance.now()) return { kind: 'retry' };
     let panics = 0;
     for (let attempt = 0; attempt < 6; attempt++) {
       if (this.loading.has(key)) await this.loading.get(key)!.p.catch(() => {});
       const r = await this.send(this.slot(), { op: 'validate', key, bytes } as Omit<ToValidator, 'id'>, bytes.length);
       if (!r) return { kind: 'retry' };
-      if (r.ok && 'end' in r) return { kind: 'ok', start: r.start, end: r.end, pending: r.pending, chain: `${key}#${r.epoch}` };
+      if (r.ok && 'end' in r) {
+        // Ждущая пачка: worker выбросил документ.
+        if (r.pending) this.dropped.add(key);
+        return { kind: 'ok', start: r.start, end: r.end, pending: r.pending, chain: `${key}#${r.epoch}` };
+      }
       if (!r.ok && r.reason === 'bad') {
         // Паника бывает и не от пачки (память worker'а кончилась, модуль испорчен раньше): винить пачку можно, только
         // если она уронила и новый worker с заново загруженным документом.
-        if (!r.fatal || ++panics >= 2) return { kind: 'bad' };
+        if (!r.fatal) return { kind: 'bad', fatal: false };
+        if (++panics >= 2) return { kind: 'bad', fatal: true };
       }
       try {
-        await this.ensureLoaded(file, doc);
+        await this.ensureLoaded(file, doc, user);
+        this.quarantine.delete(key);
       } catch (e) {
         // Worker сменился по памяти посреди загрузки: загрузить в новый.
         if (e instanceof Moved) continue;
-        console.error('Проверка пачек: не удалось загрузить документ:', e instanceof Error ? e.message : e);
+        if (e instanceof LoadPanic) this.hold(key);
+        if (!(e instanceof LoadLate)) console.error('Проверка пачек: не удалось загрузить документ:', e instanceof Error ? e.message : e);
         return { kind: 'retry' };
       }
     }
     return { kind: 'retry' };
+  }
+
+  /** Документ роняет Loro при загрузке: пачки к нему ждут, а не меняют общий worker одна за другой. */
+  private hold(key: string): void {
+    const times = (this.quarantine.get(key)?.times ?? 0) + 1;
+    const ms = Math.min(MAX_QUARANTINE_MS, this.options.quarantineMs * 2 ** (times - 1));
+    this.quarantine.set(key, { until: performance.now() + ms, times });
   }
 
   /** Журнал отверг пачку: документ проверки опередил журнал, следующая пачка загрузит его заново. */
@@ -306,6 +422,7 @@ export class Validator {
     const at = chain.lastIndexOf('#');
     const key = chain.slice(0, at);
     const epoch = Number(chain.slice(at + 1));
+    this.dropped.add(key);
     if (!this.current) return;
     void this.send(this.current, { op: 'drop', key, epoch } as Omit<ToValidator, 'id'>);
   }
@@ -334,6 +451,6 @@ export class Validator {
     clearInterval(this.watchdog);
     for (const slot of [...this.retiring, ...(this.current ? [this.current] : [])]) this.terminate(slot);
     this.current = null;
-    for (const r of this.loadQueue.splice(0)) r();
+    for (const t of this.loadQueue.splice(0)) t.late(new LoadLate('проверка остановлена'));
   }
 }

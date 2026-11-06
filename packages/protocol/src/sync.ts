@@ -298,7 +298,7 @@ export function parseClientFrame(b: Uint8Array): ClientFrame | null {
       const doc = r.doc();
       if (doc === null) return null;
       const version = r.rest();
-      return parseVersion(version) ? { t: 'subscribe', doc, version } : null;
+      return validVersion(version) ? { t: 'subscribe', doc, version } : null;
     }
     case KIND.update: {
       const doc = r.doc();
@@ -386,6 +386,24 @@ export function parseServerFrame(b: Uint8Array): ServerFrame | null {
  * строкой: u64 не влезает в число JavaScript, а в JSON базы — так же. Сверх предела и с хвостом — `null`. Запись одна:
  * пиры строго по возрастанию, счётчик больше нуля, как кодирует ядро (`SyncVersion::encode`) и `encodeVersion`. */
 export type VersionMap = Map<string, number>;
+
+/** Вектор закодирован верно — без разбора в `Map`: сервер проверяет кадр подписки, а сам вектор читает потом, только
+ * нужных пиров. Разобранный вектор на 65 536 пиров в восемь раз больше кадра. */
+function validVersion(b: Uint8Array): boolean {
+  if (b.length < 4) return false;
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const n = v.getUint32(0, true);
+  if (n > MAX_VERSION_PEERS || b.length !== 4 + n * 12) return false;
+  let prev = -1n;
+  for (let i = 0; i < n; i++) {
+    const at = 4 + i * 12;
+    const peer = v.getBigUint64(at, true);
+    const counter = v.getUint32(at + 8, true);
+    if (counter === 0 || counter > 0x7fffffff || peer <= prev) return false;
+    prev = peer;
+  }
+  return true;
+}
 
 export function parseVersion(b: Uint8Array): VersionMap | null {
   if (b.length < 4) return null;

@@ -337,3 +337,94 @@ test('файл заменён во время загрузки: старые б�
     slow.stop();
   }
 });
+
+test('паника при загрузке: документ на карантине, повторные пачки не меняют общий worker снова', async () => {
+  const f = await baseFile();
+  await logged(f, [panicReal]);
+  const q = new Validator(s.pool, s.blobs, { quarantineMs: 300 });
+  const saved = console.error;
+  console.error = () => {};
+  try {
+    expect((await q.validate(f, 'root', good)).kind).toBe('retry');
+    expect(q.restarts).toBe(1);
+    // Честный клиент повторяет «повторите»: worker больше не падает, пока документ на карантине.
+    for (let i = 0; i < 5; i++) expect((await q.validate(f, 'root', good)).kind).toBe('retry');
+    expect(q.restarts).toBe(1);
+    // Остальные документы проверяются как обычно.
+    expect((await q.validate(file, 'root', good)).kind).toBe('ok');
+    // Карантин кончился — новая попытка, и снова карантин, вдвое дольше.
+    await Bun.sleep(350);
+    expect((await q.validate(f, 'root', good)).kind).toBe('retry');
+    expect(q.restarts).toBe(2);
+    await Bun.sleep(350);
+    expect((await q.validate(f, 'root', good)).kind).toBe('retry');
+    expect(q.restarts).toBe(2);
+  } finally {
+    console.error = saved;
+    q.stop();
+  }
+});
+
+/** Хранилище, у которого чтение файлов из `held` ждёт `release`: загрузка документа стоит посреди очереди. */
+function holding(held: Set<string>) {
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+  const blobs = {
+    ...s.blobs,
+    open: async (k: string) => {
+      if ([...held].some((f) => k.includes(f))) await gate;
+      return s.blobs.open(k);
+    },
+  } as typeof s.blobs;
+  return { blobs, release };
+}
+
+const within = <T>(p: Promise<T>, ms: number): Promise<T | 'долго'> => Promise.race([p, Bun.sleep(ms).then(() => 'долго' as const)]);
+
+test('загрузки по людям: свои большие документы не занимают обе очереди, чужая загрузка идёт сразу', async () => {
+  const mine = await Promise.all([baseFile(), baseFile()]);
+  const { blobs, release } = holding(new Set(mine));
+  const limited = new Validator(s.pool, blobs, { loadsAtOnce: 2 });
+  try {
+    const slow = mine.map((f) => limited.validate(f, 'root', good, 'тот, кто грузит своё'));
+    for (let i = 0; i < 200 && limited.loads === 0; i++) await Bun.sleep(5);
+    // Чужой документ не ждёт, пока догрузятся оба своих.
+    expect(await within(limited.validate(file, 'root', good, 'другой'), 5000)).toMatchObject({ kind: 'ok' });
+    release();
+    expect((await Promise.all(slow)).map((r) => r.kind)).toEqual(['ok', 'ok']);
+  } finally {
+    limited.stop();
+  }
+});
+
+test('загрузка ждёт очереди не дольше срока: «повторите», а не ожидание без конца', async () => {
+  const busy = await baseFile();
+  const { blobs, release } = holding(new Set([busy]));
+  const one = new Validator(s.pool, blobs, { loadsAtOnce: 1, loadWaitMs: 100 });
+  try {
+    const first = one.validate(busy, 'root', good, 'первый');
+    for (let i = 0; i < 200 && one.loads === 0; i++) await Bun.sleep(5);
+    expect(await within(one.validate(file, 'root', good, 'второй'), 5000)).toEqual({ kind: 'retry' });
+    release();
+    expect((await first).kind).toBe('ok');
+  } finally {
+    one.stop();
+  }
+});
+
+test('документ загружается заново не чаще срока: пачка с разрывом не стоит полной загрузки каждый раз', async () => {
+  const [, u1] = chain(2);
+  const r = new Validator(s.pool, s.blobs, { reloadMs: 300 });
+  try {
+    const started = performance.now();
+    // Пачка с разрывом ждёт неизвестного: документ уходит из worker'а, следующая пачка загружает его заново.
+    for (let i = 0; i < 3; i++) {
+      const gap = await r.validate(file, 'root', u1);
+      expect(gap.kind === 'ok' && gap.pending).toBe(true);
+    }
+    expect(r.loads).toBe(3);
+    // Перезагрузки — не чаще срока.
+    expect(performance.now() - started).toBeGreaterThanOrEqual(2 * 300 - 20);
+  } finally {
+    r.stop();
+  }
+});

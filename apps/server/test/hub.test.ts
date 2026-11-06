@@ -291,10 +291,12 @@ test('журнал отверг подделку: зависящая от неё
   b.update('root', 1, forged);
   b.update('root', 2, dependent);
   expect((await b.wait('refused', (f) => f.clientSeq === 1)).code).toBe('FOREIGN_PEER');
-  expect((await b.wait('refused', (f) => f.clientSeq === 2)).code).toBe('GAP');
-  // И следом, после ответа.
-  b.update('root', 3, dependent);
-  expect((await b.wait('refused', (f) => f.clientSeq === 3)).code).toBe('GAP');
+  // Настоящий клиент чужой пир не шлёт: соединение закрыто сразу.
+  expect((await b.waitClosed()).code).toBe(SYNC_CLOSE.BAD_FRAME);
+  // И следом, с нового соединения.
+  const again = await joined(editor);
+  again.update('root', 3, dependent);
+  expect((await again.wait('refused', (f) => f.clientSeq === 3)).code).toBe('GAP');
   // Документ проверки загружен заново: настоящие правки снова пишутся.
   a.update('root', 2, edit(tab(), 2));
   await a.wait('ack', (f) => f.clientSeq === 2);
@@ -343,10 +345,15 @@ test('паника Loro на пачке: отказ, файл цел, остал
   console.error = () => {};
   c.update('root', 1, panic);
   expect((await c.wait('refused', (x) => x.clientSeq === 1)).code).toBe('BAD_UPDATE');
+  // Пачка уронила Loro и на свежем worker'е: соединение закрыто, клиент переподключится.
+  expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.BAD_FRAME);
   console.error = saved;
   const good = await data('loro-good.update');
-  c.update('root', 2, good);
-  await c.wait('ack', (x) => x.clientSeq === 2);
+  const again = await connect(owner, f);
+  again.subscribe('root', version);
+  await again.wait('subscribed');
+  again.update('root', 2, good);
+  await again.wait('ack', (x) => x.clientSeq === 2);
   expect((await s.pool.query('SELECT seq FROM doc_update WHERE file_id = $1', [f])).rows).toHaveLength(1);
 });
 
@@ -359,6 +366,78 @@ test('чужой пир не проходит: подделка чужих пр�
   // Тот же документ — тот же пир: второй человек шлёт следующую правку от него.
   b.update('root', 1, edit(d, 2));
   expect((await b.wait('refused')).code).toBe('FOREIGN_PEER');
+  // Подделка — не ошибка настоящего клиента: соединение закрыто, годная пачка этого не исправит.
+  expect((await b.waitClosed()).code).toBe(SYNC_CLOSE.BAD_FRAME);
+  // Соавтор пишет дальше.
+  a.update('root', 2, edit(tab(), 3));
+  await a.wait('ack', (f) => f.clientSeq === 2);
+});
+
+test('пачка, роняющая Loro, закрывает соединение и копится на человеке: годная пачка удар не прощает', async () => {
+  const tight = await apiStand(
+    { syncLimits: { userFaultsBurst: 2, userFaultsPerSecond: 0.0001, recheckMs: 3_600_000, sessionCheckMs: 3_600_000 } },
+    true,
+  );
+  const saved = console.error;
+  console.error = () => {};
+  try {
+    const base = await data('loro-base.snap');
+    const panic = await data('loro-panic-real.update');
+    const who = await tight.signIn(`panic-${crypto.randomUUID()}@example.com`);
+    const f = (await tight.newFile(who)).id;
+    expect((await tight.writeContent(who, f, 0, realContainer(base))).status).toBe(200);
+    const version = new Map([...LoroDoc.fromSnapshot(base).oplogVersion().toJSON()].map(([p, c]) => [String(p), c]));
+    // Свой пир: паника-образец пишет счётчики пира 1, и годная пачка на них же сделала бы её известной.
+    const mine = LoroDoc.fromSnapshot(base);
+    for (let round = 0; round < 2; round++) {
+      const c = (await Client.open(tight, who, f))!;
+      c.hello();
+      c.subscribe('root', version);
+      await c.wait('subscribed');
+      // Годная пачка перед паникой: удар за панику она не сбрасывает.
+      c.update('root', 1, edit(mine, round));
+      await c.wait('ack', (x) => x.clientSeq === 1);
+      c.update('root', 2, panic);
+      expect((await c.wait('refused', (x) => x.clientSeq === 2)).code).toBe('BAD_UPDATE');
+      expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.BAD_FRAME);
+    }
+    // Удары копятся на человеке, а не на соединении: новое соединение не откроется, пока бакет не наполнится.
+    expect(await Client.open(tight, who, f)).toBeNull();
+    expect((await tight.pool.query('SELECT 1 FROM doc_update WHERE file_id = $1', [f])).rows).toHaveLength(2);
+  } finally {
+    console.error = saved;
+    await tight.stop();
+  }
+});
+
+test('hello сверяет роль: снятая или пониженная, пока соединение открывалось, видна сразу', async () => {
+  // Роль прочитана при открытии, а до hello её понизили мимо сверки.
+  const lowered = (await Client.open(s, editor, file))!;
+  open.push(lowered);
+  await s.pool.query(`UPDATE file_access SET role = 'viewer' WHERE file_id = $1 AND user_id = $2`, [file, editor.id]);
+  lowered.hello();
+  expect((await lowered.wait('role')).role).toBe('viewer');
+  lowered.subscribe('root', peers(root));
+  await lowered.wait('subscribed');
+  lowered.update('root', 1, edit(tab(), 1));
+  expect((await lowered.wait('refused')).code).toBe('FORBIDDEN');
+  // Сняли совсем.
+  const gone = (await Client.open(s, editor, file))!;
+  open.push(gone);
+  await s.pool.query(`DELETE FROM file_access WHERE file_id = $1 AND user_id = $2`, [file, editor.id]);
+  gone.hello();
+  expect((await gone.waitClosed()).code).toBe(SYNC_CLOSE.REVOKED);
+});
+
+test('подписка с огромным вектором платит своим маленьким бакетом: сотни разом не держат память процесса', async () => {
+  const big = new Map<string, number>();
+  for (let i = 1; i <= 65_536; i++) big.set(String(i * 1000003), 1);
+  const bytes = encodeVersion(big);
+  const v = await connect(viewer);
+  // 40 кадров по 786 КБ — 31 МБ: больше бакета подписок (16 МБ), но меньше общего бакета байт (256 МБ).
+  for (let i = 0; i < 40; i++) v.send(encodeClientFrame({ t: 'subscribe', doc: `${i + 1}@2`, version: bytes }));
+  await v.wait('pause');
+  expect(v.closed).toBeNull();
 });
 
 test('разрыв версий: GAP, клиент подписывается заново и шлёт от версии сервера', async () => {
@@ -786,7 +865,10 @@ test('подписка платит байтами и хранит только 
   await v.wait('subscribed', (f) => f.doc === '4@1');
   // Корень знает одного пира, страницы без снимка — ни одного.
   expect(s.hub.versionEntries()).toBe(1);
-  const tight = await apiStand({ syncLimits: { userBytesBurst: 300_000, userBytesPerSecond: 1, recheckMs: 3_600_000 } }, true);
+  const tight = await apiStand(
+    { syncLimits: { userSubscribeBytesBurst: 300_000, userSubscribeBytesPerSecond: 1, recheckMs: 3_600_000 } },
+    true,
+  );
   try {
     const who = await tight.signIn('bytes@example.com');
     const f = (await tight.newFile(who)).id;
