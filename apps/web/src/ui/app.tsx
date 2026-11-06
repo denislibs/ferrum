@@ -849,7 +849,7 @@ export function App(props: AppProps) {
           '--right-w': rightCollapsed() ? 'var(--panel-rail)' : `${right()}px`,
         }}
       >
-        <main class="fe-stage">
+        <main class="fe-stage" classList={{ 'fe-following': store.state.following !== null }}>
           <canvas
             ref={canvas}
             class="fe-canvas"
@@ -981,7 +981,7 @@ export function App(props: AppProps) {
                   <PanelToggle side="right" collapsed={rightCollapsed()} onToggle={setRightCollapsed} />
                 </div>
                 <Show when={!rightCollapsed()}>
-                  <DesignHeader file={props.file} />
+                  <DesignHeader file={props.file} self={props.files.user} />
                   <PropertiesPanel theme={theme()} />
                   <ResizeEdge side="right" width={right()} onWidth={setRight} />
                 </Show>

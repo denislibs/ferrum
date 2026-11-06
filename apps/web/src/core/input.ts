@@ -44,7 +44,7 @@ export function pointer(sink: Sink, kind: PointerKind, e: PointerEvent, x: numbe
   });
 }
 
-export function simple(sink: Sink, kind: typeof Kind.POINTER_CANCEL | typeof Kind.BLUR): void {
+export function simple(sink: Sink, kind: typeof Kind.POINTER_CANCEL | typeof Kind.BLUR | typeof Kind.POINTER_LEAVE): void {
   sink((v, at) => {
     clear(v, at);
     v.setUint8(at + Field.KIND, kind);
