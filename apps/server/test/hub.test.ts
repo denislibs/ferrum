@@ -591,29 +591,47 @@ test('строки документов человек заводит не бо�
   }
 });
 
-test('пиры снимка не занимает никто: продолжение пира снимка — отказ без удара по человеку', async () => {
-  const c = await joined(editor);
-  const { rows } = await s.pool.query<{ user_id: string | null }>('SELECT user_id FROM doc_peer WHERE file_id = $1 AND peer = $2', [
-    file,
-    String(root.peerId),
-  ]);
-  expect(rows).toEqual([{ user_id: null }]);
-  // Пир того, кто записал файл целиком: продолжить его нельзя ни соавтору, ни ему самому.
-  const forged = tab();
-  forged.setPeerId(root.peerId);
-  c.update('root', 1, edit(forged, 1));
-  expect((await c.wait('refused', (f) => f.clientSeq === 1)).code).toBe('FOREIGN_PEER');
-  const a = await joined(owner);
+test('пиры снимка — за тем, кто записал файл целиком: он их продолжает, соавтор — нет; автор неизвестен — ничьи, без удара', async () => {
+  // Свой человек: удар копится на нём, а не на редакторе остальных тестов.
+  const forger = await s.signIn('forger@example.com');
+  await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'editor')`, [file, forger.id]);
+  const c = await joined(forger);
+  const peerOf = async () =>
+    (
+      await s.pool.query<{ user_id: string | null }>('SELECT user_id FROM doc_peer WHERE file_id = $1 AND peer = $2', [
+        file,
+        String(root.peerId),
+      ])
+    ).rows;
+  // Файл записал владелец (`writeContent` в `beforeEach`).
+  expect(await peerOf()).toEqual([{ user_id: owner.id }]);
+  // Первая запись нового файла и правки за ней идут одним пиром: автор продолжает его.
   const own = tab();
   own.setPeerId(root.peerId);
-  a.update('root', 1, edit(own, 2));
-  expect((await a.wait('refused', (f) => f.clientSeq === 1)).code).toBe('FOREIGN_PEER');
-  // Удара нет: так бывает и у честного клиента (правки прошлого открытия). Соединения живы, свои правки пишутся.
-  c.update('root', 2, edit(tab(), 3));
-  await c.wait('ack', (f) => f.clientSeq === 2);
-  expect(c.closed).toBeNull();
-  expect(a.closed).toBeNull();
-  expect((await s.pool.query('SELECT 1 FROM doc_update WHERE file_id = $1', [file])).rows).toHaveLength(1);
+  const a = await joined(owner);
+  a.update('root', 1, edit(own, 1));
+  await a.wait('ack', (f) => f.clientSeq === 1);
+  // Соавтор, продолжающий пир автора, — подделка.
+  const forged = LoroDoc.fromSnapshot(own.export({ mode: 'snapshot' }));
+  forged.setPeerId(root.peerId);
+  c.update('root', 1, edit(forged, 2));
+  expect((await c.wait('refused', (f) => f.clientSeq === 1)).code).toBe('FOREIGN_PEER');
+  expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.BAD_FRAME);
+  // Автор неизвестен (содержимое записано до миграции): пир ничей, продолжить нельзя никому, удара нет.
+  const f = (await s.newFile(owner)).id;
+  await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'editor')`, [f, editor.id]);
+  expect((await s.writeContent(owner, f, 0, realContainer(root.export({ mode: 'snapshot' })))).status).toBe(200);
+  await s.pool.query('UPDATE file SET content_by = NULL WHERE id = $1', [f]);
+  const b = await connect(editor, f);
+  b.subscribe('root', peers(root));
+  await b.wait('subscribed');
+  const old = tab();
+  old.setPeerId(root.peerId);
+  b.update('root', 1, edit(old, 3));
+  expect((await b.wait('refused', (x) => x.clientSeq === 1)).code).toBe('FOREIGN_PEER');
+  b.update('root', 2, edit(tab(), 4));
+  await b.wait('ack', (x) => x.clientSeq === 2);
+  expect(b.closed).toBeNull();
 });
 
 test('снимок документа идёт потоком, отдач разом у человека не больше предела', async () => {

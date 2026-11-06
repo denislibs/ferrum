@@ -528,8 +528,9 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             // Журнала нет: строки документов описывали прежние байты, следующая подписка заведёт новые.
             await c.query('DELETE FROM doc_state WHERE file_id = $1', [ctx.params.id]);
             await c.query(
-              `UPDATE file SET version = version + 1, size = $2, content_key = $3, last_write_id = $4, edited_at = now() WHERE id = $1`,
-              [ctx.params.id, size, key, write.write],
+              `UPDATE file SET version = version + 1, size = $2, content_key = $3, last_write_id = $4, content_by = $5, edited_at = now()
+               WHERE id = $1`,
+              [ctx.params.id, size, key, write.write, ctx.user.id],
             );
             // Ссылки из содержимого: картинка без ссылки живёт ещё 30 дней (отмена может её вернуть).
             await c.query(

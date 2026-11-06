@@ -37,8 +37,8 @@ export type Outcome =
   | { kind: 'written'; seq: number }
   /** Сервер всё это уже знал: повтор. */
   | { kind: 'known'; seq: number }
-  /** `fault` — чужой пир человека: настоящий клиент его не шлёт. Пир снимка (ничей) шлёт и честный клиент — правки прошлого
-   * открытия: отказ без удара. */
+  /** `fault` — чужой пир человека: настоящий клиент его не шлёт. Ничей пир снимка (автор содержимого неизвестен) честный клиент
+   * тоже может прислать — правки прошлого открытия: отказ без удара. */
   | { kind: 'refused'; code: SyncRefusal; fault?: boolean };
 
 interface Queued {
@@ -240,7 +240,7 @@ export class UpdateLog {
         refuse(item, 'FOREIGN_PEER', true);
         continue;
       }
-      // Пир снимка ничей: его счётчики продолжать нельзя никому. Уже известное — просто повтор.
+      // Ничей пир снимка (автор содержимого неизвестен): его счётчики продолжать нельзя никому. Уже известное — просто повтор.
       if (peers.some((p) => owner(p) === null && item.end[p] > (s.vv[p] ?? 0))) {
         refuse(item, 'FOREIGN_PEER');
         continue;
@@ -347,7 +347,7 @@ export class UpdateLog {
     return new Map(rows.map((r) => [r.file_id, Number(r.n)]));
   }
 
-  /** Владельцы пиров; `null` — пир снимка, ничей. */
+  /** Владельцы пиров; `null` — пир снимка, чей автор неизвестен, ничей. */
   private async peers(c: PoolClient, group: Queued[]): Promise<Map<string, string | null>> {
     const asked = [...new Set(group.flatMap((q) => Object.keys(q.item.end).map((p) => `${q.item.file}/${p}`)))];
     if (asked.length === 0) return new Map();

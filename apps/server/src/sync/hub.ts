@@ -604,8 +604,8 @@ export class SyncHub {
       // Документ проверки уже принял пачку, а журнал нет: он больше не равен журналу.
       this.validator.reject(verdict.chain);
       this.refuse(d, doc, clientSeq, outcome.code);
-      // Чужой пир настоящий клиент не шлёт, а подделка отравляет цепочку проверки соавторам: их пачки получают `GAP`. Пир
-      // снимка — не удар: его шлёт и честный клиент (правки прошлого открытия).
+      // Чужой пир настоящий клиент не шлёт, а подделка отравляет цепочку проверки соавторам: их пачки получают `GAP`. Ничей
+      // пир снимка — не удар: его может прислать и честный клиент (правки прошлого открытия).
       if (outcome.fault) this.fault(d, 'foreign peer');
       return;
     }
@@ -736,7 +736,10 @@ export class SyncHub {
         const made = await inTransaction(this.pool, async (c) => {
           // Порядок блокировок общий: строка файла, потом строки документов. Запись файла целиком (`FOR UPDATE`) ждёт этой
           // транзакции, а прошедшая видна по `content_key`.
-          const f = await c.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1 FOR KEY SHARE', [file]);
+          const f = await c.query<{ content_key: string | null; content_by: string | null }>(
+            'SELECT content_key, content_by FROM file WHERE id = $1 FOR KEY SHARE',
+            [file],
+          );
           if ((f.rows[0]?.content_key ?? null) !== contentKey) return 'changed' as const;
           const put = await c.query(
             `INSERT INTO doc_state (file_id, doc, vv, base_vv) VALUES ($1, $2, $3::jsonb, $3::jsonb) ON CONFLICT DO NOTHING`,
@@ -746,12 +749,13 @@ export class SyncHub {
             const had = await c.query<DocRowState>('SELECT vv, base_vv FROM doc_state WHERE file_id = $1 AND doc = $2', [file, doc]);
             return had.rows[0] ?? ('changed' as const);
           }
-          // Пиры снимка — ничьи: продолжать их не может никто, иначе первый пишущий занял бы пир автора (подделка его
-          // истории). Уже занятые журналом остаются за своими людьми.
+          // Пиры снимка — за тем, кто записал содержимое целиком: он и продолжает их (первая запись нового файла идёт тем же
+          // пиром, что и правки за ней). Иначе первый пишущий занял бы пир автора — подделка его истории. Автор неизвестен —
+          // пир ничей, продолжать его не может никто. Уже занятые журналом остаются за своими людьми.
           await c.query(
-            `INSERT INTO doc_peer (file_id, peer, user_id) SELECT $1::uuid, p::numeric, NULL FROM jsonb_object_keys($2::jsonb) AS p
+            `INSERT INTO doc_peer (file_id, peer, user_id) SELECT $1::uuid, p::numeric, $3 FROM jsonb_object_keys($2::jsonb) AS p
              ON CONFLICT DO NOTHING`,
-            [file, JSON.stringify(base)],
+            [file, JSON.stringify(base), f.rows[0]?.content_by ?? null],
           );
           return { vv: base, base_vv: base };
         });

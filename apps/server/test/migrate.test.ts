@@ -60,6 +60,7 @@ test('миграции репозитория применяются на пус
     '006_log_kept.sql',
     '007_snapshot_peers.sql',
     '008_log_kept_bytes.sql',
+    '009_content_by.sql',
   ]);
 });
 
@@ -76,6 +77,7 @@ test('файлы встают на базу этапа 1: люди целы, п�
     '006_log_kept.sql',
     '007_snapshot_peers.sql',
     '008_log_kept_bytes.sql',
+    '009_content_by.sql',
   ]);
   expect((await pool.query('SELECT email FROM "user"')).rows).toEqual([{ email: 'ivan@example.com' }]);
   const { rows } = await pool.query(`INSERT INTO file (owner_id, name) VALUES ('u1', 'Файл') RETURNING version`);
