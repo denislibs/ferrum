@@ -437,6 +437,11 @@ fn copy_under_peer_drag_takes_document_position() {
     join(&mut h, 1);
     drag_by(&mut h, 1, &[a], 100.0);
     let bytes = h.ed.copy().expect("есть что копировать");
+    assert_eq!(
+        h.ed.scene().node(a).unwrap().props.x,
+        110.0,
+        "после копии чужой слой — на месте"
+    );
     h.ed.paste_with(&bytes, PasteMode::Over).unwrap();
     let pasted = h.sel();
     assert_eq!(pasted.len(), 1);
@@ -516,6 +521,35 @@ fn double_click_on_text_under_peer_drag_puts_caret_where_it_is_seen() {
         "правка — без чужого слоя"
     );
     assert_eq!(h.props(t).x, 100.0);
+}
+
+#[test]
+fn vector_edit_entered_under_peer_resize_takes_document_shape() {
+    let mut h = H::new();
+    let a = h.rect(None, 0.0, 0.0, 50.0, 40.0);
+    join(&mut h, 1);
+    h.ed.presence_part(1, 1, 0, 1, vec![a]);
+    let mut s = select(&h.ed, &[a], 1);
+    s.gesture = Some(Gesture {
+        kind: GestureKind::Resize,
+        transform: Affine::scale_non_uniform(2.0, 1.0),
+        frame: Affine::IDENTITY,
+        k: 1.0,
+    });
+    h.ed.presence_state(1, s);
+    assert_eq!(h.ed.scene().node(a).unwrap().props.w, 100.0);
+    assert!(h.ed.start_vector_edit(a));
+    let right =
+        h.ed.vector_work()
+            .unwrap()
+            .points
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::MIN, f64::max);
+    assert_eq!(
+        right, 50.0,
+        "сеть — по ширине в документе, не в чужом превью"
+    );
 }
 
 /// Своё, что ничего не правит: модификатор, его отпускание, отпускание без жеста, правая

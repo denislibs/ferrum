@@ -199,13 +199,14 @@ impl Editor {
                     }
                 }
             }
+            // `run` уже снял чужой слой.
             C::Copy => {
-                if let Some(bytes) = self.copy() {
+                if let Some(bytes) = self.copy_payload() {
                     self.out.events.push(EditorEvent::Clipboard(bytes));
                 }
             }
             C::Cut => {
-                if let Some(bytes) = self.copy() {
+                if let Some(bytes) = self.copy_payload() {
                     self.out.events.push(EditorEvent::Clipboard(bytes));
                     self.delete_selection();
                 }
@@ -740,8 +741,16 @@ impl Editor {
     /// Копия выделения в формате буфера обмена Ferrum; `None` — нечего копировать.
     /// Новая копия начинает счёт повторных вставок заново.
     pub fn copy(&mut self) -> Option<Vec<u8>> {
-        // Копия берёт положение из сцены, а вставка запишет его в документ.
+        // Копия берёт положение из сцены, а вставка запишет его в документ: чужой слой снят на
+        // время копии и возвращается после неё.
         self.own_action();
+        let out = self.copy_payload();
+        self.emit();
+        out
+    }
+
+    /// Копия без снятия слоя: чужой слой уже снят (`own_action`).
+    fn copy_payload(&mut self) -> Option<Vec<u8>> {
         let ids = self.ordered_selection();
         if ids.is_empty() {
             return None;
