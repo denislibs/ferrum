@@ -2,7 +2,15 @@
 // `bufferedAmount`, пока «сеть» не вычитает; часы — ручные: ничего не ждёт настоящего времени, и видно, какой таймер идёт во время паузы.
 
 import { expect, test } from '@playwright/test';
-import { encodeServerFrame, encodeVersion, parseClientFrame, SYNC_CLOSE, type ClientFrame, type ServerFrame } from '@ferrum/protocol';
+import {
+  encodeServerFrame,
+  encodeVersion,
+  parseClientFrame,
+  SYNC_CLOSE,
+  SYNC_PROTOCOL,
+  type ClientFrame,
+  type ServerFrame,
+} from '@ferrum/protocol';
 import {
   PING_EVERY_MS,
   PONG_WAIT_MS,
@@ -173,7 +181,7 @@ test('открытие: hello, сброс курсора, ядро отдаёт 
   const ws = s.last();
   ws.open();
   ws.drain();
-  expect(ws.sent[0]).toEqual({ t: 'hello', protocol: 1, schema: 1 });
+  expect(ws.sent[0]).toEqual({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 });
   expect(s.commands).toContainEqual({ type: 'syncReset' });
   expect(s.flushing()).toBe(true);
   s.reset();

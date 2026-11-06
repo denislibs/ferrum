@@ -3,7 +3,7 @@
 // а отказ по пределу — пауза, сбой базы не теряет правок и не роняет процесс.
 
 import { afterAll, beforeEach, expect, test } from 'bun:test';
-import { encodeClientFrame, encodeVersion, SYNC_CLOSE, type VersionMap } from '@ferrum/protocol';
+import { encodeClientFrame, encodeVersion, SYNC_CLOSE, SYNC_PROTOCOL, type VersionMap } from '@ferrum/protocol';
 import { LoroDoc } from 'loro-crdt';
 import type { Pool } from 'pg';
 import { SERVER_SCHEMA, SyncHub } from '../src/sync/hub';
@@ -1178,7 +1178,7 @@ test('schema из hello: поднимает только редактор, не 
   const hello = async (who: Person, value: number) => {
     const c = (await Client.open(s, who, file))!;
     open.push(c);
-    c.send(encodeClientFrame({ t: 'hello', protocol: 1, schema: value }));
+    c.send(encodeClientFrame({ t: 'hello', protocol: SYNC_PROTOCOL, schema: value }));
     await c.wait('role');
   };
   await hello(viewer, 4_000_000_000);

@@ -3,7 +3,6 @@ import {
   encodeClientFrame,
   encodeServerFrame,
   encodeVersion,
-  MAX_EPHEMERAL_BYTES,
   MAX_SYNC_FRAME_BYTES,
   MAX_SYNC_UPDATE_BYTES,
   MAX_VERSION_PEERS,
@@ -28,7 +27,6 @@ test('кадры клиента туда и обратно', () => {
     { t: 'hello', protocol: 1, schema: 3 },
     { t: 'subscribe', doc: 'root', version },
     { t: 'update', doc, clientSeq: 4_000_000_000, bytes: new Uint8Array([1, 2, 3]) },
-    { t: 'ephemeral', bytes: new Uint8Array([9]) },
     { t: 'ping' },
   ];
   for (const f of frames) expect(parseClientFrame(encodeClientFrame(f))).toEqual(f);
@@ -252,11 +250,6 @@ test('кадры сервера: предел кадра, пустая пачк�
     expect(parseServerFrame(b)).toEqual(f);
     expect(parseServerFrame(new Uint8Array([...b, 0]))).toBeNull();
   }
-});
-
-test('присутствие — свой малый предел', () => {
-  expect(parseClientFrame(encodeClientFrame({ t: 'ephemeral', bytes: new Uint8Array(MAX_EPHEMERAL_BYTES) }))?.t).toBe('ephemeral');
-  expect(parseClientFrame(encodeClientFrame({ t: 'ephemeral', bytes: new Uint8Array(MAX_EPHEMERAL_BYTES + 1) }))).toBeNull();
 });
 
 test('snapshot-needed: адрес — только снимок того же документа на своём сервере', () => {

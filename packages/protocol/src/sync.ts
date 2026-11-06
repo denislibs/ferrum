@@ -2,17 +2,26 @@
 // Первый байт — вид кадра, числа — LE, строка — длина u8 и UTF-8. Документ — `root` или `TreeID` страницы.
 
 import type { FileRole } from './files';
+import {
+  parsePartBody,
+  parsePresenceBatch,
+  parsePresenceBody,
+  PRESENCE_BATCH_MAX,
+  PRESENCE_FRAME_MAX,
+  type PresenceItem,
+  type PresencePart,
+  type PresenceState,
+} from './presence';
 
-/** Растёт при несовместимой смене кадров: старый клиент получает `please-reload`. */
-export const SYNC_PROTOCOL = 1;
+/** Растёт при несовместимой смене кадров: старый клиент получает `please-reload`. 2 — присутствие (этап 4): кадров
+ * `presence` прежний клиент не знает и счёл бы соединение испорченным. */
+export const SYNC_PROTOCOL = 2;
 /** Предел кадра по спеке, раздел 7.3. Вся полезная нагрузка — байты Loro, заголовок сверху не считается. */
 export const MAX_SYNC_UPDATE_BYTES = 16 * 1024 * 1024;
 /** Сервер закрывает кадр больше этого, не читая его. */
 export const MAX_SYNC_FRAME_BYTES = MAX_SYNC_UPDATE_BYTES + 1024;
 /** Вектор версий: столько сеансов правки на один документ не набирается, а чужой кадр не задаёт размер разбора. */
 export const MAX_VERSION_PEERS = 65_536;
-/** Присутствие (этап 4) — курсор и выделение, килобайты: кадр в мегабайты — не присутствие. */
-export const MAX_EPHEMERAL_BYTES = 64 * 1024;
 const MAX_DOC_BYTES = 40;
 /** Документ — `root` или `TreeID` страницы `counter@peer` в той же записи, что у Loro: без ведущих нулей, иначе один документ жил бы
  * под разными ключами подписок, журнала и пределов. Диапазоны — ниже, в `isSyncDoc`. */
@@ -72,7 +81,11 @@ export type ClientFrame =
   | { t: 'hello'; protocol: number; schema: number }
   | { t: 'subscribe'; doc: string; version: Uint8Array }
   | { t: 'update'; doc: string; clientSeq: number; bytes: Uint8Array }
-  | { t: 'ephemeral'; bytes: Uint8Array }
+  /** Присутствие (спека, раздел 9): `body` — тело `encodePresenceBody`. При разборе `state` — разобранное тело, `null` —
+   * тело неверно или больше 2 КБ: сервер такой кадр молча отбрасывает, а не рвёт соединение. */
+  | { t: 'presence'; body: Uint8Array; state?: PresenceState | null }
+  /** Часть выделения: тело `encodePartBody`, при разборе `part` — как `state` выше. */
+  | { t: 'presence-part'; body: Uint8Array; part?: PresencePart | null }
   | { t: 'ping' };
 
 export type ServerFrame =
@@ -86,14 +99,17 @@ export type ServerFrame =
   | { t: 'pause'; ms: number }
   | { t: 'access-revoked'; reason: RevokeReason }
   | { t: 'please-reload' }
-  | { t: 'pong' };
+  | { t: 'pong' }
+  /** Пачка присутствия других участников файла (`encodePresenceBatch`). */
+  | { t: 'presence'; items: PresenceItem[] };
 
 const KIND = {
   hello: 1,
   subscribe: 2,
   update: 3,
-  ephemeral: 4,
+  presence: 4,
   ping: 5,
+  'presence-part': 6,
   role: 16,
   subscribed: 17,
   updates: 18,
@@ -104,6 +120,7 @@ const KIND = {
   'access-revoked': 23,
   'please-reload': 24,
   pong: 25,
+  'presence-batch': 26,
 } as const;
 
 const ROLES: readonly FileRole[] = ['viewer', 'editor', 'owner'];
@@ -248,11 +265,21 @@ export function encodeClientFrame(f: ClientFrame): Uint8Array<ArrayBuffer> {
       return w.doc(f.doc).bytes(f.version).done();
     case 'update':
       return w.doc(f.doc).u32(f.clientSeq).bytes(f.bytes).done();
-    case 'ephemeral':
-      return w.bytes(f.bytes).done();
+    case 'presence':
+    case 'presence-part':
+      return w.bytes(f.body).done();
     case 'ping':
       return w.done();
   }
+}
+
+/** Пачка присутствия одному получателю: записи подряд, не больше `PRESENCE_BATCH_MAX`. */
+export function encodePresenceBatch(records: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const w = new Writer().u8(KIND['presence-batch']);
+  for (const r of records) w.bytes(r);
+  const out = w.done();
+  if (out.length - 1 > PRESENCE_BATCH_MAX) throw new RangeError('пачка присутствия больше предела');
+  return out;
 }
 
 export function encodeServerFrame(f: ServerFrame): Uint8Array<ArrayBuffer> {
@@ -281,6 +308,8 @@ export function encodeServerFrame(f: ServerFrame): Uint8Array<ArrayBuffer> {
     case 'please-reload':
     case 'pong':
       return w.done();
+    case 'presence':
+      throw new RangeError('пачку присутствия собирает encodePresenceBatch');
   }
 }
 
@@ -307,9 +336,13 @@ export function parseClientFrame(b: Uint8Array): ClientFrame | null {
       const bytes = r.rest();
       return bytes.length > 0 && bytes.length <= MAX_SYNC_UPDATE_BYTES ? { t: 'update', doc, clientSeq, bytes } : null;
     }
-    case KIND.ephemeral: {
-      const bytes = r.rest();
-      return bytes.length <= MAX_EPHEMERAL_BYTES ? { t: 'ephemeral', bytes } : null;
+    case KIND.presence: {
+      const body = r.rest();
+      return { t: 'presence', body, state: b.length <= PRESENCE_FRAME_MAX ? parsePresenceBody(body) : null };
+    }
+    case KIND['presence-part']: {
+      const body = r.rest();
+      return { t: 'presence-part', body, part: b.length <= PRESENCE_FRAME_MAX ? parsePartBody(body) : null };
     }
     case KIND.ping:
       return r.done() ? { t: 'ping' } : null;
@@ -377,6 +410,10 @@ export function parseServerFrame(b: Uint8Array): ServerFrame | null {
       return r.done() ? { t: 'please-reload' } : null;
     case KIND.pong:
       return r.done() ? { t: 'pong' } : null;
+    case KIND['presence-batch']: {
+      const items = parsePresenceBatch(b, 1);
+      return items ? { t: 'presence', items } : null;
+    }
     default:
       return null;
   }
