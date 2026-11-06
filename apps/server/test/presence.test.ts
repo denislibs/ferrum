@@ -356,3 +356,19 @@ test('медленный читатель: сервер не копит для �
   expect(bytes.length).toBeGreaterThan(0);
   raw.destroy();
 }, 60_000);
+
+test('предел на человека: шесть вкладок в пределах своих 30 в секунду, а в сумме больше 120 — лишнее отбрасывается, вкладки живы', async () => {
+  const tabs = [];
+  for (let i = 0; i < 6; i++) tabs.push(await join(owner));
+  const b = await join(editor);
+  const dropped = s.hub.presence.dropped;
+  // По 50 кадров на вкладку — меньше запаса соединения (60), всего 300 против запаса человека 240 (+ пополнение за миллисекунды).
+  for (let i = 0; i < 50; i++) for (const [k, t] of tabs.entries()) send(t, state(i, { cursor: [i, k] }));
+  await ticks();
+  expect(s.hub.presence.dropped - dropped).toBeGreaterThan(30);
+  for (const t of tabs) {
+    expect(t.closed).toBeNull();
+    expect(t.frames.some((f) => f.t === 'pause')).toBe(false);
+  }
+  await waitItem(b, 'state');
+});

@@ -61,6 +61,9 @@ class Bucket {
     this.tokens = burst;
     this.last = now;
   }
+  has(now: number): boolean {
+    return Math.min(this.burst, this.tokens + ((now - this.last) / 1000) * this.rate) >= 1;
+  }
   take(now: number): boolean {
     this.tokens = Math.min(this.burst, this.tokens + ((now - this.last) / 1000) * this.rate);
     this.last = now;
@@ -217,13 +220,15 @@ export class PresenceHub {
     }
   }
 
-  /** Пределы частоты: соединения и человека по всем соединениям. Сначала проверяются оба, токены берутся у обоих. */
+  /** Пределы частоты: соединения и человека по всем соединениям. Сначала проверяются оба, токены берутся, только если
+   * пропустят оба: отброшенный кадр не тратит токен другого предела. */
   private allow(conn: PresenceConn): boolean {
     const now = this.now();
     const p = this.rooms.get(conn.file)?.participants.get(conn.id);
     let u = this.users.get(conn.user);
     if (!u) this.users.set(conn.user, (u = new Bucket(this.limits.userFramesPerSecond, this.limits.userFramesBurst, now)));
-    if (p && !p.frames.take(now)) return false;
+    if ((p && !p.frames.has(now)) || !u.has(now)) return false;
+    p?.frames.take(now);
     return u.take(now);
   }
 
