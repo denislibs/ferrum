@@ -165,6 +165,10 @@ pub struct PeerInfo {
 }
 
 type MarksCache = ((u64, u64, u64, PageId), Arc<[RemoteMark]>);
+/// Версия превью, сцена (`generation`, `scene_epoch`), её документ без чужого слоя
+/// (`Scene::own_change_counter`: чужая или своя правка узла под превью — слой заново от нового
+/// документа; само наложение слоя этот счётчик не трогает, цикла нет) и страница.
+type PreviewKey = (u64, u64, u64, u64, PageId);
 /// Версия выделения, сцена (`generation`, `scene_epoch`) и счётчик её изменений без чужого слоя
 /// (`Scene::own_change_counter`): наложение слоя рамку не старит.
 type OwnBoundsKey = (u64, u64, u64, u64);
@@ -176,8 +180,8 @@ pub(crate) struct Presence {
     pub(crate) revision: u64,
     /// Растёт, когда меняется живое превью: жест участника, его выделение, уход.
     preview_rev: u64,
-    /// С чем посчитан слой чужого превью в сцене: версия превью, сцена, страница.
-    applied: Option<(u64, u64, u64, PageId)>,
+    /// С чем посчитан слой чужого превью в сцене (`PreviewKey`).
+    applied: Option<PreviewKey>,
     /// Участники, чьё превью сейчас в слое (остальные с жестом — за пределами).
     previewed: Vec<u32>,
     /// Своё действие идёт (`Editor::presence_hold`): слоя нет.
@@ -549,13 +553,7 @@ impl Editor {
             self.drop_remote_preview();
             return;
         }
-        let key = (
-            self.presence.preview_rev,
-            self.scene.generation(),
-            self.scene_epoch,
-            self.page,
-        );
-        if self.presence.applied == Some(key) {
+        if self.presence.applied == Some(self.preview_key()) {
             return;
         }
         // Базы — из документа: прежний слой сначала снимается.
@@ -601,12 +599,17 @@ impl Editor {
             }
             self.scene.set_remote_preview(&patches);
         }
-        self.presence.applied = Some((
+        self.presence.applied = Some(self.preview_key());
+    }
+
+    fn preview_key(&self) -> PreviewKey {
+        (
             self.presence.preview_rev,
             self.scene.generation(),
             self.scene_epoch,
+            self.scene.own_change_counter(),
             self.page,
-        ));
+        )
     }
 
     /// Курсоры и рамки участников этой страницы для оверлея. Курсоры — каждый кадр (плавное

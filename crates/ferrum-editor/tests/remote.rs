@@ -844,3 +844,45 @@ fn moving_group_whose_child_is_deleted_by_other_goes_on() {
     assert!(b.ed.page_doc().contains(y));
     b.assert_scene_clean();
 }
+
+/// Финальное ревью, Minor 2 (T5-M1): чужая правка узла под живым превью третьего участника —
+/// слой пересобирается от нового документа, а не остаётся по старой базе, пока тянущий стоит.
+#[test]
+fn foreign_edit_under_peer_preview_rebases_the_layer() {
+    use kurbo::{Affine, Rect};
+    let (mut a, mut b) = pair();
+    let id = a.rect(None, 10.0, 10.0, 50.0, 50.0);
+    deliver(&mut a, &mut b);
+    b.ed.presence_join(7, "u-7", "Анна", peer_color(0x0d74ce));
+    b.ed.presence_part(7, 1, 0, 1, vec![id]);
+    let page = b.ed.page();
+    b.ed.presence_state(
+        7,
+        PeerState {
+            page: Some(page),
+            view: Rect::new(0.0, 0.0, 1000.0, 800.0),
+            cursor: None,
+            selection: Some(PeerSelection {
+                rev: 1,
+                count: 1,
+                parts: 1,
+                bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+            }),
+            gesture: Some(Gesture {
+                kind: GestureKind::Move,
+                transform: Affine::translate((100.0, 0.0)),
+                frame: Affine::IDENTITY,
+                k: 1.0,
+            }),
+        },
+    );
+    assert_eq!(b.ed.scene().node(id).unwrap().props.x, 110.0);
+    a.set(id, patch(50.0, 10.0, 50.0, 50.0));
+    deliver(&mut a, &mut b);
+    assert_eq!(b.props(id).x, 50.0);
+    assert_eq!(
+        b.ed.scene().node(id).unwrap().props.x,
+        150.0,
+        "сдвиг участника — от нового документа"
+    );
+}
