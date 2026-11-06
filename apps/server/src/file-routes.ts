@@ -516,15 +516,19 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
     {
       // «Скачать копию» с экрана файлов: содержимое без журнала было бы старше того, что видят люди. Читателю тоже: экспорт ему
       // разрешён. Сжатие занимает секунды на большом файле, поэтому общего срока API нет: свой срок и предел частоты на файл
-      // держит `Compactor.manual`, отказ — 503 с `Retry-After`.
+      // держит `Compactor.manual`, отказ — 503 с `Retry-After`. Журнал документа не входит в файл (больше предела, паника
+      // при сжатии) — 503 `INCOMPLETE`: неполная копия — не успех.
       method: 'POST',
       path: '/api/files/:id/compact',
       access: { kind: 'file', min: 'viewer' },
       limit: 'write',
       stream: true,
       handle: async (ctx) => {
-        const done = deps.compactNow ? await deps.compactNow(ctx.params.id) : { ok: true as const };
-        return done.ok ? ok({ ok: true }) : apiError(503, 'UNAVAILABLE', { 'Retry-After': String(done.retryAfter) });
+        const done = deps.compactNow ? await deps.compactNow(ctx.params.id, ctx.user.id) : { ok: true as const };
+        if (done.ok) return ok({ ok: true });
+        return 'incomplete' in done
+          ? apiError(503, 'INCOMPLETE')
+          : apiError(503, 'UNAVAILABLE', { 'Retry-After': String(done.retryAfter) });
       },
     },
     {

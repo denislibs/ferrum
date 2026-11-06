@@ -1,8 +1,9 @@
 // Сжатие файла (спека подсистемы 4, раздел 7.4): снимок и журнал документов становятся новым контейнером одной транзакцией
 // с удалением вошедших записей. Сбой посередине ничего не теряет: прежнее содержимое и журнал остаются. Обновление, которое не
-// применилось, откладывает только свой документ: его снимок и журнал остаются как есть, следующая попытка через час, остальные
-// документы файла сжимаются. Приём правок при этом идёт дальше. Автоматически ничего не удаляется: удалённая страница остаётся
-// в контейнере, параллельный перенос в Loro может её вернуть.
+// применилось, пропускается: Loro держит его отдельно, как и у клиентов, следующие записи применяются, а оно само остаётся в
+// журнале (`doc_state.log_kept`) и названо в журнале сервера. Поэтому файл равен тому, что видят люди. Документ больше предела
+// и страница, которой не знает корень, ждут срока. Приём правок при этом идёт дальше. Автоматически ничего не удаляется:
+// удалённая страница остаётся в контейнере, параллельный перенос в Loro может её вернуть.
 //
 // Функция без глобального состояния: её вызывает `compact.worker.ts` (Bun Worker, память wasm не возвращается системе) и тесты.
 // В памяти — один собираемый документ: его секции сразу уходят во временный файл.
@@ -33,19 +34,29 @@ export interface CompactOptions {
   retryAfterSeconds: number;
 }
 
-/** Документ не собран: `seq` — запись, которая не применилась (0 — документ больше предела). */
+/** Запись документа: `seq` — запись, которая не применилась; 0 — документ больше предела. */
 export interface CompactFailure {
   doc: string;
   seq: number;
 }
 
+/** Что не вошло. `failed` — документы, отложенные до срока (больше предела). `skipped` — записи, которые не применились: они
+ * остались в журнале, остальные записи их документов сжаты. `incomplete` — документы, которые видят люди, а их журнал в файл
+ * не вошёл: такой файл — не полная копия. Страница, которой не знает корень, людям не видна и сюда не входит. */
+interface Left {
+  failed: CompactFailure[];
+  skipped: CompactFailure[];
+  incomplete: string[];
+  /** Документы, которые теперь ждут срока: до него порог сжатия их не считает. */
+  deferred: string[];
+}
+
 export type CompactResult =
-  /** `failed` — документы, отложенные до срока; остальные сжаты. */
-  | { kind: 'done'; docs: number; size: number; rows: number; failed: CompactFailure[] }
-  /** Сжимать нечего: журнала нет или все документы ждут срока. */
-  | { kind: 'empty' }
-  /** Ни один документ не собрался; файл не тронут. */
-  | { kind: 'failed'; failed: CompactFailure[] }
+  | ({ kind: 'done'; docs: number; size: number; rows: number } & Left)
+  /** Переписывать нечего: журнала нет, он весь из пропущенных записей, или документы ждут срока. */
+  | ({ kind: 'empty' } & Left)
+  /** Ни один документ не собран, а отложенные есть; файл не тронут. */
+  | ({ kind: 'failed' } & Left)
   /** Файл заменили, пока шла работа. Журнал цел. */
   | { kind: 'raced' };
 
@@ -74,6 +85,7 @@ interface DocRow {
   doc: string;
   next_seq: string;
   log_count: number;
+  log_kept: number;
   log_bytes: string;
   waits: boolean;
 }
@@ -101,6 +113,8 @@ function pageIds(root: LoroDoc): { listed: Set<string>; known: Set<string> } {
 }
 
 const plain = (d: LoroDoc): Record<string, number> => Object.fromEntries(d.oplogVersion().toJSON()) as Record<string, number>;
+const covers = (vv: Record<string, number>, end: Record<string, number>): boolean =>
+  Object.entries(end).every(([p, c]) => (vv[p] ?? 0) >= c);
 
 /** Сжать файл. Журнал читается до `next_seq` на момент начала: новые записи остаются на следующий раз. */
 export async function compactFile(
@@ -112,13 +126,15 @@ export async function compactFile(
   const opts: CompactOptions = { maxContent: MAX_CONTENT_BYTES, maxDocBytes: MAX_DOC_BYTES, retryAfterSeconds: 3600, ...options };
   const fileRow = await pool.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1', [file]);
   const contentKey = fileRow.rows[0]?.content_key ?? null;
-  if (!fileRow.rows[0]) return { kind: 'empty' };
+  if (!fileRow.rows[0]) return { kind: 'empty', failed: [], skipped: [], incomplete: [], deferred: [] };
   const { rows: states } = await pool.query<DocRow>(
-    `SELECT doc, next_seq, log_count, log_bytes, coalesce(compact_after > now(), false) AS waits FROM doc_state WHERE file_id = $1`,
+    `SELECT doc, next_seq, log_count, log_kept, log_bytes, coalesce(compact_after > now(), false) AS waits FROM doc_state WHERE file_id = $1`,
     [file],
   );
-  const due = states.filter((s) => s.log_count > 0 && !s.waits);
-  if (due.length === 0) return { kind: 'empty' };
+  // Журнал из одних пропущенных записей сжимать незачем: они так и останутся.
+  const withLog = states.filter((s) => s.log_count > s.log_kept);
+  const due = withLog.filter((s) => !s.waits);
+  if (withLog.length === 0) return { kind: 'empty', failed: [], skipped: [], incomplete: [], deferred: [] };
 
   const blob = contentKey ? await blobs.open(contentKey) : null;
   if (contentKey && !blob) throw new Error(`нет байтов содержимого файла ${file}`);
@@ -136,13 +152,8 @@ export async function compactFile(
   const stateOf = new Map(states.map((s) => [s.doc, s]));
   const cutOf = (doc: string): number => Number(stateOf.get(doc)?.next_seq ?? 1) - 1;
 
-  /** Документ со снимком и журналом до `cut`. Не применилось — `failed` и то, что успело собраться. */
-  const build = async (
-    doc: string,
-    kind: number,
-    id: string,
-    cut: number,
-  ): Promise<{ loro: LoroDoc; rows: number; failed: CompactFailure | null }> => {
+  /** Документ со снимком и журналом до `cut`. `rows` — вошедшие записи, `kept` — те, что не применились: они остаются в журнале. */
+  const build = async (doc: string, kind: number, id: string, cut: number): Promise<{ loro: LoroDoc; rows: number; kept: number[] }> => {
     const span = spanOf(kind, id);
     const snapshot = span ? await read(span.data, span.data + span.size) : null;
     let loro: LoroDoc;
@@ -152,33 +163,44 @@ export async function compactFile(
       if (isPanic(e)) throw new CompactPanic(doc, 0, e);
       throw e;
     }
-    let rows = 0;
+    let total = 0;
     let after = 0;
+    /** Не применились при импорте: ждут неизвестного или не разбираются. */
+    const odd: { seq: number; end: Record<string, number> }[] = [];
     for (;;) {
-      const page = await pool.query<{ seq: string; bytes: Uint8Array }>(
-        'SELECT seq, bytes FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq > $3 AND seq <= $4 ORDER BY seq LIMIT $5',
+      const page = await pool.query<{ seq: string; bytes: Uint8Array; end_vv: Record<string, number> }>(
+        'SELECT seq, bytes, end_vv FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq > $3 AND seq <= $4 ORDER BY seq LIMIT $5',
         [file, doc, after, cut, ROWS_AT_ONCE],
       );
       if (page.rows.length === 0) break;
       for (const r of page.rows) {
         after = Number(r.seq);
+        total++;
         try {
           const status = loro.import(r.bytes);
-          if (status.pending != null) return { loro, rows, failed: { doc, seq: after } };
+          if (status.pending != null) odd.push({ seq: after, end: r.end_vv });
         } catch (e) {
           if (isPanic(e)) throw new CompactPanic(doc, after, e);
-          return { loro, rows, failed: { doc, seq: after } };
+          // Не разобралась: клиенты её тоже не применят. Следующие записи — как у них.
+          odd.push({ seq: after, end: r.end_vv });
         }
-        rows++;
       }
     }
-    return { loro, rows, failed: null };
+    // Ждавшая запись могла дождаться следующих: остаётся только то, чего в документе так и нет.
+    const have = plain(loro);
+    const kept = odd.filter((o) => !covers(have, o.end)).map((o) => o.seq);
+    return { loro, rows: total - kept.length, kept };
   };
 
   const failed: CompactFailure[] = [];
-  /** Отложенные до срока: не собрались или корень их не знает. */
+  const skipped: CompactFailure[] = [];
+  /** Видны людям, а журнал в файл не вошёл. */
+  const incomplete: string[] = [];
+  /** Отложенные до срока: больше предела или корень их не знает. */
   const deferred = new Set<string>();
-  const replaced = new Map<string, { version: Record<string, number>; refs: string[] }>();
+  const replaced = new Map<string, { version: Record<string, number>; refs: string[]; kept: number[] }>();
+  /** Документ, в котором не применилось ничего нового: секция та же, запоминается только число пропущенных записей. */
+  const keptOnly = new Map<string, number>();
   const fresh: Section[] = [];
   let totalRows = 0;
   const tmp = join(tmpdir(), `ferrum-compact-${randomUUID()}`);
@@ -194,31 +216,46 @@ export async function compactFile(
   };
   const tooLarge = (doc: string, kind: number, id: string) =>
     (spanOf(kind, id)?.size ?? 0) + Number(stateOf.get(doc)?.log_bytes ?? 0) > opts.maxDocBytes;
+  /** Собран: пропущенные записи названы. Ничего нового не применилось — секция та же, `false`. */
+  const settle = (doc: string, built: { rows: number; kept: number[] }): boolean => {
+    for (const seq of built.kept) skipped.push({ doc, seq });
+    if (built.rows > 0) return true;
+    keptOnly.set(doc, built.kept.length);
+    return false;
+  };
 
   try {
-    // Корень нужен всегда: по нему видно, какие страницы есть. Его журнал — только если он не ждёт срока.
+    // Корень нужен всегда: по нему видно, какие страницы есть. Его журнал — только если он не ждёт срока и не больше предела;
+    // иначе страницы берутся из его снимка.
     const rootDue = due.some((s) => s.doc === 'root');
-    let rootBuilt: Awaited<ReturnType<typeof build>> | null = null;
-    if (rootDue && tooLarge('root', SECTION_ROOT, '')) {
+    const rootLarge = rootDue && tooLarge('root', SECTION_ROOT, '');
+    if (rootLarge) {
       failed.push({ doc: 'root', seq: 0 });
       deferred.add('root');
-    } else {
-      rootBuilt = await build('root', SECTION_ROOT, '', rootDue ? cutOf('root') : 0);
-      if (rootBuilt.failed) {
-        failed.push(rootBuilt.failed);
-        deferred.add('root');
-      }
+      incomplete.push('root');
     }
-    const pages = rootBuilt ? pageIds(rootBuilt.loro) : { listed: new Set<string>(), known: new Set<string>() };
-    if (rootBuilt && rootDue && !rootBuilt.failed) {
+    const rootCut = rootDue && !rootLarge ? cutOf('root') : 0;
+    const rootBuilt =
+      rootCut > 0 || (spanOf(SECTION_ROOT, '')?.size ?? 0) <= opts.maxDocBytes ? await build('root', SECTION_ROOT, '', rootCut) : null;
+    /** `null` — корень не собрать: какие страницы есть, неизвестно, и ни одна не сжимается. */
+    const pages = rootBuilt ? pageIds(rootBuilt.loro) : null;
+    if (rootBuilt && rootCut > 0 && settle('root', rootBuilt)) {
       totalRows += rootBuilt.rows;
-      replaced.set('root', { version: plain(rootBuilt.loro), refs: [] });
+      replaced.set('root', { version: plain(rootBuilt.loro), refs: [], kept: rootBuilt.kept });
       await keep(SECTION_ROOT, '', rootBuilt.loro.export({ mode: 'snapshot' }));
     }
     rootBuilt?.loro.free();
+    // Ждут срока: их журнала в файле не будет. Страница, которой не знает корень, людям не видна.
+    for (const s of withLog) {
+      if (s.waits && (s.doc === 'root' || !pages || pages.known.has(s.doc))) incomplete.push(s.doc);
+    }
 
     for (const s of due) {
       if (s.doc === 'root') continue;
+      if (!pages) {
+        incomplete.push(s.doc);
+        continue;
+      }
       // Страница, которой корень ещё не знает: корень мог не дойти. Ждёт срока, файл ради неё не переписывается.
       if (!pages.known.has(s.doc)) {
         deferred.add(s.doc);
@@ -227,35 +264,42 @@ export async function compactFile(
       if (tooLarge(s.doc, SECTION_PAGE, s.doc)) {
         failed.push({ doc: s.doc, seq: 0 });
         deferred.add(s.doc);
+        incomplete.push(s.doc);
         continue;
       }
       const built = await build(s.doc, SECTION_PAGE, s.doc, cutOf(s.doc));
-      if (built.failed) {
+      if (!settle(s.doc, built)) {
         built.loro.free();
-        failed.push(built.failed);
-        deferred.add(s.doc);
         continue;
       }
       totalRows += built.rows;
       const refs = imageRefs(built.loro);
-      replaced.set(s.doc, { version: plain(built.loro), refs });
+      replaced.set(s.doc, { version: plain(built.loro), refs, kept: built.kept });
       await keep(SECTION_PAGE, s.doc, built.loro.export({ mode: 'snapshot' }));
       await keep(SECTION_PAGE_REFS, s.doc, new TextEncoder().encode(refs.join('\n')));
       built.loro.free();
     }
     await sink.end();
 
-    const defer = (c: Pick<Pool, 'query'>) =>
-      deferred.size === 0
-        ? Promise.resolve()
-        : c.query(`UPDATE doc_state SET compact_after = now() + make_interval(secs => $3) WHERE file_id = $1 AND doc = ANY($2::text[])`, [
-            file,
-            [...deferred],
-            opts.retryAfterSeconds,
-          ]);
+    /** Отложенные ждут срока; у документов без нового запоминается число пропущенных записей. */
+    const note = async (c: Pick<Pool, 'query'>) => {
+      if (deferred.size > 0) {
+        await c.query(
+          `UPDATE doc_state SET compact_after = now() + make_interval(secs => $3) WHERE file_id = $1 AND doc = ANY($2::text[])`,
+          [file, [...deferred], opts.retryAfterSeconds],
+        );
+      }
+      if (keptOnly.size > 0) {
+        await c.query(
+          `UPDATE doc_state s SET log_kept = u.k FROM unnest($2::text[], $3::int[]) AS u(d, k) WHERE s.file_id = $1 AND s.doc = u.d`,
+          [file, [...keptOnly.keys()], [...keptOnly.values()]],
+        );
+      }
+    };
+    const left: Left = { failed, skipped, incomplete, deferred: [...deferred] };
     if (replaced.size === 0) {
-      await defer(pool);
-      return failed.length > 0 ? { kind: 'failed', failed } : { kind: 'empty' };
+      await note(pool);
+      return failed.length > 0 ? { kind: 'failed', ...left } : { kind: 'empty', ...left };
     }
 
     // Секции нового контейнера: неизменённые — копией куска прежнего файла, новые — из временного файла.
@@ -276,7 +320,7 @@ export async function compactFile(
       sections.push({ kind: s.kind, id: s.id, from: { src: 'old', start: s.start, end: s.data + s.size }, data: null });
     }
     // Страница без единой правки (только что добавлена): ни журнала, ни секции. Ядро приняло бы отсутствие секции за повреждение файла.
-    for (const id of pages.listed) {
+    for (const id of pages?.listed ?? []) {
       if (replaced.has(id) || spanOf(SECTION_PAGE, id)) continue;
       sections.push({ kind: SECTION_PAGE, id, from: null, data: new LoroDoc().export({ mode: 'snapshot' }) });
       sections.push({ kind: SECTION_PAGE_REFS, id, from: null, data: new Uint8Array(0) });
@@ -324,19 +368,20 @@ export async function compactFile(
         key,
       ]);
       // Вошедшие записи — той же транзакцией: записи новее `cut` остаются, журнал и снимок не расходятся.
+      // Пропущенные записи остаются: Loro у клиентов держит их так же, отдельно от документа.
       for (const [doc, r] of replaced) {
         if (!stateOf.has(doc)) continue;
         const removed = await c.query<{ size: number }>(
-          'DELETE FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq <= $3 RETURNING octet_length(bytes) AS size',
-          [file, doc, cutOf(doc)],
+          'DELETE FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq <= $3 AND seq <> ALL($4::bigint[]) RETURNING octet_length(bytes) AS size',
+          [file, doc, cutOf(doc), r.kept],
         );
         await c.query(
-          `UPDATE doc_state SET base_vv = $3::jsonb, log_count = log_count - $4, log_bytes = log_bytes - $5, compact_after = NULL
+          `UPDATE doc_state SET base_vv = $3::jsonb, log_count = log_count - $4, log_bytes = log_bytes - $5, log_kept = $6, compact_after = NULL
            WHERE file_id = $1 AND doc = $2`,
-          [file, doc, JSON.stringify(r.version), removed.rowCount ?? 0, removed.rows.reduce((n, x) => n + x.size, 0)],
+          [file, doc, JSON.stringify(r.version), removed.rowCount ?? 0, removed.rows.reduce((n, x) => n + x.size, 0), r.kept.length],
         );
       }
-      await defer(c);
+      await note(c);
       await c.query(
         `UPDATE file_image SET unreferenced_at = CASE WHEN hash = ANY($2::text[]) THEN NULL ELSE COALESCE(unreferenced_at, now()) END WHERE file_id = $1`,
         [file, [...refs]],
@@ -348,7 +393,7 @@ export async function compactFile(
       await pool.query('DELETE FROM blob_pending WHERE key = $1', [key]).catch(() => {});
       return { kind: 'raced' };
     }
-    return { kind: 'done', docs: replaced.size, size, rows: totalRows, failed };
+    return { kind: 'done', docs: replaced.size, size, rows: totalRows, ...left };
   } finally {
     await Promise.resolve(sink.end()).catch(() => {});
     rmSync(tmp, { force: true });

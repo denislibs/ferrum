@@ -228,19 +228,72 @@ test('сбой посреди транзакции: содержимое и жу
   expect((await compactFile(s.pool, s.blobs, file)).kind).toBe('done');
 });
 
-test('обновление не применилось: снимок не заменён, журнал цел, seq назван, приём правок идёт', async () => {
+/** Запись, которую не применить: вторая правка пира 77 без первой. Вставляется мимо журнала — журнал её бы не пропустил. */
+async function ghost(doc = pageId): Promise<number> {
+  const g = new LoroDoc();
+  g.setPeerId(77n as never);
+  g.getMap('g').set('a', 1);
+  g.commit();
+  const first = g.oplogVersion();
+  g.getMap('g').set('b', 2);
+  g.commit();
+  const bytes = g.export({ mode: 'update', from: first });
+  const { rows } = await s.pool.query<{ seq: string }>(
+    `UPDATE doc_state SET next_seq = next_seq + 1, log_count = log_count + 1, log_bytes = log_bytes + $3
+     WHERE file_id = $1 AND doc = $2 RETURNING next_seq - 1 AS seq`,
+    [file, doc, bytes.length],
+  );
+  const seq = Number(rows[0].seq);
+  await s.pool.query(
+    `INSERT INTO doc_update (file_id, doc, seq, start_vv, end_vv, bytes) VALUES ($1, $2, $3, '{"77":1}', '{"77":2}', $4)`,
+    [file, doc, seq, Buffer.from(bytes)],
+  );
+  return seq;
+}
+
+/** Документ страницы в текущем содержимом файла. */
+async function pageInContent(): Promise<LoroDoc> {
+  const { bytes, spans } = await contentSections();
+  const span = spans.find((x) => x.kind === 2 && x.id === pageId)!;
+  return LoroDoc.fromSnapshot(bytes.subarray(span.data, span.data + span.size));
+}
+
+test('неприменимая запись пропускается: остальные записи документа входят в снимок, она остаётся в журнале', async () => {
   const d = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
   const c = await joined(pageId, peers(page));
+  await writes(1, d, c);
+  const bad = await ghost();
+  // Правки после неё — у людей они есть.
   await writes(2, d, c);
-  await s.pool.query('UPDATE doc_update SET bytes = $3 WHERE file_id = $1 AND seq = $2', [file, 2, Buffer.from([1, 2, 3])]);
-  const before = await contentSections();
+  const before = await fileVersion();
   const r = await compactFile(s.pool, s.blobs, file);
-  expect(r).toEqual({ kind: 'failed', failed: [{ doc: pageId, seq: 2 }] });
-  expect((await contentSections()).version).toBe(before.version);
-  expect(await logRows()).toEqual([1, 2]);
+  expect(r).toMatchObject({ kind: 'done', rows: 3, failed: [], skipped: [{ doc: pageId, seq: bad }], incomplete: [] });
+  expect(await fileVersion()).toBe(before + 1);
+  expect(await logRows()).toEqual([bad]);
+  // Копия — то, что видят люди: все правки, кроме той, которую не применит никто.
+  const read = await pageInContent();
+  expect(read.oplogVersion().toJSON()).toEqual(d.oplogVersion().toJSON());
+  expect(read.getTree('nodes').getNodes().length).toBe(3);
+  const { rows } = await s.pool.query<{ log_count: number; log_kept: number }>(
+    'SELECT log_count, log_kept FROM doc_state WHERE file_id = $1 AND doc = $2',
+    [file, pageId],
+  );
+  expect(rows[0]).toEqual({ log_count: 1, log_kept: 1 });
+  // Ничего нового: файл не переписывается ради пропущенной записи.
+  expect(await compactFile(s.pool, s.blobs, file)).toMatchObject({ kind: 'empty', incomplete: [] });
+  expect(await fileVersion()).toBe(before + 1);
+  // Новая правка сжимается, пропущенная остаётся.
+  await writes(1, d, c);
+  expect(await compactFile(s.pool, s.blobs, file)).toMatchObject({ kind: 'done', rows: 1, skipped: [{ doc: pageId, seq: bad }] });
+  expect(await logRows()).toEqual([bad]);
+  // Новый подписчик со снимком получает её догонянием, как и прежде: у него то же, что у людей.
+  const late = LoroDoc.fromSnapshot((await pageInContent()).export({ mode: 'snapshot' }));
+  const l = await joined(pageId, peers(late), editor);
+  for (const f of l.frames) if (f.t === 'updates') late.import(f.bytes);
+  expect(late.oplogVersion().toJSON()).toEqual(d.oplogVersion().toJSON());
 });
 
-test('одна неприменимая запись не останавливает сжатие файла: остальные документы сжимаются, этот ждёт срока', async () => {
+test('одна неприменимая запись не останавливает сжатие файла: остальные документы и записи сжимаются, она остаётся в журнале', async () => {
   const d = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
   const c = await joined(pageId, peers(page));
   await writes(2, d, c);
@@ -255,12 +308,13 @@ test('одна неприменимая запись не останавлива
   await r.wait('ack');
   const before = await fileVersion();
   const out = await compactFile(s.pool, s.blobs, file);
-  expect(out).toMatchObject({ kind: 'done', failed: [{ doc: pageId, seq: 2 }] });
+  expect(out).toMatchObject({ kind: 'done', failed: [], skipped: [{ doc: pageId, seq: 2 }], incomplete: [] });
   expect(await fileVersion()).toBe(before + 1);
   expect(await logRows('root')).toEqual([]);
-  expect(await logRows()).toEqual([1, 2]);
-  // Документ ждёт срока: файл не переписывается на каждом проходе.
-  expect(await compactFile(s.pool, s.blobs, file)).toEqual({ kind: 'empty' });
+  expect(await logRows()).toEqual([2]);
+  expect((await pageInContent()).getTree('nodes').getNodes().length).toBe(1);
+  // Пропущенная запись — не повод переписывать файл на каждом проходе.
+  expect(await compactFile(s.pool, s.blobs, file)).toMatchObject({ kind: 'empty' });
   expect(await fileVersion()).toBe(before + 1);
 });
 
@@ -268,8 +322,9 @@ test('документ, которого нет в корне, не перепи
   const c = await joined('5@99', new Map());
   await writes(2, LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' })), c, '5@99');
   const before = await fileVersion();
-  expect(await compactFile(s.pool, s.blobs, file)).toEqual({ kind: 'empty' });
-  expect(await compactFile(s.pool, s.blobs, file)).toEqual({ kind: 'empty' });
+  // Людям её не видно: копия без неё полная.
+  expect(await compactFile(s.pool, s.blobs, file)).toMatchObject({ kind: 'empty', incomplete: [] });
+  expect(await compactFile(s.pool, s.blobs, file)).toMatchObject({ kind: 'empty', incomplete: [] });
   expect(await fileVersion()).toBe(before);
   expect(await logRows('5@99')).toEqual([1, 2]);
   // Таймер его не берёт до срока: файл не встаёт в очередь на каждом тике.
@@ -396,6 +451,89 @@ test('Compactor: задача POST — вперёд очереди', async () =>
   }
 });
 
+test('Compactor: «Скачать копию» и задачи таймера — через одну, у человека одна ручная задача разом', async () => {
+  const files = [file, ...(await Promise.all([0, 1, 2].map(async () => (await s.newFile(owner)).id)))];
+  for (const f of files) {
+    await s.pool.query(`INSERT INTO doc_state (file_id, doc, log_count) VALUES ($1, 'root', 1) ON CONFLICT DO NOTHING`, [f]);
+  }
+  const order: string[] = [];
+  const c = new Compactor(s.pool, { databaseUrl: TEST_DATABASE_URL, dataDir: s.dataDir }, { tickMs: 3_600_000 });
+  c.onResult = (f) => order.push(f);
+  try {
+    c.enqueue(files[0]);
+    c.enqueue(files[1]);
+    // Два файла одного человека «Скачать копию» не ставят вперёд всех: задача таймера идёт между ними.
+    await Promise.all([c.compactNow(files[2]), c.compactNow(files[3])]);
+    for (let i = 0; i < 400 && order.length < 4; i++) await Bun.sleep(10);
+    expect(order).toEqual([files[0], files[2], files[1], files[3]]);
+    // Вторая ручная задача того же человека, пока идёт первая, — «повторите».
+    const first = c.manual(files[0], 'кто-то');
+    const second = await c.manual(files[1], 'кто-то');
+    expect(second).toMatchObject({ ok: false });
+    expect((second as { retryAfter: number }).retryAfter).toBeGreaterThan(0);
+    expect(await first).toEqual({ ok: true });
+  } finally {
+    c.stop();
+  }
+});
+
+test('Compactor: память «Скачать копию» по файлам не растёт без конца', async () => {
+  const c = new Compactor(s.pool, { databaseUrl: TEST_DATABASE_URL, dataDir: s.dataDir }, { tickMs: 20, manualIntervalMs: 50 });
+  try {
+    expect(await c.manual(file, owner.id)).toEqual({ ok: true });
+    expect(c.manualEntries()).toBe(1);
+    for (let i = 0; i < 200 && c.manualEntries() > 0; i++) await Bun.sleep(10);
+    expect(c.manualEntries()).toBe(0);
+  } finally {
+    c.stop();
+  }
+});
+
+test('документ, который ждёт срока, порог не считает: правки в нём не переписывают файл', async () => {
+  // Порог стенда — 5 записей. Файл открыт: таймер простоя его не трогает, сжимает только порог.
+  const c = await joined(pageId, peers(page));
+  c.subscribe('5@99', new Map());
+  await c.wait('subscribed', (x) => x.doc === '5@99');
+  const results: string[] = [];
+  s.compactor!.onResult = (f) => results.push(f);
+  try {
+    const p = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
+    const z = new LoroDoc();
+    let seq = 0;
+    const put = async (doc: string, d: LoroDoc) => {
+      const from = d.oplogVersion();
+      d.getMap('m').set('x', seq);
+      d.commit();
+      const k = ++seq;
+      c.update(doc, k, d.export({ mode: 'update', from }));
+      await c.wait('ack', (x) => x.clientSeq === k);
+    };
+    // Страница, которой нет в корне, перешла порог: сжатие её откладывает.
+    for (let i = 0; i < 7; i++) await put('5@99', z);
+    for (let i = 0; i < 400 && results.length === 0; i++) await Bun.sleep(10);
+    expect(results.length).toBeGreaterThan(0);
+    const { rows } = await s.pool.query<{ waits: boolean }>(
+      `SELECT compact_after > now() AS waits FROM doc_state WHERE file_id = $1 AND doc = '5@99'`,
+      [file],
+    );
+    expect(rows[0].waits).toBe(true);
+    const before = await fileVersion();
+    for (let i = 0; i < 4; i++) {
+      await put(pageId, p);
+      await put('5@99', z);
+    }
+    // Очередь сжатия — по порядку: когда дошла задача после правок, всё, что они поставили, уже прошло.
+    const sentinel = (await s.newFile(owner)).id;
+    s.compactor!.enqueue(sentinel);
+    for (let i = 0; i < 400 && !results.includes(sentinel); i++) await Bun.sleep(10);
+    expect(results).toContain(sentinel);
+    expect(await fileVersion()).toBe(before);
+    expect(await logRows()).toEqual([1, 2, 3, 4]);
+  } finally {
+    s.compactor!.onResult = () => {};
+  }
+});
+
 test('Compactor: паника wasm меняет worker, документ ждёт срока, остальные файлы сжимаются', async () => {
   const base = await data('loro-base.snap');
   const bad = (await s.newFile(owner)).id;
@@ -519,6 +657,68 @@ test('POST compact: сжимает и отвечает 200; на паузе — 
   expect(paused.status).toBe(503);
 });
 
+test('«Скачать копию» не отвечает 200 с неполной копией: документ, который ждёт срока, — 503 INCOMPLETE', async () => {
+  const viewer = await s.signIn(`viewer-${crypto.randomUUID()}@example.com`);
+  await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [file, viewer.id]);
+  const d = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
+  await writes(2, d, await joined(pageId, peers(page)));
+  // Документ отложен (паника wasm при прошлом сжатии): его правок в копии не будет.
+  await s.pool.query(`UPDATE doc_state SET compact_after = now() + interval '1 hour' WHERE file_id = $1 AND doc = $2`, [file, pageId]);
+  const before = await fileVersion();
+  const res = await s.call(viewer, 'POST', `/api/files/${file}/compact`);
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({ error: 'INCOMPLETE' });
+  expect(await fileVersion()).toBe(before);
+  expect(await logRows()).toEqual([1, 2]);
+  // Повтор в окне без новых правок — тот же ответ, файл не переписывается.
+  expect((await s.call(viewer, 'POST', `/api/files/${file}/compact`)).status).toBe(503);
+  expect(await fileVersion()).toBe(before);
+});
+
+test('«Скачать копию»: страница, которой нет в корне, людям не видна — копия без неё полная, 200', async () => {
+  const d = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
+  await writes(2, d, await joined(pageId, peers(page)));
+  await writes(1, new LoroDoc(), await joined('5@99', new Map()), '5@99');
+  expect((await s.call(owner, 'POST', `/api/files/${file}/compact`)).status).toBe(200);
+  expect(await logRows()).toEqual([]);
+  expect(await logRows('5@99')).toEqual([1]);
+  // Повтор в окне без новых правок: копия та же, полная.
+  expect((await s.call(owner, 'POST', `/api/files/${file}/compact`)).status).toBe(200);
+});
+
+test('«Скачать копию»: документ больше предела в копию не входит — 503 INCOMPLETE', async () => {
+  const tight = await apiStand(
+    {
+      compact: {
+        init: { databaseUrl: TEST_DATABASE_URL, dataDir: '', maxDocBytes: 1 },
+        limits: { tickMs: 3_600_000 },
+      },
+    },
+    true,
+  );
+  try {
+    const who = await tight.signIn(`large-${crypto.randomUUID()}@example.com`);
+    const f = (await tight.newFile(who)).id;
+    expect((await tight.writeContent(who, f, 0, realContainer(root.export({ mode: 'snapshot' })))).status).toBe(200);
+    const c = (await Client.open(tight, who, f))!;
+    c.hello();
+    c.subscribe('root', peers(root));
+    await c.wait('subscribed');
+    const tabRoot = LoroDoc.fromSnapshot(root.export({ mode: 'snapshot' }));
+    const from = tabRoot.oplogVersion();
+    tabRoot.getMap('meta').set('name', 'другое');
+    tabRoot.commit();
+    c.update('root', 1, tabRoot.export({ mode: 'update', from }));
+    await c.wait('ack');
+    const res = await tight.call(who, 'POST', `/api/files/${f}/compact`);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'INCOMPLETE' });
+    c.close();
+  } finally {
+    await tight.stop();
+  }
+});
+
 test('POST compact со сроком: долгое сжатие — 503 с Retry-After, а не обрыв соединения', async () => {
   const tight = await apiStand(
     {
@@ -562,7 +762,7 @@ test('документ больше предела не собирается: о
   const pageSize = await sizeOf(pageId, 2, pageId);
   expect(await sizeOf('root', 1, '')).toBeLessThan(pageSize);
   const out = await compactFile(s.pool, s.blobs, file, { maxDocBytes: pageSize - 1 });
-  expect(out).toMatchObject({ kind: 'done', failed: [{ doc: pageId, seq: 0 }] });
+  expect(out).toMatchObject({ kind: 'done', failed: [{ doc: pageId, seq: 0 }], incomplete: [pageId] });
   expect(await logRows('root')).toEqual([]);
   expect(await logRows()).toEqual([1, 2, 3, 4, 5]);
 });

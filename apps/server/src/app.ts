@@ -87,7 +87,7 @@ export function startServer(deps: AppDeps, port: number): Running {
   const hub = new SyncHub(deps.pool, deps.blobs, deps.auth, deps.publicUrl, deps.syncLimits);
   const compactor = deps.compact ? new Compactor(deps.pool, deps.compact.init, deps.compact.limits) : null;
   if (compactor) {
-    hub.onLog = (file, _doc, count, bytes) => compactor.note(file, count, bytes);
+    hub.onLog = (file, doc, count, bytes) => compactor.note(file, doc, count, bytes);
     hub.onLastLeft = (file) => compactor.lastLeft(file);
     compactor.active = (file) => hub.isOpen(file);
   }
@@ -97,7 +97,7 @@ export function startServer(deps: AppDeps, port: number): Running {
     ...apiDeps(deps),
     afterWrite: (route, ctx) => accessChanged(hub, route, ctx),
     contentReplaced: (file) => hub.forgetFile(file),
-    compactNow: (file) => (compactor ? compactor.manual(file) : Promise.resolve({ ok: true as const })),
+    compactNow: (file, user) => (compactor ? compactor.manual(file, user) : Promise.resolve({ ok: true as const })),
   };
   const handleApi = apiHandler(apiRoutes(api), api);
   const server = Bun.serve({

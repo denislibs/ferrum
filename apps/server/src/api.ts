@@ -66,8 +66,9 @@ export interface ApiDeps {
   afterWrite?: (route: Route, ctx: Ctx) => void;
   /** Содержимое файла заменено целиком: проверка пачек забывает его документы. */
   contentReplaced?: (file: string) => void;
-  /** Сжать журнал файла сейчас: копия для скачивания должна быть полной. `false` — не вышло. */
-  compactNow?: (file: string) => Promise<{ ok: true } | { ok: false; retryAfter: number }>;
+  /** Сжать журнал файла сейчас: копия для скачивания должна быть полной. Не вышло — когда повторить; `incomplete` — журнал
+   * документа, который видят люди, в файл не входит. */
+  compactNow?: (file: string, user: string) => Promise<{ ok: true } | { ok: false; retryAfter: number } | { ok: false; incomplete: true }>;
 }
 
 export interface ApiUser {
