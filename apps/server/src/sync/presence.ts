@@ -100,6 +100,8 @@ interface Pending {
 interface Recipient {
   conn: PresenceConn;
   pending: Map<number, Pending>;
+  /** Участники, о чьём `join` получателю уже отправлено и `left` ещё нет: только о них нужен `left`. */
+  known: Set<number>;
 }
 
 interface Room {
@@ -143,7 +145,7 @@ export class PresenceHub {
     if (conn.closed) return;
     const room = this.room(conn.file);
     if (room.recipients.has(conn.id)) return;
-    const r: Recipient = { conn, pending: new Map() };
+    const r: Recipient = { conn, pending: new Map(), known: new Set() };
     room.recipients.set(conn.id, r);
     for (const p of room.participants.values()) {
       if (p.shown && p.conn !== conn) r.pending.set(p.conn.id, everything(p));
@@ -248,6 +250,11 @@ export class PresenceHub {
   }
 
   private markLeft(r: Recipient, id: number): void {
+    // Получатель о нём не знает (его `join` ещё не ушёл): говорить об уходе нечего, отметка не копится.
+    if (!r.known.has(id)) {
+      r.pending.delete(id);
+      return;
+    }
     r.pending.set(id, { join: false, state: false, parts: new Set(), left: true });
   }
 
@@ -291,6 +298,7 @@ export class PresenceHub {
       if (q.left) {
         if (!fits(encodePresenceRecord({ k: 'left', participant: id }))) return out;
         r.pending.delete(id);
+        r.known.delete(id);
         continue;
       }
       const p = room.participants.get(id);
@@ -301,6 +309,7 @@ export class PresenceHub {
       if (q.join) {
         if (!fits(p.join)) return out;
         q.join = false;
+        r.known.add(id);
       }
       if (q.state && p.state) {
         if (!fits(p.state)) return out;
@@ -326,6 +335,13 @@ export class PresenceHub {
       }
       for (const r of room.recipients.values()) for (const q of r.pending.values()) n += 32 + q.parts.size * 8;
     }
+    return n;
+  }
+
+  /** Сколько отметок «что отправить» ждёт самого загруженного получателя файла. Для тестов памяти. */
+  pendingMax(file: string): number {
+    let n = 0;
+    for (const r of this.rooms.get(file)?.recipients.values() ?? []) n = Math.max(n, r.pending.size);
     return n;
   }
 

@@ -15,6 +15,7 @@ import {
 } from '@ferrum/protocol';
 import { connect as tcp } from 'node:net';
 import { apiStand, type Person } from './api-stand';
+import { PresenceHub } from '../src/sync/presence';
 import { Client } from './sync-client';
 
 const STALE_MS = 1500;
@@ -371,4 +372,38 @@ test('предел на человека: шесть вкладок в пред�
     expect(t.frames.some((f) => f.t === 'pause')).toBe(false);
   }
   await waitItem(b, 'state');
+});
+
+test('получатель, который не читает, не копит отметки об уходе тех, о ком не знает: ожидающее ограничено живыми участниками', () => {
+  let t = 0;
+  const hub = new PresenceHub({}, () => t);
+  const conn = (id: number, user: string, buffered: number) => ({
+    id,
+    file: 'f',
+    user,
+    closed: false,
+    ws: { getBufferedAmount: () => buffered, sendBinary: () => 0 },
+  });
+  hub.admit(conn(1, 'slow', 1_000_000));
+  const body = encodePresenceBody(state(1));
+  for (let i = 0; i < 500; i++) {
+    const c = conn(1000 + i, `u${i}`, 0);
+    hub.admit(c);
+    hub.state(c, `u${i}`, body, state(1));
+    t += 40;
+    hub.tick();
+    hub.leave(c);
+    t += 40;
+    hub.tick();
+  }
+  expect(hub.shown('f')).toBe(0);
+  expect(hub.pendingMax('f')).toBe(0);
+  // Живые участники — граница: по записи на каждого.
+  for (let i = 0; i < 5; i++) {
+    const c = conn(5000 + i, `live${i}`, 0);
+    hub.admit(c);
+    hub.state(c, `live${i}`, body, state(1));
+  }
+  expect(hub.pendingMax('f')).toBeLessThanOrEqual(5);
+  hub.stop();
 });
