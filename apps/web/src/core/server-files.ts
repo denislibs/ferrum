@@ -61,6 +61,8 @@ export function failureMessage(code: Failure): string {
       return 'Слишком много запросов — повторите позже';
     case 'UNAVAILABLE':
       return 'Сервер недоступен — повторите позже';
+    case 'INCOMPLETE':
+      return 'Копию не собрать целиком: часть файла на сервере не сжимается. Правки целы — откройте файл и сохраните копию из редактора';
     case 'MISSING_IMAGES':
       return 'Картинки файла не дошли до сервера — повторите позже';
     case 'TOO_MANY_IMAGES':
@@ -573,6 +575,11 @@ export class ServerFiles {
     if (compacted.status === 503 && Number.isFinite(retry) && retry > 0) {
       void compacted.body?.cancel().catch(() => {});
       throw new ServerFailure('UNAVAILABLE', `Копия собирается — повторите через ${Math.ceil(retry)} с`);
+    }
+    // Журнал документа, который видят люди, в файл не вошёл: копия была бы неполной, повтор не поможет.
+    if (compacted.status === 503) {
+      const body: unknown = await compacted.json().catch(() => null);
+      throw new ServerFailure(record(body)?.error === 'INCOMPLETE' ? 'INCOMPLETE' : 'UNAVAILABLE');
     }
     if (!compacted.ok) await this.readReply(compacted, (_v): _v is never => false);
     const { bytes } = await this.download(file);
