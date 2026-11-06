@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import {
+  checkPartBody,
   decodeSelectionIds,
   encodePartBody,
   encodePresenceBody,
@@ -10,13 +11,15 @@ import {
   presenceColor,
   PRESENCE_BATCH_MAX,
   PRESENCE_COLORS,
+  PRESENCE_FRAME_HOSTILE,
   PRESENCE_FRAME_MAX,
   PRESENCE_PART_BYTES,
   PRESENCE_PARTS_MAX,
   splitSelection,
+  withoutGesture,
   type PresenceState,
 } from '../src/presence';
-import { encodeClientFrame, encodePresenceBatch, parseClientFrame, parseServerFrame } from '../src/sync';
+import { encodeClientFrame, encodePresenceBatch, parseClientFrame, parseServerFrame, readClientFrame } from '../src/sync';
 
 const page = '12@7910247476534078275';
 const full: PresenceState = {
@@ -103,6 +106,75 @@ test('кадр присутствия больше 2 КБ или неверны�
   expect(parseClientFrame(bad)).toEqual({ t: 'presence-part', body: bad.subarray(1), part: null });
 });
 
+test('сервер читает кадр присутствия без разбора тела; больше 64 КБ — неверный кадр', () => {
+  const body = encodePresenceBody(full);
+  const f = encodeClientFrame({ t: 'presence', body });
+  expect(readClientFrame(f)).toStrictEqual({ t: 'presence', body });
+  const part = encodePartBody({ rev: 1, index: 0, parts: 1, bytes: encodeSelectionIds(['1@2']) });
+  expect(readClientFrame(encodeClientFrame({ t: 'presence-part', body: part }))).toStrictEqual({ t: 'presence-part', body: part });
+  for (const kind of [4, 6]) {
+    const edge = new Uint8Array(PRESENCE_FRAME_HOSTILE);
+    edge[0] = kind;
+    expect(readClientFrame(edge)).not.toBeNull();
+    const over = new Uint8Array(PRESENCE_FRAME_HOSTILE + 1);
+    over[0] = kind;
+    expect(readClientFrame(over)).toBeNull();
+    expect(parseClientFrame(over)).toBeNull();
+  }
+});
+
+test('жест убирается из тела, остальное — как было', () => {
+  for (const cursor of [null, full.cursor]) {
+    for (const selection of [null, full.selection]) {
+      for (const gesture of [null, full.gesture]) {
+        const body = encodePresenceBody({ ...full, cursor, selection, gesture });
+        expect(parsePresenceBody(withoutGesture(body))).toEqual({ ...full, cursor, selection, gesture: null });
+      }
+    }
+  }
+});
+
+test('проверка части без строк согласна с разбором', () => {
+  const peer = (p: bigint) => {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setBigUint64(0, p, true);
+    return [...b];
+  };
+  const head = [1, 0, 0, 0, 0, 1];
+  const cases = [
+    encodeSelectionIds(['5@2', '1@2', '1@18446744073709551615', '2147483647@3', '7@2', '1@4294967296', '1@4294967295']),
+    new Uint8Array(),
+    new Uint8Array([...peer(2n), 1, 0x81, 0x00]),
+    new Uint8Array([...peer(2n), 2, 1, 0]),
+    new Uint8Array([...peer(3n), 1, 1, ...peer(2n), 1, 1]),
+    new Uint8Array([...peer(2n), 1, 1, ...peer(2n), 1, 2]),
+    // Старшее слово пира меньше при большем младшем: пиры не по возрастанию.
+    new Uint8Array([...peer(2n ** 32n), 1, 1, ...peer(0xffffffffn), 1, 1]),
+    new Uint8Array([...peer(0xffffffffn), 1, 1, ...peer(2n ** 32n), 1, 1]),
+    new Uint8Array([...peer(2n), 1, 0xff, 0xff, 0xff, 0xff, 0x0f]),
+    new Uint8Array([...peer(2n), 0xff, 0xff, 0x03, 1]),
+    new Uint8Array([...peer(2n), 1]),
+  ];
+  for (const ids of cases) {
+    const body = new Uint8Array([...head, ...ids]);
+    const parsed = parsePartBody(body);
+    const checked = checkPartBody(body);
+    expect(checked === null).toBe(parsed === null);
+    if (parsed) expect(checked).toEqual({ rev: parsed.rev, index: parsed.index, parts: parsed.parts });
+  }
+  expect(decodeSelectionIds(cases[0])).toEqual([
+    '1@2',
+    '5@2',
+    '7@2',
+    '2147483647@3',
+    '1@4294967295',
+    '1@4294967296',
+    '1@18446744073709551615',
+  ]);
+  expect(decodeSelectionIds(cases[6])).toBeNull();
+  expect(decodeSelectionIds(cases[7])).toEqual(['1@4294967295', '1@4294967296']);
+});
+
 test('предел 2 КБ: верная часть выделения на границе принимается, на байт длиннее — нет', () => {
   // Узлы одного пира: 8 байт пира, число узлов (2 байта), первый счётчик и разности по байту — всего n + 10 байт.
   const nodes = (n: number) => {
@@ -132,7 +204,9 @@ test('предел 2 КБ: верная часть выделения на гр�
     // Без предела кадр был бы верным: узлы разбираются.
     expect(decodeSelectionIds(nodes(PRESENCE_PART_BYTES - 10 + extra))).not.toBeNull();
     expect(parseClientFrame(over)).toEqual({ t: 'presence-part', body: over.subarray(1), part: null });
+    expect(checkPartBody(over.subarray(1))).toBeNull();
   }
+  expect(checkPartBody(edge.subarray(1))).toEqual({ rev: 5, index: 0, parts: 1 });
 });
 
 test('узлы выделения: запись одна, туда и обратно', () => {

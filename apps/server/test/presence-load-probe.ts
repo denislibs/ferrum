@@ -113,7 +113,8 @@ const s = await apiStand({
   syncLimits: {
     connectionsPerUser: 100_000,
     userOpensBurst: 100_000,
-    presence: { userFramesPerSecond: 100_000, userFramesBurst: 100_000 },
+    // 50 участников — соединения одного человека: пределы человека сняты, предел файла (100) — как есть.
+    presence: { userFramesPerSecond: 100_000, userFramesBurst: 100_000, userConnections: 100_000 },
   },
 });
 const who = await s.signIn(`presence-load-${Date.now()}@example.com`);

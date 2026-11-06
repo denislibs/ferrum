@@ -6,7 +6,7 @@ import {
   encodeServerFrame,
   encodeVersion,
   MAX_SYNC_FRAME_BYTES,
-  parseClientFrame,
+  readClientFrame,
   RANK_ROLE,
   ROLE_RANK,
   snapshotPath,
@@ -468,7 +468,7 @@ export class SyncHub {
       return;
     }
     const at = performance.now();
-    const frame = parseClientFrame(message);
+    const frame = readClientFrame(message);
     if (!frame) {
       ws.close(SYNC_CLOSE.BAD_FRAME, 'frame');
       return;
@@ -487,13 +487,13 @@ export class SyncHub {
       return;
     }
     // Присутствие — мимо бакетов правок: его пределы свои, лишнее молча отбрасывается, а пауза правок от курсора была бы
-    // ложной. Кадр подписывает соединение: кто, имя и цвет — с сервера.
+    // ложной. Кадр подписывает соединение: кто, имя и цвет — с сервера. Тело разбирает `PresenceHub` после своих пределов.
     if (frame.t === 'presence') {
-      this.presence.state(d, d.name, frame.body, frame.state);
+      this.presence.state(d, d.name, frame.body);
       return;
     }
     if (frame.t === 'presence-part') {
-      this.presence.part(d, frame.body, frame.part);
+      this.presence.part(d, frame.body);
       return;
     }
     const u = this.user(d.user);
@@ -551,7 +551,7 @@ export class SyncHub {
                 up AS (UPDATE file SET schema_version = $3 FROM f
                        WHERE file.id = f.id AND f.rank >= $4 AND file.schema_version < $3 RETURNING 1)
            SELECT version, member, rank,
-                  (SELECT coalesce(nullif(btrim(name), ''), split_part(email, '@', 1)) FROM "user" WHERE id = $2) AS name
+                  (SELECT name FROM "user" WHERE id = $2) AS name
            FROM f`,
           [d.file, d.user, Math.min(schema, this.limits.knownSchema), ROLE_RANK.editor],
         )
@@ -691,7 +691,7 @@ export class SyncHub {
 
   private async subscribe(d: ConnData, doc: string, frame: Uint8Array): Promise<void> {
     // Вектор не разбирается в `Map` до ответа базы: разобранный он в восемь раз больше кадра и жил бы через `await`. Байты
-    // кадра — своя копия: буфер сокета живёт только на время обработчика. Разбор уже проверен `parseClientFrame`.
+    // кадра — своя копия: буфер сокета живёт только на время обработчика. Разбор уже проверен `readClientFrame`.
     const raw = frame.slice();
     const old = d.docs.get(doc);
     if (!old && d.docs.size >= this.limits.subscribesPerConnection) {
@@ -927,6 +927,8 @@ export class SyncHub {
         if (role !== d.role) {
           d.role = role;
           this.send(d, { t: 'role', role, canShare: (r.member ?? 0) >= ROLE_RANK.editor, version: Number(r.version ?? 0) });
+          // Понижение посреди жеста: превью у других снимается сразу.
+          this.presence.roleChanged(d);
         }
       }
     }
