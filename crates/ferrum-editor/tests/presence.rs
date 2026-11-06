@@ -487,3 +487,30 @@ fn drawing_under_peer_drag_of_a_frame_places_by_document() {
     assert_eq!((h.props(r).x, h.props(r).y), (600.0, 100.0));
     assert_eq!(h.props(f).x, 0.0);
 }
+
+#[test]
+fn own_selection_bounds_for_others_ignore_peer_preview() {
+    let mut h = H::new();
+    let a = h.rect(None, 10.0, 10.0, 50.0, 40.0);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[a], 100.0);
+    // Выделение сменилось под чужим слоем: рамка — по документу, слой остаётся.
+    h.ed.select(&[a]);
+    assert_eq!(
+        h.ed.own_selection_bounds(),
+        Some(Rect::new(10.0, 10.0, 60.0, 50.0))
+    );
+    assert_eq!(h.ed.scene().node(a).unwrap().props.x, 110.0);
+    // Новый кадр участника — рамка та же.
+    drag_by(&mut h, 1, &[a], 200.0);
+    assert_eq!(
+        h.ed.own_selection_bounds(),
+        Some(Rect::new(10.0, 10.0, 60.0, 50.0))
+    );
+    // Без чужого превью — по сцене, со своим превью жеста.
+    h.ed.presence_left(1);
+    assert_eq!(
+        h.ed.own_selection_bounds(),
+        Some(Rect::new(10.0, 10.0, 60.0, 50.0))
+    );
+}

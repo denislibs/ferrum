@@ -534,3 +534,27 @@ fn opening_a_file_resets_own_presence() {
         encode_selection(&[id.parse().unwrap()])
     );
 }
+
+/// Своя рамка выделения — по документу: участник, тянущий мои узлы, её не сдвигает.
+#[test]
+fn own_selection_frame_ignores_peer_preview() {
+    let mut c = core();
+    c.command(Command::SyncStart);
+    let id = rect(&mut c);
+    c.set_time(1000.0);
+    let (sel, _) = sent_selection(&presence_events(&mut c)[0]);
+    let bounds = sel.unwrap().bounds;
+    c.command(Command::Presence {
+        items: [vec![join(1)], drag(&c, 1, &id, 300.0)].concat(),
+    });
+    assert!(c.editor().scene().has_remote_preview());
+    c.handle(Input::PointerMove(PointerEvent::new(
+        (20.0, 20.0),
+        Modifiers::NONE,
+        0.0,
+    )));
+    c.set_time(2000.0);
+    let sent = presence_events(&mut c);
+    let (sel, _) = sent_selection(sent.last().expect("курсор сдвинулся — кадр"));
+    assert_eq!(sel.unwrap().bounds, bounds);
+}

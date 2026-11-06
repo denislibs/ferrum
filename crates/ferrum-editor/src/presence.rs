@@ -125,6 +125,8 @@ pub struct PeerInfo {
 }
 
 type MarksCache = ((u64, u64, u64, PageId), Arc<[RemoteMark]>);
+/// Версия выделения, сцена (`generation`, `scene_epoch`) и счётчик её изменений.
+type OwnBoundsKey = (u64, u64, u64, u64);
 
 #[derive(Default)]
 pub(crate) struct Presence {
@@ -141,6 +143,9 @@ pub(crate) struct Presence {
     /// Страница, на которую следование переключает само: это не действие человека.
     following_switch: bool,
     marks: RefCell<Option<MarksCache>>,
+    /// Рамка своего выделения по документу, посчитанная перед наложением слоя, и с чем она
+    /// верна (`Editor::own_bounds_key` после наложения).
+    own_bounds: Option<(OwnBoundsKey, Option<Rect>)>,
     now: f64,
 }
 
@@ -461,7 +466,10 @@ impl Editor {
             ));
         }
         if !patches.is_empty() {
+            // Сцена сейчас — документ: своя рамка для других считается здесь, а не под слоем.
+            let bounds = self.selection_world_bounds();
             self.scene.set_remote_preview(&patches);
+            self.presence.own_bounds = Some((self.own_bounds_key(), bounds));
         }
         self.presence.applied = Some((
             self.presence.preview_rev,
@@ -509,6 +517,57 @@ impl Editor {
         let marks: Arc<[RemoteMark]> = Arc::from(marks);
         *self.presence.marks.borrow_mut() = Some((key, marks.clone()));
         marks
+    }
+
+    fn own_bounds_key(&self) -> OwnBoundsKey {
+        (
+            self.selection.version(),
+            self.scene.generation(),
+            self.scene_epoch,
+            self.scene.change_counter(),
+        )
+    }
+
+    /// Мировая рамка выделенных узлов по сцене.
+    fn selection_world_bounds(&self) -> Option<Rect> {
+        self.selection
+            .iter()
+            .filter_map(|id| {
+                let n = self.scene.node(*id)?;
+                Some(n.world.transform_rect_bbox(n.local_bounds?))
+            })
+            .reduce(|a, b| a.union(b))
+    }
+
+    /// Рамка своего выделения для других участников — по документу, без чужого превью (своё
+    /// превью жеста в ней есть: его видят и другие). Под чужим слоем — рамка, посчитанная перед
+    /// его наложением; если с тех пор сменились выделение или документ, слой накладывается
+    /// заново и рамка считается с ним.
+    pub fn own_selection_bounds(&mut self) -> Option<Rect> {
+        let fresh = |me: &Self| {
+            me.presence
+                .own_bounds
+                .filter(|(k, _)| *k == me.own_bounds_key())
+                .map(|(_, b)| b)
+        };
+        if !self.scene.has_remote_preview() {
+            return self.selection_world_bounds();
+        }
+        if let Some(b) = fresh(self) {
+            return b;
+        }
+        self.presence.applied = None;
+        self.sync_remote_preview();
+        if !self.scene.has_remote_preview() {
+            return self.selection_world_bounds();
+        }
+        fresh(self).unwrap_or_else(|| {
+            // Не бывает: слой только что наложен вместе с рамкой. На всякий случай — без него.
+            self.drop_remote_preview();
+            let b = self.selection_world_bounds();
+            self.emit();
+            b
+        })
     }
 
     /// Номер того, что видно от участников: входит в ключ кадра.
