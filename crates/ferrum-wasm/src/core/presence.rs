@@ -357,6 +357,11 @@ impl Core {
                     parts: n as u8,
                     bounds: [b.x0, b.y0, b.x1, b.y1],
                 });
+            // Без рамки выделения нет и у получателей: на `None` они сбрасывают части. Рамка
+            // вернётся той же версией — части уйдут с ней снова.
+            if self.presence.selection.is_none() {
+                self.presence.parts_sent = false;
+            }
         }
         // Части уходят с первым кадром, где о выделении сказано.
         let parts = if self.presence.selection.is_some() && !self.presence.parts_sent {

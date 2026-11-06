@@ -481,6 +481,47 @@ fn selection_parts_wait_for_bounds_instead_of_being_lost() {
     );
 }
 
+/// Рамка выделения пропала и вернулась без смены версии (дети группы скрыты и снова видны):
+/// получатели на кадре без выделения сбросили части — они уходят снова.
+#[test]
+fn selection_parts_go_again_after_selection_frame_was_gone() {
+    let mut c = core();
+    c.command(Command::SyncStart);
+    let a = rect(&mut c);
+    c.command(Command::Execute {
+        command: "object.group".into(),
+    });
+    let group = c.editor().selection()[0].to_string();
+    c.set_time(1000.0);
+    let sent = presence_events(&mut c);
+    let (sel, parts) = sent_selection(sent.last().expect("выделение объявлено"));
+    let rev = sel.expect("выделение").rev;
+    assert!(parts.is_some());
+    let flags = |c: &mut Core, visible: bool| {
+        c.command(Command::SetLayerFlags {
+            ids: vec![a.clone()],
+            visible: Some(visible),
+            locked: None,
+        })
+    };
+    flags(&mut c, false);
+    c.set_time(2000.0);
+    let sent = presence_events(&mut c);
+    assert_eq!(
+        sent_selection(sent.last().expect("рамка пропала — кадр")).0,
+        None
+    );
+    flags(&mut c, true);
+    c.set_time(3000.0);
+    let sent = presence_events(&mut c);
+    let (sel, parts) = sent_selection(sent.last().expect("рамка вернулась — кадр"));
+    assert_eq!(sel.expect("выделение").rev, rev, "версия та же");
+    assert_eq!(
+        parts.expect("части снова"),
+        encode_selection(&[group.parse().unwrap()])
+    );
+}
+
 /// Части не теряются, если кадр не ушёл: вид вне мира (холст уведён за предел) — кадра нет,
 /// части — со следующим.
 #[test]
