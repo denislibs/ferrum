@@ -285,10 +285,9 @@ impl Core {
                         },
                         None => None,
                     };
-                    // Страница, которой здесь нет, — участник не на нашей странице.
-                    let page = PageId::from_str(&page)
-                        .ok()
-                        .filter(|p| self.editor.document().pages().iter().any(|(id, _)| id == p));
+                    // Страницы может ещё не быть (кадр участника обогнал её правку): номер
+                    // остаётся, и следование перейдёт на неё, как только она дойдёт.
+                    let page = PageId::from_str(&page).ok();
                     self.editor.presence_state(
                         participant,
                         PeerState {

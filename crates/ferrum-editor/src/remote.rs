@@ -134,6 +134,10 @@ impl Editor {
                 self.out.events.push(EditorEvent::NeedsRedraw);
             }
         }
+        // Страница участника, за которым следуем, могла дойти позже его кадра — переход сразу.
+        if self.presence.follow.is_some() {
+            self.follow_peer();
+        }
         self.emit();
         Ok(RemoteEffects {
             failed: outcome.failed,

@@ -59,8 +59,8 @@ pub struct PeerSelection {
     pub bounds: Rect,
 }
 
-/// Состояние участника из его последнего кадра. `page` — `None`, если такой страницы здесь
-/// нет (удалена, ещё не пришла).
+/// Состояние участника из его последнего кадра. `page` — его страница, даже если её здесь нет
+/// (удалена, ещё не пришла); `None` — номер не разобран.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerState {
     pub page: Option<PageId>,
@@ -373,7 +373,8 @@ impl Editor {
     }
 
     /// Вид участника, за которым следуем: его страница и камера, вписанная в свой холст.
-    fn follow_peer(&mut self) {
+    /// Страница, которой ещё нет, — переход, как только она дойдёт (`apply_remote`).
+    pub(crate) fn follow_peer(&mut self) {
         let Some(id) = self.presence.follow else {
             return;
         };
