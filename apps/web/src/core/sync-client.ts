@@ -92,7 +92,7 @@ const SEND_RETRY_MS = 25;
 const MAX_OUT_BYTES = 32 * 1024 * 1024;
 /** Загрузка картинки не удалась по сети: снова через столько, правки за ней ждут. */
 const IMAGE_RETRY_MS = 5000;
-/** Отказ «повторите» (`UNAVAILABLE`, `GAP`): от этого и с тем же ростом, что переподключение. */
+/** Отказ «повторите» (`UNAVAILABLE`, `GAP`): подписка заново через столько, с разбросом; роста паузы нет (бэклог). */
 const RESYNC_MIN_MS = 1000;
 /** Столько поколений подряд с `GAP` без единого `ack`: клиент не может послать правки в верном порядке. */
 const MAX_GAPS = 6;
@@ -116,6 +116,8 @@ export class SyncClient {
   private pongTimer: unknown = null;
   private pauseTimer: unknown = null;
   private retryTimer: unknown = null;
+  /** Срок на открытие сокета: зависшее рукопожатие браузер может держать минуты. */
+  private openTimer: unknown = null;
   /** Ожидания отправки, картинок и снимков: их бывает несколько разом, остановка снимает все. */
   private readonly sleeps = new Set<unknown>();
   private opened = false;
@@ -125,7 +127,8 @@ export class SyncClient {
   private unacked = false;
   /** Подписки этого поколения: `false` — без ответа (файл ещё догоняет), `true` — сервер ответил. */
   private readonly subs = new Map<string, boolean>();
-  /** Поколения подряд с `GAP` без `ack`; `gapCounted` — в этом поколении уже посчитан. */
+  /** Поколения подряд с `GAP` без `ack`; `gapCounted` — в этом поколении уже посчитан или был свой `UNAVAILABLE`: разрыв после
+   * него — следствие отказа (пачки в пути опирались на отвергнутую), а не неверный порядок. */
   private gaps = 0;
   private gapCounted = false;
   /** Сбросы, которые ядро ещё не выполнило: всё, что оно шлёт до этого, — старое поколение. */
@@ -194,8 +197,9 @@ export class SyncClient {
   }
 
   private clearTimers(): void {
-    for (const t of [this.reconnectTimer, this.pingTimer, this.pongTimer, this.pauseTimer, this.retryTimer, ...this.sleeps]) this.clock(t);
-    this.reconnectTimer = this.pingTimer = this.pongTimer = this.pauseTimer = this.retryTimer = null;
+    for (const t of [this.reconnectTimer, this.pingTimer, this.pongTimer, this.pauseTimer, this.retryTimer, this.openTimer, ...this.sleeps])
+      this.clock(t);
+    this.reconnectTimer = this.pingTimer = this.pongTimer = this.pauseTimer = this.retryTimer = this.openTimer = null;
     this.sleeps.clear();
   }
 
@@ -223,9 +227,17 @@ export class SyncClient {
       if (generation === this.generation) this.onClose(e.code);
     };
     ws.onerror = () => {};
+    this.clock(this.openTimer);
+    this.openTimer = this.env.clock.setTimeout(() => {
+      this.openTimer = null;
+      // Не открылся за срок: как мёртвый сокет — закрыть и не ждать браузера, `online()` иначе его не заменит.
+      if (generation === this.generation && !this.opened) this.dropSocket();
+    }, PONG_WAIT_MS);
   }
 
   private onOpen(): void {
+    this.clock(this.openTimer);
+    this.openTimer = null;
     this.opened = true;
     this.send(encodeClientFrame({ t: 'hello', protocol: SYNC_PROTOCOL, schema: this.env.schema }));
     this.resync();
@@ -397,6 +409,7 @@ export class SyncClient {
         break;
       case 'UNAVAILABLE':
         if (stale) return;
+        this.gapCounted = true;
         this.resyncLater();
         break;
       case 'LOG_FULL':
@@ -418,6 +431,9 @@ export class SyncClient {
           if (this.ended) return;
           if (a) this.env.access(a);
           this.updateFlush();
+          // Право правки осталось (или ответа нет): курсор ядра уже за отвергнутыми пачками — без подписки заново они не уйдут,
+          // пока следующая правка не получит `GAP`.
+          if (!a || (a.kind === 'role' && a.role !== 'viewer')) this.resyncLater();
         });
         break;
       case 'BAD_UPDATE':
@@ -427,10 +443,13 @@ export class SyncClient {
     }
   }
 
-  /** Отказ, который повтор не исправит: правки дальше не уходят, чужие продолжают приходить, человек об этом знает. */
+  /** Отказ, который повтор не исправит: правки дальше не уходят, чужие продолжают приходить, человек об этом знает. Шаг ядра не
+   * выключается: он же отдаёт подписки — без него новые чужие страницы пусты, а после переподключения нет ни одной подписки.
+   * Правки ядра отбрасываются здесь: отказ окончателен до перезагрузки, курсор ядра больше не нужен. */
   private reject(message: string): void {
     this.rejected = message;
-    this.env.core.flush(false);
+    this.drop('update');
+    this.updateFlush();
     this.emitStatus();
   }
 
@@ -461,6 +480,8 @@ export class SyncClient {
   }
 
   private onClose(code: number): void {
+    this.clock(this.openTimer);
+    this.openTimer = null;
     this.lostOnce = true;
     this.ws = null;
     this.opened = false;
@@ -525,12 +546,14 @@ export class SyncClient {
         this.send(encodeClientFrame({ t: 'subscribe', doc: e.doc, version: e.version }));
         break;
       case 'localImage':
+        // После отказа картинке незачем на сервер: правка со ссылкой на неё туда не уйдёт.
+        if (this.rejected) break;
         this.push({ kind: 'image', hash: e.hash, bytes: e.bytes });
         break;
       case 'localUpdates':
         // Соединение успело упасть или пачка собрана до сброса: ядро соберёт её снова от версии сервера, а раньше новой подписки
-        // она дала бы `GAP`.
-        if (this.resets > 0 || !this.ws || !this.opened) break;
+        // она дала бы `GAP`. После отказа правки не уходят вовсе.
+        if (this.rejected || this.resets > 0 || !this.ws || !this.opened) break;
         this.lastSeq = Math.max(this.lastSeq, e.clientSeq);
         this.push({ kind: 'update', doc: e.doc, clientSeq: e.clientSeq, bytes: e.bytes });
         break;
@@ -583,9 +606,7 @@ export class SyncClient {
   private updateFlush(): void {
     const room = this.outBytes < MAX_OUT_BYTES;
     // Пока качается снимок, правки ждут: документ без подписки дал бы `GAP` на каждую.
-    this.env.core.flush(
-      !!this.ws && this.opened && !this.paused && !this.rejected && !this.roleCheck && this.snapshotting.size === 0 && room,
-    );
+    this.env.core.flush(!!this.ws && this.opened && !this.paused && !this.roleCheck && this.snapshotting.size === 0 && room);
   }
 
   private pumpOut(): void {
