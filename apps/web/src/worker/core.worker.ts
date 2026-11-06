@@ -234,7 +234,7 @@ async function loadBundled(family: string, files: string[]): Promise<void> {
   );
 }
 
-const SYNC_EVENTS: ReadonlySet<string> = new Set(['syncSubscribe', 'localImage', 'localUpdates', 'syncState', 'imagesNeeded']);
+const SYNC_EVENTS: ReadonlySet<string> = new Set(['syncSubscribe', 'localImage', 'localUpdates', 'syncState', 'imagesNeeded', 'presence']);
 
 function runSync(cmd: Parameters<WasmCore['command']>[0]): void {
   if (!core) return;
@@ -258,6 +258,7 @@ function sendToSync(events: CoreEvent[]): void {
     const transfer: Transferable[] = [];
     if (e.type === 'localUpdates' || e.type === 'localImage') transfer.push(e.bytes.buffer as ArrayBuffer);
     if (e.type === 'syncSubscribe') transfer.push(e.version.buffer as ArrayBuffer);
+    if (e.type === 'presence') for (const p of e.parts ?? []) transfer.push(p.buffer as ArrayBuffer);
     syncLink.post({ t: 'event', event: e as CoreSyncEvent }, transfer);
   }
 }
@@ -268,7 +269,7 @@ function sendEvents(): void {
   let events: CoreEvent[] = core.takeEvents();
   if (events.length === 0) return;
   // Ядро что-то сделало: следующий шаг таймера пачек соберёт правки. В простое событий нет — и сборки нет.
-  syncLink.touch();
+  if (events.some((e) => e.type !== 'presence')) syncLink.touch();
   // Трафик синхронизации основному потоку не нужен. `syncState` нужен обоим: индикатор считает `sync.worker`, а «Сохранить» ждёт сервер.
   if (syncLink.connected && events.some((e) => SYNC_EVENTS.has(e.type))) {
     sendToSync(events.filter((e) => SYNC_EVENTS.has(e.type)));

@@ -12,11 +12,18 @@
 
 import {
   encodeClientFrame,
+  encodePartBody,
+  encodePresenceBody,
   parseServerFrame,
+  PRESENCE_COLORS,
   snapshotPath,
   SYNC_CLOSE,
   SYNC_PROTOCOL,
   syncPath,
+  type Affine6,
+  type GestureKind,
+  type PresenceItem,
+  type Rect4,
   type ServerFrame,
   type SyncRefusal,
 } from '@ferrum/protocol';
@@ -43,7 +50,49 @@ export type CoreCommand =
   | { type: 'syncSubscribed'; doc: string; version: Uint8Array }
   | { type: 'syncAcked'; doc: string; clientSeq: number }
   | { type: 'applyRemote'; doc: string; batches: Uint8Array[] }
-  | { type: 'addRemoteImage'; hash: string; bytes: Uint8Array };
+  | { type: 'addRemoteImage'; hash: string; bytes: Uint8Array }
+  /** Присутствие других участников (спека подсистемы 4, раздел 9): записи пачки сервера, уже разобранные. */
+  | { type: 'presence'; items: PresenceItemForCore[] }
+  /** Соединение заново: прежние участники уходят у ядра, своё состояние оно скажет снова. */
+  | { type: 'presenceReset' };
+
+/** Выделение и жест в кадре присутствия — те же поля, что у `PresenceSelection` и `PresenceGesture` протокола. */
+export interface PresenceSelectionForCore {
+  rev: number;
+  count: number;
+  parts: number;
+  bounds: Rect4;
+}
+export interface PresenceGestureForCore {
+  kind: GestureKind;
+  transform: Affine6;
+  frame: Affine6;
+  k: number;
+}
+
+/** Запись присутствия для ядра (`PresenceItemDto`): цвет — `0xRRGGBB`, пустые поля — без значения. */
+export type PresenceItemForCore =
+  | { k: 'join'; participant: number; user: string; name: string; color: number }
+  | {
+      k: 'state';
+      participant: number;
+      page: string;
+      view: Rect4;
+      cursor?: [number, number];
+      selection?: PresenceSelectionForCore;
+      gesture?: PresenceGestureForCore;
+    }
+  | { k: 'part'; participant: number; rev: number; index: number; parts: number; ids: string[] }
+  | { k: 'left'; participant: number };
+
+/** Участник для шапки: номер соединения, человек, имя, цвет и страница. */
+export interface Participant {
+  id: number;
+  user: string;
+  name: string;
+  color: string;
+  page: string | null;
+}
 
 /** События ядра, которые идут этому классу. */
 export type CoreSyncEvent =
@@ -51,7 +100,17 @@ export type CoreSyncEvent =
   | { type: 'localImage'; hash: string; bytes: Uint8Array }
   | { type: 'localUpdates'; doc: string; clientSeq: number; bytes: Uint8Array }
   | { type: 'syncState'; unacked: boolean }
-  | { type: 'imagesNeeded'; hashes: string[] };
+  | { type: 'imagesNeeded'; hashes: string[] }
+  /** Своё присутствие: не чаще 20 раз в секунду и при изменении; `parts` — узлы выделения новой версии. */
+  | {
+      type: 'presence';
+      page: string;
+      view: Rect4;
+      cursor?: [number, number];
+      selection?: PresenceSelectionForCore;
+      parts?: Uint8Array[];
+      gesture?: PresenceGestureForCore;
+    };
 
 export interface SyncEnv {
   file: string;
@@ -77,6 +136,8 @@ export interface SyncEnv {
   status(s: SyncStatus, detail?: string): void;
   access(state: AccessState): void;
   reload(): void;
+  /** Участники файла для шапки: не чаще `PARTICIPANTS_MS` и только при изменении. */
+  participants(list: Participant[]): void;
 }
 
 /** Переподключение: от 0,5 до 30 с с разбросом, сразу при `online` (спека, раздел 8.1). */
@@ -104,6 +165,13 @@ const MAX_SNAPSHOT_ATTEMPTS = 4;
 const IMAGE_CONCURRENCY = 4;
 /** Журнал файла полон: ждём, пока сервер его сожмёт. */
 const LOG_FULL_WAIT_MS = 30_000;
+/** Кадры присутствия: не больше 25 в секунду (сервер принимает 30), лишнее сливается в последнее состояние. */
+export const PRESENCE_RATE = 25;
+export const PRESENCE_BURST = 40;
+/** Повтор своего состояния, пока соединение живо: в скрытой вкладке кадров нет, а через 30 с тишины сервер скроет участника. */
+export const PRESENCE_HEARTBEAT_MS = 10_000;
+/** Список участников основному потоку не чаще. */
+export const PARTICIPANTS_MS = 250;
 
 type Out = { kind: 'image'; hash: string; bytes: Uint8Array } | { kind: 'update'; doc: string; clientSeq: number; bytes: Uint8Array };
 type In = { kind: 'apply'; doc: string; batches: Uint8Array[] } | { kind: 'cmd'; cmd: CoreCommand };
@@ -156,6 +224,20 @@ export class SyncClient {
   private lostOnce = false;
   /** С начала подписки до первого «всё на месте». */
   private catchingUp = true;
+  /** Присутствие: роль подтверждена этим соединением (до этого сервер кадры отбрасывает), последнее своё состояние и части
+   * выделения, ожидающие отправки кадры и бакет частоты. */
+  private present = false;
+  private ownState: Uint8Array | null = null;
+  private ownParts: Uint8Array[] = [];
+  private outState: Uint8Array | null = null;
+  private outParts: Uint8Array[] = [];
+  private tokens = PRESENCE_BURST;
+  private tokensAt = 0;
+  private presenceTimer: unknown = null;
+  private heartbeat: unknown = null;
+  private readonly participants = new Map<number, Participant>();
+  private participantsTimer: unknown = null;
+  private participantsDirty = false;
 
   constructor(private readonly env: SyncEnv) {}
 
@@ -197,9 +279,21 @@ export class SyncClient {
   }
 
   private clearTimers(): void {
-    for (const t of [this.reconnectTimer, this.pingTimer, this.pongTimer, this.pauseTimer, this.retryTimer, this.openTimer, ...this.sleeps])
+    for (const t of [
+      this.reconnectTimer,
+      this.pingTimer,
+      this.pongTimer,
+      this.pauseTimer,
+      this.retryTimer,
+      this.openTimer,
+      this.presenceTimer,
+      this.heartbeat,
+      this.participantsTimer,
+      ...this.sleeps,
+    ])
       this.clock(t);
     this.reconnectTimer = this.pingTimer = this.pongTimer = this.pauseTimer = this.retryTimer = this.openTimer = null;
+    this.presenceTimer = this.heartbeat = this.participantsTimer = null;
     this.sleeps.clear();
   }
 
@@ -338,6 +432,15 @@ export class SyncClient {
     switch (f.t) {
       case 'role':
         this.env.access({ kind: 'role', role: f.role, version: f.version, canShare: f.canShare, own: true });
+        // Роль подтверждена: сервер принимает присутствие. Своё — сразу, новое соединение о нём не знает.
+        if (!this.present) {
+          this.present = true;
+          if (this.ownState) this.queuePresence(this.ownState, this.ownParts);
+          this.armHeartbeat();
+        }
+        break;
+      case 'presence':
+        this.onPresence(f.items);
         break;
       case 'subscribed':
         // Ответ на подписку прежнего поколения (или без подписки): его версия ядру уже не нужна.
@@ -483,6 +586,7 @@ export class SyncClient {
     this.clock(this.openTimer);
     this.openTimer = null;
     this.lostOnce = true;
+    this.dropPresence();
     this.ws = null;
     this.opened = false;
     this.subs.clear();
@@ -565,7 +669,148 @@ export class SyncClient {
         for (const h of e.hashes) this.needImages.add(h);
         this.pumpImages();
         break;
+      case 'presence':
+        this.ownPresence(e);
+        break;
     }
+  }
+
+  // ——— Присутствие (спека подсистемы 4, раздел 9) ———
+
+  /** Своё состояние от ядра: кадр и, у новой версии выделения, её части. Без соединения — только запомнить. */
+  private ownPresence(e: Extract<CoreSyncEvent, { type: 'presence' }>): void {
+    let body: Uint8Array;
+    try {
+      body = encodePresenceBody({
+        page: e.page,
+        view: e.view,
+        cursor: e.cursor ?? null,
+        selection: e.selection ?? null,
+        gesture: e.gesture ?? null,
+      });
+    } catch {
+      // Ядро проверяет числа само; неверное сюда не доходит, а дошедшее не уходит в сеть.
+      return;
+    }
+    this.ownState = body;
+    const sel = e.selection;
+    let parts: Uint8Array[] = [];
+    if (e.parts && sel) {
+      parts = e.parts.map((bytes, index) => encodePartBody({ rev: sel.rev, index, parts: e.parts!.length, bytes }));
+      this.ownParts = parts;
+    } else if (!sel) this.ownParts = [];
+    // До роли очередь только копит последнее: уйдёт с ответом о роли.
+    this.queuePresence(body, parts);
+  }
+
+  /** В очередь: состояние заменяет прежнее неотправленное, части новой версии — прежние. */
+  private queuePresence(state: Uint8Array, parts: Uint8Array[]): void {
+    this.outState = state;
+    if (parts.length) this.outParts = [...parts];
+    this.pumpPresence();
+  }
+
+  private pumpPresence(): void {
+    if (!this.ws || !this.opened || !this.present) return;
+    const now = this.env.clock.now();
+    this.tokens = Math.min(PRESENCE_BURST, this.tokens + ((now - this.tokensAt) / 1000) * PRESENCE_RATE);
+    this.tokensAt = now;
+    while (this.tokens >= 1 && (this.outState || this.outParts.length)) {
+      const body = this.outState ?? this.outParts.shift()!;
+      const t = this.outState ? 'presence' : 'presence-part';
+      this.outState = null;
+      this.tokens -= 1;
+      this.send(encodeClientFrame({ t, body }));
+    }
+    if ((this.outState || this.outParts.length) && this.presenceTimer === null) {
+      this.presenceTimer = this.env.clock.setTimeout(() => {
+        this.presenceTimer = null;
+        this.pumpPresence();
+      }, 1000 / PRESENCE_RATE);
+    }
+    this.armHeartbeat();
+  }
+
+  /** Повтор последнего состояния через `PRESENCE_HEARTBEAT_MS` после последнего кадра. */
+  private armHeartbeat(): void {
+    this.clock(this.heartbeat);
+    this.heartbeat = this.env.clock.setTimeout(() => {
+      this.heartbeat = null;
+      if (this.present && this.ownState && !this.outState) this.queuePresence(this.ownState, []);
+      else this.armHeartbeat();
+    }, PRESENCE_HEARTBEAT_MS);
+  }
+
+  /** Соединения нет: участники пропадают, ядро забывает их; своё состояние уйдёт на следующем. */
+  private dropPresence(): void {
+    this.present = false;
+    this.outState = null;
+    this.outParts = [];
+    this.clock(this.presenceTimer);
+    this.clock(this.heartbeat);
+    this.presenceTimer = this.heartbeat = null;
+    this.env.core.command({ type: 'presenceReset' });
+    if (this.participants.size > 0) {
+      this.participants.clear();
+      this.participantsChanged();
+    }
+  }
+
+  /** Пачка сервера: ядру — записи, шапке — список участников. Порядок с правками не важен: ядро их не смешивает. */
+  private onPresence(items: PresenceItem[]): void {
+    const out: PresenceItemForCore[] = [];
+    let changed = false;
+    for (const it of items) {
+      switch (it.k) {
+        case 'join': {
+          const color = PRESENCE_COLORS[it.color];
+          const was = this.participants.get(it.participant);
+          this.participants.set(it.participant, { id: it.participant, user: it.user, name: it.name, color, page: was?.page ?? null });
+          changed = true;
+          out.push({ k: 'join', participant: it.participant, user: it.user, name: it.name, color: parseInt(color.slice(1), 16) });
+          break;
+        }
+        case 'state': {
+          const s = it.state;
+          const p = this.participants.get(it.participant);
+          if (p && p.page !== s.page) {
+            p.page = s.page;
+            changed = true;
+          }
+          out.push({
+            k: 'state',
+            participant: it.participant,
+            page: s.page,
+            view: s.view,
+            ...(s.cursor ? { cursor: s.cursor } : {}),
+            ...(s.selection ? { selection: s.selection } : {}),
+            ...(s.gesture ? { gesture: s.gesture } : {}),
+          });
+          break;
+        }
+        case 'part':
+          out.push({ k: 'part', participant: it.participant, ...it.part });
+          break;
+        case 'left':
+          changed = this.participants.delete(it.participant) || changed;
+          out.push({ k: 'left', participant: it.participant });
+          break;
+      }
+    }
+    this.env.core.command({ type: 'presence', items: out });
+    if (changed) this.participantsChanged();
+  }
+
+  /** Шапке — не чаще `PARTICIPANTS_MS`: присутствие приходит 30 раз в секунду, а список меняется редко. */
+  private participantsChanged(): void {
+    this.participantsDirty = true;
+    if (this.participantsTimer !== null) return;
+    this.env.participants([...this.participants.values()].map((p) => ({ ...p })));
+    this.participantsDirty = false;
+    this.participantsTimer = this.env.clock.setTimeout(() => {
+      this.participantsTimer = null;
+      if (this.participantsDirty) this.participantsChanged();
+    }, PARTICIPANTS_MS);
   }
 
   /** Ядро закончило `applyRemote`: следующая пачка. Пока оно занято, входящее складывается в одну. */

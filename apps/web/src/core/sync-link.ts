@@ -68,7 +68,8 @@ export class SyncLink {
       this.setFlush(m.on);
       return;
     }
-    this.wanted = true;
+    // Присутствие правок не рождает: сборка пачек на него не просыпается (оно приходит 30 раз в секунду).
+    if (m.cmd.type !== 'presence' && m.cmd.type !== 'presenceReset') this.wanted = true;
     this.env.run(m.cmd);
     // Порядок порта: всё, что ядро пришлёт после этих ответов, — после команды.
     if (m.cmd.type === 'applyRemote') this.post({ t: 'applied' });

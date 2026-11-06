@@ -27,7 +27,7 @@ export class ServerFileStore implements FileStore, SettingsBackend {
   private broken: string | null = null;
   private readonly onVisibility = () => this.post({ t: 'visible', on: document.visibilityState === 'visible' });
 
-  constructor(private readonly user: string) {
+  constructor(readonly user: string) {
     this.worker = new Worker(new URL('../../worker/server.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<FromServer>) => this.onMessage(e.data);
     // Обновили образ при открытой вкладке: старого файла worker'а больше нет (B-208).
@@ -150,6 +150,7 @@ export class ServerFileStore implements FileStore, SettingsBackend {
       const m = e.data;
       if (m.t === 'status') events.status(m.status, m.detail);
       else if (m.t === 'reload') events.reload();
+      else if (m.t === 'participants') events.participants(m.list);
       else for (const w of this.watchers.get(file) ?? []) w(m.state);
     };
     worker.onerror = (e) => {

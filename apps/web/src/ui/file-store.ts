@@ -6,7 +6,7 @@
 
 import type { FileMeta, FromIo, IoOp, IoResults, JournalMark, Section, ToIo } from '../core/file-list';
 import type { AccessState } from '../core/server-files';
-import type { SyncStatus } from '../core/sync-client';
+import type { Participant, SyncStatus } from '../core/sync-client';
 import { nameFromFile } from '../core/file-list';
 import { mb } from '../core/limits';
 import { MAX_COMMAND_BYTES } from '../core/messages';
@@ -20,6 +20,8 @@ export type { FileMeta, JournalMark, Section } from '../core/file-list';
 export interface SyncEvents {
   status(status: SyncStatus, detail?: string): void;
   reload(): void;
+  /** Участники файла для шапки (спека подсистемы 4, раздел 9). */
+  participants(list: Participant[]): void;
 }
 
 /** Ядро для соединения файла: прямой порт к `sync.worker` и его конец. */
@@ -77,6 +79,8 @@ export interface FileStore {
   readonly fullHistory?: boolean;
   /** Запись зависит от сети: неудачная повторяется сама, закрытие вкладки спрашивает о незаписанном. */
   readonly remote?: boolean;
+  /** Кто вошёл (файлы на сервере): себя в полосе участников нет. */
+  readonly user?: string;
   /** Соединение файла (спека подсистемы 4, раздел 7): правки идут журналом сервера, файл целиком пишется только первый раз. */
   sync?(id: string, core: SyncCore, events: SyncEvents): { stop(): void };
   /** Сервер подтвердил правки: снять пачки журнала браузера. */
