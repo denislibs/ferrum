@@ -558,3 +558,29 @@ fn own_selection_frame_ignores_peer_preview() {
     let (sel, _) = sent_selection(sent.last().expect("курсор сдвинулся — кадр"));
     assert_eq!(sel.unwrap().bounds, bounds);
 }
+
+/// Коэффициент «Масштаба» из сети: не число или не больше нуля — кадр пропускается.
+#[test]
+fn gesture_with_bad_scale_factor_is_skipped() {
+    let mut c = core();
+    let id = rect(&mut c);
+    for k in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut items = [vec![join(1)], drag(&c, 1, &id, 300.0)].concat();
+        if let PresenceItemDto::State {
+            gesture: Some(g), ..
+        } = &mut items[2]
+        {
+            g.kind = GestureKindDto::Scale;
+            g.k = k;
+        }
+        c.command(Command::Presence { items });
+        assert!(
+            !c.editor().scene().has_remote_preview(),
+            "k = {k}: превью нет"
+        );
+        assert!(c.editor().overlay().remote.is_empty(), "k = {k}");
+        c.command(Command::Presence {
+            items: vec![PresenceItemDto::Left { participant: 1 }],
+        });
+    }
+}

@@ -93,7 +93,8 @@ fn gesture(g: PresenceGestureDto) -> Option<Gesture> {
         },
         transform: affine(g.transform)?,
         frame: affine(g.frame)?,
-        k: coord(g.k).then_some(g.k)?,
+        // Коэффициент «Масштаба»: ноль или минус схлопнули бы и отразили превью.
+        k: (coord(g.k) && g.k > 0.0).then_some(g.k)?,
     })
 }
 
@@ -110,7 +111,8 @@ fn gesture_dto(g: Gesture) -> Option<PresenceGestureDto> {
         k: g.k,
     };
     // Нечисловая матрица (вырожденная рамка) не уходит: превью у других было бы мусором.
-    (out.transform.iter().chain(&out.frame).all(|v| coord(*v)) && coord(out.k)).then_some(out)
+    (out.transform.iter().chain(&out.frame).all(|v| coord(*v)) && coord(out.k) && out.k > 0.0)
+        .then_some(out)
 }
 
 /// Узел как пара (пир, счётчик) `TreeID`.

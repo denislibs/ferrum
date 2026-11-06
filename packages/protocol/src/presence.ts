@@ -306,6 +306,7 @@ function writePresenceState(out: Out, s: PresenceState): void {
     writeRect(out, sel.bounds);
   }
   if (s.gesture) {
+    if (!(s.gesture.k > 0)) throw new RangeError('жест');
     out.u8(GESTURE_KINDS.indexOf(s.gesture.kind));
     for (const v of s.gesture.transform) out.f64(v);
     for (const v of s.gesture.frame) out.f64(v);
@@ -342,7 +343,8 @@ function readPresenceState(r: In): PresenceState | null {
     const transform = readAffine(r);
     const frame = readAffine(r);
     const k = r.f64();
-    if (!kind || transform === null || frame === null || k === null) return null;
+    // Коэффициент «Масштаба» больше нуля: ноль или минус схлопнули бы и отразили превью.
+    if (!kind || transform === null || frame === null || k === null || !(k > 0)) return null;
     gesture = { kind, transform, frame, k };
   }
   return { page, view, cursor, selection, gesture };

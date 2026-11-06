@@ -86,6 +86,13 @@ test('разбор строгий: выделение и жест', () => {
   const goff = 2 + g[1] + 32;
   expect(parsePresenceBody(patch(g, goff, (v) => v.setUint8(0, 4)))).toBeNull();
   expect(parsePresenceBody(patch(g, goff + 1, (v) => v.setFloat64(0, NaN, true)))).toBeNull();
+  // Коэффициент «Масштаба» — после вида и двух матриц: только больше нуля.
+  const scale = at({ ...full, cursor: null, selection: null, gesture: { ...full.gesture!, kind: 'scale', k: 2 } });
+  expect(parsePresenceBody(scale)?.gesture?.k).toBe(2);
+  for (const k of [0, -0, -1, NaN, Infinity]) {
+    expect(parsePresenceBody(patch(scale, goff + 97, (v) => v.setFloat64(0, k, true)))).toBeNull();
+    expect(() => encodePresenceBody({ ...full, gesture: { ...full.gesture!, k } })).toThrow();
+  }
 });
 
 test('кадр присутствия больше 2 КБ или неверный разбирается в `null`-состояние, а не в отказ кадра', () => {
