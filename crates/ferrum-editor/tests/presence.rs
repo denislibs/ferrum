@@ -904,3 +904,27 @@ fn only_peers_drawn_are_drawn() {
     );
     assert_eq!(h.ed.peers().len(), PEERS_DRAWN + 1, "в списке — все");
 }
+
+/// Финальное ревью, Minor 1: уход указателя с холста — только курсор присутствия; жест панели,
+/// начатый сразу после него (запись кольца и сообщение панели не упорядочены), не отменяется.
+#[test]
+fn pointer_leave_keeps_panel_gesture() {
+    let mut h = H::new();
+    let a = h.rect(None, 10.0, 10.0, 50.0, 40.0);
+    h.ed.select(&[a]);
+    let x5 = PanelEdit::Number {
+        field: NumField::X,
+        value: 5.0,
+        relative: true,
+    };
+    h.ed.edit_selection(&x5, Phase::Preview);
+    h.ev(Input::PointerLeave);
+    assert_eq!(
+        h.ed.scene().node(a).unwrap().props.x,
+        15.0,
+        "превью панели осталось"
+    );
+    h.ed.edit_selection(&x5, Phase::Commit);
+    assert_eq!(h.props(a).x, 15.0);
+    assert_eq!(h.ed.own_presence().cursor, None, "курсора над холстом нет");
+}
