@@ -849,9 +849,11 @@ export class SyncHub {
     }
   }
 
-  /** Файл заменён целиком (`PUT content` до начала журнала). */
+  /** Файл заменён целиком (`PUT content` до начала журнала). Строк документов больше нет, а подписки знают прежние байты:
+   * соединения закрываются, клиенты переподключатся и сверят версию с новым снимком. */
   forgetFile(file: string): void {
     this.validator.forget(file);
+    for (const d of this.conns.get(file) ?? []) d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'replaced');
   }
 
   /** Открыт ли файл у кого-нибудь. */

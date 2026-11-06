@@ -909,6 +909,22 @@ test('пока идёт журнал, запись файла целиком о�
   expect((await s.pool.query<{ version: string }>('SELECT version FROM file WHERE id = $1', [file])).rows[0].version).toBe('1');
 });
 
+test('файл заменён целиком при открытых соединениях: они закрываются и после переподключения видят новые байты', async () => {
+  const a = await joined(owner);
+  const b = await joined(editor);
+  const next = tab();
+  next.getMap('meta').set('name', 'новое');
+  next.commit();
+  expect((await s.writeContent(owner, file, 1, realContainer(next.export({ mode: 'snapshot' })))).status).toBe(200);
+  // Строки документов удалены: без переподключения их завела бы следующая пачка, с пустой версией.
+  expect((await a.waitClosed()).code).toBe(SYNC_CLOSE.GOING_AWAY);
+  expect((await b.waitClosed()).code).toBe(SYNC_CLOSE.GOING_AWAY);
+  // Подписка со старой версией: новый снимок её не покрывает — снимок.
+  const c = await connect(editor);
+  c.subscribe('root', peers(root));
+  await c.wait('snapshot-needed');
+});
+
 test('schema из hello: поднимает только редактор, не выше известной сборке и не вниз', async () => {
   const schema = async () =>
     (await s.pool.query<{ schema_version: number }>('SELECT schema_version FROM file WHERE id = $1', [file])).rows[0].schema_version;
