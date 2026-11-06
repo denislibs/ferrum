@@ -170,6 +170,9 @@ export const PRESENCE_RATE = 25;
 export const PRESENCE_BURST = 40;
 /** Повтор своего состояния, пока соединение живо: в скрытой вкладке кадров нет, а через 30 с тишины сервер скроет участника. */
 export const PRESENCE_HEARTBEAT_MS = 10_000;
+/** В буфере сокета больше этого — кадр присутствия не уходит, а сливается в последнее состояние: очереди присутствия нет, а правки
+ * не ждут за курсорами. Как у сервера (`lowWaterBytes`). */
+export const PRESENCE_HIGH_WATER = 64 * 1024;
 /** Список участников основному потоку не чаще. */
 export const PARTICIPANTS_MS = 250;
 
@@ -405,7 +408,9 @@ export class SyncClient {
   }
 
   private onMessage(data: unknown): void {
-    if (!(data instanceof ArrayBuffer)) return;
+    // Конец (доступ снят, нужна перезагрузка): сервер мог ещё не закрыть сокет, а кадры после конца ничего не значат — и не
+    // заводят заново ни `ping`, ни присутствие.
+    if (this.ended || !(data instanceof ArrayBuffer)) return;
     // Любой кадр — соединение живо.
     this.clock(this.pongTimer);
     this.pongTimer = null;
@@ -488,6 +493,8 @@ export class SyncClient {
   private end(): void {
     this.ended = true;
     this.clearTimers();
+    // Сокет может быть ещё открыт: своё присутствие больше не уходит, чужое пропадает сразу.
+    this.dropPresence();
     this.env.core.flush(false);
   }
 
@@ -698,7 +705,11 @@ export class SyncClient {
     if (e.parts && sel) {
       parts = e.parts.map((bytes, index) => encodePartBody({ rev: sel.rev, index, parts: e.parts!.length, bytes }));
       this.ownParts = parts;
-    } else if (!sel) this.ownParts = [];
+    } else if (!sel) {
+      // Выделение снято: части прежнего, ещё не ушедшие, уже никому не нужны.
+      this.ownParts = [];
+      this.outParts = [];
+    }
     // До роли очередь только копит последнее: уйдёт с ответом о роли.
     this.queuePresence(body, parts);
   }
@@ -711,11 +722,13 @@ export class SyncClient {
   }
 
   private pumpPresence(): void {
-    if (!this.ws || !this.opened || !this.present) return;
+    if (!this.ws || !this.opened || !this.present || this.ended) return;
     const now = this.env.clock.now();
     this.tokens = Math.min(PRESENCE_BURST, this.tokens + ((now - this.tokensAt) / 1000) * PRESENCE_RATE);
     this.tokensAt = now;
-    while (this.tokens >= 1 && (this.outState || this.outParts.length)) {
+    // Буфер сокета занят (правки, медленный канал): кадр ждёт здесь, следующее состояние заменит его.
+    const busy = this.ws.bufferedAmount > PRESENCE_HIGH_WATER;
+    while (!busy && this.tokens >= 1 && (this.outState || this.outParts.length)) {
       const body = this.outState ?? this.outParts.shift()!;
       const t = this.outState ? 'presence' : 'presence-part';
       this.outState = null;
@@ -750,7 +763,8 @@ export class SyncClient {
     this.clock(this.heartbeat);
     this.presenceTimer = this.heartbeat = null;
     this.env.core.command({ type: 'presenceReset' });
-    if (this.participants.size > 0) {
+    // Список ещё не дошёл до шапки (ждёт паузы, которую сняла остановка таймеров) — шапке пустой сейчас же.
+    if (this.participants.size > 0 || this.participantsDirty) {
       this.participants.clear();
       this.participantsChanged();
     }
@@ -807,6 +821,7 @@ export class SyncClient {
     if (this.participantsTimer !== null) return;
     this.env.participants([...this.participants.values()].map((p) => ({ ...p })));
     this.participantsDirty = false;
+    if (this.ended) return;
     this.participantsTimer = this.env.clock.setTimeout(() => {
       this.participantsTimer = null;
       if (this.participantsDirty) this.participantsChanged();

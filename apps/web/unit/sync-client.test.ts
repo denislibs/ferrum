@@ -3,6 +3,7 @@
 
 import { expect, test } from '@playwright/test';
 import {
+  encodeClientFrame,
   encodePartBody,
   encodePresenceBatch,
   encodePresenceBody,
@@ -23,6 +24,8 @@ import {
   PONG_WAIT_MS,
   PRESENCE_BURST,
   PRESENCE_HEARTBEAT_MS,
+  PRESENCE_HIGH_WATER,
+  PRESENCE_RATE,
   RECONNECT_MAX_MS,
   SyncClient,
   type CoreCommand,
@@ -1120,4 +1123,88 @@ test('присутствие: новое соединение получает �
   next.drain();
   const f = presenceFrames(next)[0];
   expect(f.t === 'presence' && f.state?.cursor?.[0]).toBe(42);
+});
+
+test('присутствие: устойчиво не чаще 25 кадров в секунду при непрерывном движении, повтора между ними нет', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  const perSecond: number[] = [];
+  let x = 0;
+  let total = 0;
+  for (let sec = 0; sec < 4; sec++) {
+    // Кадр ядра каждые 10 мс — 100 в секунду.
+    for (let t = 0; t < 100; t++) {
+      s.client.onCore(own(x++));
+      s.clock.advance(10);
+    }
+    ws.drain();
+    const n = presenceFrames(ws).length;
+    perSecond.push(n - total);
+    total = n;
+  }
+  // Первая секунда — запас и частота, дальше — только частота.
+  expect(perSecond[0]).toBeLessThanOrEqual(PRESENCE_BURST + PRESENCE_RATE + 1);
+  for (const n of perSecond.slice(1)) {
+    expect(n).toBeGreaterThanOrEqual(PRESENCE_RATE - 1);
+    expect(n).toBeLessThanOrEqual(PRESENCE_RATE + 1);
+  }
+});
+
+test('присутствие: снятое выделение снимает и неотправленные части прежнего', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  // Запас кончился: следующее ждёт в очереди.
+  for (let i = 0; i < PRESENCE_BURST; i++) s.client.onCore(own(i));
+  ws.drain();
+  const before = presenceFrames(ws).length;
+  const parts = Array.from({ length: 5 }, (_, i) => encodeSelectionIds([`${i + 1}@2`]));
+  s.client.onCore(own(50, { selection: { rev: 4, count: 5, parts: 5, bounds: [0, 0, 1, 1] }, parts }));
+  s.client.onCore(own(51));
+  s.clock.advance(1000);
+  ws.drain();
+  const after = presenceFrames(ws).slice(before);
+  expect(after.map((f) => f.t)).toEqual(['presence']);
+  expect(after[0].t === 'presence' && after[0].state?.cursor?.[0]).toBe(51);
+});
+
+test('присутствие: буфер сокета занят — кадр в него не ложится, а сливается в последнее и уходит, когда буфер освободится', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  ws.drain();
+  ws.queued.push(encodeClientFrame({ t: 'update', doc: 'root', clientSeq: 1, bytes: new Uint8Array(PRESENCE_HIGH_WATER + 1) }));
+  for (let i = 0; i < 5; i++) s.client.onCore(own(i));
+  s.clock.advance(1000);
+  expect(ws.queued).toHaveLength(1);
+  ws.drain();
+  s.clock.advance(100);
+  ws.drain();
+  const sent = presenceFrames(ws);
+  expect(sent).toHaveLength(1);
+  expect(sent[0].t === 'presence' && sent[0].state?.cursor?.[0]).toBe(4);
+});
+
+test('присутствие: после `access-revoked` при открытом сокете ничего не уходит, участники и таймеры сброшены', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  ws.receiveRaw(encodePresenceBatch([encodePresenceRecord({ k: 'join', participant: 7, user: 'u-7', name: 'Анна', color: 3 })]));
+  s.client.onCore(own(1));
+  ws.drain();
+  const sent = presenceFrames(ws).length;
+  ws.receive({ t: 'access-revoked', reason: 'access' });
+  expect(s.commands.at(-1)).toEqual({ type: 'presenceReset' });
+  expect(s.participants.at(-1)).toEqual([]);
+  // Сервер не закрыл сокет сразу: ни кадра от ядра, ни повтора, ни ответа на кадры сервера.
+  s.client.onCore(own(2));
+  role(ws);
+  ws.receiveRaw(encodePresenceBatch([encodePresenceRecord({ k: 'join', participant: 8, user: 'u-8', name: 'Борис', color: 1 })]));
+  s.clock.advance(PRESENCE_HEARTBEAT_MS * 3);
+  ws.drain();
+  expect(presenceFrames(ws)).toHaveLength(sent);
+  expect(ws.sent.filter((f) => f.t === 'ping')).toEqual([]);
+  expect(s.participants.at(-1)).toEqual([]);
+  expect(s.clock.timers.size).toBe(0);
 });
