@@ -571,11 +571,14 @@ impl Editor {
         if !self.scene.has_remote_preview() {
             return self.selection_world_bounds();
         }
-        fresh(self).unwrap_or_else(|| {
-            // Не бывает: слой только что наложен вместе с рамкой. На всякий случай — без него.
+        let b = fresh(self);
+        debug_assert!(b.is_some(), "слой наложен вместе с рамкой");
+        b.unwrap_or_else(|| {
+            // Не бывает: слой только что наложен вместе с рамкой. На всякий случай — по сцене без
+            // слоя, и слой обратно; событий нет: сцена та же, что была.
             self.drop_remote_preview();
             let b = self.selection_world_bounds();
-            self.emit();
+            self.sync_remote_preview();
             b
         })
     }

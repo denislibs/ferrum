@@ -599,18 +599,41 @@ fn opening_a_file_resets_own_presence() {
     c.command(Command::SyncStart);
     rect(&mut c);
     c.set_time(1000.0);
-    assert!(sent_selection(&presence_events(&mut c)[0]).1.is_some());
+    let (sel, parts) = sent_selection(&presence_events(&mut c)[0]);
+    assert!(parts.is_some());
+    let old_rev = sel.unwrap().rev;
     c.command(Command::Demo { nodes: 0 });
     c.command(Command::SyncStart);
     let id = rect(&mut c);
     c.set_time(2000.0);
     let sent = presence_events(&mut c);
     let (sel, parts) = sent_selection(sent.last().expect("кадр нового файла"));
-    assert!(sel.is_some());
+    assert_ne!(
+        sel.expect("выделение").rev,
+        old_rev,
+        "номер версии не повторяет прошлый"
+    );
     assert_eq!(
         parts.expect("части нового выделения"),
         encode_selection(&[id.parse().unwrap()])
     );
+}
+
+/// Соединение заново: о выделении сказано снова, номером версии дальше прежнего.
+#[test]
+fn reconnect_announces_selection_again_with_a_new_rev() {
+    let mut c = core();
+    c.command(Command::SyncStart);
+    rect(&mut c);
+    c.set_time(1000.0);
+    let (sel, _) = sent_selection(&presence_events(&mut c)[0]);
+    let old_rev = sel.unwrap().rev;
+    c.command(Command::PresenceReset);
+    c.set_time(2000.0);
+    let sent = presence_events(&mut c);
+    let (sel, parts) = sent_selection(sent.last().expect("кадр после переподключения"));
+    assert_ne!(sel.expect("выделение").rev, old_rev);
+    assert!(parts.is_some());
 }
 
 /// Своя рамка выделения — по документу: участник, тянущий мои узлы, её не сдвигает.
