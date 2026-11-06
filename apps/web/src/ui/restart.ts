@@ -5,6 +5,7 @@
 // `RESTART_WINDOW_MS` — иначе повторяющийся сбой крутился бы вечно; дальше остаётся
 // плашка остановки ядра.
 
+import type { FileRole } from '@ferrum/protocol';
 import type { Backend } from '../wasm/ferrum_wasm';
 
 export interface Restart {
@@ -47,4 +48,14 @@ export function restartText(r: Restart): string {
  * исходом (`own`) — не «другой»: новое поколение может быть своим. */
 export function takenByOther(access: { version: number; own: boolean }, saver: { stored: boolean; modified: boolean }): boolean {
   return !saver.stored && !saver.modified && !access.own && access.version > 0;
+}
+
+/** Почему открытый файл не пишется на сервер: доступ снят, сессия кончилась, документ разошёлся с файлом, сервер отказал. */
+export type Lost = 'none' | 'session' | 'diverged' | 'rejected' | null;
+
+/** Что меняет ответ о роли в открытом файле. Роль приходит на каждом новом соединении (`role` после `hello`), а отказ сервера
+ * окончателен до перезагрузки: его плашку роль не снимает. После «вышла новая версия — обновите страницу» правок нет до
+ * перезагрузки, какой бы ни была роль. */
+export function afterRole(lost: Lost, role: FileRole, reload: boolean): { lost: Lost; viewOnly: boolean } {
+  return { lost: lost === 'rejected' ? lost : null, viewOnly: role === 'viewer' || reload };
 }

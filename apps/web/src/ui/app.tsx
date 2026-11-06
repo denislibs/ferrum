@@ -29,7 +29,7 @@ import { importFromDisk, type FileMeta, type FileStore } from './file-store';
 import { systemFonts } from './system-fonts';
 import { isTauri, saveExport } from './tauri';
 import type { Backend, MenuActionDto } from '../wasm/ferrum_wasm';
-import { restartText, takenByOther, type Restart } from './restart';
+import { afterRole, restartText, takenByOther, type Lost, type Restart } from './restart';
 import type { Route } from './router';
 import { createSaver, SERVER_REFUSED, SETTLE_MS, withTimeout, type Saver, type SaverOptions } from './saver';
 import { clipboardAction, eventShortcut } from './shortcuts';
@@ -263,7 +263,7 @@ export function App(props: AppProps) {
 
   const id = props.file.id;
   /** Доступ к файлу потерян, пока он открыт (файл на сервере): снят или сессия кончилась. */
-  const [lost, setLost] = createSignal<'none' | 'session' | 'diverged' | 'rejected' | null>(null);
+  const [lost, setLost] = createSignal<Lost>(null);
   /** Сервер не принял правки: причина для плашки. */
   const [rejected, setRejected] = createSignal('');
   let syncHandle: { stop(): void } | undefined;
@@ -450,6 +450,8 @@ export function App(props: AppProps) {
           offClipboard();
         };
         let diverged = false;
+        /** Сервер попросил обновить страницу (новая версия): правок нет до перезагрузки, ответ о роли этого не меняет. */
+        let reloadNeeded = false;
         /** Почему сервер правки сейчас не примет: уход и «Сохранить» говорят это сразу, а не «уйдут при открытии» через 5 с. */
         const serverRefusal = (): string | null => {
           const l = lost();
@@ -472,6 +474,7 @@ export function App(props: AppProps) {
               } else if (status === 'paused' && detail) store.toast(detail);
             },
             reload: () => {
+              reloadNeeded = true;
               ed.send({ type: 'setViewOnly', on: true });
               store.toast('Вышла новая версия Ferrum — обновите страницу, правки сохранятся');
             },
@@ -509,7 +512,8 @@ export function App(props: AppProps) {
             return;
           }
           const before = store.state.fileRole;
-          setLost(null);
+          const next = afterRole(lost(), state.role, reloadNeeded);
+          setLost(next.lost);
           // Читателю вернули право, а его прежние правки ещё не в документе: первая запись прошла бы мимо
           // них. Файл открывается заново, журнал сливается. До этого режим просмотра.
           if (journalHeld && state.role !== 'viewer') {
@@ -520,7 +524,7 @@ export function App(props: AppProps) {
           }
           store.setState('fileRole', state.role);
           store.setState('fileCanShare', state.canShare);
-          ed.send({ type: 'setViewOnly', on: state.role === 'viewer' });
+          ed.send({ type: 'setViewOnly', on: next.viewOnly });
           if (before !== state.role && state.role === 'viewer') {
             store.toast(
               store.state.modified
