@@ -1208,3 +1208,15 @@ test('присутствие: после `access-revoked` при открыто�
   expect(s.participants.at(-1)).toEqual([]);
   expect(s.clock.timers.size).toBe(0);
 });
+
+test('присутствие: соединение закрыто со снятием доступа сразу после входа участника — шапке всё равно пустой список', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  ws.receiveRaw(encodePresenceBatch([encodePresenceRecord({ k: 'join', participant: 7, user: 'u-7', name: 'Анна', color: 3 })]));
+  expect(s.participants.at(-1)?.map((p) => p.id)).toEqual([7]);
+  // Пауза списка ещё идёт, а конец снимает таймеры: пустой список не должен застрять в ней.
+  ws.dropped(SYNC_CLOSE.REVOKED);
+  expect(s.participants.at(-1)).toEqual([]);
+  expect(s.clock.timers.size).toBe(0);
+});
