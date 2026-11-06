@@ -225,6 +225,24 @@ test('жест — только с правом правки: у читател�
   expect(fromEditor.state.gesture?.transform).toEqual([1, 0, 0, 1, 30, 40]);
 });
 
+test('роль понижена посреди жеста: превью у других снимается сразу, без нового кадра', async () => {
+  const a = await join(owner);
+  const e = await join(editor);
+  const gesture = { kind: 'move', transform: [1, 0, 0, 1, 30, 40], frame: [1, 0, 0, 1, 0, 0], k: 1 } as PresenceState['gesture'];
+  send(e, state(8, { gesture }));
+  const je = await waitItem(a, 'join', (i) => i.user === editor.id);
+  await waitItem(a, 'state', (i) => i.participant === je.participant && i.state.gesture !== null);
+  await s.pool.query(`UPDATE file_access SET role = 'viewer' WHERE file_id = $1 AND user_id = $2`, [file, editor.id]);
+  await s.hub.recheckAll();
+  await e.wait('role', (f) => f.role === 'viewer');
+  const st = await waitItem(a, 'state', (i) => i.participant === je.participant && i.state.gesture === null);
+  expect(st.state).toEqual(state(8));
+  // Пришедший позже получает уже без жеста.
+  const late = await join(owner);
+  const got = await waitItem(late, 'state', (i) => i.participant === je.participant);
+  expect(got.state.gesture).toBeNull();
+});
+
 test('без имени у присутствия — «Участник», не часть почты', async () => {
   await s.pool.query(`UPDATE "user" SET name = ' ' WHERE id = $1`, [nameless.id]);
   const a = await join(owner);
@@ -567,29 +585,49 @@ test('пределы соединений в файле и у человека: 
   expect(a3.got()).toEqual([]);
   expect(c.got()).toEqual([]);
   // Ушло соединение a1: первым по приходу ждал a3, у человека снова место — он входит и получает всех; c ждёт дальше.
+  // Вошедший виден другим сразу — с последним состоянием, присланным, пока ждал, а не со следующим кадром.
   hub.leave(a1);
   hub.tick();
   expect(a3.got().map((i) => i.k)).toEqual(['join', 'state']);
-  hub.state(a3, 'А', body(7));
-  hub.state(c, 'В', body(5));
-  hub.tick();
   expect(c.got()).toEqual([]);
-  expect(a2.got()).toMatchObject([
-    { k: 'join', participant: 4 },
+  const seen = a2.got();
+  expect(seen).toMatchObject([
+    { k: 'join', participant: 4, user: 'a' },
     { k: 'state', participant: 4 },
   ]);
-  // Ушёл b — входит c и получает всех, кто виден; его кадры теперь принимаются.
+  expect(seen[1].k === 'state' && seen[1].state.cursor?.[0]).toBe(3);
+  // Ушёл b — входит c (номер 5: a1, a2, b, затем a3 и c) с последним из присланных, пока ждал.
+  hub.state(c, 'В', body(6));
   hub.leave(b);
   hub.tick();
   expect(c.got().map((i) => i.k)).toEqual(['join', 'state']);
-  a2.got();
-  hub.state(c, 'В', body(6));
-  hub.tick();
-  // Номера — в файле, по порядку входа: a1, a2, b, затем a3 и c.
-  expect(a2.got()).toMatchObject([
+  const after = a2.got();
+  expect(after).toMatchObject([
+    { k: 'left', participant: 3 },
     { k: 'join', participant: 5, user: 'c' },
     { k: 'state', participant: 5 },
   ]);
+  expect(after[2].k === 'state' && after[2].state.cursor?.[0]).toBe(6);
+  hub.stop();
+});
+
+test('все соединения файла ушли, в том числе ждущие, — комнаты файла нет', () => {
+  const hub = new PresenceHub({ roomConnections: 1 }, new Clock().now);
+  const rooms = () => (hub as unknown as { rooms: Map<string, unknown> }).rooms.size;
+  const x = fake(1, 'x');
+  const y = fake(2, 'y');
+  const z = fake(3, 'z');
+  for (const c of [x, y, z]) hub.admit(c);
+  hub.state(x, 'Икс', encodePresenceBody(state(1)));
+  hub.state(y, 'Игрек', encodePresenceBody(state(2)));
+  // Ждущий закрылся раньше, чем освободилось место.
+  y.closed = true;
+  hub.leave(y);
+  hub.leave(x);
+  hub.leave(z);
+  hub.tick();
+  expect(rooms()).toBe(0);
+  expect(hub.heldBytes()).toBe(0);
   hub.stop();
 });
 

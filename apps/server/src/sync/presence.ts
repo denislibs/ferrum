@@ -130,13 +130,23 @@ interface Recipient {
   known: Set<number>;
 }
 
+/** Ждущий места: последнее тело состояния держится без разбора — вошёл, и сразу виден другим, не дожидаясь своего кадра. */
+interface Waiting {
+  conn: PresenceConn;
+  name: string;
+  body: Uint8Array | null;
+}
+
+/** Заголовок записи `state` пачки: вид, участник, длина тела (`encodePresenceRecord`). */
+const STATE_RECORD_HEAD = 1 + 4 + 2;
+
 interface Room {
   /** По номеру участника. */
   participants: Map<number, Participant>;
   /** По номеру соединения. */
   recipients: Map<number, Recipient>;
   /** Сверх пределов соединений: ждут места по порядку прихода. */
-  waiting: Map<number, PresenceConn>;
+  waiting: Map<number, Waiting>;
   /** Соединений с присутствием у человека в этом файле. */
   perUser: Map<string, number>;
   /** Последний выданный номер участника. Растёт: новейшее соединение человека — с бóльшим номером (полоса аватаров следует
@@ -184,20 +194,21 @@ export class PresenceHub {
     const room = this.room(conn.file);
     if (room.recipients.has(conn.id) || room.waiting.has(conn.id)) return;
     if (this.fits(room, conn)) this.enter(room, conn);
-    else room.waiting.set(conn.id, conn);
+    else room.waiting.set(conn.id, { conn, name: '', body: null });
   }
 
   private fits(room: Room, conn: PresenceConn): boolean {
     return room.recipients.size < this.limits.roomConnections && (room.perUser.get(conn.user) ?? 0) < this.limits.userConnections;
   }
 
-  private enter(room: Room, conn: PresenceConn): void {
+  private enter(room: Room, conn: PresenceConn): Recipient {
     const r: Recipient = { conn, pid: ++room.next, pending: new Map(), known: new Set() };
     room.recipients.set(conn.id, r);
     room.perUser.set(conn.user, (room.perUser.get(conn.user) ?? 0) + 1);
     for (const p of room.participants.values()) {
       if (p.shown) r.pending.set(p.pid, everything(p));
     }
+    return r;
   }
 
   /** Состояние участника. `name` — имя человека с сервера, не из кадра. Неверное и сверх пределов — молча мимо; тело
@@ -205,10 +216,24 @@ export class PresenceHub {
   state(conn: PresenceConn, name: string, body: Uint8Array): void {
     const room = this.rooms.get(conn.file);
     const r = room?.recipients.get(conn.id);
+    if (room && !r && body.length < PRESENCE_FRAME_MAX) {
+      // Ждущий: не рассылается, но последнее тело (в пределе частоты человека) держится до входа.
+      const w = room.waiting.get(conn.id);
+      if (w && this.allow(conn, undefined)) {
+        w.name = name;
+        w.body = body.slice();
+      }
+    }
     if (!room || !r || body.length >= PRESENCE_FRAME_MAX || !this.allow(conn, room.participants.get(r.pid))) {
       this.dropped++;
       return;
     }
+    this.accept(room, r, name, body);
+  }
+
+  /** Состояние принято пределами: разбор и отметки получателям. */
+  private accept(room: Room, r: Recipient, name: string, body: Uint8Array): void {
+    const conn = r.conn;
     this.parsed++;
     const state = parsePresenceBody(body);
     if (!state) {
@@ -258,6 +283,22 @@ export class PresenceHub {
       q.state = true;
       if (appearing) Object.assign(q, everything(p));
     }
+  }
+
+  /** Роль соединения сменилась (сверка ролей). Без права правки жест срезается и из сохранённого состояния — у других превью
+   * снимается сразу, а не со следующим кадром соединения. */
+  roleChanged(conn: PresenceConn): void {
+    if (ROLE_RANK[conn.role] >= ROLE_RANK.editor) return;
+    const room = this.rooms.get(conn.file);
+    const r = room?.recipients.get(conn.id);
+    const p = r && room?.participants.get(r.pid);
+    if (!room || !r || !p?.state) return;
+    const body = p.state.subarray(STATE_RECORD_HEAD);
+    const own = withoutGesture(body);
+    if (own.length === body.length) return;
+    p.state = encodePresenceRecord({ k: 'state', participant: p.pid, body: own });
+    if (!p.shown) return;
+    for (const x of room.recipients.values()) if (x !== r) pendingOf(x, p.pid).state = true;
   }
 
   /** Часть выделения. Часть другой версии начинает её заново: кадры одного сокета идут по порядку, старых частей после новой
@@ -316,9 +357,11 @@ export class PresenceHub {
       if (p?.shown) this.hide(room, r.pid);
       for (const w of room.waiting.values()) {
         if (room.recipients.size >= this.limits.roomConnections) break;
-        if (w.closed || !this.fits(room, w)) continue;
-        room.waiting.delete(w.id);
-        this.enter(room, w);
+        if (w.conn.closed || !this.fits(room, w.conn)) continue;
+        room.waiting.delete(w.conn.id);
+        const entered = this.enter(room, w.conn);
+        // Его прежние кадры не рассылались: последнее состояние — сразу, клиент его не повторит до пульса.
+        if (w.body) this.accept(room, entered, w.name, w.body);
       }
     }
     if (empty(room)) this.rooms.delete(conn.file);

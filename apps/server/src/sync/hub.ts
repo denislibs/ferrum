@@ -691,7 +691,7 @@ export class SyncHub {
 
   private async subscribe(d: ConnData, doc: string, frame: Uint8Array): Promise<void> {
     // Вектор не разбирается в `Map` до ответа базы: разобранный он в восемь раз больше кадра и жил бы через `await`. Байты
-    // кадра — своя копия: буфер сокета живёт только на время обработчика. Разбор уже проверен `parseClientFrame`.
+    // кадра — своя копия: буфер сокета живёт только на время обработчика. Разбор уже проверен `readClientFrame`.
     const raw = frame.slice();
     const old = d.docs.get(doc);
     if (!old && d.docs.size >= this.limits.subscribesPerConnection) {
@@ -927,6 +927,8 @@ export class SyncHub {
         if (role !== d.role) {
           d.role = role;
           this.send(d, { t: 'role', role, canShare: (r.member ?? 0) >= ROLE_RANK.editor, version: Number(r.version ?? 0) });
+          // Понижение посреди жеста: превью у других снимается сразу.
+          this.presence.roleChanged(d);
         }
       }
     }
