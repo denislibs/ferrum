@@ -360,6 +360,34 @@ test('сжатие между проходами догоняния: отста�
   }
 });
 
+test('пропущенная запись посреди журнала: проход догоняния не перепрыгивает дыру за ней, отставший получает snapshot-needed', async () => {
+  // Сжатие стенда по порогу этот файл не берёт: сжимает только сам тест, в нужный момент.
+  await s.pool.query(`UPDATE file SET compact_after = now() + interval '1 hour' WHERE id = $1`, [file]);
+  const d = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
+  const w = await joined(pageId, peers(page));
+  await writes(4, d, w);
+  const bad = await ghost();
+  await writes(4, d, w);
+  // Первый проход отдал 1–4. Перед вторым: сжатие оставило только пропущенную запись, соавтор написал новую — в одном проходе
+  // оказываются пропущенная запись и запись новее сжатого.
+  const restore = intercept(pumpPass(pageId, 4), async (run) => {
+    expect((await compactFile(s.pool, s.blobs, file)).kind).toBe('done');
+    await writes(1, d, w);
+    expect(await logRows()).toEqual([bad, 10]);
+    return run();
+  });
+  try {
+    const late = (await Client.open(s, editor, file))!;
+    open.push(late);
+    late.hello();
+    late.subscribe(pageId, peers(page));
+    const mine = await catchUp(late, d);
+    expect(mine.getTree('nodes').getNodes().length).toBe(9);
+  } finally {
+    restore();
+  }
+});
+
 test('сжатие между заведением строки и первым проходом: отставший получает snapshot-needed', async () => {
   const d = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
   const w = await joined(pageId, peers(page));

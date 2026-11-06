@@ -728,7 +728,12 @@ export class SyncHub {
         armed = false;
         const need: number[] = [];
         let bytes = 0;
+        let prev = sub.sent;
         for (const r of rows) {
+          // Дыра посреди прохода: сжатие оставило пропущенную запись, а записи за ней убрало. Проход кончается на ней, следующий
+          // увидит дыру первой и сверит снимок.
+          if (Number(r.seq) !== prev + 1) break;
+          prev = Number(r.seq);
           const end = r.end_vv ?? {};
           // Клиент уже знает: не шлём, но и не останавливаемся.
           if (versionIncludes(sub.version, toMap(end))) {
