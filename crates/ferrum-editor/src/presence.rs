@@ -11,8 +11,8 @@
 //! (`Editor::presence_hold`), слоя нет: иначе базы своего действия прочли бы чужое превью и
 //! записали бы его в документ.
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ferrum_doc::{NodeId, PageId, PropsPatch};
@@ -125,15 +125,24 @@ struct Peer {
     /// страница.
     marks_rev: u64,
     /// Рамки выделения и с чем они посчитаны: курсор движется каждый кадр, а рамки — только на
-    /// смене выделения участника или сцены (ревью безопасности, M3).
+    /// смене выделения участника, документа или — если выделение задето слоем чужого превью —
+    /// слоя (ревью безопасности, M3; повторное ревью, N2).
     marks: RefCell<Option<(MarksKey, SelectionMarks)>>,
+    /// Задевает ли слой чужого превью выделение участника (узел или его предок в слое) и с чем
+    /// это посчитано: версия рамок, документ (`own_change_counter`, `generation`) и набор узлов
+    /// слоя (`Presence::layer_rev`).
+    touched: Cell<Option<(TouchedKey, bool)>>,
 }
 
+/// С чем посчитано «задето ли выделение слоем»: версия рамок, `own_change_counter`,
+/// `generation`, `Presence::layer_rev`.
+type TouchedKey = (u64, u64, u64, u64);
 /// Рамки узлов выделения и общая рамка.
 type SelectionMarks = (Vec<(Affine, Rect)>, Option<Rect>);
-/// Версия рамок участника, сцена (счётчик изменений со слоем превью, `generation`,
-/// `scene_epoch`), страница и есть ли превью участника в слое.
-type MarksKey = (u64, u64, u64, u64, PageId, bool);
+/// Версия рамок участника, документ (`own_change_counter`: наложение чужого слоя его не
+/// меняет), `generation`, `scene_epoch`, страница, есть ли превью участника в слое и — только у
+/// выделения, задетого слоем, — счётчик сцены со слоем (иначе 0).
+type MarksKey = (u64, u64, u64, u64, PageId, bool, u64);
 
 impl Peer {
     fn on_page(&self, page: PageId) -> bool {
@@ -184,6 +193,10 @@ pub(crate) struct Presence {
     applied: Option<PreviewKey>,
     /// Участники, чьё превью сейчас в слое (остальные с жестом — за пределами).
     previewed: Vec<u32>,
+    /// Узлы слоя чужого превью и номер этого набора: растёт, только когда набор меняется (жест
+    /// начался, кончился, сменилось выделение тянущего), а не на каждой пачке.
+    layer_ids: HashSet<NodeId>,
+    layer_rev: u64,
     /// В слое только переносы: матрицы под ним отличаются от документа лишь сдвигом, и следующий
     /// перенос считается поверх слоя без его снятия (`move_patches_over_layer`).
     layer_moves: bool,
@@ -269,6 +282,7 @@ impl Editor {
             seen: now,
             marks_rev: 0,
             marks: RefCell::new(None),
+            touched: Cell::new(None),
         });
         p.user = Arc::from(user);
         p.name = Arc::from(name);
@@ -542,6 +556,7 @@ impl Editor {
         }
         self.presence.applied = None;
         self.presence.previewed.clear();
+        self.set_layer_ids(HashSet::new());
     }
 
     /// Слой чужого превью по нынешним жестам участников этой страницы. Нет его, пока идёт
@@ -596,6 +611,7 @@ impl Editor {
         if !patches.is_empty() || self.scene.has_remote_preview() {
             self.scene.set_remote_preview(&patches);
         }
+        self.set_layer_ids(patches.iter().map(|(id, _)| *id).collect());
         self.presence.applied = Some(self.preview_key());
     }
 
@@ -639,6 +655,48 @@ impl Editor {
         Some((patches, previewed))
     }
 
+    fn set_layer_ids(&mut self, ids: HashSet<NodeId>) {
+        if ids != self.presence.layer_ids {
+            self.presence.layer_ids = ids;
+            self.presence.layer_rev += 1;
+        }
+    }
+
+    /// Задевает ли слой чужого превью выделение участника: узел выделения или его предок в слое.
+    /// Обход выделения — только на смене выделения, документа или набора узлов слоя.
+    fn peer_touched(&self, p: &Peer) -> bool {
+        if self.presence.layer_ids.is_empty() {
+            return false;
+        }
+        let key = (
+            p.marks_rev,
+            self.scene.own_change_counter(),
+            self.scene.generation(),
+            self.presence.layer_rev,
+        );
+        if let Some((k, t)) = p.touched.get() {
+            if k == key {
+                return t;
+            }
+        }
+        let layer = &self.presence.layer_ids;
+        let t = p.selection().is_some_and(|ids| {
+            ids.iter().any(|id| {
+                let mut cur = self.scene.slot(*id);
+                while let Some(s) = cur {
+                    let n = self.scene.at(s);
+                    if layer.contains(&n.id) {
+                        return true;
+                    }
+                    cur = n.parent;
+                }
+                false
+            })
+        });
+        p.touched.set(Some((key, t)));
+        t
+    }
+
     fn preview_key(&self) -> PreviewKey {
         (
             self.presence.preview_rev,
@@ -676,13 +734,19 @@ impl Editor {
             .map(|(id, p)| {
                 let state = p.state.as_ref().expect("на странице — есть состояние");
                 let previewed = self.presence.previewed.contains(id);
+                let layered = if self.peer_touched(p) {
+                    scene.change_counter()
+                } else {
+                    0
+                };
                 let mk = (
                     p.marks_rev,
-                    scene.change_counter(),
+                    scene.own_change_counter(),
                     scene.generation(),
                     self.scene_epoch,
                     page,
                     previewed,
+                    layered,
                 );
                 let mut cache = p.marks.borrow_mut();
                 let (boxes, frame) = match &*cache {

@@ -1039,3 +1039,45 @@ fn pointer_leave_keeps_panel_gesture() {
     assert_eq!(h.props(a).x, 15.0);
     assert_eq!(h.ed.own_presence().cursor, None, "курсора над холстом нет");
 }
+
+/// Повторное ревью, N2: рамки стоящего выделения, задетого чужим перетаскиванием (узел или его
+/// фрейм в слое), едут за слоем на каждой пачке; незадетые от пачек не пересчитываются (замер —
+/// `editor_report`, «кадр оверлея после пачки»).
+#[test]
+fn standing_selection_marks_follow_peer_drag_of_their_frame() {
+    let mut h = H::new();
+    let f = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    let c = h.rect(Some(f), 10.0, 10.0, 20.0, 20.0);
+    let other = h.rect(None, 600.0, 0.0, 20.0, 20.0);
+    join(&mut h, 1);
+    join(&mut h, 2);
+    h.ed.presence_part(1, 1, 0, 1, vec![c]);
+    let s = select(&h.ed, &[c], 1);
+    h.ed.presence_state(1, s);
+    join(&mut h, 3);
+    h.ed.presence_part(3, 1, 0, 1, vec![other]);
+    let s = select(&h.ed, &[other], 1);
+    h.ed.presence_state(3, s);
+    let box_x = |h: &H, i: usize| {
+        let m = &h.ed.overlay().remote[i];
+        m.boxes[0].0.transform_rect_bbox(m.boxes[0].1).x0
+    };
+    assert_eq!(box_x(&h, 0), 10.0);
+    // Сначала участник 2 тянет другой узел: выделение 1 не задето.
+    let lone = h.rect(None, 800.0, 0.0, 20.0, 20.0);
+    drag_by(&mut h, 2, &[lone], 50.0);
+    assert_eq!(box_x(&h, 0), 10.0);
+    // Затем — фрейм (новая версия его выделения): набор узлов слоя сменился.
+    h.ed.presence_part(2, 2, 0, 1, vec![f]);
+    for dx in [100.0, 150.0, 200.0] {
+        let mut s = moving(&h.ed, &[f], dx);
+        s.selection.as_mut().unwrap().rev = 2;
+        h.ed.presence_state(2, s);
+        assert_eq!(box_x(&h, 0), 10.0 + dx, "рамка ребёнка тянутого фрейма");
+        assert_eq!(box_x(&h, 2), 600.0);
+    }
+    // Жест кончился — рамка по документу.
+    let s = select(&h.ed, &[f], 2);
+    h.ed.presence_state(2, s);
+    assert_eq!(box_x(&h, 0), 10.0);
+}

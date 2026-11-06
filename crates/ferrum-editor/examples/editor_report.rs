@@ -542,6 +542,60 @@ fn presence_frame_drag(report: &mut Report, children: usize, shown: bool, limit_
     );
 }
 
+/// Рамки чужих выделений при тянущем участнике (финальное повторное ревью, N2): 49 участников
+/// стоят с выделениями по 2000 узлов, 50-й тянет один узел. Пачка пересобирает слой, а рамки
+/// стоящих — не задетых слоем — не пересчитываются.
+fn presence_marks_with_dragger(report: &mut Report, ed: &mut Editor, ids: &[NodeId]) {
+    let page = ed.page();
+    ed.select(&[]);
+    let shapes: Vec<NodeId> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 100 != 0)
+        .map(|(_, id)| *id)
+        .collect();
+    for p in 0..49 {
+        let id = 200 + p as u32;
+        ed.presence_join(
+            id,
+            &format!("u-{id}"),
+            "Участник",
+            ferrum_editor::peer_color(0x0d74ce),
+        );
+        ed.presence_part(id, 1, 0, 1, shapes[p * 2000..(p + 1) * 2000].to_vec());
+        ed.presence_state(id, peer_move(page, 2000, None));
+    }
+    let lone = shapes[98_999];
+    ed.presence_join(
+        300,
+        "u-300",
+        "Участник",
+        ferrum_editor::peer_color(0x0d74ce),
+    );
+    ed.presence_part(300, 1, 0, 1, vec![lone]);
+    ed.presence_state(300, peer_move(page, 1, None));
+    let _ = ed.overlay();
+    ed.take_events();
+    let runs: Vec<Duration> = (1..=MOVES)
+        .map(|i| {
+            ed.presence_batch(|ed| ed.presence_state(300, peer_move(page, 1, Some(i as f64))));
+            let t = Instant::now();
+            let marks = ed.overlay().remote;
+            let d = t.elapsed();
+            assert_eq!(marks.len(), 50);
+            ed.take_events();
+            d
+        })
+        .collect();
+    report.gate_median(
+        "Кадр оверлея после пачки: 49 выделений по 2000 узлов стоят, один участник тянет узел",
+        &runs,
+        1.0,
+    );
+    ed.presence_reset();
+    ed.take_events();
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -603,6 +657,7 @@ fn main() {
     presence_hostile_batch(&mut report, &mut ed, &ids, (10, 1000, 16.0));
     presence_hostile_batch(&mut report, &mut ed, &ids, (10, 3000, 16.0));
     presence_hostile_batch(&mut report, &mut ed, &ids, (50, 1900, 16.0));
+    presence_marks_with_dragger(&mut report, &mut ed, &ids);
     presence_frame_drag(&mut report, 1500, true, 8.0);
     presence_frame_drag(&mut report, 10_000, false, 8.0);
     presence_frame_drag(&mut report, 50_000, false, 8.0);
