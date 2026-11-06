@@ -826,3 +826,33 @@ fn server_batch_rebuilds_peer_preview_once() {
         "пределы превью"
     );
 }
+
+/// Ревью безопасности, L4 **(поведение)**: панель свойств показывает свой документ, как в
+/// Figma, а не чужое превью: участник тянет мой узел на 300, я сдвигаю его стрелкой — в
+/// панели X документа.
+#[test]
+fn properties_panel_shows_document_under_peer_preview() {
+    let mut c = core();
+    let id = rect(&mut c);
+    let x0 = x_in_doc(&mut c, &id);
+    c.command(Command::Presence {
+        items: [vec![join(1)], drag(&c, 1, &id, 300.0)].concat(),
+    });
+    assert_eq!(x_of(&mut c, &id).0, x0 + 300.0);
+    c.take_events();
+    c.handle(Input::KeyDown(ferrum_editor::KeyEvent::new(
+        "ArrowRight",
+        Modifiers::NONE,
+    )));
+    let x = c
+        .take_events()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            CoreEvent::Properties { summary } => Some(summary.x.value),
+            _ => None,
+        })
+        .expect("сводка после правки");
+    assert_eq!(x, x0 + 1.0, "в панели — документ");
+    assert_eq!(x_of(&mut c, &id).0, x0 + 301.0, "на холсте — чужое превью");
+}

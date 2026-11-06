@@ -724,6 +724,39 @@ impl Editor {
         })
     }
 
+    /// **(поведение)** Сцена без чужого превью для того, что панели показывают как свой документ
+    /// (сводка выделения, как в Figma): `f` получает сцену и выделение. Слой снимается и
+    /// накладывается заново, только если он задевает выделенные узлы или их потомков (ревью
+    /// безопасности, L4); событий нет — сцена после вызова та же.
+    pub fn with_document_scene<R>(&mut self, f: impl FnOnce(&Scene, &[NodeId]) -> R) -> R {
+        if !self.selection_under_remote_preview() {
+            return f(&self.scene, &self.selection);
+        }
+        self.drop_remote_preview();
+        let r = f(&self.scene, &self.selection);
+        self.sync_remote_preview();
+        r
+    }
+
+    /// Задевает ли слой чужого превью выделенные узлы или их потомков.
+    fn selection_under_remote_preview(&self) -> bool {
+        if !self.scene.has_remote_preview() || self.selection.is_empty() {
+            return false;
+        }
+        let mut touched = std::collections::HashSet::new();
+        for (id, _) in self.scene.remote_patches() {
+            let mut cur = self.scene.slot(id);
+            while let Some(s) = cur {
+                let n = self.scene.at(s);
+                if !touched.insert(n.id) {
+                    break;
+                }
+                cur = n.parent;
+            }
+        }
+        self.selection.iter().any(|id| touched.contains(id))
+    }
+
     /// Номер того, что видно от участников: входит в ключ кадра.
     pub(crate) fn presence_revision(&self) -> u64 {
         self.presence.revision
