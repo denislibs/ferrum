@@ -857,9 +857,16 @@ impl Editor {
         if !self.selection_under_remote_preview() {
             return f(self);
         }
+        // Слой вернётся тем же: номер набора его узлов не меняется, и кэш «задето ли» у
+        // участников не сбрасывается.
+        let rev = self.presence.layer_rev;
+        let ids = self.presence.layer_ids.clone();
         self.drop_remote_preview();
         let r = f(self);
         self.sync_remote_preview();
+        if self.presence.layer_ids == ids {
+            self.presence.layer_rev = rev;
+        }
         r
     }
 
@@ -976,4 +983,65 @@ pub fn fit_view(camera: &mut Camera, view: Rect) {
     let zoom = (width / view.width()).min(height / view.height());
     camera.set_zoom(zoom);
     camera.set_center(view.center());
+}
+
+#[cfg(test)]
+mod tests {
+    use ferrum_doc::{Document, NodeKind, PropsPatch};
+    use kurbo::{Affine, Rect, Size};
+
+    use super::*;
+    use crate::Platform;
+
+    /// Повторное ревью 2, M3: сводка по документу снимает и возвращает тот же слой — номер набора
+    /// его узлов не растёт, и кэш «задето ли» у участников не сбрасывается.
+    #[test]
+    fn with_document_keeps_layer_rev() {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        let a = doc
+            .transact(page, vec![], |tx| {
+                let a = tx.create_node(None, None, NodeKind::Rect)?;
+                tx.set_props(
+                    a,
+                    &PropsPatch {
+                        w: Some(10.0),
+                        h: Some(10.0),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(vec![a])
+            })
+            .unwrap()[0];
+        let mut ed =
+            Editor::new(doc, Some(page), Size::new(800.0, 600.0), 1.0, Platform::Mac).unwrap();
+        ed.presence_join(1, "u-1", "Анна", peer_color(0x0d74ce));
+        ed.presence_part(1, 1, 0, 1, vec![a]);
+        ed.presence_state(
+            1,
+            PeerState {
+                page: Some(page),
+                view: Rect::new(0.0, 0.0, 800.0, 600.0),
+                cursor: None,
+                selection: Some(PeerSelection {
+                    rev: 1,
+                    count: 1,
+                    parts: 1,
+                    bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                }),
+                gesture: Some(Gesture {
+                    kind: GestureKind::Move,
+                    transform: Affine::translate((100.0, 0.0)),
+                    frame: Affine::IDENTITY,
+                    k: 1.0,
+                }),
+            },
+        );
+        ed.select(&[a]);
+        let rev = ed.presence.layer_rev;
+        let x = ed.with_document_scene(|scene, _| scene.node(a).unwrap().props.x);
+        assert_eq!(x, 0.0, "по документу");
+        assert_eq!(ed.scene().node(a).unwrap().props.x, 100.0, "слой вернулся");
+        assert_eq!(ed.presence.layer_rev, rev);
+    }
 }
