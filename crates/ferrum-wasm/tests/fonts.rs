@@ -678,3 +678,94 @@ fn nudge_does_not_rescan_missing_fonts_or_catalog() {
     let after_load = c.font_recomputes_for_tests();
     assert!(after_load.0 > after_page.0 && after_load.1 > after_page.1);
 }
+
+fn exported_svg(c: &mut Core) -> Vec<u8> {
+    c.take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            CoreEvent::Exported { bytes, .. } => Some(bytes.to_vec()),
+            _ => None,
+        })
+        .expect("экспорт")
+}
+
+/// Команда, ждавшая шрифтов, выполняется с тем же удержанием присутствия, что и сразу: чужое
+/// превью не попадает в то, что она читает со сцены (экспорт по таймауту ожидания).
+#[test]
+fn command_waiting_for_fonts_runs_without_peer_preview() {
+    use ferrum_editor::{Input, Modifiers, PointerEvent};
+    let mut c = core();
+    let at = |x: f64, t: f64| PointerEvent::new((x, 150.0), Modifiers::NONE, t);
+    c.command(Command::SetTool { tool: Tool::Rect });
+    c.handle(Input::PointerDown(at(200.0, 1.0)));
+    c.handle(Input::PointerMove(at(260.0, 2.0)));
+    c.handle(Input::PointerUp(at(260.0, 3.0)));
+    let rect = c.editor().selection()[0].to_string();
+    let page = c.editor().page().to_string();
+    // Текст ждёт шрифтов — экспорт встаёт в очередь за ним.
+    create(&mut c, "Ferrum", None);
+    c.command(Command::Presence {
+        items: vec![
+            PresenceItemDto::Join {
+                participant: 1,
+                user: "u-1".into(),
+                name: "Анна".into(),
+                color: 0x0d74ce,
+            },
+            PresenceItemDto::Part {
+                participant: 1,
+                rev: 1,
+                index: 0,
+                parts: 1,
+                ids: vec![rect.clone()],
+            },
+            PresenceItemDto::State {
+                participant: 1,
+                page,
+                view: [0.0, 0.0, 400.0, 300.0],
+                cursor: None,
+                selection: Some(PresenceSelectionDto {
+                    rev: 1,
+                    count: 1,
+                    parts: 1,
+                    bounds: [0.0, 0.0, 1.0, 1.0],
+                }),
+                gesture: Some(PresenceGestureDto {
+                    kind: GestureKindDto::Move,
+                    transform: [1.0, 0.0, 0.0, 1.0, 500.0, 0.0],
+                    frame: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                    k: 1.0,
+                }),
+            },
+        ],
+    });
+    assert!(c.editor().scene().has_remote_preview());
+    c.command(Command::Select {
+        ids: vec![],
+        mode: SelectMode::Replace,
+    });
+    let export = Command::Export {
+        scale: 1.0,
+        format: Some(ExportFormat::Svg),
+        outline_text: Some(true),
+        svg_ids: None,
+    };
+    c.command(export.clone());
+    c.take_events();
+    // Ответа на запрос шрифтов нет — ожидание кончается по таймауту, очередь выполняется.
+    c.set_time(FONT_WAIT_MS + 1.0);
+    let waited = exported_svg(&mut c);
+    assert!(c.editor().scene().has_remote_preview(), "превью вернулось");
+    c.command(Command::Presence {
+        items: vec![PresenceItemDto::Left { participant: 1 }],
+    });
+    c.command(export);
+    assert_eq!(
+        String::from_utf8(waited).unwrap(),
+        String::from_utf8(exported_svg(&mut c)).unwrap(),
+        "экспорт — по документу"
+    );
+}
+
+/// `FONT_WAIT_MS` ядра: дольше ответа на запрос шрифта не ждут.
+const FONT_WAIT_MS: f64 = 15_000.0;

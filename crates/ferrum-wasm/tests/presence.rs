@@ -375,3 +375,41 @@ fn following_is_reported_to_the_interface() {
         .take_events()
         .contains(&CoreEvent::Following { participant: None }));
 }
+
+/// Рисует инструментом `tool` от `from` до `to` (экран); возвращает выделенный узел.
+fn draw(c: &mut Core, tool: Tool, from: (f64, f64), to: (f64, f64)) -> String {
+    let at = |p: (f64, f64), t: f64| PointerEvent::new(p, Modifiers::NONE, t);
+    c.command(Command::SetTool { tool });
+    c.handle(Input::PointerDown(at(from, 5000.0)));
+    c.handle(Input::PointerMove(at(to, 5100.0)));
+    c.handle(Input::PointerUp(at(to, 5200.0)));
+    c.take_events();
+    c.editor().selection()[0].to_string()
+}
+
+fn parent_in_doc(c: &Core, id: &str) -> Option<String> {
+    let page = c.editor().page();
+    c.editor()
+        .document()
+        .loaded_page(page)
+        .unwrap()
+        .parent(id.parse().unwrap())
+        .map(|p| p.to_string())
+}
+
+/// Ввод — своё действие: нажатие инструмента под чужим перетаскиванием фрейма берёт фрейм и
+/// его положение из документа, а не из превью.
+#[test]
+fn drawing_under_peer_frame_drag_is_placed_by_document() {
+    let mut c = core();
+    let frame = draw(&mut c, Tool::Frame, (100.0, 100.0), (300.0, 300.0));
+    c.command(Command::Presence {
+        items: [vec![join(1)], drag(&c, 1, &frame, 400.0)].concat(),
+    });
+    // Фрейм виден у экранных 500…700; прямоугольник рисуется там.
+    let r = draw(&mut c, Tool::Rect, (550.0, 150.0), (600.0, 200.0));
+    assert_eq!(parent_in_doc(&c, &r), None, "в документе фрейма там нет");
+    assert_eq!(x_in_doc(&mut c, &r), world(&c, 550.0, 150.0).x);
+    let x0 = world(&c, 100.0, 100.0).x;
+    assert_eq!(x_in_doc(&mut c, &frame), x0);
+}

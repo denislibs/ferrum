@@ -725,19 +725,9 @@ impl Core {
     fn run_input(&mut self, input: Input) {
         self.editor.take_text_pending();
         let retry = input.clone();
-        // Нажатие, отпускание и клавиши могут править: чужого превью в сцене на это время нет.
-        // Движение, колесо и щипок не правят (жест уже держит превью снятым сам).
-        let hold = !matches!(
-            input,
-            Input::PointerMove(_) | Input::Wheel(_) | Input::Pinch { .. } | Input::PointerLeave
-        );
-        if hold {
-            self.editor.presence_hold();
-        }
+        // Нажатие, отпускание и клавиши — своё действие: чужое превью снимает сам
+        // `Editor::handle` до первого чтения сцены (ядро сцену до него не читает).
         self.editor.handle(input);
-        if hold {
-            self.editor.presence_release();
-        }
         if self.editor.take_text_pending() {
             self.wait(fonts::Waiting::Input(retry));
         }
@@ -746,7 +736,7 @@ impl Core {
     /// Ждавшее шрифтов — по порядку, когда они пришли.
     fn run_waiting(&mut self, item: fonts::Waiting) {
         match item {
-            fonts::Waiting::Command(cmd) => self.run_command(cmd),
+            fonts::Waiting::Command(cmd) => self.run_command_held(cmd),
             fonts::Waiting::Input(input) => self.run_input(input),
         }
         self.drain_editor();
@@ -774,21 +764,26 @@ impl Core {
     /// документ, выделение, камеру или правку, встают в очередь за ним
     /// (`waits_behind_fonts`): порядок действий пользователя сохраняется.
     pub fn command(&mut self, cmd: Command) {
-        // Команда может править документ по свойствам из сцены: чужого превью в ней нет, пока
-        // она идёт (спека подсистемы 4, раздел 9).
+        if self.fonts_awaited() && waits_behind_fonts(&cmd) {
+            self.wait(fonts::Waiting::Command(cmd));
+        } else {
+            self.run_command_held(cmd);
+        }
+        self.drain_editor();
+    }
+
+    /// Команда сразу или после ожидания шрифтов: она может читать сцену (правка, экспорт) и
+    /// править документ по ней, поэтому чужого превью в сцене нет, пока она идёт (спека
+    /// подсистемы 4, раздел 9).
+    fn run_command_held(&mut self, cmd: Command) {
         let hold = presence::holds(&cmd);
         if hold {
             self.editor.presence_hold();
         }
-        if self.fonts_awaited() && waits_behind_fonts(&cmd) {
-            self.wait(fonts::Waiting::Command(cmd));
-        } else {
-            self.run_command(cmd);
-        }
+        self.run_command(cmd);
         if hold {
             self.editor.presence_release();
         }
-        self.drain_editor();
     }
 
     fn run_command(&mut self, cmd: Command) {
