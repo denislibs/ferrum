@@ -226,6 +226,15 @@ impl DrawTool {
     }
 }
 
+/// Опоры фигуры в родителе `parent`: его мировая матрица и привязки к соседям.
+fn bases(cx: &Ctx, parent: Option<NodeId>) -> (Affine, Snapper) {
+    let parent_world = parent
+        .and_then(|p| cx.scene.node(p))
+        .map_or(Affine::IDENTITY, |n| n.world);
+    let snapper = Snapper::for_parent(cx.scene, parent, &[]).with_guides(cx.snap_guides());
+    (parent_world, snapper)
+}
+
 impl Tool for DrawTool {
     fn kind(&self) -> ToolKind {
         match self.shape {
@@ -245,17 +254,21 @@ impl Tool for DrawTool {
             world = Point::new(world.x.round(), world.y.round());
         }
         let parent = drop_frame_at(cx.scene, world, cx.tolerance(), &HashSet::new());
-        let parent_world = parent
-            .and_then(|p| cx.scene.node(p))
-            .map_or(Affine::IDENTITY, |n| n.world);
+        let (parent_world, snapper) = bases(cx, parent);
         *cx.hover = None;
         self.state = State::Pressed(Start {
             screen: e.point,
             world,
             parent,
             parent_world,
-            snapper: Snapper::for_parent(cx.scene, parent, &[]).with_guides(cx.snap_guides()),
+            snapper,
         });
+    }
+
+    fn rebase(&mut self, cx: &mut Ctx) {
+        if let State::Pressed(start) = &mut self.state {
+            (start.parent_world, start.snapper) = bases(cx, start.parent);
+        }
     }
 
     fn pointer_move(&mut self, cx: &mut Ctx, e: &PointerEvent) {

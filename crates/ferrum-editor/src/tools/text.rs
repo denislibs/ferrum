@@ -82,6 +82,12 @@ impl TextTool {
     }
 }
 
+fn parent_world(cx: &Ctx, parent: Option<NodeId>) -> Affine {
+    parent
+        .and_then(|p| cx.scene.node(p))
+        .map_or(Affine::IDENTITY, |n| n.world)
+}
+
 impl Tool for TextTool {
     fn kind(&self) -> ToolKind {
         ToolKind::Text
@@ -103,9 +109,7 @@ impl Tool for TextTool {
         }
         let world = Self::snap(cx, at);
         let parent = drop_frame_at(cx.scene, world, cx.tolerance(), &HashSet::new());
-        let parent_world = parent
-            .and_then(|p| cx.scene.node(p))
-            .map_or(Affine::IDENTITY, |n| n.world);
+        let parent_world = parent_world(cx, parent);
         *cx.hover = None;
         self.state = State::Pressed(Start {
             screen: e.point,
@@ -113,6 +117,12 @@ impl Tool for TextTool {
             parent,
             parent_world,
         });
+    }
+
+    fn rebase(&mut self, cx: &mut Ctx) {
+        if let State::Pressed(start) = &mut self.state {
+            start.parent_world = parent_world(cx, start.parent);
+        }
     }
 
     fn pointer_move(&mut self, cx: &mut Ctx, e: &PointerEvent) {

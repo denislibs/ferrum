@@ -43,7 +43,8 @@ pub(crate) struct PresenceOut {
 }
 
 /// Команды, которые сцену не правят и чужое превью снимать не должны: присутствие, синхронизация,
-/// чтение пикселей. Остальные идут с `presence_hold`: правка не прочтёт чужое превью.
+/// чтение пикселей, выбор контекстного меню (цель — по тому, что видно, как у нажатия; меняется
+/// только выделение). Остальные идут с `presence_hold`: правка не прочтёт чужое превью.
 pub(crate) fn holds(cmd: &Command) -> bool {
     !matches!(
         cmd,
@@ -60,6 +61,7 @@ pub(crate) fn holds(cmd: &Command) -> bool {
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements
             | Command::ReadPresence
+            | Command::ContextMenu { .. }
     )
 }
 

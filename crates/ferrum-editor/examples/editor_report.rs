@@ -265,7 +265,8 @@ fn alt(ed: &mut Editor, down: bool) {
 /// Чужое перетаскивание: участник выделил `ids` (одной частью кадра) и тянет их; каждый его
 /// кадр — сдвиг. Замер — приём кадра целиком (`presence_state`: слой превью и сцена) при своём
 /// выделении `own` (подпись `own_label`, цель `limit_ms`): своя рамка для других не
-/// пересчитывается на каждом кадре участника.
+/// пересчитывается на каждом кадре участника. Ещё — Shift под чужим превью: клавиша ничего не
+/// правит, и слой не снимается и не накладывается заново.
 fn presence_preview(
     report: &mut Report,
     ed: &mut Editor,
@@ -319,6 +320,21 @@ fn presence_preview(
         shown == before + MOVES as f64 * 3.0 && doc == before,
         format!("сцена {shown}, документ {doc}"),
         "сцена сдвинута, документ прежний",
+    );
+    let keys: Vec<Duration> = (0..MOVES)
+        .map(|i| {
+            let (input, mods): (fn(KeyEvent) -> Input, _) = if i % 2 == 0 {
+                (Input::KeyDown, Modifiers::SHIFT)
+            } else {
+                (Input::KeyUp, Modifiers::NONE)
+            };
+            timed(ed, input(KeyEvent::new("ShiftLeft", mods)))
+        })
+        .collect();
+    report.gate_median(
+        &format!("Shift под чужим превью 1000 узлов, своё выделение {own_label}"),
+        &keys,
+        1.0,
     );
     let t = Instant::now();
     ed.presence_state(7, state(0.0, false));

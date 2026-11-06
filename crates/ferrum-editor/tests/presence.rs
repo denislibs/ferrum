@@ -229,16 +229,18 @@ fn own_drag_of_a_node_under_peer_preview_writes_only_own_move() {
     join(&mut h, 1);
     drag_by(&mut h, 1, &[a], 100.0);
     assert_eq!(h.ed.scene().node(a).unwrap().props.x, 110.0);
-    // Нажатие — своё действие: чужой слой снимается до попадания, узел — на месте в документе
-    // (как и в ядре, `presence_hold` вокруг ввода). Перетаскивание на 20: записывается только
-    // свой сдвиг от документа.
-    h.down(30.0, 30.0, none());
+    // Наведение и нажатие — по тому, что видно (как в Figma): узел у 130. Нажатие — своё
+    // действие: чужой слой снимается, и перетаскивание на 20 записывает только свой сдвиг от
+    // документа.
+    h.hover(130.0, 30.0);
+    assert_eq!(h.ed.overlay().hover, Some(a), "наведение — по виду");
+    h.down(130.0, 30.0, none());
     assert!(
         !h.ed.scene().has_remote_preview(),
         "свой жест — чужое превью снято"
     );
-    assert_eq!(h.sel(), vec![a]);
-    for x in [35.0, 40.0, 50.0] {
+    assert_eq!(h.sel(), vec![a], "нажатие — тот же узел, что и наведение");
+    for x in [135.0, 140.0, 150.0] {
         h.mv(x, 30.0, none());
     }
     assert_eq!(
@@ -246,7 +248,7 @@ fn own_drag_of_a_node_under_peer_preview_writes_only_own_move() {
         30.0,
         "превью жеста — от документа"
     );
-    h.up(50.0, 30.0, none());
+    h.up(150.0, 30.0, none());
     assert_eq!(h.props(a).x, 30.0, "в документе — только свой сдвиг");
     // После своего жеста чужое превью возвращается — сдвиг участника от нового документа.
     assert_eq!(h.ed.scene().node(a).unwrap().props.x, 130.0);
@@ -472,20 +474,77 @@ fn text_style_edit_under_peer_drag_keeps_document_position() {
 }
 
 #[test]
-fn drawing_under_peer_drag_of_a_frame_places_by_document() {
+fn drawing_under_peer_drag_of_a_frame_goes_into_the_visible_frame_by_document() {
     let mut h = H::new();
     let f = h.frame(None, 0.0, 0.0, 400.0, 300.0);
     join(&mut h, 1);
     drag_by(&mut h, 1, &[f], 500.0);
     assert_eq!(h.ed.scene().node(f).unwrap().props.x, 500.0);
-    // Нажатие — своё действие: чужой слой снимается до него, фрейм — на месте в документе,
-    // и прямоугольник у точки 600 рисуется мимо него, на холсте.
+    // Фрейм виден у 500…900: нажатие у 600 — в нём (цель по виду). Опоры — по документу:
+    // фрейм в документе в начале мира, и прямоугольник встаёт в точку мира, где начат.
     h.ed.set_tool(ToolKind::Rect);
     h.drag((600.0, 100.0), (650.0, 150.0), none());
     let r = h.sel()[0];
-    assert_eq!(h.parent(r), None, "фрейм в документе — не под указателем");
+    assert_eq!(
+        h.parent(r),
+        Some(f),
+        "фрейм под указателем — тот, что видно"
+    );
     assert_eq!((h.props(r).x, h.props(r).y), (600.0, 100.0));
+    assert_eq!((h.props(r).w, h.props(r).h), (50.0, 50.0));
     assert_eq!(h.props(f).x, 0.0);
+}
+
+#[test]
+fn double_click_on_text_under_peer_drag_puts_caret_where_it_is_seen() {
+    let mut h = common::text::text_h();
+    let t = common::text::add_text(&mut h, 100.0, 100.0, "Привет", 24.0);
+    let (x1, y) = common::text::at_index(&h, t, 1);
+    let (x2, _) = common::text::at_index(&h, t, 2);
+    h.ed.select(&[]);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[t], 300.0);
+    // У границы первой и второй буквы — там, где текст виден.
+    h.dbl(x1 + (x2 - x1) * 0.25 + 300.0, y);
+    assert_eq!(
+        common::text::info(&h).focus,
+        1,
+        "курсор — у той же буквы, что под указателем"
+    );
+    assert!(
+        !h.ed.scene().has_remote_preview(),
+        "правка — без чужого слоя"
+    );
+    assert_eq!(h.props(t).x, 100.0);
+}
+
+/// Своё, что ничего не правит: модификатор, его отпускание, отпускание без жеста, правая
+/// кнопка, потеря фокуса — чужой слой не снимается и не накладывается заново. Запись (стрелка)
+/// по-прежнему — без чужого сдвига.
+#[test]
+fn input_that_writes_nothing_leaves_peer_layer_alone() {
+    let mut h = H::new();
+    let a = h.rect(None, 10.0, 10.0, 50.0, 40.0);
+    h.ed.select(&[a]);
+    join(&mut h, 1);
+    drag_by(&mut h, 1, &[a], 100.0);
+    let changes = h.ed.scene().change_counter();
+    h.ev(Input::KeyDown(KeyEvent::new("ShiftLeft", Modifiers::SHIFT)));
+    h.ev(Input::KeyUp(KeyEvent::new("ShiftLeft", none())));
+    h.up(500.0, 500.0, none());
+    let mut right = h.pe(500.0, 500.0, none());
+    right.button = PointerButton::Secondary;
+    h.ev(Input::PointerDown(right));
+    h.ev(Input::PointerUp(right));
+    h.ev(Input::Blur);
+    assert_eq!(
+        h.ed.scene().change_counter(),
+        changes,
+        "слой не снимался и не накладывался"
+    );
+    h.key("ArrowRight", none());
+    assert_eq!(h.props(a).x, 11.0, "запись — от документа");
+    assert_eq!(h.ed.scene().node(a).unwrap().props.x, 111.0);
 }
 
 #[test]

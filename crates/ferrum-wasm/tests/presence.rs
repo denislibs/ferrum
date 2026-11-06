@@ -397,8 +397,8 @@ fn parent_in_doc(c: &Core, id: &str) -> Option<String> {
         .map(|p| p.to_string())
 }
 
-/// Ввод — своё действие: нажатие инструмента под чужим перетаскиванием фрейма берёт фрейм и
-/// его положение из документа, а не из превью.
+/// Ввод — своё действие: нажатие инструмента под чужим перетаскиванием фрейма выбирает фрейм по
+/// тому, что видно, а его положение берёт из документа, а не из превью.
 #[test]
 fn drawing_under_peer_frame_drag_is_placed_by_document() {
     let mut c = core();
@@ -406,12 +406,49 @@ fn drawing_under_peer_frame_drag_is_placed_by_document() {
     c.command(Command::Presence {
         items: [vec![join(1)], drag(&c, 1, &frame, 400.0)].concat(),
     });
-    // Фрейм виден у экранных 500…700; прямоугольник рисуется там.
+    // Фрейм виден у экранных 500…700; прямоугольник рисуется там — в нём.
     let r = draw(&mut c, Tool::Rect, (550.0, 150.0), (600.0, 200.0));
-    assert_eq!(parent_in_doc(&c, &r), None, "в документе фрейма там нет");
-    assert_eq!(x_in_doc(&mut c, &r), world(&c, 550.0, 150.0).x);
+    assert_eq!(
+        parent_in_doc(&c, &r),
+        Some(frame.clone()),
+        "фрейм — тот, что видно"
+    );
     let x0 = world(&c, 100.0, 100.0).x;
+    assert_eq!(
+        x_in_doc(&mut c, &r),
+        world(&c, 550.0, 150.0).x - x0,
+        "в осях фрейма из документа"
+    );
     assert_eq!(x_in_doc(&mut c, &frame), x0);
+}
+
+/// Контекстное меню под чужим перетаскиванием выбирает то, что видно (как нажатие).
+#[test]
+fn context_menu_under_peer_drag_picks_what_is_seen() {
+    let mut c = core();
+    let id = rect(&mut c);
+    c.command(Command::Select {
+        ids: vec![],
+        mode: SelectMode::Replace,
+    });
+    c.command(Command::Presence {
+        items: [vec![join(1)], drag(&c, 1, &id, 300.0)].concat(),
+    });
+    // Прямоугольник виден у экранных 400…500.
+    c.command(Command::ContextMenu {
+        target: ContextTarget::Canvas { x: 450.0, y: 150.0 },
+    });
+    assert_eq!(
+        c.editor()
+            .selection()
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>(),
+        vec![id.clone()]
+    );
+    assert!(c.editor().scene().has_remote_preview(), "слой на месте");
+    let x0 = world(&c, 100.0, 100.0).x;
+    assert_eq!(x_of(&mut c, &id), (x0 + 300.0, x0));
 }
 
 fn presence_events(c: &mut Core) -> Vec<CoreEvent> {
