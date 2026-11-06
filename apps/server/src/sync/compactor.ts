@@ -98,7 +98,8 @@ export class Compactor {
     for (const [key, until] of this.waiting) if (until <= now) this.waiting.delete(key);
     for (const [file, m] of this.manualAt) if (now - m.at >= this.limits.manualIntervalMs) this.manualAt.delete(file);
     const { rows } = await this.pool.query<{ file_id: string }>(
-      `SELECT DISTINCT s.file_id FROM doc_state s JOIN file f ON f.id = s.file_id
+      // Таблицы — в том же порядке, что у журнала и записи файла: файл, потом документы. Запрос берёт их в порядке `FROM`.
+      `SELECT DISTINCT s.file_id FROM file f JOIN doc_state s ON s.file_id = f.id
        WHERE s.log_count > s.log_kept AND (s.compact_after IS NULL OR s.compact_after <= now())
          AND (f.compact_after IS NULL OR f.compact_after <= now()) LIMIT 100`,
     );

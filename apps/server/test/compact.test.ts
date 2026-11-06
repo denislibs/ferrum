@@ -534,6 +534,32 @@ test('документ, который ждёт срока, порог не сч
   }
 });
 
+test('таймер сжатия берёт таблицы в том же порядке, что журнал и очистка стенда: файл, потом документы', async () => {
+  const c = new Compactor(s.pool, { databaseUrl: TEST_DATABASE_URL, dataDir: s.dataDir }, { tickMs: 20 });
+  const other = await s.pool.connect();
+  try {
+    // Как `TRUNCATE file, doc_state, …`: файл, потом документы.
+    await other.query('BEGIN');
+    await other.query('LOCK TABLE file IN ACCESS EXCLUSIVE MODE');
+    let waiting = false;
+    for (let i = 0; i < 400 && !waiting; i++) {
+      const { rows } = await s.pool.query(
+        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%log_kept%'`,
+      );
+      waiting = rows.length > 0;
+      if (!waiting) await Bun.sleep(5);
+    }
+    expect(waiting).toBe(true);
+    // Таймер ждёт файл, не держа документы: иначе здесь `deadlock detected`.
+    await other.query('LOCK TABLE doc_state IN ACCESS EXCLUSIVE MODE');
+    await other.query('COMMIT');
+  } finally {
+    await other.query('ROLLBACK').catch(() => {});
+    other.release();
+    c.stop();
+  }
+});
+
 test('Compactor: паника wasm меняет worker, документ ждёт срока, остальные файлы сжимаются', async () => {
   const base = await data('loro-base.snap');
   const bad = (await s.newFile(owner)).id;
