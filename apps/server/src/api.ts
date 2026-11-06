@@ -96,6 +96,8 @@ export interface Ctx {
   /** Роль в команде (`team`, `project`) и команда проекта. */
   teamRole: 'owner' | 'member';
   teamId: string;
+  /** Маршрут без `:id` назвал файлы, доступ к которым он изменил: сверяются только они. */
+  touched?: string[];
 }
 
 export interface Route {

@@ -215,6 +215,9 @@ export class SyncHub {
   private readonly inflight = new Set<Promise<unknown>>();
   /** Строки документов, которые заводятся сейчас: подписки на тот же документ ждут ту же, а не читают снимок снова. */
   private readonly creating = new Map<string, Promise<DocRowState | null | 'busy'>>();
+  /** Идущая сверка ролей всех файлов и нужна ли ещё одна после неё. */
+  private rechecking: Promise<void> | null = null;
+  private recheckAgain = false;
   /** Замер §13.1: от прихода кадра до конца его рассылки, мс. */
   onTiming: ((ms: number) => void) | null = null;
   /** Вызывается после фиксации: сжатие считает записи журнала; при уходе последнего — тоже. */
@@ -235,7 +238,7 @@ export class SyncHub {
       for (const { item, seq } of items) this.broadcast(item, seq);
       for (const s of states) this.onLog(s.file, s.doc, s.logCount, s.logBytes);
     };
-    this.timers.push(setInterval(() => void this.recheckEverything().catch(report), this.limits.recheckMs));
+    this.timers.push(setInterval(() => void this.recheckAll(), this.limits.recheckMs));
     this.timers.push(setInterval(() => void this.checkSessions().catch(report), this.limits.sessionCheckMs));
     this.timers.push(
       setInterval(
@@ -850,39 +853,57 @@ export class SyncHub {
   /** Роль соединений файла заново: снята — закрыть сразу, понижена — сообщить. Зовут маршруты после правки доступа;
    * раз в `recheckMs` — на случай изменений мимо маршрутов. */
   async recheckFile(file: string): Promise<void> {
-    const set = this.conns.get(file);
-    if (!set || set.size === 0) return;
-    const users = [...new Set([...set].map((d) => d.user))];
-    const { rows } = await this.pool.query<{ u: string; rank: number | null; member: number | null; version: string | null }>(
-      `SELECT u, file_role_rank($1, u) AS rank, file_member_rank($1, u) AS member,
-              (SELECT version FROM file WHERE id = $1) AS version
-       FROM unnest($2::text[]) AS x(u)`,
-      [file, users],
+    await this.recheck([file]);
+  }
+
+  /** Все пары «файл, человек» открытых соединений — одним запросом. */
+  private async recheck(files: string[]): Promise<void> {
+    const pairs = new Map<string, { file: string; user: string }>();
+    for (const file of files) for (const d of this.conns.get(file) ?? []) pairs.set(`${file}/${d.user}`, { file, user: d.user });
+    if (pairs.size === 0) return;
+    const list = [...pairs.values()];
+    const { rows } = await this.pool.query<{ f: string; u: string; rank: number | null; member: number | null; version: string | null }>(
+      `SELECT f, u, file_role_rank(f, u) AS rank, file_member_rank(f, u) AS member, (SELECT version FROM file WHERE id = f) AS version
+       FROM unnest($1::uuid[], $2::text[]) AS x(f, u)`,
+      [list.map((p) => p.file), list.map((p) => p.user)],
     );
-    const by = new Map(rows.map((r) => [r.u, r]));
-    for (const d of set) {
-      const r = by.get(d.user);
-      // Соединение открыто, пока шёл запрос: его роль проверена при открытии, следующая сверка его увидит.
-      if (!r) continue;
-      const role = RANK_ROLE[r.rank ?? 0];
-      if (!role) {
-        this.revoke(d, 'access');
-        continue;
-      }
-      if (role !== d.role) {
-        d.role = role;
-        this.send(d, { t: 'role', role, canShare: (r.member ?? 0) >= ROLE_RANK.editor, version: Number(r.version ?? 0) });
+    const by = new Map(rows.map((r) => [`${r.f}/${r.u}`, r]));
+    for (const file of files) {
+      for (const d of this.conns.get(file) ?? []) {
+        const r = by.get(`${file}/${d.user}`);
+        // Соединение открыто, пока шёл запрос: его роль проверена при открытии, следующая сверка его увидит.
+        if (!r) continue;
+        const role = RANK_ROLE[r.rank ?? 0];
+        if (!role) {
+          this.revoke(d, 'access');
+          continue;
+        }
+        if (role !== d.role) {
+          d.role = role;
+          this.send(d, { t: 'role', role, canShare: (r.member ?? 0) >= ROLE_RANK.editor, version: Number(r.version ?? 0) });
+        }
       }
     }
   }
 
-  private async recheckEverything(): Promise<void> {
-    for (const file of this.conns.keys()) await this.recheckFile(file);
-  }
-
-  /** Команды и проекты: меняется доступ ко многим файлам сразу. */
-  recheckAll(): void {
-    void this.recheckEverything().catch(report);
+  /** Команды, проекты и таймер: меняется доступ ко многим файлам сразу. Запуски сливаются: пока идёт сверка, следующие вызовы
+   * дают ещё одну после неё, а не каждый свою. Промис — конец сверки, он не отказывает. */
+  recheckAll(): Promise<void> {
+    if (this.rechecking) {
+      this.recheckAgain = true;
+      return this.rechecking;
+    }
+    this.rechecking = (async () => {
+      try {
+        do {
+          this.recheckAgain = false;
+          await this.recheck([...this.conns.keys()]).catch(report);
+        } while (this.recheckAgain && !this.stopped);
+      } finally {
+        this.rechecking = null;
+      }
+    })();
+    return this.rechecking;
   }
 
   private revoke(d: ConnData, reason: RevokeReason): void {

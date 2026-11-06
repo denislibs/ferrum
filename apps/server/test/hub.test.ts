@@ -616,44 +616,54 @@ test('пиры снимка не занимает никто: продолжен
   expect((await s.pool.query('SELECT 1 FROM doc_update WHERE file_id = $1', [file])).rows).toHaveLength(1);
 });
 
-test('снимок документа идёт потоком, загрузок разом у человека не больше предела', async () => {
-  const big = new Uint8Array(16 * 1024 * 1024).fill(3);
-  expect((await s.writeContent(owner, file, 1, realContainer(root.export({ mode: 'snapshot' }), [['1@9', big]]))).status).toBe(200);
+test('снимок документа идёт потоком, отдач разом у человека не больше предела', async () => {
+  const page = new Uint8Array(64 * 1024).fill(3);
+  expect((await s.writeContent(owner, file, 1, realContainer(root.export({ mode: 'snapshot' }), [['1@9', page]]))).status).toBe(200);
   const path = `/api/files/${file}/docs/1@9/snapshot`;
-  const one = await s.call(viewer, 'GET', path);
-  expect(new Uint8Array(await one.arrayBuffer())).toEqual(big);
-  // Медленные читатели: соединение открыто, тело не читается.
-  const { connect: tcp } = await import('node:net');
-  const port = Number(new URL(s.publicUrl).port);
-  const slow = Array.from({ length: 16 }, () => {
-    const sock = tcp(port, '127.0.0.1');
-    sock.write(`GET ${path} HTTP/1.1\r\nHost: localhost\r\nCookie: ${viewer.cookie}\r\n\r\n`);
-    sock.pause();
-    return sock;
-  });
+  // Медленный читатель: после первого куска поток ждёт `release`.
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+  const held = (part: Blob): ReadableStream<Uint8Array> => {
+    const reader = part.stream().getReader();
+    let first = true;
+    return new ReadableStream<Uint8Array>({
+      async pull(c) {
+        if (!first) await gate;
+        first = false;
+        const next = await reader.read();
+        if (next.done) c.close();
+        else c.enqueue(next.value);
+      },
+    });
+  };
+  const real = s.blobs.open.bind(s.blobs);
+  s.blobs.open = async (k: string) => {
+    const b = await real(k);
+    if (!b) return b;
+    const slice = (a?: number, e?: number) => {
+      const part = b.slice(a, e);
+      return { size: part.size, arrayBuffer: () => part.arrayBuffer(), stream: () => held(part) } as unknown as Blob;
+    };
+    return { size: b.size, slice } as unknown as Blob;
+  };
   try {
-    let refused: Response | null = null;
-    for (let i = 0; i < 200 && !refused; i++) {
-      const r = await s.call(viewer, 'GET', path);
-      if (r.status === 429) refused = r;
-      else await r.arrayBuffer();
-    }
-    expect(refused?.status).toBe(429);
-    expect(await refused?.json()).toEqual({ error: 'BUSY' });
+    // Ответ уходит, пока тело ещё не прочитано: в памяти сервера секции нет.
+    const slow = await Promise.all(Array.from({ length: 16 }, () => s.call(viewer, 'GET', path)));
+    expect(slow.map((r) => r.status)).toEqual(slow.map(() => 200));
+    const over = await s.call(viewer, 'GET', path);
+    expect(over.status).toBe(429);
+    expect(await over.json()).toEqual({ error: 'BUSY' });
     // У другого — своё место.
-    expect((await s.call(editor, 'GET', path)).status).toBe(200);
+    const other = await s.call(editor, 'GET', path);
+    expect(other.status).toBe(200);
+    release();
+    for (const r of [...slow, other]) expect(new Uint8Array(await r.arrayBuffer())).toEqual(page);
   } finally {
-    for (const sock of slow) sock.destroy();
+    s.blobs.open = real;
   }
-  // Ушедший читатель освобождает место.
-  let after = 0;
-  for (let i = 0; i < 200 && after !== 200; i++) {
-    const r = await s.call(viewer, 'GET', path);
-    after = r.status;
-    if (after === 200) await r.arrayBuffer();
-    else await Bun.sleep(10);
-  }
-  expect(after).toBe(200);
+  // Дочитанные освободили места.
+  const again = await s.call(viewer, 'GET', path);
+  expect(again.status).toBe(200);
+  expect(new Uint8Array(await again.arrayBuffer())).toEqual(page);
 });
 
 test('снятие роли закрывает соединение сразу', async () => {
@@ -695,7 +705,7 @@ test('сверка ролей не выгоняет того, кто откры�
   const a = await connect(owner);
   let opened: Client | null = null;
   const restore = intercept(
-    (text) => text.includes('unnest($2::text[]) AS x(u)'),
+    (text) => text.includes('file_member_rank(f, u)'),
     async (run) => {
       // Запрос сверки ушёл; человек открывает файл.
       opened = await connect(editor);
@@ -743,6 +753,43 @@ test('корзина закрывает всех, кроме убравшего'
   await b.wait('access-revoked');
   expect((await b.waitClosed()).code).toBe(SYNC_CLOSE.REVOKED);
   expect(a.closed).toBeNull();
+});
+
+test('сверка ролей: запуски сливаются, все файлы — одним запросом; пустая корзина и новая команда сверку не запускают', async () => {
+  const files = [file];
+  for (let i = 0; i < 2; i++) {
+    const f = (await s.newFile(owner)).id;
+    await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'editor')`, [f, editor.id]);
+    files.push(f);
+  }
+  for (const f of files) await connect(editor, f);
+  let checks = 0;
+  const restore = intercept(
+    (text) => text.includes('file_role_rank') && text.includes('unnest'),
+    (run) => {
+      checks++;
+      return run();
+    },
+  );
+  try {
+    let last: Promise<void> | void = undefined;
+    for (let i = 0; i < 50; i++) last = s.hub.recheckAll();
+    await last;
+    // Идущий запуск и один следующий за ним.
+    expect(checks).toBeLessThanOrEqual(2);
+    checks = 0;
+    expect((await s.call(stranger, 'POST', '/api/files/empty-trash')).status).toBe(200);
+    expect((await s.call(stranger, 'POST', '/api/teams', { name: 'Своя' })).status).toBe(201);
+    expect(checks).toBe(0);
+  } finally {
+    restore();
+  }
+  // Корзина удалила файл: сверяется он, его соединения закрываются.
+  const gone = files[1];
+  expect((await s.call(owner, 'POST', `/api/files/${gone}/trash`)).status).toBe(200);
+  const c = await connect(owner, gone);
+  expect((await s.call(owner, 'POST', '/api/files/empty-trash')).status).toBe(200);
+  expect((await c.waitClosed()).code).toBe(SYNC_CLOSE.REVOKED);
 });
 
 test('выход закрывает соединения этой сессии, выход на всех — все соединения человека', async () => {

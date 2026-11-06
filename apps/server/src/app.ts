@@ -46,11 +46,14 @@ export interface AppDeps {
 /** Запись, после которой доступ к открытым файлам не изменился: содержимое, превью, картинки, отметка открытия. */
 const NO_ACCESS_CHANGE = /\/(content|thumb|touch|images\/[^/]+)$/;
 
-/** Маршрут изменил файлы или права: открытые соединения сверяют роль сразу, а не по таймеру. */
+/** Маршрут изменил файлы или права: открытые соединения сверяют роль сразу, а не по таймеру. Новая команда пуста: доступа
+ * к файлам она не меняет. Маршрут, назвавший затронутые файлы, сверяет только их; без `:id` и без названных — все файлы,
+ * запуски сливаются. */
 function accessChanged(hub: SyncHub, route: Route, ctx: Ctx): void {
-  if (NO_ACCESS_CHANGE.test(route.path) || route.path === '/api/files') return;
-  if (ctx.params.id) void hub.recheckFile(ctx.params.id).catch((e: unknown) => console.error('Проверка ролей:', e));
-  else hub.recheckAll();
+  if (NO_ACCESS_CHANGE.test(route.path) || route.path === '/api/files' || (route.method === 'POST' && route.path === '/api/teams')) return;
+  const files = ctx.touched ?? (ctx.params.id ? [ctx.params.id] : null);
+  if (files) for (const id of files) void hub.recheckFile(id).catch((e: unknown) => console.error('Проверка ролей:', e));
+  else void hub.recheckAll();
 }
 
 /** Простой соединения: загрузка с паузами дольше этого уже оборвана проверкой `UPLOAD_IDLE_MS`. */

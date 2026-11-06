@@ -321,7 +321,8 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       access: { kind: 'user' },
       limit: 'write',
       handle: async (ctx) => {
-        await inTransaction(pool, async (c) => {
+        // Сверка ролей — только удалённых файлов: пустая корзина ничего не меняет.
+        ctx.touched = await inTransaction(pool, async (c) => {
           const { rows } = await c.query<{ id: string; content_key: string | null; thumb_key: string | null }>(
             `SELECT id, content_key, thumb_key FROM file
              WHERE trashed_at IS NOT NULL AND (owner_id = $1 OR trashed_by = $1) AND file_role_rank(id, $1) = 3 FOR UPDATE`,
@@ -332,6 +333,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             await trashBlob(c, r.thumb_key);
           }
           await c.query('DELETE FROM file WHERE id = ANY($1::uuid[])', [rows.map((r) => r.id)]);
+          return rows.map((r) => r.id);
         });
         return ok({ ok: true });
       },
