@@ -413,3 +413,124 @@ fn drawing_under_peer_frame_drag_is_placed_by_document() {
     let x0 = world(&c, 100.0, 100.0).x;
     assert_eq!(x_in_doc(&mut c, &frame), x0);
 }
+
+fn presence_events(c: &mut Core) -> Vec<CoreEvent> {
+    c.take_events()
+        .into_iter()
+        .filter(|e| matches!(e, CoreEvent::Presence { .. }))
+        .collect()
+}
+
+fn sent_selection(e: &CoreEvent) -> (Option<PresenceSelectionDto>, Option<Vec<Vec<u8>>>) {
+    match e {
+        CoreEvent::Presence {
+            selection, parts, ..
+        } => (
+            *selection,
+            parts
+                .as_ref()
+                .map(|p| p.iter().map(|b| b.to_vec()).collect()),
+        ),
+        _ => unreachable!(),
+    }
+}
+
+/// Части выделения уходят, когда о нём впервые можно сказать: у выделенной группы без видимых
+/// детей рамки нет — части ждут её, а не теряются.
+#[test]
+fn selection_parts_wait_for_bounds_instead_of_being_lost() {
+    let mut c = core();
+    c.command(Command::SyncStart);
+    let a = rect(&mut c);
+    c.command(Command::Execute {
+        command: "object.group".into(),
+    });
+    let group = c.editor().selection()[0].to_string();
+    c.command(Command::SetLayerFlags {
+        ids: vec![a.clone()],
+        visible: Some(false),
+        locked: None,
+    });
+    c.command(Command::Select {
+        ids: vec![],
+        mode: SelectMode::Replace,
+    });
+    c.set_time(1000.0);
+    c.take_events();
+    // Новая версия выделения — группа без рамки: о выделении не сказать.
+    c.command(Command::Select {
+        ids: vec![group.clone()],
+        mode: SelectMode::Replace,
+    });
+    c.set_time(2000.0);
+    let sent = presence_events(&mut c);
+    assert!(sent.iter().all(|e| sent_selection(e).0.is_none()));
+    // Ребёнок снова виден — рамка есть, части уходят с ней.
+    c.command(Command::SetLayerFlags {
+        ids: vec![a],
+        visible: Some(true),
+        locked: None,
+    });
+    c.set_time(3000.0);
+    let sent = presence_events(&mut c);
+    let (sel, parts) = sent_selection(sent.last().expect("выделение объявлено"));
+    assert_eq!(sel.expect("выделение").parts, 1);
+    assert_eq!(
+        parts.expect("части той же версии"),
+        encode_selection(&[group.parse().unwrap()])
+    );
+}
+
+/// Части не теряются, если кадр не ушёл: вид вне мира (холст уведён за предел) — кадра нет,
+/// части — со следующим.
+#[test]
+fn selection_parts_are_kept_until_a_frame_actually_goes() {
+    let mut c = core();
+    c.command(Command::SyncStart);
+    let id = rect(&mut c);
+    let far = PointerEvent::new((10.0, 10.0), Modifiers::NONE, 0.0);
+    let wheel = |dy: f64| {
+        Input::Wheel(ferrum_editor::WheelEvent {
+            point: far.point,
+            delta: kurbo::Vec2::new(0.0, dy),
+            modifiers: Modifiers::NONE,
+        })
+    };
+    c.handle(wheel(2e9));
+    c.set_time(1000.0);
+    assert!(
+        presence_events(&mut c).is_empty(),
+        "вид вне мира — кадра нет"
+    );
+    c.handle(wheel(-2e9));
+    c.set_time(2000.0);
+    let sent = presence_events(&mut c);
+    let (sel, parts) = sent_selection(sent.last().expect("кадр ушёл"));
+    assert!(sel.is_some());
+    assert_eq!(
+        parts.expect("части с первым ушедшим кадром"),
+        encode_selection(&[id.parse().unwrap()])
+    );
+}
+
+/// Новый файл — своё присутствие с нуля: версия выделения и части прошлого файла не мешают
+/// объявить выделение нового.
+#[test]
+fn opening_a_file_resets_own_presence() {
+    let mut c = core();
+    c.command(Command::SyncStart);
+    rect(&mut c);
+    c.set_time(1000.0);
+    assert!(sent_selection(&presence_events(&mut c)[0]).1.is_some());
+    c.command(Command::Demo { nodes: 0 });
+    c.command(Command::SyncStart);
+    let id = rect(&mut c);
+    c.set_time(2000.0);
+    let sent = presence_events(&mut c);
+    let (sel, parts) = sent_selection(sent.last().expect("кадр нового файла"));
+    assert!(sel.is_some());
+    assert_eq!(
+        parts.expect("части нового выделения"),
+        encode_selection(&[id.parse().unwrap()])
+    );
+}

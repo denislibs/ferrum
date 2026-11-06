@@ -359,6 +359,9 @@ impl Core {
         }
         self.images = DocImages::default();
         self.sync = sync::SyncCore::default();
+        // Своё присутствие — с нуля: версия выделения и счётчики сцены нового редактора
+        // начинаются заново и могли бы совпасть с прошлым файлом.
+        self.presence = Default::default();
         self.selection = None;
         self.layers.reset();
         self.selected.clear();

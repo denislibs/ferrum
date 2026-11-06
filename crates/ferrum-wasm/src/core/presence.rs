@@ -33,11 +33,13 @@ pub(crate) struct PresenceOut {
     last_ms: Option<f64>,
     last: Option<CoreEvent>,
     rev: u32,
-    /// Выделение, о котором сказано: версия, ключ сцены для рамки, заголовок.
+    /// Своё выделение: версия, ключ сцены для рамки, заголовок, части версии и ушли ли они.
+    /// Части считаются при новой версии, а отправленными — только когда кадр с ними ушёл.
     sel_version: Option<u64>,
     bounds_key: Option<(u64, u64)>,
     selection: Option<PresenceSelectionDto>,
     parts: Option<Vec<ByteBuf>>,
+    parts_sent: bool,
 }
 
 /// Команды, которые сцену не правят и чужое превью снимать не должны: присутствие, синхронизация,
@@ -320,48 +322,51 @@ impl Core {
         }
         let own = self.editor.own_presence();
         let version = own.selection_version;
+        // Новое выделение — новая версия и её части, есть у него рамка или нет.
+        if self.presence.sel_version != Some(version) {
+            self.presence.sel_version = Some(version);
+            self.presence.bounds_key = None;
+            let ids = self.editor.selection();
+            if ids.is_empty() {
+                self.presence.parts = None;
+            } else {
+                self.presence.rev = self.presence.rev.wrapping_add(1);
+                let encoded = encode_selection(&ids[..ids.len().min(PRESENCE_SELECTION_MAX)]);
+                self.presence.parts = Some(encoded.into_iter().map(ByteBuf::from).collect());
+            }
+            self.presence.parts_sent = false;
+        }
+        // Рамка — заново, если сцена менялась.
         let scene = self.editor.scene();
         let key = (scene.generation(), scene.change_counter());
-        // Новое выделение — новая версия и части; та же — только рамка, если сцена менялась.
-        let mut parts = None;
-        if self.presence.sel_version != Some(version) || self.presence.bounds_key != Some(key) {
-            let ids = self.editor.selection();
-            let fresh = self.presence.sel_version != Some(version);
-            self.presence.sel_version = Some(version);
-            self.presence.bounds_key = Some(key);
-            let bounds = ids
+        if self.presence.bounds_key != Some(key) {
+            let count = self.editor.selection().len().min(PRESENCE_SELECTION_MAX) as u32;
+            let bounds = self
+                .editor
+                .selection()
                 .iter()
                 .filter_map(|id| {
                     let n = scene.node(*id)?;
                     Some(n.world.transform_rect_bbox(n.local_bounds?))
                 })
                 .reduce(|a, b| a.union(b));
-            match bounds {
-                Some(b) if !ids.is_empty() => {
-                    if fresh {
-                        self.presence.rev = self.presence.rev.wrapping_add(1);
-                        let encoded =
-                            encode_selection(&ids[..ids.len().min(PRESENCE_SELECTION_MAX)]);
-                        self.presence.parts =
-                            Some(encoded.into_iter().map(ByteBuf::from).collect());
-                        parts = self.presence.parts.clone();
-                    }
-                    let n = self.presence.parts.as_ref().map_or(0, Vec::len);
-                    self.presence.selection = (n > 0
-                        && [b.x0, b.y0, b.x1, b.y1].iter().all(|v| coord(*v)))
-                    .then(|| PresenceSelectionDto {
-                        rev: self.presence.rev,
-                        count: ids.len().min(PRESENCE_SELECTION_MAX) as u32,
-                        parts: n as u8,
-                        bounds: [b.x0, b.y0, b.x1, b.y1],
-                    });
-                }
-                _ => {
-                    self.presence.selection = None;
-                    self.presence.parts = None;
-                }
-            }
+            self.presence.bounds_key = Some(key);
+            let n = self.presence.parts.as_ref().map_or(0, Vec::len);
+            self.presence.selection = bounds
+                .filter(|b| n > 0 && [b.x0, b.y0, b.x1, b.y1].iter().all(|v| coord(*v)))
+                .map(|b| PresenceSelectionDto {
+                    rev: self.presence.rev,
+                    count,
+                    parts: n as u8,
+                    bounds: [b.x0, b.y0, b.x1, b.y1],
+                });
         }
+        // Части уходят с первым кадром, где о выделении сказано.
+        let parts = if self.presence.selection.is_some() && !self.presence.parts_sent {
+            self.presence.parts.clone()
+        } else {
+            None
+        };
         let view = own.view;
         if ![view.x0, view.y0, view.x1, view.y1]
             .iter()
@@ -387,6 +392,9 @@ impl Core {
         }
         self.presence.last = Some(event.clone());
         self.presence.last_ms = Some(now);
+        if parts.is_some() {
+            self.presence.parts_sent = true;
+        }
         let event = match event {
             CoreEvent::Presence {
                 page,
