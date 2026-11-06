@@ -476,69 +476,91 @@ fn peer_move(page: ferrum_doc::PageId, count: usize, k: Option<f64>) -> ferrum_e
     }
 }
 
-/// Перенос фрейма с `children` потомками другим участником (финальное повторное ревью, N1):
-/// цена пачки — пересборка поддерева, поэтому в предел превью идёт всё поддерево. `shown` —
-/// ожидается ли превью (честный артборд в пределах) — проверка без времени.
-fn presence_frame_drag(report: &mut Report, children: usize, shown: bool, limit_ms: f64) {
+/// Перенос фреймов с `children` потомками каждый — `peers` участников, у каждого свой фрейм
+/// (повторные ревью, N1 и M1): цена пачки — пересборка поддеревьев, поэтому в пределы превью
+/// (у участника и у всех вместе) идут поддеревья. `shown` — сколько фреймов ожидается в
+/// превью — проверка без времени.
+fn presence_frame_drag(
+    report: &mut Report,
+    (peers, children): (usize, usize),
+    shown: usize,
+    limit_ms: f64,
+) {
     use ferrum_doc::NodeKind;
     let mut doc = Document::new();
     let page = doc.pages()[0].0;
-    let frame = doc
+    let frames = doc
         .transact(page, vec![], |tx| {
-            let f = tx.create_node(None, None, NodeKind::Frame)?;
-            tx.set_props(
-                f,
-                &PropsPatch {
-                    w: Some(4000.0),
-                    h: Some(4000.0),
-                    ..Default::default()
-                },
-            )?;
-            for i in 0..children {
-                let id = tx.create_node(Some(f), None, NodeKind::Rect)?;
+            let mut frames = Vec::new();
+            for p in 0..peers {
+                let f = tx.create_node(None, None, NodeKind::Frame)?;
                 tx.set_props(
-                    id,
+                    f,
                     &PropsPatch {
-                        x: Some((i % 300) as f64 * 12.0),
-                        y: Some((i / 300) as f64 * 12.0),
-                        w: Some(10.0),
-                        h: Some(10.0),
+                        x: Some(p as f64 * 5000.0),
+                        w: Some(4000.0),
+                        h: Some(4000.0),
                         ..Default::default()
                     },
                 )?;
+                for i in 0..children {
+                    let id = tx.create_node(Some(f), None, NodeKind::Rect)?;
+                    tx.set_props(
+                        id,
+                        &PropsPatch {
+                            x: Some((i % 300) as f64 * 12.0),
+                            y: Some((i / 300) as f64 * 12.0),
+                            w: Some(10.0),
+                            h: Some(10.0),
+                            ..Default::default()
+                        },
+                    )?;
+                }
+                frames.push(f);
             }
-            Ok(vec![f])
+            Ok(frames)
         })
-        .unwrap()[0];
+        .unwrap();
     let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
-    ed.presence_join(7, "u-7", "Участник", ferrum_editor::peer_color(0x0d74ce));
-    ed.presence_part(7, 1, 0, 1, vec![frame]);
-    ed.presence_state(7, peer_move(page, 1, None));
+    for (p, f) in frames.iter().enumerate() {
+        let id = 7 + p as u32;
+        ed.presence_join(id, "u-7", "Участник", ferrum_editor::peer_color(0x0d74ce));
+        ed.presence_part(id, 1, 0, 1, vec![*f]);
+        ed.presence_state(id, peer_move(page, 1, None));
+    }
     ed.take_events();
     let runs: Vec<Duration> = (1..=MOVES)
         .map(|i| {
             let t = Instant::now();
-            ed.presence_batch(|ed| ed.presence_state(7, peer_move(page, 1, Some(i as f64))));
+            ed.presence_batch(|ed| {
+                for p in 0..peers {
+                    ed.presence_state(7 + p as u32, peer_move(page, 1, Some(i as f64)));
+                }
+            });
             let d = t.elapsed();
             ed.take_events();
             d
         })
         .collect();
-    report.gate_median(
-        &format!("Чужой перенос фрейма с {children} потомками: пачка"),
-        &runs,
-        limit_ms,
-    );
-    let has = ed.scene().has_remote_preview();
+    let what = if peers == 1 {
+        format!("Чужой перенос фрейма с {children} потомками")
+    } else {
+        format!("Чужой перенос: {peers} участников, у каждого фрейм с {children} потомками")
+    };
+    report.gate_median(&format!("{what}: пачка"), &runs, limit_ms);
+    let moved = frames
+        .iter()
+        .filter(|f| {
+            ed.scene()
+                .remote_base(ed.scene().slot(**f).unwrap())
+                .is_some()
+        })
+        .count();
     report.check(
-        &format!("Чужой перенос фрейма с {children} потомками: превью"),
-        has == shown,
-        format!("{has}"),
-        if shown {
-            "есть"
-        } else {
-            "нет (больше предела)"
-        },
+        &format!("{what}: фреймов в превью"),
+        moved == shown,
+        format!("{moved}"),
+        &format!("{shown}"),
     );
 }
 
@@ -658,9 +680,13 @@ fn main() {
     presence_hostile_batch(&mut report, &mut ed, &ids, (10, 3000, 16.0));
     presence_hostile_batch(&mut report, &mut ed, &ids, (50, 1900, 16.0));
     presence_marks_with_dragger(&mut report, &mut ed, &ids);
-    presence_frame_drag(&mut report, 1500, true, 8.0);
-    presence_frame_drag(&mut report, 10_000, false, 8.0);
-    presence_frame_drag(&mut report, 50_000, false, 8.0);
+    presence_frame_drag(&mut report, (1, 1500), 1, 8.0);
+    presence_frame_drag(&mut report, (1, 10_000), 0, 8.0);
+    presence_frame_drag(&mut report, (1, 50_000), 0, 8.0);
+    // Восемь артбордов: в слой помещается один (1501 + 1501 > 3000). Цель — как у враждебной
+    // пачки: пачка дороже одного артборда на маленькой странице, потому что на странице 12 000
+    // узлов (пересборка R-tree сцены), а не из-за числа участников.
+    presence_frame_drag(&mut report, (8, 1500), 1, 16.0);
     ed.select(&children);
 
     // 2. Запись перетаскивания 1000 узлов одной транзакцией и её отмена.

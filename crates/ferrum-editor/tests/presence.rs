@@ -1081,3 +1081,30 @@ fn standing_selection_marks_follow_peer_drag_of_their_frame() {
     h.ed.presence_state(2, s);
     assert_eq!(box_x(&h, 0), 10.0);
 }
+
+/// Повторное ревью 2, M1: общий предел `PREVIEW_NODES` считается в узлах с поддеревьями, а не в
+/// правках: два фрейма по одной правке, но 2000 + 1001 узел, — у второго превью нет.
+#[test]
+fn total_preview_limit_counts_subtrees() {
+    let mut h = H::new();
+    let a = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    many(&mut h, Some(a), PREVIEW_PEER_NODES - 1);
+    let b = h.frame(None, 1000.0, 0.0, 400.0, 400.0);
+    many(&mut h, Some(b), PREVIEW_NODES - PREVIEW_PEER_NODES);
+    join(&mut h, 1);
+    join(&mut h, 2);
+    drag_by(&mut h, 1, &[a], 500.0);
+    drag_by(&mut h, 2, &[b], 500.0);
+    assert_eq!(h.ed.scene().node(a).unwrap().props.x, 500.0);
+    assert_eq!(
+        h.ed.scene().node(b).unwrap().props.x,
+        1000.0,
+        "{} + {} узлов > {PREVIEW_NODES}",
+        PREVIEW_PEER_NODES,
+        PREVIEW_NODES - PREVIEW_PEER_NODES + 1
+    );
+    // Первый закончил — второй помещается.
+    let s = select(&h.ed, &[a], 1);
+    h.ed.presence_state(1, s);
+    assert_eq!(h.ed.scene().node(b).unwrap().props.x, 1500.0);
+}

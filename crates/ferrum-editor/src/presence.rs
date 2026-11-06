@@ -625,6 +625,8 @@ impl Editor {
     ) -> Option<(Vec<(NodeId, PropsPatch)>, Vec<u32>)> {
         let mut patches: Vec<(NodeId, PropsPatch)> = Vec::new();
         let mut previewed = Vec::new();
+        // Цена слоя в узлах — с поддеревьями, как её платит сцена, а не число правок.
+        let mut used = 0usize;
         for (id, p) in &self.presence.peers {
             if previewed.len() == PREVIEW_PEERS {
                 break;
@@ -636,7 +638,7 @@ impl Editor {
                 continue;
             };
             let Some(ids) = p.selection() else { continue };
-            let budget = PREVIEW_PEER_NODES.min(PREVIEW_NODES - patches.len());
+            let budget = PREVIEW_PEER_NODES.min(PREVIEW_NODES - used);
             // Выделение больше остатка — превью нет, и обходить его не нужно.
             if ids.len() > budget {
                 continue;
@@ -646,9 +648,10 @@ impl Editor {
             } else {
                 crate::tools::select::gesture_patches(&self.scene, ids, &g, &self.fonts, budget)
             };
-            let Some(own) = own else { continue };
+            let Some((own, cost)) = own else { continue };
             if !own.is_empty() {
                 patches.extend(own);
+                used += cost;
                 previewed.push(*id);
             }
         }

@@ -737,22 +737,21 @@ impl SelectTool {
 /// `budget` — сколько узлов слоя может стоить жест: узлы с **всем** поддеревом при любом виде
 /// жеста — сцена пересчитывает мировые матрицы и рамки поддерева каждого изменённого узла,
 /// так что перенос фрейма с 10 000 потомков стоит как 10 001 узел. Больше — `None`, и правки
-/// не считаются (пределы живого превью, `presence::PREVIEW_*`).
+/// не считаются (пределы живого превью, `presence::PREVIEW_*`); иначе — правки и их цена в
+/// узлах (для общего предела всех участников).
 pub(crate) fn gesture_patches(
     scene: &ferrum_scene::Scene,
     selection: &[NodeId],
     g: &Gesture,
     fonts: &ferrum_text::SharedFonts,
     budget: usize,
-) -> Option<Vec<(NodeId, PropsPatch)>> {
+) -> Option<(Vec<(NodeId, PropsPatch)>, usize)> {
     let ids = gesture_ids(scene, selection);
     if ids.is_empty() {
-        return Some(Vec::new());
+        return Some((Vec::new(), 0));
     }
-    if !nodes_within(scene, &ids, budget) {
-        return None;
-    }
-    Some(match g.kind {
+    let cost = nodes_within(scene, &ids, budget)?;
+    let patches = match g.kind {
         GestureKind::Move => move_patches(scene, &ids, g.transform.translation()),
         GestureKind::Rotate => rigid_patches(&bases(scene, &ids, false), g.transform, false),
         GestureKind::Resize => {
@@ -772,7 +771,8 @@ pub(crate) fn gesture_patches(
                 Err(_) => scale_patches(&bases, g.transform, g.frame, g.k, None),
             }
         }
-    })
+    };
+    Some((patches, cost))
 }
 
 /// Точка `p` рамки `from` — то же место (доли сторон) рамки `to`. У нулевой стороны — тот же
@@ -841,26 +841,31 @@ fn move_patches(
 /// из базы слоя (`Scene::remote_base`), а перевод мирового сдвига в оси родителя берёт только
 /// линейную часть его матрицы (`local_delta`), которую слой из одних переносов не меняет. Так
 /// слой пересобирается один раз на пачку, а не дважды (снять и наложить). `None` — не перенос:
-/// правки — после снятия слоя (`gesture_patches`); `Some(None)` — больше `budget`.
+/// правки — после снятия слоя (`gesture_patches`); `Some(None)` — больше `budget`; иначе —
+/// правки и их цена в узлах.
+#[allow(clippy::type_complexity)]
 pub(crate) fn move_patches_over_layer(
     scene: &ferrum_scene::Scene,
     selection: &[NodeId],
     g: &Gesture,
     budget: usize,
-) -> Option<Option<Vec<(NodeId, PropsPatch)>>> {
+) -> Option<Option<(Vec<(NodeId, PropsPatch)>, usize)>> {
     if g.kind != GestureKind::Move {
         return None;
     }
     let ids = gesture_ids(scene, selection);
-    if !nodes_within(scene, &ids, budget) {
+    let Some(cost) = nodes_within(scene, &ids, budget) else {
         return Some(None);
-    }
-    Some(Some(move_patches(scene, &ids, g.transform.translation())))
+    };
+    Some(Some((
+        move_patches(scene, &ids, g.transform.translation()),
+        cost,
+    )))
 }
 
-/// Узлов с поддеревьями `ids` не больше `budget`. Обход кончается, как только предел превышен:
-/// поддерево в 100 000 узлов не обходится целиком.
-fn nodes_within(scene: &ferrum_scene::Scene, ids: &[NodeId], budget: usize) -> bool {
+/// Сколько узлов с поддеревьями у `ids`, если не больше `budget` (иначе `None`). Обход
+/// кончается, как только предел превышен: поддерево в 100 000 узлов не обходится целиком.
+fn nodes_within(scene: &ferrum_scene::Scene, ids: &[NodeId], budget: usize) -> Option<usize> {
     let mut n = 0usize;
     let mut stack = Vec::new();
     for id in ids {
@@ -873,12 +878,12 @@ fn nodes_within(scene: &ferrum_scene::Scene, ids: &[NodeId], budget: usize) -> b
             let children = &scene.at(s).children;
             // Всё, что в стеке, будет посчитано: сверх предела — сразу, не копируя детей.
             if n + stack.len() + children.len() > budget {
-                return false;
+                return None;
             }
             stack.extend_from_slice(children);
         }
     }
-    true
+    Some(n)
 }
 
 /// Узлы, которые жест может менять: есть в сцене, не черновики, не заблокированы.
