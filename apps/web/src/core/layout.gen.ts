@@ -27,6 +27,7 @@ export const Kind = {
   KEY_DOWN: 7,
   KEY_UP: 8,
   BLUR: 9,
+  POINTER_LEAVE: 11,
   RESIZE: 10,
 } as const;
 

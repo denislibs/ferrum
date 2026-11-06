@@ -258,6 +258,10 @@ impl Ctx<'_> {
             "правка документа при открытом пути пера: нет Editor::begin_doc_edit"
         );
         self.scene.clear_preview();
+        debug_assert!(
+            !self.scene.has_remote_preview(),
+            "чужое превью попало бы в документ"
+        );
         let scene: &Scene = self.scene;
         let result = self
             .doc
@@ -333,4 +337,8 @@ pub trait Tool {
     }
     fn cursor(&self) -> Cursor;
     fn overlay(&self) -> ToolOverlay;
+    /// Идущий жест для других участников (живое превью): перенос, ресайз, поворот выделения.
+    fn gesture(&self) -> Option<crate::presence::Gesture> {
+        None
+    }
 }

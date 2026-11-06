@@ -153,6 +153,7 @@ pub fn encode(record: &Record) -> [u8; RECORD_SIZE] {
         Record::Input(Input::KeyDown(e)) => key(&mut out, kind::KEY_DOWN, e),
         Record::Input(Input::KeyUp(e)) => key(&mut out, kind::KEY_UP, e),
         Record::Input(Input::Blur) => out[field::KIND] = kind::BLUR,
+        Record::Input(Input::PointerLeave) => out[field::KIND] = kind::POINTER_LEAVE,
         Record::Resize { width, height, dpr } => {
             out[field::KIND] = kind::RESIZE;
             put_f64(&mut out, field::A, *width);
@@ -223,6 +224,7 @@ pub fn decode(rec: &[u8]) -> Option<Record> {
         kind::KEY_DOWN => Input::KeyDown(key()?),
         kind::KEY_UP => Input::KeyUp(key()?),
         kind::BLUR => Input::Blur,
+        kind::POINTER_LEAVE => Input::PointerLeave,
         kind::RESIZE => {
             let (width, height, dpr) = (
                 get_f64(rec, field::A),

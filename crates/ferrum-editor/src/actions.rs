@@ -94,6 +94,9 @@ impl Editor {
     /// сообщается интерфейсу. Правка текста и вектора шлют эти же команды своим
     /// жестам (удалить точку, символ): уведомление — только про слои.
     pub(crate) fn run(&mut self, cmd: CommandId) {
+        // Команда может править по свойствам из сцены: чужого превью в ней на это время нет,
+        // `emit` в конце вернёт его поверх нового документа.
+        self.drop_remote_preview();
         let notice =
             undo_notice(cmd).filter(|_| self.text_edit.is_none() && self.vector_edit.is_none());
         let before = self.doc.last_step();

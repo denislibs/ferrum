@@ -262,6 +262,61 @@ fn alt(ed: &mut Editor, down: bool) {
     ed.take_events();
 }
 
+/// Чужое перетаскивание: участник выделил `ids` (одной частью кадра) и тянет их; каждый его
+/// кадр — сдвиг. Замер — приём кадра целиком (`presence_state`: слой превью и сцена).
+fn presence_preview(report: &mut Report, ed: &mut Editor, ids: &[NodeId]) {
+    use ferrum_editor::{peer_color, Gesture, GestureKind, PeerSelection, PeerState};
+    use kurbo::{Affine, Rect};
+    let page = ed.page();
+    let before = ed.page_doc().props(ids[500]).unwrap().x;
+    ed.presence_join(7, "u-7", "Участник", peer_color(0x0d74ce));
+    let head = PeerSelection {
+        rev: 1,
+        count: ids.len() as u32,
+        parts: 1,
+        bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+    };
+    ed.presence_part(7, 1, 0, 1, ids.to_vec());
+    let state = |k: f64, moving: bool| PeerState {
+        page: Some(page),
+        view: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+        cursor: Some(Point::new(k, k)),
+        selection: Some(head),
+        gesture: moving.then_some(Gesture {
+            kind: GestureKind::Move,
+            transform: Affine::translate((k, k * 0.5)),
+            frame: Affine::IDENTITY,
+            k: 1.0,
+        }),
+    };
+    ed.presence_state(7, state(0.0, false));
+    let runs: Vec<Duration> = (1..=MOVES)
+        .map(|i| {
+            let t = Instant::now();
+            ed.presence_state(7, state(i as f64 * 3.0, true));
+            t.elapsed()
+        })
+        .collect();
+    let shown = ed.scene().node(ids[500]).unwrap().props.x;
+    let doc = ed.page_doc().props(ids[500]).unwrap().x;
+    report.gate_median(
+        "Живое превью чужого перетаскивания 1000 узлов: кадр участника",
+        &runs,
+        4.0,
+    );
+    report.check(
+        "Чужое превью: сцена сдвинута, документ — нет",
+        shown == before + MOVES as f64 * 3.0 && doc == before,
+        format!("сцена {shown}, документ {doc}"),
+        "сцена сдвинута, документ прежний",
+    );
+    let t = Instant::now();
+    ed.presence_state(7, state(0.0, false));
+    report.info("Конец чужого жеста: превью снято", ms(t.elapsed()));
+    ed.presence_left(7);
+    ed.take_events();
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -312,6 +367,11 @@ fn main() {
     ed.handle(Input::PointerUp(clock.at(end)));
     ed.execute(CommandId::Undo);
     ed.take_events();
+
+    // 1а. Живое превью чужого перетаскивания тех же 1000 узлов (спека подсистемы 4, раздел 9):
+    // кадр участника 20 раз в секунду — слой превью сцены по выделению и матрице жеста, без
+    // правки документа. Цель — как у своего движения.
+    presence_preview(&mut report, &mut ed, &children);
 
     // 2. Запись перетаскивания 1000 узлов одной транзакцией и её отмена.
     let mut commits = Vec::new();

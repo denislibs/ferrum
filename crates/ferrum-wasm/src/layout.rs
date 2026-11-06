@@ -71,6 +71,8 @@ pub mod kind {
     pub const BLUR: u8 = 9;
     /// Размер холста: CSS-пиксели и `devicePixelRatio`.
     pub const RESIZE: u8 = 10;
+    /// Указатель ушёл с холста (`pointerleave`): курсор не виден другим участникам.
+    pub const POINTER_LEAVE: u8 = 11;
 }
 
 /// Биты модификаторов (байт 2).
@@ -173,6 +175,7 @@ pub fn typescript() -> String {
             ("KEY_DOWN", kind::KEY_DOWN as usize),
             ("KEY_UP", kind::KEY_UP as usize),
             ("BLUR", kind::BLUR as usize),
+            ("POINTER_LEAVE", kind::POINTER_LEAVE as usize),
             ("RESIZE", kind::RESIZE as usize),
         ],
     );

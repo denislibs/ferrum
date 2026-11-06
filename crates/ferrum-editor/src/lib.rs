@@ -23,6 +23,7 @@ mod ops;
 mod outline;
 pub mod pages;
 pub mod panel;
+pub mod presence;
 pub mod presets;
 pub mod props_clip;
 mod remote;
@@ -53,6 +54,10 @@ pub use menu::{main_menu, menu_commands, MenuAction, MenuNode};
 pub use pages::{clean_name, MAX_NAME_CHARS};
 pub use panel::{
     display_rotation, field_applies, panel_pose, DropTarget, NumField, PanelEdit, PanelPose, Phase,
+};
+pub use presence::{
+    fit_view, peer_color, Gesture, GestureKind, OwnPresence, PeerInfo, PeerSelection, PeerState,
+    PEERS_DRAWN, PEER_STALE_MS,
 };
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
 pub use remote::{

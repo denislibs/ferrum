@@ -22,6 +22,7 @@ use crate::geometry::{
 };
 use crate::input::{Modifiers, PointerEvent};
 use crate::ops::{duplicate, local_delta, reposition};
+use crate::presence::{Gesture, GestureKind};
 use crate::scale::{scale_patches, uniform_factor};
 use crate::selection::{
     deeper, drop_frame_at, frame_label_at, locked, resolve_with, root_frame_at, selection_parents,
@@ -721,6 +722,66 @@ impl SelectTool {
     }
 }
 
+/// Правки живого превью чужого жеста (спека подсистемы 4, раздел 9): те же функции, что у
+/// своего жеста этого вида, по выделению участника и матрице его жеста. Привязки и пиксели
+/// участник уже учёл в матрице. Сцена — без чужого превью: базы берутся из документа.
+pub(crate) fn gesture_patches(
+    scene: &ferrum_scene::Scene,
+    selection: &[NodeId],
+    g: &Gesture,
+    fonts: &ferrum_text::SharedFonts,
+) -> Vec<(NodeId, PropsPatch)> {
+    let ids: Vec<NodeId> = top_level(scene, selection)
+        .into_iter()
+        .filter(|id| {
+            scene
+                .slot(*id)
+                .is_some_and(|s| !scene.is_draft(*id) && !locked(scene, s))
+        })
+        .collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    match g.kind {
+        GestureKind::Move => {
+            let delta = g.transform.translation();
+            ids.iter()
+                .filter_map(|id| {
+                    let n = scene.node(*id)?;
+                    let parent_world = n.parent.map_or(Affine::IDENTITY, |p| scene.at(p).world);
+                    let dl = local_delta(parent_world, delta);
+                    Some((
+                        *id,
+                        PropsPatch {
+                            x: Some(n.props.x + dl.x),
+                            y: Some(n.props.y + dl.y),
+                            ..Default::default()
+                        },
+                    ))
+                })
+                .collect()
+        }
+        GestureKind::Rotate => rigid_patches(&bases(scene, &ids, false), g.transform, false),
+        GestureKind::Resize => {
+            let bases = bases(scene, &ids, true);
+            let mut patches = scale_patches_in(&bases, g.transform, g.frame, false.into());
+            // Реестр шрифтов занят (раскладка посреди кадра) — текст без переноса строк до
+            // следующего кадра участника.
+            if let Ok(mut f) = fonts.try_borrow_mut() {
+                resize_texts(&mut f, bases.iter().map(|b| (b.id, &b.props)), &mut patches);
+            }
+            patches
+        }
+        GestureKind::Scale => {
+            let bases = bases_deep(scene, &ids);
+            match fonts.try_borrow_mut() {
+                Ok(mut f) => scale_patches(&bases, g.transform, g.frame, g.k, Some(&mut f)),
+                Err(_) => scale_patches(&bases, g.transform, g.frame, g.k, None),
+            }
+        }
+    }
+}
+
 /// Узлы, которые жест может менять: есть в сцене, не черновики, не заблокированы.
 fn editable(cx: &Ctx, ids: &[NodeId]) -> Vec<NodeId> {
     ids.iter()
@@ -1090,6 +1151,36 @@ impl Tool for SelectTool {
         match &self.state {
             State::Dragging(d) if d.copies.is_some() => Cursor::Duplicate,
             _ => self.cursor,
+        }
+    }
+
+    /// Перенос (без копий с Alt: черновиков у других нет), ресайз, «Масштаб» и поворот выделения —
+    /// той же матрицей, что и превью здесь. Конец линии и рамка выделения другим не видны.
+    fn gesture(&self) -> Option<Gesture> {
+        match &self.state {
+            State::Dragging(d) if d.copies.is_none() => Some(Gesture {
+                kind: GestureKind::Move,
+                transform: Affine::translate(d.delta),
+                frame: Affine::IDENTITY,
+                k: 1.0,
+            }),
+            State::Resizing(r) => Some(Gesture {
+                kind: if self.scale {
+                    GestureKind::Scale
+                } else {
+                    GestureKind::Resize
+                },
+                transform: r.transform,
+                frame: r.sbox.to_world,
+                k: r.k,
+            }),
+            State::Rotating(r) => Some(Gesture {
+                kind: GestureKind::Rotate,
+                transform: r.transform,
+                frame: Affine::IDENTITY,
+                k: 1.0,
+            }),
+            _ => None,
         }
     }
 

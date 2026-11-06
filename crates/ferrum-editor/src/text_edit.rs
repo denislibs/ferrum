@@ -150,7 +150,9 @@ impl Editor {
     pub fn set_time(&mut self, now_ms: f64) {
         if now_ms.is_finite() {
             self.now_ms = now_ms;
-            if self.text_edit.is_some() {
+            // Плавное движение чужих курсоров и уход молчащих участников — тоже по времени.
+            let presence = self.presence_time(now_ms);
+            if self.text_edit.is_some() || presence {
                 self.emit();
             }
         }

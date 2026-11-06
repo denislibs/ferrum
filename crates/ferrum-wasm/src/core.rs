@@ -997,6 +997,8 @@ impl Core {
                 }),
                 EditorEvent::CommandStates(changed) => self.push_command_states(changed),
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
+                // Интерфейсу о следовании скажет следующая задача.
+                EditorEvent::Following(_) => {}
             }
         }
         if let Some(ids) = selection {
