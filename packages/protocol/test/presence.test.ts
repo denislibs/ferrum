@@ -96,6 +96,38 @@ test('кадр присутствия больше 2 КБ или неверны�
   expect(parseClientFrame(bad)).toEqual({ t: 'presence-part', body: bad.subarray(1), part: null });
 });
 
+test('предел 2 КБ: верная часть выделения на границе принимается, на байт длиннее — нет', () => {
+  // Узлы одного пира: 8 байт пира, число узлов (2 байта), первый счётчик и разности по байту — всего n + 10 байт.
+  const nodes = (n: number) => {
+    const b = new Uint8Array(n + 10);
+    new DataView(b.buffer).setBigUint64(0, 2n, true);
+    b[8] = (n & 0x7f) | 0x80;
+    b[9] = n >> 7;
+    b.fill(1, 10);
+    return b;
+  };
+  const frame = (bytes: Uint8Array) => {
+    const f = new Uint8Array(1 + 6 + bytes.length);
+    f[0] = 6;
+    new DataView(f.buffer).setUint32(1, 5, true);
+    f[5] = 0;
+    f[6] = 1;
+    f.set(bytes, 7);
+    return f;
+  };
+  const edge = frame(nodes(PRESENCE_PART_BYTES - 10));
+  expect(edge.length).toBe(PRESENCE_FRAME_MAX - 1);
+  expect(parseClientFrame(edge)).toMatchObject({ t: 'presence-part', part: { rev: 5, index: 0, parts: 1 } });
+  expect(parseClientFrame(edge)).not.toMatchObject({ part: null });
+  for (const extra of [1, 2]) {
+    const over = frame(nodes(PRESENCE_PART_BYTES - 10 + extra));
+    expect(over.length).toBe(PRESENCE_FRAME_MAX - 1 + extra);
+    // Без предела кадр был бы верным: узлы разбираются.
+    expect(decodeSelectionIds(nodes(PRESENCE_PART_BYTES - 10 + extra))).not.toBeNull();
+    expect(parseClientFrame(over)).toEqual({ t: 'presence-part', body: over.subarray(1), part: null });
+  }
+});
+
 test('узлы выделения: запись одна, туда и обратно', () => {
   const ids = ['5@2', '1@2', '1@18446744073709551615', '2147483647@3', '7@2'];
   const bytes = encodeSelectionIds(ids);
