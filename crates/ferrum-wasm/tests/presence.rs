@@ -662,3 +662,28 @@ fn gesture_with_bad_scale_factor_is_skipped() {
         });
     }
 }
+
+/// Свой «Масштаб», схлопнувший рамку в точку (`k = 0`), уходит другим жестом, а не пропадает
+/// посреди него: коэффициент — малый положительный.
+#[test]
+fn own_scale_collapsed_to_zero_still_goes_to_others() {
+    let mut c = core();
+    c.command(Command::SyncStart);
+    rect(&mut c);
+    c.command(Command::SetTool { tool: Tool::Scale });
+    let at = |x: f64, y: f64, t: f64| PointerEvent::new((x, y), Modifiers::NONE, t);
+    // Правый нижний угол — на левый верхний.
+    c.handle(Input::PointerDown(at(200.0, 200.0, 2000.0)));
+    for (i, p) in [150.0, 120.0, 100.0].into_iter().enumerate() {
+        c.handle(Input::PointerMove(at(p, p, 2010.0 + i as f64)));
+    }
+    c.set_time(5000.0);
+    let sent = presence_events(&mut c);
+    let gesture = match sent.last().expect("кадр жеста") {
+        CoreEvent::Presence { gesture, .. } => *gesture,
+        _ => unreachable!(),
+    };
+    let g = gesture.expect("жест «Масштаба» уходит");
+    assert_eq!(g.kind, GestureKindDto::Scale);
+    assert!(g.k > 0.0 && g.k < 1e-3, "k = {}", g.k);
+}

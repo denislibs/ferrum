@@ -27,6 +27,9 @@ pub const PRESENCE_PART_BYTES: usize = 2040;
 pub const PRESENCE_PARTS_MAX: usize = 16;
 pub const PRESENCE_SELECTION_MAX: usize = 100_000;
 const WORLD_MAX: f64 = 1e9;
+/// Коэффициент своего «Масштаба» для других — не меньше: рамку, схлопнутую ручкой, `k = 0`
+/// (протокол такой не примет), они видят почти схлопнутой, а не теряют жест посреди него.
+const SCALE_K_MIN: f64 = 1e-6;
 
 #[derive(Default)]
 pub(crate) struct PresenceOut {
@@ -110,7 +113,7 @@ fn gesture_dto(g: Gesture) -> Option<PresenceGestureDto> {
         },
         transform: g.transform.as_coeffs(),
         frame: g.frame.as_coeffs(),
-        k: g.k,
+        k: g.k.max(SCALE_K_MIN),
     };
     // Нечисловая матрица (вырожденная рамка) не уходит: превью у других было бы мусором.
     (out.transform.iter().chain(&out.frame).all(|v| coord(*v)) && coord(out.k) && out.k > 0.0)
