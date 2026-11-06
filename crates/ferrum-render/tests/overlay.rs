@@ -299,3 +299,215 @@ fn measurement_badge_sits_on_visible_part_of_long_line() {
     let img = draw((-9000.0, 400.0), (5000.0, 400.0));
     assert!(img.data().iter().all(|c| c.r == 0x1e));
 }
+
+mod remote {
+    use super::common::*;
+    use ferrum_render::{
+        Camera, CpuBackend, ImagePaint, NoImages, Overlay, RemoteMark, RenderBackend, Renderer,
+        Rgba, REMOTE_BOXES_MAX,
+    };
+    use ferrum_scene::Scene;
+    use kurbo::{Affine, BezPath, Point, Rect, Stroke};
+    use std::sync::Arc;
+    use vello_cpu::peniko::Fill;
+
+    const BLUE: [u8; 3] = [0x0d, 0x74, 0xce];
+
+    fn mark(cursor: Option<Point>, name: &str) -> RemoteMark {
+        RemoteMark {
+            color: Rgba::from_rgba8(BLUE[0], BLUE[1], BLUE[2], 255),
+            name: name.into(),
+            cursor,
+            boxes: Vec::new(),
+            frame: None,
+        }
+    }
+
+    fn overlay(marks: Vec<RemoteMark>) -> Overlay {
+        Overlay {
+            frame_labels: false,
+            remote: Arc::from(marks),
+            ..Default::default()
+        }
+    }
+
+    fn frame(r: &mut Renderer, b: &mut impl RenderBackend, cam: &Camera, o: &Overlay) {
+        r.render(b, &Scene::new(), cam, o, &NoImages, Some(WHITE));
+    }
+
+    /// Бэкенд без картинок: курсор рисуется глифами и обводкой напрямую.
+    struct NoImagesBackend(CpuBackend);
+
+    impl RenderBackend for NoImagesBackend {
+        fn begin_frame(&mut self, w: u16, h: u16) {
+            self.0.begin_frame(w, h)
+        }
+        fn size(&self) -> (u16, u16) {
+            self.0.size()
+        }
+        fn set_transform(&mut self, t: Affine) {
+            self.0.set_transform(t)
+        }
+        fn set_color(&mut self, c: Rgba) {
+            self.0.set_color(c)
+        }
+        fn set_image(&mut self, i: &ImagePaint) {
+            self.0.set_image(i)
+        }
+        fn fill_path(&mut self, p: &BezPath, f: Fill) {
+            self.0.fill_path(p, f)
+        }
+        fn fill_rect(&mut self, r: &Rect) {
+            self.0.fill_rect(r)
+        }
+        fn stroke_path(&mut self, p: &BezPath, s: &Stroke) {
+            self.0.stroke_path(p, s)
+        }
+        fn push_clip(&mut self, p: &BezPath) {
+            self.0.push_clip(p)
+        }
+        fn pop_clip(&mut self) {
+            self.0.pop_clip()
+        }
+        fn push_opacity_layer(&mut self, a: f32) {
+            self.0.push_opacity_layer(a)
+        }
+        fn pop_layer(&mut self) {
+            self.0.pop_layer()
+        }
+        fn supports_images(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn cursor_and_label_are_drawn_at_world_point_in_peer_colour() {
+        let mut cam = camera(200.0, 100.0);
+        // Мир сдвинут: курсор в мире (1000, 500) — на экране (40, 30).
+        cam.set_center(Point::new(1060.0, 520.0));
+        let img = render_overlay(
+            &Scene::new(),
+            &cam,
+            &overlay(vec![mark(Some(Point::new(1000.0, 500.0)), "Анна")]),
+            WHITE,
+        );
+        // Стрелка у острия — цвет участника; левее острия — фон.
+        assert_px(&img, 42, 38, BLUE, 40);
+        assert_px(&img, 35, 38, [255, 255, 255], 0);
+        // Плашка имени справа снизу от острия: цвет участника вокруг букв.
+        assert_px(&img, 52, 51, BLUE, 40);
+    }
+
+    #[test]
+    fn hidden_and_off_screen_cursors_are_not_drawn() {
+        let cam = camera(100.0, 100.0);
+        for m in [
+            mark(None, "Анна"),
+            mark(Some(Point::new(5000.0, 50.0)), "Анна"),
+            mark(Some(Point::new(50.0, 5000.0)), "Анна"),
+            mark(Some(Point::new(-5000.0, 50.0)), "Анна"),
+        ] {
+            let mut r = Renderer::new();
+            let mut cpu = CpuBackend::new(100, 100);
+            frame(&mut r, &mut cpu, &cam, &overlay(vec![m]));
+            let img = cpu.render();
+            for (x, y) in [(5, 5), (50, 50), (95, 95)] {
+                assert_px(&img, x, y, [255, 255, 255], 0);
+            }
+            // Курсор за краем экрана и картинки не строит.
+            assert_eq!(r.cursor_sprites(), 0);
+        }
+    }
+
+    #[test]
+    fn sprite_looks_like_direct_drawing_and_is_built_once() {
+        let cam = camera(160.0, 80.0);
+        let o = overlay(vec![mark(Some(Point::new(20.0, 10.0)), "Вероника")]);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(160, 80);
+        frame(&mut r, &mut cpu, &cam, &o);
+        let sprite = cpu.render();
+        assert_eq!(r.cursor_sprites(), 1);
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.cursor_sprites(), 1, "тот же курсор — та же картинка");
+        let mut direct = NoImagesBackend(CpuBackend::new(160, 80));
+        let mut r2 = Renderer::new();
+        frame(&mut r2, &mut direct, &cam, &o);
+        assert_eq!(r2.cursor_sprites(), 0);
+        let direct = direct.0.render();
+        let mut worst = 0u8;
+        for y in 0..80 {
+            for x in 0..160 {
+                let (a, b) = (px(&sprite, x, y), px(&direct, x, y));
+                worst = worst.max((0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap());
+            }
+        }
+        assert!(
+            worst <= 8,
+            "картинка курсора отличается от прямого рисования на {worst}"
+        );
+    }
+
+    #[test]
+    fn sprites_are_built_a_few_per_frame() {
+        let cam = camera(400.0, 300.0);
+        let marks: Vec<_> = (0..30)
+            .map(|i| {
+                mark(
+                    Some(Point::new(10.0 + i as f64 * 12.0, 20.0)),
+                    &format!("Участник {i}"),
+                )
+            })
+            .collect();
+        let o = overlay(marks);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(400, 300);
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.cursor_sprites(), 8, "не больше восьми картинок за кадр");
+        for _ in 0..3 {
+            frame(&mut r, &mut cpu, &cam, &o);
+        }
+        assert_eq!(r.cursor_sprites(), 30);
+    }
+
+    #[test]
+    fn selection_boxes_and_frame_in_peer_colour() {
+        let cam = camera(200.0, 120.0);
+        let mut m = mark(None, "Анна");
+        m.boxes = vec![
+            (
+                Affine::translate((20.0, 20.0)),
+                Rect::new(0.0, 0.0, 40.0, 30.0),
+            ),
+            (
+                Affine::translate((150.0, 60.0)) * Affine::rotate(0.5),
+                Rect::new(0.0, 0.0, 30.0, 20.0),
+            ),
+        ];
+        m.frame = Some(Rect::new(10.0, 10.0, 190.0, 110.0));
+        let img = render_overlay(&Scene::new(), &cam, &overlay(vec![m]), WHITE);
+        // Рамка узла: левая сторона — x = 20, внутри — фон.
+        assert_px(&img, 20, 35, BLUE, 30);
+        assert_px(&img, 35, 35, [255, 255, 255], 0);
+        // Общая рамка.
+        assert_px(&img, 100, 10, BLUE, 30);
+        assert_px(&img, 190, 60, BLUE, 30);
+    }
+
+    #[test]
+    fn boxes_beyond_the_limit_are_not_drawn() {
+        let cam = camera(400.0, 40.0);
+        let mut m = mark(None, "Анна");
+        m.boxes = (0..REMOTE_BOXES_MAX + 1)
+            .map(|i| {
+                (
+                    Affine::translate((i as f64 * 5.0, 10.0)),
+                    Rect::new(0.0, 0.0, 3.0, 10.0),
+                )
+            })
+            .collect();
+        let img = render_overlay(&Scene::new(), &cam, &overlay(vec![m]), WHITE);
+        assert_px(&img, ((REMOTE_BOXES_MAX - 1) * 5) as u16, 15, BLUE, 30);
+        assert_px(&img, (REMOTE_BOXES_MAX * 5) as u16, 15, [255, 255, 255], 0);
+    }
+}

@@ -1,7 +1,10 @@
 //! Оверлеи поверх содержимого в экранных пикселях: пиксельная сетка, названия
 //! фреймов, направляющие, подсветка наведения, рамка выделения мышью, линии привязки,
-//! рамка выделения с ручками, бейдж «W × H», измерения расстояний с Alt и линейки.
+//! рамка выделения с ручками, бейдж «W × H», измерения расстояний с Alt, линейки и
+//! участники совместной работы: их курсоры с подписью и рамки выделения.
 //! Толщины и размеры задаются в CSS-пикселях и умножаются на `devicePixelRatio`.
+
+use std::sync::Arc;
 
 use ferrum_doc::{NodeId, NodeKind};
 use ferrum_scene::shape::Geometry;
@@ -9,7 +12,12 @@ use ferrum_scene::{Scene, SceneNode};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Shape, Stroke};
 use vello_cpu::peniko::Fill;
 
-use crate::backend::{RenderBackend, Rgba};
+use std::collections::HashMap;
+
+use vello_cpu::peniko::Extend;
+use vello_cpu::Pixmap;
+
+use crate::backend::{CpuBackend, ImageKey, ImagePaint, RenderBackend, Rgba};
 use crate::camera::Camera;
 use crate::text::{Label, TextEngine};
 
@@ -227,7 +235,31 @@ pub struct Overlay {
     pub guides: Vec<GuideMark>,
     /// Направляющая, которую сейчас тянут.
     pub active_guide: Option<ActiveGuide>,
+    /// Другие участники файла на этой странице (спека подсистемы 4, раздел 9).
+    pub remote: Arc<[RemoteMark]>,
 }
+
+/// Другой участник на холсте: его курсор с подписью и рамка его выделения, цветом
+/// участника. Всё — в мировых координатах; кэширует и пересчитывает редактор.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteMark {
+    pub color: Rgba,
+    pub name: Arc<str>,
+    /// Курсор; `None` — указатель вне холста.
+    pub cursor: Option<Point>,
+    /// Рамки выделенных узлов: матрица узла в мир и его границы. Не больше
+    /// `REMOTE_BOXES_MAX`: остальные видны общей рамкой.
+    pub boxes: Vec<(Affine, Rect)>,
+    /// Общая рамка выделения в мире: у нескольких узлов и у выделения, узлы
+    /// которого не пришли или которых здесь нет.
+    pub frame: Option<Rect>,
+}
+
+/// Столько рамок узлов чужого выделения рисуется; дальше — только общая рамка.
+pub const REMOTE_BOXES_MAX: usize = 64;
+/// Подпись чужого курсора: кегль, наибольшая ширина имени — CSS-пиксели.
+pub const REMOTE_LABEL_SIZE: f64 = 11.0;
+pub const REMOTE_LABEL_MAX_WIDTH: f64 = 160.0;
 
 impl Default for Overlay {
     fn default() -> Self {
@@ -245,6 +277,7 @@ impl Default for Overlay {
             rulers: None,
             guides: Vec::new(),
             active_guide: None,
+            remote: Arc::from(Vec::new()),
         }
     }
 }
@@ -281,6 +314,7 @@ pub fn format_size(v: f64) -> String {
 pub(crate) fn draw(
     backend: &mut impl RenderBackend,
     text: &mut TextEngine,
+    sprites: &mut CursorSprites,
     scene: &Scene,
     camera: &Camera,
     overlay: &Overlay,
@@ -338,8 +372,10 @@ pub(crate) fn draw(
     if let Some(v) = &overlay.vector_edit {
         vector_edit(backend, view, dpr, theme, v);
     }
+    remote_frames(backend, view, dpr, &overlay.remote);
     selection(backend, text, scene, camera, overlay);
     measurements(backend, text, camera, overlay);
+    remote_cursors(backend, text, sprites, view, dpr, &overlay.remote);
     if let Some(r) = &overlay.rulers {
         rulers(backend, text, camera, theme, r);
     }
@@ -1122,6 +1158,322 @@ fn selection(
         theme.select,
         theme.on_select,
     );
+}
+
+/// Рамки чужих выделений: у каждого узла — его повёрнутый прямоугольник, у
+/// нескольких — ещё общая рамка, как у своего выделения, но без ручек и бейджа.
+/// Всё, что целиком за краем экрана, пропускается. Стороны рамок по осям —
+/// заливкой прямоугольников (обводка у 50 участников стоила треть цели §13.1),
+/// повёрнутые — обводкой.
+fn remote_frames(backend: &mut impl RenderBackend, view: Affine, dpr: f64, marks: &[RemoteMark]) {
+    if marks.is_empty() {
+        return;
+    }
+    let (w, h) = backend.size();
+    let screen = Rect::new(0.0, 0.0, w as f64, h as f64).inflate(2.0 * dpr, 2.0 * dpr);
+    let line = Stroke::new(dpr);
+    backend.set_transform(Affine::IDENTITY);
+    for m in marks {
+        let mut edges: Vec<Rect> = Vec::new();
+        let mut slanted = BezPath::new();
+        let mut ring = |r: Rect| {
+            let r = Rect::from_points(
+                crisp_point(r.origin(), dpr),
+                crisp_point(Point::new(r.x1, r.y1), dpr),
+            );
+            if !overlaps(r, screen) {
+                return;
+            }
+            let half = dpr / 2.0;
+            // Четыре стороны: верх и низ во всю ширину, бока между ними.
+            edges.push(Rect::new(
+                r.x0 - half,
+                r.y0 - half,
+                r.x1 + half,
+                r.y0 + half,
+            ));
+            edges.push(Rect::new(
+                r.x0 - half,
+                r.y1 - half,
+                r.x1 + half,
+                r.y1 + half,
+            ));
+            if r.y1 - r.y0 > dpr {
+                edges.push(Rect::new(
+                    r.x0 - half,
+                    r.y0 + half,
+                    r.x0 + half,
+                    r.y1 - half,
+                ));
+                edges.push(Rect::new(
+                    r.x1 - half,
+                    r.y0 + half,
+                    r.x1 + half,
+                    r.y1 - half,
+                ));
+            }
+        };
+        for (to_world, b) in m.boxes.iter().take(REMOTE_BOXES_MAX) {
+            let to_device = view * *to_world;
+            let c = to_device.as_coeffs();
+            if c[1] == 0.0 && c[2] == 0.0 {
+                ring(to_device.transform_rect_bbox(*b));
+                continue;
+            }
+            let quad = [
+                Point::new(b.x0, b.y0),
+                Point::new(b.x1, b.y0),
+                Point::new(b.x1, b.y1),
+                Point::new(b.x0, b.y1),
+            ]
+            .map(|p| to_device * p);
+            let bbox = quad
+                .iter()
+                .fold(Rect::from_points(quad[0], quad[0]), |r, p| r.union_pt(*p));
+            if !overlaps(bbox, screen) {
+                continue;
+            }
+            slanted.move_to(quad[0]);
+            for p in &quad[1..] {
+                slanted.line_to(*p);
+            }
+            slanted.close_path();
+        }
+        if let Some(f) = m.frame {
+            ring(view.transform_rect_bbox(f));
+        }
+        if edges.is_empty() && slanted.elements().is_empty() {
+            continue;
+        }
+        backend.set_color(m.color);
+        for e in &edges {
+            backend.fill_rect(e);
+        }
+        if !slanted.elements().is_empty() {
+            backend.stroke_path(&slanted, &line);
+        }
+    }
+}
+
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
+}
+
+/// Стрелка курсора в CSS-пикселях: остриё в начале координат.
+fn cursor_arrow() -> BezPath {
+    let mut p = BezPath::new();
+    p.move_to((0.0, 0.0));
+    p.line_to((0.0, 16.0));
+    p.line_to((4.2, 12.2));
+    p.line_to((7.0, 18.4));
+    p.line_to((9.6, 17.2));
+    p.line_to((6.9, 11.2));
+    p.line_to((12.4, 11.2));
+    p.close_path();
+    p
+}
+
+/// Текст на плашке цвета участника: тёмный на светлом, иначе белый.
+fn ink_on(c: Rgba) -> Rgba {
+    let [r, g, b, _] = c.components;
+    let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if l > 0.6 {
+        Rgba::from_rgba8(0x1a, 0x19, 0x18, 255)
+    } else {
+        Rgba::from_rgba8(255, 255, 255, 255)
+    }
+}
+
+/// Готовая картинка чужого курсора: стрелка с белой обводкой и плашка с именем. Курсор
+/// рисуется одной заливкой прямоугольника этой картинкой: глифы подписи и обводка
+/// стрелки каждый кадр у 50 участников стоили бы больше всей цели §13.1.
+#[derive(Clone)]
+struct Sprite {
+    key: ImageKey,
+    pixmap: Arc<Pixmap>,
+    /// Где в картинке остриё стрелки, пиксели устройства.
+    tip: Point,
+    used: u64,
+}
+
+/// Картинки курсоров по имени, цвету и плотности пикселей. Строится не больше
+/// `SPRITE_BUILDS_PER_FRAME` за кадр: остальные курсоры этого кадра рисуются
+/// напрямую, а следующие кадры — картинкой.
+#[derive(Default)]
+pub(crate) struct CursorSprites {
+    map: HashMap<(Arc<str>, [u8; 4], u32), Sprite>,
+    frame: u64,
+}
+
+/// Столько картинок курсоров строится за кадр (около 0,1 мс каждая).
+const SPRITE_BUILDS_PER_FRAME: usize = 8;
+/// Столько картинок курсоров хранится: участников с курсором — не больше 50 на
+/// страницу, запас на смену имён и тем.
+const SPRITE_LIMIT: usize = 256;
+
+impl CursorSprites {
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn get(&mut self, key: &(Arc<str>, [u8; 4], u32)) -> Option<Sprite> {
+        let frame = self.frame;
+        self.map.get_mut(key).map(|s| {
+            s.used = frame;
+            s.clone()
+        })
+    }
+
+    fn insert(&mut self, key: (Arc<str>, [u8; 4], u32), sprite: Sprite) {
+        if self.map.len() >= SPRITE_LIMIT {
+            // Давно не нужные уходят первыми; в кадре их не больше 50.
+            let frame = self.frame;
+            self.map.retain(|_, s| s.used + 1 >= frame);
+        }
+        self.map.insert(key, sprite);
+    }
+}
+
+/// Стрелка курсора и плашка с именем в своей системе координат: остриё в `tip`.
+fn draw_cursor(
+    backend: &mut impl RenderBackend,
+    label: Option<&Label>,
+    tip: Point,
+    dpr: f64,
+    color: Rgba,
+) {
+    let arrow = Affine::scale(dpr) * cursor_arrow();
+    backend.set_transform(Affine::translate(tip.to_vec2()));
+    backend.set_color(Rgba::from_rgba8(255, 255, 255, 255));
+    backend.stroke_path(&arrow, &Stroke::new(1.5 * dpr));
+    backend.set_color(color);
+    backend.fill_path(&arrow, Fill::NonZero);
+    let Some(label) = label else { return };
+    let pill = label_pill(label, tip, dpr);
+    backend.set_transform(Affine::IDENTITY);
+    backend.set_color(color);
+    backend.fill_path(
+        &RoundedRect::from_rect(pill, 4.0 * dpr).to_path(0.1),
+        Fill::NonZero,
+    );
+    label.draw(
+        backend,
+        Point::new(pill.x0 + 6.0 * dpr, pill.y0 + 3.0 * dpr + label.ascent),
+        ink_on(color),
+    );
+}
+
+/// Плашка имени справа снизу от острия.
+fn label_pill(label: &Label, tip: Point, dpr: f64) -> Rect {
+    let (pad_x, pad_y) = (6.0 * dpr, 3.0 * dpr);
+    let x0 = tip.x + 10.0 * dpr;
+    let y0 = tip.y + 18.0 * dpr;
+    Rect::new(
+        x0,
+        y0,
+        x0 + label.width + 2.0 * pad_x,
+        y0 + label.ascent + label.descent + 2.0 * pad_y,
+    )
+}
+
+/// Картинка курсора: стрелка и плашка на прозрачном фоне с полем в 2 px под обводку.
+fn build_sprite(label: Option<&Label>, dpr: f64, color: Rgba) -> Sprite {
+    let margin = 2.0 * dpr;
+    let tip = Point::new(margin.ceil(), margin.ceil());
+    let mut bounds = Rect::new(0.0, 0.0, tip.x + 14.0 * dpr, tip.y + 20.0 * dpr);
+    if let Some(l) = label {
+        bounds = bounds.union(label_pill(l, tip, dpr));
+    }
+    let (w, h) = (
+        (bounds.x1 + margin).ceil() as u16,
+        (bounds.y1 + margin).ceil() as u16,
+    );
+    let mut cpu = CpuBackend::new(w, h);
+    draw_cursor(&mut cpu, label, tip, dpr, color);
+    Sprite {
+        key: ImageKey::next_raster(),
+        pixmap: Arc::new(cpu.render()),
+        tip,
+        used: 0,
+    }
+}
+
+/// Чужие курсоры: стрелка цвета участника с белой обводкой и плашка с именем справа
+/// снизу от острия. Курсор за краем экрана (вместе с подписью) не рисуется.
+fn remote_cursors(
+    backend: &mut impl RenderBackend,
+    text: &mut TextEngine,
+    sprites: &mut CursorSprites,
+    view: Affine,
+    dpr: f64,
+    marks: &[RemoteMark],
+) {
+    if marks.iter().all(|m| m.cursor.is_none()) {
+        return;
+    }
+    sprites.frame += 1;
+    let mut builds = 0;
+    let images = backend.supports_images();
+    let (w, h) = backend.size();
+    let screen = Rect::new(0.0, 0.0, w as f64, h as f64);
+    let reach = (REMOTE_LABEL_MAX_WIDTH + 40.0) * dpr;
+    for m in marks {
+        let Some(at) = m.cursor else { continue };
+        let tip = view * at;
+        if !tip.x.is_finite()
+            || !tip.y.is_finite()
+            || tip.x < screen.x0 - reach
+            || tip.y < screen.y0 - reach
+            || tip.x > screen.x1
+            || tip.y > screen.y1
+        {
+            continue;
+        }
+        // Картинка ложится пиксель в пиксель: остриё — на целом пикселе.
+        let tip = Point::new(tip.x.round(), tip.y.round());
+        let key = (
+            m.name.clone(),
+            m.color.to_rgba8().to_u8_array(),
+            (dpr * 64.0).round() as u32,
+        );
+        let mut sprite = if images { sprites.get(&key) } else { None };
+        if sprite.is_none() && images && builds < SPRITE_BUILDS_PER_FRAME {
+            builds += 1;
+            let label = text.label(
+                &m.name,
+                REMOTE_LABEL_SIZE * dpr,
+                500,
+                REMOTE_LABEL_MAX_WIDTH * dpr,
+            );
+            let s = build_sprite(label.as_deref(), dpr, m.color);
+            sprites.insert(key, s.clone());
+            sprite = Some(s);
+        }
+        match sprite {
+            Some(s) => {
+                let origin = tip - s.tip.to_vec2();
+                let (sw, sh) = (s.pixmap.width() as f64, s.pixmap.height() as f64);
+                backend.set_transform(Affine::IDENTITY);
+                backend.set_image(&ImagePaint {
+                    key: s.key,
+                    pixmap: s.pixmap.clone(),
+                    transform: Affine::translate(origin.to_vec2()),
+                    extend: Extend::Pad,
+                    alpha: 1.0,
+                });
+                backend.fill_rect(&Rect::new(origin.x, origin.y, origin.x + sw, origin.y + sh));
+            }
+            None => {
+                let label = text.label(
+                    &m.name,
+                    REMOTE_LABEL_SIZE * dpr,
+                    500,
+                    REMOTE_LABEL_MAX_WIDTH * dpr,
+                );
+                draw_cursor(backend, label.as_deref(), tip, dpr, m.color);
+            }
+        }
+    }
 }
 
 /// Высота плашки с подписью `label` (поля 2 px сверху и снизу).

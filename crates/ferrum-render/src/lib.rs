@@ -37,8 +37,9 @@ pub use gpu::{atlas_config, AtlasStats, GpuBackend, GpuDevice, GPU_ATLAS_PAGES, 
 pub use image::{decode_png, ImageProvider, NoImages, MAX_IMAGE_SIDE};
 pub use overlay::{
     format_size, ruler_steps, ActiveGuide, GuideMark, Measure, MeasureKind, Overlay, OverlayTheme,
-    RulersOverlay, TextEditOverlay, VectorEditOverlay, HANDLE_SIZE, LABEL_SIZE, MEASURE_DASH,
-    MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, RULER_SIZE, TEXT_SELECTION_ALPHA, VECTOR_HANDLE_RADIUS,
+    RemoteMark, RulersOverlay, TextEditOverlay, VectorEditOverlay, HANDLE_SIZE, LABEL_SIZE,
+    MEASURE_DASH, MEASURE_GAP, PIXEL_GRID_MIN_ZOOM, REMOTE_BOXES_MAX, REMOTE_LABEL_MAX_WIDTH,
+    REMOTE_LABEL_SIZE, RULER_SIZE, TEXT_SELECTION_ALPHA, VECTOR_HANDLE_RADIUS,
     VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
 };
 pub use pdf::MAX_PDF_SIDE;
@@ -82,6 +83,8 @@ pub enum ExportError {
 pub struct Renderer {
     painter: Painter,
     text: TextEngine,
+    /// Картинки чужих курсоров (`overlay::CursorSprites`).
+    sprites: overlay::CursorSprites,
     /// Реестр шрифтов и раскладка текстовых узлов — общие с редактором
     /// (`set_fonts`); свой рендерер без реестра знает только вшитый Onest.
     fonts: SharedFonts,
@@ -104,6 +107,7 @@ impl Renderer {
         Renderer {
             painter: Painter::with_raster_limit(bytes),
             text: TextEngine::new(),
+            sprites: Default::default(),
             fonts: Fonts::shared(),
         }
     }
@@ -161,8 +165,20 @@ impl Renderer {
             backend.fill_rect(&Rect::new(0.0, 0.0, w as f64, h as f64));
         }
         let stats = self.draw_scene(backend, scene, camera, images);
-        overlay::draw(backend, &mut self.text, scene, camera, overlay);
+        overlay::draw(
+            backend,
+            &mut self.text,
+            &mut self.sprites,
+            scene,
+            camera,
+            overlay,
+        );
         stats
+    }
+
+    /// Сколько картинок чужих курсоров построено и хранится (для проверки кэша).
+    pub fn cursor_sprites(&self) -> usize {
+        self.sprites.len()
     }
 
     /// Сколько раскладок подписей выполнено за всё время (для проверки кэша).

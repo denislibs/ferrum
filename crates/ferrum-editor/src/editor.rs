@@ -587,6 +587,7 @@ impl Editor {
             rulers: self.rulers_overlay(),
             guides: self.guide_marks(),
             active_guide: self.active_guide(),
+            remote: std::sync::Arc::from(Vec::new()),
         }
     }
 
