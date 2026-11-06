@@ -155,6 +155,15 @@ const update = (clientSeq: number, size = 3) => ({
   bytes: new Uint8Array(size).fill(1),
 });
 const tick = () => new Promise((r) => setTimeout(r, 0));
+/** Время до следующего сокета, и не дальше: у нового сокета свой срок на открытие. */
+const nextSocket = (s: ReturnType<typeof stand>): FakeSocket => {
+  const n = s.sockets.length;
+  for (let waited = 0; s.sockets.length === n; waited += 50) {
+    if (waited > RECONNECT_MAX_MS) throw new Error('переподключения нет');
+    s.clock.advance(50);
+  }
+  return s.last();
+};
 
 test('открытие: hello, сброс курсора, ядро отдаёт подписки; подтверждение — ядру', () => {
   const s = stand();
@@ -421,7 +430,9 @@ test('`GAP` и `UNAVAILABLE`: подписка заново через пауз�
     s.clock.advance(1000);
   }
   expect(s.status()).toBe('rejected');
-  expect(s.flushing()).toBe(false);
+  // Шаг ядра идёт (он отдаёт подписки), правки не уходят.
+  s.client.onCore(update(9));
+  expect(updatesSent(ws)).toEqual([]);
 });
 
 test('подтверждение сбрасывает счёт разрывов', () => {
@@ -441,7 +452,8 @@ test('`BAD_UPDATE` и чужой пир: правки больше не уход
     const ws = s.live();
     ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code });
     expect(s.status()).toBe('rejected');
-    expect(s.flushing()).toBe(false);
+    s.client.onCore(update(2));
+    expect(updatesSent(ws)).toEqual([]);
     ws.receive({ t: 'updates', doc: 'root', seq: 1, bytes: new Uint8Array([1]) });
     expect(s.commands.at(-1)?.type).toBe('applyRemote');
   }
@@ -688,7 +700,8 @@ test('`DOC_LIMIT` — правки не уходят, причина своя', 
   const ws = s.live();
   ws.receive({ t: 'refused', doc: '1@1', clientSeq: 1, code: 'DOC_LIMIT' });
   expect(s.status()).toBe('rejected');
-  expect(s.flushing()).toBe(false);
+  s.client.onCore(update(2));
+  expect(updatesSent(ws)).toEqual([]);
   expect(s.statuses.at(-1)?.detail).toContain('страниц');
 });
 
@@ -809,8 +822,7 @@ test('снимок качается долго, соединение рвётс�
     // Пока снимка нет, правки ждут: документ без подписки дал бы `GAP` на каждую.
     expect(s.flushing()).toBe(false);
     ws.dropped();
-    s.clock.advance(30_000);
-    ws = s.last();
+    ws = nextSocket(s);
     ws.open();
     s.reset();
   }
@@ -884,4 +896,104 @@ test('остановка снимает все ожидания: повтор к
   await tick();
   s.client.stop();
   expect(s.clock.timers.size).toBe(0);
+});
+
+const subscribesSent = (ws: FakeSocket) => {
+  ws.drain();
+  return ws.sent.filter((f) => f.t === 'subscribe').map((f) => (f as { doc: string }).doc);
+};
+
+test('отказ: новые чужие страницы подписываются, свои правки не уходят (финальное ревью, I1)', async () => {
+  const s = stand();
+  const ws = s.live();
+  s.client.onCore(update(1));
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'BAD_UPDATE' });
+  expect(s.status()).toBe('rejected');
+  // Подписки отдаёт тот же шаг ядра, что и правки: он не выключается.
+  expect(s.flushing()).toBe(true);
+  s.client.onCore({ type: 'syncSubscribe', doc: '2@1', version: encodeVersion(new Map()) });
+  expect(subscribesSent(ws)).toContain('2@1');
+  s.client.onCore(update(2));
+  await tick();
+  expect(updatesSent(ws)).toEqual([1]);
+  ws.receive({ t: 'updates', doc: '2@1', seq: 1, bytes: new Uint8Array([1]) });
+  expect(s.commands.at(-1)).toMatchObject({ type: 'applyRemote', doc: '2@1' });
+  expect(s.status()).toBe('rejected');
+});
+
+test('отказ и переподключение: подписки есть, чужие правки идут, свои — нет (финальное ревью, I1)', async () => {
+  const s = stand();
+  const ws = s.live();
+  s.client.onCore(update(1));
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'BAD_UPDATE' });
+  ws.dropped(1006);
+  const ws2 = nextSocket(s);
+  ws2.open();
+  s.reset();
+  expect(s.flushing()).toBe(true);
+  s.subscribe(ws2, ['root', '1@1']);
+  expect(subscribesSent(ws2)).toEqual(['root', '1@1']);
+  // Ядро шлёт всё сверх версии сервера — отказ окончателен до перезагрузки, пачки не уходят.
+  s.client.onCore(update(2));
+  await tick();
+  expect(updatesSent(ws2)).toEqual([]);
+  expect(s.status()).toBe('rejected');
+});
+
+test('`GAP` после своего `UNAVAILABLE` в том же поколении — не разрыв (повторное ревью клиента, N1)', async () => {
+  const s = stand();
+  const ws = s.live();
+  let seq = 0;
+  // Запись базы падает, чтение живо: подписка проходит, первая пачка — «повторите», следующие в пути — разрыв.
+  for (let gen = 0; gen < 10; gen++) {
+    s.client.onCore(update(++seq));
+    s.client.onCore(update(++seq));
+    s.client.onCore(update(++seq));
+    await tick();
+    ws.receive({ t: 'refused', doc: 'root', clientSeq: seq - 2, code: 'UNAVAILABLE' });
+    ws.receive({ t: 'refused', doc: 'root', clientSeq: seq - 1, code: 'GAP' });
+    ws.receive({ t: 'refused', doc: 'root', clientSeq: seq, code: 'GAP' });
+    s.clock.advance(RECONNECT_MAX_MS);
+    s.reset();
+    s.subscribe(ws);
+  }
+  expect(s.status()).not.toBe('rejected');
+});
+
+test('`FORBIDDEN`, а роль та же: неподтверждённое уходит заново без новой правки (финальное ревью, M1)', async () => {
+  const s = stand();
+  const ws = s.live();
+  const before = resets(s);
+  ws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'FORBIDDEN' });
+  await tick();
+  await tick();
+  s.clock.advance(RECONNECT_MAX_MS);
+  expect(resets(s)).toBe(before + 1);
+  s.reset();
+  s.subscribe(ws);
+  expect(s.flushing()).toBe(true);
+  // Роль сменилась на просмотр: подписываться заново незачем, правки не уйдут и так.
+  const v = stand({ access: () => Promise.resolve({ kind: 'role', role: 'viewer', version: 2, canShare: false, own: true }) });
+  const vws = v.live();
+  const vbefore = resets(v);
+  vws.receive({ t: 'refused', doc: 'root', clientSeq: 1, code: 'FORBIDDEN' });
+  await tick();
+  await tick();
+  v.clock.advance(RECONNECT_MAX_MS);
+  expect(resets(v)).toBe(vbefore);
+});
+
+test('сокет не открывается: срок на рукопожатие, потом обычное переподключение (T8-M5)', () => {
+  const s = stand();
+  s.client.start();
+  const first = s.last();
+  s.clock.advance(PONG_WAIT_MS - 1);
+  expect(first.closedCode).toBeNull();
+  s.clock.advance(1);
+  expect(first.closedCode).not.toBeNull();
+  expect(s.status()).toBe('offline');
+  nextSocket(s).open();
+  // Открылся вовремя — срок снят.
+  s.clock.advance(PONG_WAIT_MS);
+  expect(s.last().closedCode).toBeNull();
 });

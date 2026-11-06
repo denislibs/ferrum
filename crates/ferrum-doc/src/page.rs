@@ -989,6 +989,23 @@ impl PageDoc {
         Ok(id)
     }
 
+    /// Та же страница в новом `LoroDoc` без истории: те же узлы под прежними `NodeId` в том же порядке, но операции —
+    /// свои. Повтор дубля страницы (спека подсистемы 4, раздел 7): под новым id страницы это новый документ для сервера, и
+    /// чужие правки, попавшие в копию, он принял бы за подделку пира. Шаги отмены копии находят узлы по `NodeId`.
+    pub(crate) fn rebuilt(&self) -> DocResult<PageDoc> {
+        let copy = PageDoc::new();
+        // Обход без рекурсии: глубина не ограничена.
+        let mut stack: Vec<Option<NodeId>> = vec![None];
+        while let Some(parent) = stack.pop() {
+            for child in self.children(parent) {
+                copy.create_with(child, parent, None, self.props(child)?)?;
+                stack.push(Some(child));
+            }
+        }
+        copy.commit();
+        Ok(copy)
+    }
+
     /// Восстанавливает узел под прежним стабильным ID (отмена удаления).
     fn create_with(
         &self,

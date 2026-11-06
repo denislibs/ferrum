@@ -163,6 +163,8 @@ pub struct RemoteOutcome {
 pub(crate) struct Cursor {
     /// До ответа `subscribed` версия сервера неизвестна, и отправлять нечего.
     pub ready: bool,
+    /// Правки не собрались (ошибка экспорта): до новой подписки не пробуем, ошибка уже сообщена.
+    pub failed: bool,
     pub sent: VersionVector,
     pub acked: VersionVector,
 }
@@ -172,6 +174,8 @@ pub(crate) struct SyncCursors {
     pub docs: HashMap<DocKey, Cursor>,
     /// Новых пачек не собираем, пока их не примет сторона соединения.
     pub subscribed: std::collections::HashSet<DocKey>,
+    /// Отказы экспорта, ещё не сообщённые: документ и причина.
+    pub failures: Vec<(DocKey, String)>,
 }
 
 /// Операций за раз, больше которых незачем пробовать собирать одним куском: на большой вставке целый

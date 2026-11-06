@@ -125,21 +125,30 @@ test('двое правят один файл: каждый видит чужо�
   await nodes(a, 1);
   await nodes(b, 1);
   await synced(a);
-  // Отмена у `b` — его прямоугольник; у него шаг чужой правки не появился.
+  // Повтор возвращает его обоим.
+  await a.keyboard.press('ControlOrMeta+Shift+KeyZ');
+  await nodes(a, 2);
+  await nodes(b, 2);
+  await synced(a);
+  await synced(b);
+  // Отмена у `b` — его прямоугольник. Прямоугольник `a` у него не шаг отмены: вторая отмена его не трогает.
   await b.locator('canvas').click({ position: { x: 10, y: 10 } });
   await b.keyboard.press('ControlOrMeta+KeyZ');
-  await nodes(b, 0);
-  await nodes(a, 0);
+  await nodes(b, 1);
+  await nodes(a, 1);
   await b.keyboard.press('ControlOrMeta+KeyZ');
-  await nodes(a, 0);
+  await expect.poll(async () => (await live(b)).busy).toBe(0);
+  expect((await live(b)).nodes).toBe(1);
+  // Новая правка `b` приходит к `a` после всего, что `b` сделал раньше: два узла — чужой прямоугольник цел.
+  await drawRect(b, 400);
+  await nodes(a, 2);
+  await synced(b);
 
   // Заново открытый файл — то же самое: всё дошло до сервера.
-  await a.keyboard.press('ControlOrMeta+Shift+KeyZ');
-  await nodes(a, 1);
   await synced(a);
   await a.reload();
   await editorReady(a);
-  await nodes(a, 1);
+  await nodes(a, 2);
   await synced(a);
 });
 
@@ -341,11 +350,11 @@ test('выход, пока правки без подтверждения: он�
 });
 
 test('журнал браузера снимается подтверждением сервера и держит неподтверждённое', async ({ browser }) => {
+  test.skip(test.info().project.name === 'server-firefox', 'setOffline в Firefox не закрывает WebSocket');
   const a = await person(browser, newEmail('sn'), 'Анна');
   await newFile(a);
   await drawRect(a);
   await synced(a);
-  test.skip(test.info().project.name === 'server-firefox', 'setOffline в Firefox не закрывает WebSocket');
   // Прежние пачки подтверждены: журнал браузера пуст.
   await expect.poll(() => journalCount(a)).toBe(0);
   await a.context().setOffline(true);

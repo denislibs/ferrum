@@ -964,6 +964,7 @@ impl Document {
                 doc,
                 Cursor {
                     ready: true,
+                    failed: false,
                     sent: server.0.clone(),
                     acked: server.0,
                 },
@@ -973,7 +974,31 @@ impl Document {
 
     /// Свои правки, которых сервер ещё не получал, кусками до `limit` байт. Просмотр и файл только для
     /// чтения правок не шлют, что бы ни было в журнале документа.
+    ///
+    /// Документ, который не экспортируется, не держит остальные: его курсор стоит на месте, а ошибка один раз до следующей
+    /// подписки уходит в [`Document::take_sync_failures`].
     pub fn take_sync_updates(&mut self, limit: usize) -> DocResult<Vec<SyncBatch>> {
+        self.take_sync_updates_with(|_, doc, from| {
+            sync::split_updates(doc, from, limit, sync::MAX_SYNC_FLUSH_BYTES)
+        })
+    }
+
+    /// Документы, чьи правки не собрались для сервера, с причиной. Каждый — один раз до новой подписки.
+    pub fn take_sync_failures(&mut self) -> Vec<(DocKey, String)> {
+        self.sync
+            .as_mut()
+            .map(|s| std::mem::take(&mut s.failures))
+            .unwrap_or_default()
+    }
+
+    fn take_sync_updates_with(
+        &mut self,
+        mut split: impl FnMut(
+            DocKey,
+            &LoroDoc,
+            &VersionVector,
+        ) -> DocResult<Vec<(Vec<u8>, VersionVector)>>,
+    ) -> DocResult<Vec<SyncBatch>> {
         if self.is_read_only() {
             return Ok(Vec::new());
         }
@@ -981,7 +1006,7 @@ impl Document {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
-        for (key, c) in s.docs.iter_mut().filter(|(_, c)| c.ready) {
+        for (key, c) in s.docs.iter_mut().filter(|(_, c)| c.ready && !c.failed) {
             let doc = match key {
                 DocKey::Root => Some(self.root.clone()),
                 DocKey::Page(id) => self.loaded.get(id).map(|p| p.loro().clone()),
@@ -990,9 +1015,15 @@ impl Document {
             if c.sent.includes_vv(&doc.oplog_vv()) {
                 continue;
             }
-            for (bytes, end) in
-                sync::split_updates(&doc, &c.sent, limit, sync::MAX_SYNC_FLUSH_BYTES)?
-            {
+            let parts = match split(*key, &doc, &c.sent) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    c.failed = true;
+                    s.failures.push((*key, e.to_string()));
+                    continue;
+                }
+            };
+            for (bytes, end) in parts {
                 // Отправлено ровно то, что собрано: остаток заберёт следующий вызов.
                 sync::merge(&mut c.sent, &end);
                 out.push(SyncBatch {
@@ -1297,9 +1328,15 @@ impl Document {
                     background,
                     guides,
                 } => {
-                    if !self.parked.contains_key(page) {
+                    let Some(parked) = self.parked.get(page) else {
                         return Err(DocError::PageNotFound(page.to_string()));
-                    }
+                    };
+                    // Скрытые узлы неизвестного типа копия потеряла бы: файл только для чтения повтор не делает.
+                    self.writable()?;
+                    // Под новым id — новый документ: без чужой истории (сервер не примет чужие пиры) и с полной своей
+                    // (снимок shallow от пустой версии не экспортируется). Собирается до правки списка: отказ не оставляет
+                    // пустой страницы.
+                    let doc = parked.rebuilt()?;
                     let at = (*index).min(self.pages().len());
                     let t = self.pages_tree.create_at(TreeParentId::Root, at)?;
                     let meta = self.pages_tree.get_meta(t)?;
@@ -1312,7 +1349,10 @@ impl Document {
                     }
                     self.root.commit();
                     let new = PageId(t);
-                    let doc = self.parked.remove(page).expect("проверено выше");
+                    self.parked.remove(page);
+                    if self.sync.is_some() {
+                        doc.listen();
+                    }
                     self.loaded.insert(new, doc);
                     // Копия целиком — в следующую пачку журнала, как новая страница.
                     self.journaled_pages.insert(new, VersionVector::default());
@@ -1425,6 +1465,73 @@ mod tests {
     use super::*;
     use crate::history::HistoryEntry;
     use crate::types::{NodeKind, PropsPatch};
+
+    /// Правка на странице и в корне, подписка на оба документа от пустой версии сервера.
+    fn syncing() -> (Document, PageId) {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        doc.sync_start();
+        doc.page(page).unwrap();
+        doc.transact(page, vec![], |p| {
+            Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+        })
+        .unwrap();
+        doc.set_name("Файл").unwrap();
+        for (k, _) in doc.take_sync_subscribes() {
+            doc.sync_subscribed(k, SyncVersion::default());
+        }
+        (doc, page)
+    }
+
+    #[test]
+    fn export_failure_of_one_doc_does_not_hold_back_the_others() {
+        // Отказ экспорта одного документа (T3-M3): пачки остальных уходят и их курсоры двигаются, у отказавшего — нет.
+        // Документы в `HashMap`, отказ бывает и до собранного, и после: проверяются оба документа.
+        for fail_root in [true, false] {
+            let (mut doc, page) = syncing();
+            let broken = if fail_root {
+                DocKey::Root
+            } else {
+                DocKey::Page(page)
+            };
+            let other = if fail_root {
+                DocKey::Page(page)
+            } else {
+                DocKey::Root
+            };
+            let split = |key: DocKey, d: &LoroDoc, from: &VersionVector| {
+                if key == broken {
+                    return Err(DocError::InvalidId("сбой экспорта".into()));
+                }
+                sync::split_updates(
+                    d,
+                    from,
+                    sync::MAX_SYNC_BATCH_BYTES,
+                    sync::MAX_SYNC_FLUSH_BYTES,
+                )
+            };
+            let batches = doc.take_sync_updates_with(split).unwrap();
+            assert!(!batches.is_empty());
+            assert!(
+                batches.iter().all(|b| b.doc == other),
+                "ушёл только исправный"
+            );
+            let failed = doc.take_sync_failures();
+            assert_eq!(failed.len(), 1);
+            assert_eq!(failed[0].0, broken);
+            // Сообщается один раз, а не на каждом шаге таймера; исправный документ своё уже отдал.
+            assert!(doc.take_sync_updates_with(split).unwrap().is_empty());
+            assert!(doc.take_sync_failures().is_empty());
+            assert!(doc.sync_unacked(), "правки отказавшего не подтверждены");
+            // Новое соединение — новая попытка: курсор заводит ответ на подписку.
+            doc.sync_reset();
+            for (k, _) in doc.take_sync_subscribes() {
+                doc.sync_subscribed(k, SyncVersion::default());
+            }
+            let again = doc.take_sync_updates(sync::MAX_SYNC_BATCH_BYTES).unwrap();
+            assert!(again.iter().any(|b| b.doc == broken));
+        }
+    }
 
     /// Идентификатор узла, которого нет на свежей странице.
     fn missing_node() -> NodeId {

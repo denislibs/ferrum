@@ -945,3 +945,18 @@ test('«Скачать копию»: сервер просит подождат�
   const plain = stand({ 'POST /api/files/f/compact': new Response('', { status: 503 }) });
   expect(((await plain.files.blob('f').catch((x: unknown) => x)) as ServerFailure).message).toBe(failureMessage('UNAVAILABLE'));
 });
+
+test('«Скачать копию»: копия была бы неполной (503 `INCOMPLETE`) — своя причина, а не «сервер недоступен»', async () => {
+  const s = stand({
+    'POST /api/files/f/compact': new Response(JSON.stringify({ error: 'INCOMPLETE' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+  const e = (await s.files.blob('f').catch((x: unknown) => x)) as ServerFailure;
+  expect(e).toBeInstanceOf(ServerFailure);
+  expect(e.code).toBe('INCOMPLETE');
+  expect(e.message).toBe(
+    'Копию не собрать целиком: часть файла на сервере не сжимается. Правки целы — откройте файл и сохраните копию из редактора',
+  );
+});

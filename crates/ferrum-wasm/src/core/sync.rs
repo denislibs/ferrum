@@ -77,6 +77,10 @@ impl Core {
                 return;
             }
         };
+        // Документ, который не собрался, не держит остальные; сообщение — один раз до нового соединения.
+        for (_, e) in self.editor.take_sync_failures() {
+            self.error(format!("Не удалось собрать правки для сервера: {e}"));
+        }
         if !batches.is_empty() {
             for (hash, bytes) in self.editor.take_sync_images() {
                 self.events.push(CoreEvent::LocalImage {

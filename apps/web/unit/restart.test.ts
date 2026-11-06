@@ -1,7 +1,7 @@
 // Перезапуск редактора после сбоя: не больше двух за минуту, тексты уведомлений.
 
 import { expect, test } from '@playwright/test';
-import { allowRestart, restartText, RESTART_LIMIT, RESTART_WINDOW_MS, takenByOther } from '../src/ui/restart';
+import { afterRole, allowRestart, restartText, RESTART_LIMIT, RESTART_WINDOW_MS, takenByOther } from '../src/ui/restart';
 
 test('не больше двух перезапусков за минуту', () => {
   expect(RESTART_LIMIT).toBe(2);
@@ -48,4 +48,14 @@ test('открыть заново — только когда записал д�
   // Файл уже записан этим редактором или ещё никем.
   expect(takenByOther(other, { stored: true, modified: false })).toBe(false);
   expect(takenByOther({ version: 0, own: false }, fresh)).toBe(false);
+});
+
+test('роль приходит на каждом соединении: не снимает отказ сервера и просмотр после «обновите страницу» (финальное ревью, I2)', () => {
+  // Отказ окончателен до перезагрузки: плашка с причиной остаётся.
+  expect(afterRole('rejected', 'editor', false)).toEqual({ lost: 'rejected', viewOnly: false });
+  // Доступ вернули — плашка «нет доступа» уходит, просмотр — по роли.
+  expect(afterRole('none', 'editor', false)).toEqual({ lost: null, viewOnly: false });
+  expect(afterRole(null, 'viewer', false)).toEqual({ lost: null, viewOnly: true });
+  // Вышла новая версия: правки только после перезагрузки, какой бы ни была роль.
+  expect(afterRole(null, 'editor', true)).toEqual({ lost: null, viewOnly: true });
 });
