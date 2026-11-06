@@ -21,6 +21,12 @@ scope.onmessage = (e: MessageEvent<{ id: number; op: string }>) => {
     scope.postMessage({ id: m.id, ok: false, reason: 'bad', fatal: true });
     return;
   }
+  if (marker && existsSync(`${marker}.load`) && m.op === 'load') {
+    unlinkSync(`${marker}.load`);
+    // Как нехватка памяти wasm при загрузке невиновного документа: память заняли чужие документы.
+    scope.postMessage({ id: m.id, ok: false, reason: 'fatal', message: 'unreachable' });
+    return;
+  }
   if (marker && existsSync(`${marker}.base`) && m.op === 'base') {
     unlinkSync(`${marker}.base`);
     throw new Error('сбой worker’а');

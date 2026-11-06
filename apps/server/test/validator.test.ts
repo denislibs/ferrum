@@ -220,6 +220,38 @@ test("паника не по вине пачки (нехватка памяти,
   }
 });
 
+test("разовая паника при загрузке не по вине документа: повтор на свежем worker'е, пачка принята, карантина нет", async () => {
+  const f = faulty();
+  const saved = console.error;
+  console.error = () => {};
+  try {
+    writeFileSync(`${faultMark}.load`, '');
+    expect((await f.validate(file, 'root', good)).kind).toBe('ok');
+    expect(f.restarts).toBe(1);
+    expect((await f.validate(file, 'root', chain(1)[0])).kind).toBe('ok');
+  } finally {
+    console.error = saved;
+    f.stop();
+  }
+});
+
+test('файл заменён целиком: карантин его документов снят, исправленный документ загружается сразу', async () => {
+  const f = await baseFile();
+  await logged(f, [panicReal]);
+  const saved = console.error;
+  console.error = () => {};
+  try {
+    expect((await v.validate(f, 'root', good)).kind).toBe('retry');
+    expect((await v.validate(f, 'root', good)).kind).toBe('retry');
+    // Замена содержимого: журнала больше нет, строки документов удалены.
+    await s.pool.query('DELETE FROM doc_state WHERE file_id = $1', [f]);
+    v.forget(f);
+    expect((await v.validate(f, 'root', good)).kind).toBe('ok');
+  } finally {
+    console.error = saved;
+  }
+});
+
 test('паника на журнале файла при загрузке: worker заменён, пачка не винится и не проходит', async () => {
   const f = await baseFile();
   await logged(f, [panicReal]);
@@ -230,7 +262,8 @@ test('паника на журнале файла при загрузке: worke
   } finally {
     console.error = saved;
   }
-  expect(v.restarts).toBe(1);
+  // Вторая паника — загрузка одна на свежем worker'е: вина документа доказана.
+  expect(v.restarts).toBe(2);
 });
 
 test('неприменимая запись журнала при загрузке: документ остаётся, проверка не слабеет', async () => {
@@ -346,19 +379,20 @@ test('паника при загрузке: документ на каранти
   console.error = () => {};
   try {
     expect((await q.validate(f, 'root', good)).kind).toBe('retry');
-    expect(q.restarts).toBe(1);
+    // Две паники: вторая — на свежем worker'е, где загружался только этот документ.
+    expect(q.restarts).toBe(2);
     // Честный клиент повторяет «повторите»: worker больше не падает, пока документ на карантине.
     for (let i = 0; i < 5; i++) expect((await q.validate(f, 'root', good)).kind).toBe('retry');
-    expect(q.restarts).toBe(1);
+    expect(q.restarts).toBe(2);
     // Остальные документы проверяются как обычно.
     expect((await q.validate(file, 'root', good)).kind).toBe('ok');
-    // Карантин кончился — новая попытка, и снова карантин, вдвое дольше.
+    // Карантин кончился — одна попытка (вина уже доказана), и снова карантин, вдвое дольше.
     await Bun.sleep(350);
     expect((await q.validate(f, 'root', good)).kind).toBe('retry');
-    expect(q.restarts).toBe(2);
+    expect(q.restarts).toBe(3);
     await Bun.sleep(350);
     expect((await q.validate(f, 'root', good)).kind).toBe('retry');
-    expect(q.restarts).toBe(2);
+    expect(q.restarts).toBe(3);
   } finally {
     console.error = saved;
     q.stop();
@@ -426,5 +460,28 @@ test('документ загружается заново не чаще сро�
     expect(performance.now() - started).toBeGreaterThanOrEqual(2 * 300 - 20);
   } finally {
     r.stop();
+  }
+});
+
+test('повтор загрузки после паники идёт один: чужие загрузки в это время не идут в свежий worker', async () => {
+  const busy = await baseFile();
+  const { blobs, release } = holding(new Set([busy]));
+  const f = new Validator(s.pool, blobs, { workerUrl: new URL('./validator-faulty.worker.ts', import.meta.url), loadsAtOnce: 2 });
+  const saved = console.error;
+  console.error = () => {};
+  try {
+    const other = f.validate(busy, 'root', good, 'другой');
+    for (let i = 0; i < 200 && f.loads === 0; i++) await Bun.sleep(5);
+    writeFileSync(`${faultMark}.load`, '');
+    const mine = f.validate(file, 'root', good, 'свой');
+    // Повтор ждёт, пока чужая загрузка не кончится: паника на нём — уже вина документа.
+    expect(await within(mine, 300)).toBe('долго');
+    release();
+    await other;
+    expect((await mine).kind).toBe('ok');
+    expect(f.restarts).toBe(1);
+  } finally {
+    console.error = saved;
+    f.stop();
   }
 });

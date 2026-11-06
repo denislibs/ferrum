@@ -3,7 +3,8 @@
 //
 // Worker один на сервер, поэтому чужие документы не должны его занимать: загрузок у человека — одна разом, очередь
 // загрузок — по людям и со сроком, документ перезагружается не чаще раза в `reloadMs`, а документ, чей журнал роняет
-// Loro, ждёт на карантине и worker больше не роняет.
+// Loro, ждёт на карантине и worker больше не роняет. Вина документа, как и вина пачки, доказывается второй паникой — на
+// свежем worker'е, где в это время не загружается ничего другого.
 
 import type { Pool } from 'pg';
 import type { BlobStore } from '../blob-store';
@@ -29,7 +30,7 @@ export interface ValidatorOptions {
   loadWaitMs: number;
   /** Документ загружается заново не чаще: пачка с разрывом сбрасывает документ, и иначе каждая стоила бы полной загрузки. */
   reloadMs: number;
-  /** Карантин документа после паники при загрузке; каждая следующая — вдвое дольше, до часа. */
+  /** Карантин документа, чья загрузка роняет Loro и на свежем worker'е; каждый следующий — вдвое дольше, до часа. */
   quarantineMs: number;
   /** Журнал читается кусками не больше этого: одна запись бывает до 16 МБ, кусок — не меньше одной записи. */
   logChunkBytes: number;
@@ -67,12 +68,24 @@ interface Waiting {
 interface Slot {
   w: Worker;
   waiting: Map<number, Waiting>;
+  /** Номер по порядку заведения: worker новее паники в ней не участвовал. */
+  gen: number;
 }
 
 /** Загрузка шла в worker, который сменили по памяти. */
 class Moved extends Error {}
-/** Снимок или журнал документа роняет Loro: документ на карантин. */
-class LoadPanic extends Error {}
+/** Загрузка уронила Loro. `proven` — загрузка шла одна на свежем worker'е: виноват документ, ему карантин. Иначе паника
+ * могла быть и не от него (память worker'а заняли чужие документы): повтор. */
+class LoadPanic extends Error {
+  constructor(
+    message: string,
+    readonly proven: boolean,
+    /** Worker, в котором случилась паника. */
+    readonly gen: number,
+  ) {
+    super(message);
+  }
+}
 /** Очередь загрузок не дошла до этой в срок. */
 class LoadLate extends Error {}
 
@@ -81,6 +94,8 @@ const MAX_QUARANTINE_MS = 3_600_000;
 
 interface LoadTurn {
   user: string;
+  /** Одна на сервере: не начинается, пока идут другие, и другие не начинаются, пока идёт она. */
+  alone: boolean;
   go: () => void;
   late: (e: Error) => void;
 }
@@ -102,8 +117,14 @@ export class Validator {
   /** Документ ушёл из worker'а из-за пачки (ждала неизвестного или её отверг журнал): следующая загрузка — не раньше срока.
    * Замена worker'а и вытеснение по памяти сюда не входят: в них человек не виноват. */
   private readonly dropped = new Set<string>();
-  /** Документы, чей снимок или журнал роняет Loro: до `until` пачки получают «повторите», worker не трогается. */
+  /** Документы, чей снимок или журнал роняет Loro: до `until` пачки получают «повторите», worker не трогается. Запись
+   * остаётся и после срока (до часа): одна попытка, и снова карантин, если документ всё ещё роняет. */
   private readonly quarantine = new Map<string, { until: number; times: number }>();
+  /** Загрузка документа уронила Loro, но вина не доказана: следующая его загрузка идёт одна. `gen` — worker паники. */
+  private readonly suspect = new Map<string, { at: number; gen: number }>();
+  private gens = 0;
+  /** Идёт загрузка «одна на сервере». */
+  private alone = false;
   private readonly watchdog: Timer;
   private stopped = false;
   private readonly options: ValidatorOptions;
@@ -124,7 +145,7 @@ export class Validator {
 
   private spawn(): Slot {
     const w = new Worker(this.options.workerUrl);
-    const slot: Slot = { w, waiting: new Map() };
+    const slot: Slot = { w, waiting: new Map(), gen: ++this.gens };
     w.onmessage = (e: MessageEvent<FromValidator>) => this.answer(slot, e.data);
     w.onerror = (e) => {
       console.error("Проверка пачек: сбой worker'а:", e.message);
@@ -196,6 +217,7 @@ export class Validator {
       this.dropped.delete(key);
     }
     for (const [key, q] of this.quarantine) if (now - q.until > MAX_QUARANTINE_MS) this.quarantine.delete(key);
+    for (const [key, x] of this.suspect) if (now - x.at > MAX_QUARANTINE_MS) this.suspect.delete(key);
     for (const slot of [...this.retiring, ...(this.current ? [this.current] : [])]) {
       for (const w of slot.waiting.values()) {
         if (now - w.at > WORK_DEADLINE_MS) {
@@ -234,42 +256,55 @@ export class Validator {
     return entry.p;
   }
 
-  private mayStart(user: string): boolean {
+  private mayStart(user: string, alone: boolean): boolean {
+    if (this.alone) return false;
+    if (alone) return this.loadsRunning === 0;
     return this.loadsRunning < this.options.loadsAtOnce && (this.loadsBy.get(user) ?? 0) < this.options.loadsPerUser;
   }
 
-  private admit(user: string): void {
+  private admit(user: string, alone: boolean): void {
     this.loadsRunning++;
     this.loadsBy.set(user, (this.loadsBy.get(user) ?? 0) + 1);
+    if (alone) this.alone = true;
   }
 
-  /** Свободное место — тому из ждущих, у кого меньше всего загрузок идёт; среди равных — кто раньше. */
+  /** Свободное место — тому из ждущих, у кого меньше всего загрузок идёт; среди равных — кто раньше. Загрузка «одна» ждёт
+   * только идущих: пока она в очереди, новые не начинаются. */
   private next(): void {
     for (;;) {
+      const first = this.loadQueue.findIndex((t) => t.alone);
       let best = -1;
-      for (const [i, t] of this.loadQueue.entries()) {
-        if (!this.mayStart(t.user)) continue;
-        if (best < 0 || (this.loadsBy.get(t.user) ?? 0) < (this.loadsBy.get(this.loadQueue[best].user) ?? 0)) best = i;
+      if (first >= 0) {
+        if (this.mayStart(this.loadQueue[first].user, true)) best = first;
+      } else {
+        for (const [i, t] of this.loadQueue.entries()) {
+          if (!this.mayStart(t.user, false)) continue;
+          if (best < 0 || (this.loadsBy.get(t.user) ?? 0) < (this.loadsBy.get(this.loadQueue[best].user) ?? 0)) best = i;
+        }
       }
       if (best < 0) return;
       const [turn] = this.loadQueue.splice(best, 1);
-      this.admit(turn.user);
+      this.admit(turn.user, turn.alone);
       turn.go();
     }
   }
 
-  /** Очередь загрузок: не больше `loadsAtOnce` разом и `loadsPerUser` у человека, ожидание — не дольше `loadWaitMs`. */
-  private async gate<T>(user: string, work: () => Promise<T>): Promise<T> {
-    if (this.mayStart(user) && this.loadQueue.length === 0) this.admit(user);
+  /** Очередь загрузок: не больше `loadsAtOnce` разом и `loadsPerUser` у человека, ожидание — не дольше `loadWaitMs`. `alone` —
+   * загрузка одна на сервере. */
+  private async gate<T>(user: string, alone: boolean, work: () => Promise<T>): Promise<T> {
+    if (this.mayStart(user, alone) && this.loadQueue.length === 0) this.admit(user, alone);
     else {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
           const at = this.loadQueue.indexOf(turn);
           if (at >= 0) this.loadQueue.splice(at, 1);
+          // Ушла загрузка «одна»: остальные, ждавшие её, могут начинаться.
+          this.next();
           reject(new LoadLate('загрузка не дождалась очереди'));
         }, this.options.loadWaitMs);
         const turn: LoadTurn = {
           user,
+          alone,
           go: () => {
             clearTimeout(timer);
             resolve();
@@ -286,6 +321,7 @@ export class Validator {
     try {
       return await work();
     } finally {
+      if (alone) this.alone = false;
       this.loadsRunning--;
       const n = (this.loadsBy.get(user) ?? 1) - 1;
       if (n > 0) this.loadsBy.set(user, n);
@@ -299,16 +335,21 @@ export class Validator {
     const last = this.dropped.delete(key) ? this.loadedAt.get(key) : undefined;
     const pause = last === undefined ? 0 : last + this.options.reloadMs - performance.now();
     if (pause > 0) await Bun.sleep(pause);
-    return this.gate(user, async () => {
+    // Прошлая загрузка уронила Loro (или документ уже бывал на карантине): эта идёт одна, на свежем worker'е, и её паника —
+    // вина документа.
+    const alone = this.suspect.has(key) || this.quarantine.has(key);
+    return this.gate(user, alone, async () => {
       if (entry.cancelled) throw new Error('загрузка отменена');
       this.loadedAt.set(key, performance.now());
       this.loads++;
       const slot = this.slot();
+      // Свежий — заведён после паники: она его не испортила, а загрузка идёт одна.
+      const fresh = slot.gen > (this.suspect.get(key)?.gen ?? 0);
       const epoch = ++this.epoch;
       const fail = (r: FromValidator | null) => {
         if (r?.ok) return;
         if (!r && slot !== this.current && !this.stopped) throw new Moved();
-        if (r && !r.ok && r.reason === 'fatal') throw new LoadPanic(`паника: ${r.message}`);
+        if (r && !r.ok && r.reason === 'fatal') throw new LoadPanic(`паника: ${r.message}`, alone && fresh, slot.gen);
         throw new Error('worker заменён');
       };
       const client = await this.pool.connect();
@@ -399,10 +440,19 @@ export class Validator {
       try {
         await this.ensureLoaded(file, doc, user);
         this.quarantine.delete(key);
+        this.suspect.delete(key);
       } catch (e) {
         // Worker сменился по памяти посреди загрузки: загрузить в новый.
         if (e instanceof Moved) continue;
-        if (e instanceof LoadPanic) this.hold(key);
+        if (e instanceof LoadPanic) {
+          // Вина не доказана: worker уже заменён, загрузка повторится одна на свежем.
+          if (!e.proven) {
+            this.suspect.set(key, { at: performance.now(), gen: e.gen });
+            continue;
+          }
+          this.suspect.delete(key);
+          this.hold(key);
+        }
         if (!(e instanceof LoadLate)) console.error('Проверка пачек: не удалось загрузить документ:', e instanceof Error ? e.message : e);
         return { kind: 'retry' };
       }
@@ -437,6 +487,12 @@ export class Validator {
 
   /** Файл заменён целиком: его документы в памяти больше не верны, идущие загрузки читают прежнее. */
   forget(file: string): void {
+    // Новое содержимое — новый документ: прежняя паника о нём ничего не говорит.
+    for (const key of [...this.quarantine.keys(), ...this.suspect.keys()]) {
+      if (!key.startsWith(`${file}/`)) continue;
+      this.quarantine.delete(key);
+      this.suspect.delete(key);
+    }
     for (const [key, l] of this.loading) {
       if (!key.startsWith(`${file}/`)) continue;
       l.cancelled = true;
