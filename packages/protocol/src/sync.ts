@@ -7,6 +7,7 @@ import {
   parsePresenceBatch,
   parsePresenceBody,
   PRESENCE_BATCH_MAX,
+  PRESENCE_FRAME_HOSTILE,
   PRESENCE_FRAME_MAX,
   type PresenceItem,
   type PresencePart,
@@ -81,8 +82,9 @@ export type ClientFrame =
   | { t: 'hello'; protocol: number; schema: number }
   | { t: 'subscribe'; doc: string; version: Uint8Array }
   | { t: 'update'; doc: string; clientSeq: number; bytes: Uint8Array }
-  /** Присутствие (спека, раздел 9): `body` — тело `encodePresenceBody`. При разборе `state` — разобранное тело, `null` —
-   * тело неверно или больше 2 КБ: сервер такой кадр молча отбрасывает, а не рвёт соединение. */
+  /** Присутствие (спека, раздел 9): `body` — тело `encodePresenceBody`. `parseClientFrame` кладёт в `state` разобранное тело,
+   * `null` — тело неверно или больше 2 КБ: сервер такой кадр молча отбрасывает, а не рвёт соединение. `readClientFrame`
+   * (сервер) тело не разбирает: `state` нет. */
   | { t: 'presence'; body: Uint8Array; state?: PresenceState | null }
   /** Часть выделения: тело `encodePartBody`, при разборе `part` — как `state` выше. */
   | { t: 'presence-part'; body: Uint8Array; part?: PresencePart | null }
@@ -313,8 +315,10 @@ export function encodeServerFrame(f: ServerFrame): Uint8Array<ArrayBuffer> {
   }
 }
 
-/** Разбор кадра клиента на сервере. Байты пачки — вид внутрь кадра, без копии. */
-export function parseClientFrame(b: Uint8Array): ClientFrame | null {
+/** Разбор кадра клиента на сервере. Байты пачки — вид внутрь кадра, без копии. Тело присутствия не разбирается: сервер сначала
+ * проверяет пределы частоты и только потом тело (`PresenceHub`), иначе поток отбрасываемых кадров стоил бы разбора каждого.
+ * Кадр присутствия больше `PRESENCE_FRAME_HOSTILE` — неверный кадр. */
+export function readClientFrame(b: Uint8Array): ClientFrame | null {
   if (b.length === 0 || b.length > MAX_SYNC_FRAME_BYTES) return null;
   const r = new Reader(b);
   switch (b[0]) {
@@ -336,19 +340,23 @@ export function parseClientFrame(b: Uint8Array): ClientFrame | null {
       const bytes = r.rest();
       return bytes.length > 0 && bytes.length <= MAX_SYNC_UPDATE_BYTES ? { t: 'update', doc, clientSeq, bytes } : null;
     }
-    case KIND.presence: {
-      const body = r.rest();
-      return { t: 'presence', body, state: b.length <= PRESENCE_FRAME_MAX ? parsePresenceBody(body) : null };
-    }
-    case KIND['presence-part']: {
-      const body = r.rest();
-      return { t: 'presence-part', body, part: b.length <= PRESENCE_FRAME_MAX ? parsePartBody(body) : null };
-    }
+    case KIND.presence:
+      return b.length <= PRESENCE_FRAME_HOSTILE ? { t: 'presence', body: r.rest() } : null;
+    case KIND['presence-part']:
+      return b.length <= PRESENCE_FRAME_HOSTILE ? { t: 'presence-part', body: r.rest() } : null;
     case KIND.ping:
       return r.done() ? { t: 'ping' } : null;
     default:
       return null;
   }
+}
+
+/** Разбор кадра клиента с телом присутствия: для тестов и проб, что шлёт клиент. */
+export function parseClientFrame(b: Uint8Array): ClientFrame | null {
+  const f = readClientFrame(b);
+  if (f?.t === 'presence') return { ...f, state: b.length <= PRESENCE_FRAME_MAX ? parsePresenceBody(f.body) : null };
+  if (f?.t === 'presence-part') return { ...f, part: b.length <= PRESENCE_FRAME_MAX ? parsePartBody(f.body) : null };
+  return f;
 }
 
 /** Разбор кадра сервера у клиента: сеть не доверенная, неверное — как обрыв. Пределы те же, что у кадров клиента: общий предел

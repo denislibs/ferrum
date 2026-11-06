@@ -98,6 +98,12 @@ test('имя: пробелы убираются, пустое и длинное 
   }
 });
 
+test('имя: символы направления и нулевой ширины убираются, из одних них — пустое', () => {
+  expect(parseNameRequest({ name: '\u202eАнна\u2066\u2069\u200b\ufeff' })).toEqual({ name: 'Анна' });
+  expect(parseNameRequest({ name: ' \u200eИв\u200dан\u2060\u2064\u061c ' })).toEqual({ name: 'Иван' });
+  expect(parseNameRequest({ name: '\u202e\u200f\u2067' })).toBeNull();
+});
+
 test('адрес подтверждения: туда и обратно, чужое — не он', () => {
   const hash = confirmHash(TOKEN, '#/file/abc?page=1@2');
   expect(parseConfirmHash(hash)).toEqual({ token: TOKEN, next: '#/file/abc?page=1@2' });

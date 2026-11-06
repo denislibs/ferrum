@@ -7,6 +7,9 @@
 
 /** Предел кадра присутствия от клиента (спека, раздел 9): 2 КБ. */
 export const PRESENCE_FRAME_MAX = 2048;
+/** Кадр присутствия больше этого настоящий клиент не шлёт ни при какой ошибке: это не лишний кадр, а враждебный, и соединение
+ * закрывается (как `ephemeral` больше 64 КБ на этапе 3). Между `PRESENCE_FRAME_MAX` и этим — молча мимо. */
+export const PRESENCE_FRAME_HOSTILE = 64 * 1024;
 /** Координаты мира по модулю: дальше — не холст, а мусор. */
 export const PRESENCE_WORLD_MAX = 1e9;
 /** Выделение: столько узлов называет заголовок, частей — не больше `PRESENCE_PARTS_MAX`. Больше — только рамкой. */
@@ -374,30 +377,53 @@ export function encodeSelectionIds(ids: string[]): Uint8Array<ArrayBuffer> {
   return out.done();
 }
 
-/** Разбор узлов части. Запись одна: пиры строго по возрастанию, разности больше нуля, счётчик в пределах `TreeID`. */
-export function decodeSelectionIds(b: Uint8Array): string[] | null {
+/** Проход по узлам части без строк и без выделения памяти на узел. Запись одна: пиры строго по возрастанию, разности больше
+ * нуля, счётчик в пределах `TreeID`. Возвращает число узлов или `null`. `onPeer` получает смещение пира, `onNode` — счётчик:
+ * они нужны только разбору у клиента, сервер проверяет часть без них. */
+function scanSelectionIds(b: Uint8Array, onPeer?: (at: number) => void, onNode?: (counter: number) => void): number | null {
   const r = new In(b);
-  const out: string[] = [];
-  let prev = -1n;
+  let prevHi = -1;
+  let prevLo = -1;
+  let count = 0;
   while (!r.done()) {
-    const peer = r.u64();
+    const at = r.at;
+    // Пир — u64 LE: сравнение по старшему и младшему словам, без `BigInt`.
+    const lo = r.u32();
+    const hi = r.u32();
     const n = r.varint();
-    if (peer === null || n === null || peer <= prev || n < 1) return null;
-    prev = peer;
+    if (lo === null || hi === null || n === null || n < 1) return null;
+    if (hi < prevHi || (hi === prevHi && lo <= prevLo)) return null;
+    prevHi = hi;
+    prevLo = lo;
     // Каждый узел — хотя бы байт: заголовок не заставит разбирать больше, чем пришло.
     if (n > r.end - r.at) return null;
+    onPeer?.(at);
     let counter = r.varint();
     if (counter === null || counter > MAX_COUNTER) return null;
-    out.push(`${counter}@${peer}`);
+    onNode?.(counter);
     for (let i = 1; i < n; i++) {
       const d = r.varint();
       if (d === null || d < 1) return null;
       counter += d;
       if (counter > MAX_COUNTER) return null;
-      out.push(`${counter}@${peer}`);
+      onNode?.(counter);
     }
+    count += n;
   }
-  return out.length > 0 ? out : null;
+  return count > 0 ? count : null;
+}
+
+/** Разбор узлов части в строки `counter@peer`: нужен клиенту. Сервер проверяет часть `checkPartBody`, без строк. */
+export function decodeSelectionIds(b: Uint8Array): string[] | null {
+  const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const out: string[] = [];
+  let peer = '';
+  const n = scanSelectionIds(
+    b,
+    (at) => (peer = String(view.getBigUint64(at, true))),
+    (counter) => out.push(`${counter}@${peer}`),
+  );
+  return n === null ? null : out;
 }
 
 /** Разбивает выделение на части, каждая — не больше `PRESENCE_PART_BYTES`. Сверх `PRESENCE_PARTS_MAX` — не уходит. */
@@ -443,7 +469,8 @@ export function parsePresenceBody(b: Uint8Array): PresenceState | null {
   return s && r.done() ? s : null;
 }
 
-export function parsePartBody(b: Uint8Array): PresencePart | null {
+/** Заголовок части и её узлы — байтами, без разбора. */
+function readPartHead(b: Uint8Array): { rev: number; index: number; parts: number; rest: Uint8Array } | null {
   if (b.length > PRESENCE_FRAME_MAX) return null;
   const r = new In(b);
   const rev = r.u32();
@@ -452,8 +479,32 @@ export function parsePartBody(b: Uint8Array): PresencePart | null {
   if (rev === null || index === null || parts === null || parts < 1 || parts > PRESENCE_PARTS_MAX || index >= parts) return null;
   const rest = r.bytes(r.end - r.at);
   if (!rest || rest.length > PRESENCE_PART_BYTES) return null;
-  const ids = decodeSelectionIds(rest);
-  return ids ? { rev, index, parts, ids } : null;
+  return { rev, index, parts, rest };
+}
+
+export function parsePartBody(b: Uint8Array): PresencePart | null {
+  const head = readPartHead(b);
+  const ids = head && decodeSelectionIds(head.rest);
+  return head && ids ? { rev: head.rev, index: head.index, parts: head.parts, ids } : null;
+}
+
+/** Проверка части на сервере: та же строгость, что у `parsePartBody`, но без строк узлов — сервер пересылает байты и узлов
+ * не читает. Возвращает заголовок части. */
+export function checkPartBody(b: Uint8Array): { rev: number; index: number; parts: number } | null {
+  const head = readPartHead(b);
+  return head && scanSelectionIds(head.rest) !== null ? { rev: head.rev, index: head.index, parts: head.parts } : null;
+}
+
+/** Байты жеста в конце тела состояния: вид, две матрицы и коэффициент. */
+const GESTURE_BYTES = 1 + 6 * 8 + 6 * 8 + 8;
+
+/** Тело состояния без жеста — для участника без права правки (как в Figma, читатель жестов не делает). `body` — уже проверенное
+ * `parsePresenceBody`: жест в нём последний. */
+export function withoutGesture(body: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (!(body[0] & FLAG_GESTURE)) return body.slice();
+  const out = body.slice(0, body.length - GESTURE_BYTES);
+  out[0] &= ~FLAG_GESTURE;
+  return out;
 }
 
 const ITEM = { join: 1, state: 2, part: 3, left: 4 } as const;

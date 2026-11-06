@@ -27,6 +27,14 @@ const EMAIL_RE =
   /^[\p{L}\p{M}\p{N}#$&'*+/=?^_`{|}~-]+(?:\.[\p{L}\p{M}\p{N}#$&'*+/=?^_`{|}~-]+)*@[\p{L}\p{M}\p{N}](?:[\p{L}\p{M}\p{N}-]*[\p{L}\p{M}\p{N}])?(?:\.[\p{L}\p{M}\p{N}](?:[\p{L}\p{M}\p{N}-]*[\p{L}\p{M}\p{N}])?)+$/u;
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+/** Символы направления и нулевой ширины: невидимы, а переворачивают или маскируют соседний текст — имя с ними можно выдать за
+ * чужое. */
+const INVISIBLE_RE = /[\p{Bidi_Control}\u200b-\u200f\u2060-\u2064\ufeff]/gu;
+
+/** Имя без невидимых символов (имя в профиле и подпись курсора у других). */
+export function stripInvisible(s: string): string {
+  return s.replace(INVISIBLE_RE, '');
+}
 
 /** Все коды ошибок: клиент сверяет ответ с этим списком, поэтому новый код добавляется только здесь.
  * `UNAVAILABLE` — сервер не уложился в срок (зависла база или Valkey). */
@@ -117,11 +125,11 @@ export function parseConfirmRequest(v: unknown): ConfirmRequest | null {
   return r && typeof r.token === 'string' && TOKEN_RE.test(r.token) ? { token: r.token } : null;
 }
 
-/** Имя с первого входа: пробелы по краям убираются, пустое не годится. */
+/** Имя с первого входа: невидимые символы и пробелы по краям убираются, пустое не годится. */
 export function parseNameRequest(v: unknown): NameRequest | null {
   const r = record(v);
   if (!r || typeof r.name !== 'string') return null;
-  const name = r.name.trim();
+  const name = stripInvisible(r.name).trim();
   if (name.length === 0 || Array.from(name).length > MAX_NAME_CHARS || CONTROL_RE.test(name)) return null;
   return { name };
 }
