@@ -263,10 +263,18 @@ fn alt(ed: &mut Editor, down: bool) {
 }
 
 /// Чужое перетаскивание: участник выделил `ids` (одной частью кадра) и тянет их; каждый его
-/// кадр — сдвиг. Замер — приём кадра целиком (`presence_state`: слой превью и сцена).
-fn presence_preview(report: &mut Report, ed: &mut Editor, ids: &[NodeId]) {
+/// кадр — сдвиг. Замер — приём кадра целиком (`presence_state`: слой превью и сцена) при своём
+/// выделении `own` (подпись `own_label`, цель `limit_ms`): своя рамка для других не
+/// пересчитывается на каждом кадре участника.
+fn presence_preview(
+    report: &mut Report,
+    ed: &mut Editor,
+    ids: &[NodeId],
+    (own, own_label, limit_ms): (&[NodeId], &str, f64),
+) {
     use ferrum_editor::{peer_color, Gesture, GestureKind, PeerSelection, PeerState};
     use kurbo::{Affine, Rect};
+    ed.select(own);
     let page = ed.page();
     let before = ed.page_doc().props(ids[500]).unwrap().x;
     ed.presence_join(7, "u-7", "Участник", peer_color(0x0d74ce));
@@ -300,12 +308,14 @@ fn presence_preview(report: &mut Report, ed: &mut Editor, ids: &[NodeId]) {
     let shown = ed.scene().node(ids[500]).unwrap().props.x;
     let doc = ed.page_doc().props(ids[500]).unwrap().x;
     report.gate_median(
-        "Живое превью чужого перетаскивания 1000 узлов: кадр участника",
+        &format!(
+            "Живое превью чужого перетаскивания 1000 узлов: кадр участника, своё выделение {own_label}"
+        ),
         &runs,
-        4.0,
+        limit_ms,
     );
     report.check(
-        "Чужое превью: сцена сдвинута, документ — нет",
+        &format!("Чужое превью: сцена сдвинута, документ — нет (своё выделение {own_label})"),
         shown == before + MOVES as f64 * 3.0 && doc == before,
         format!("сцена {shown}, документ {doc}"),
         "сцена сдвинута, документ прежний",
@@ -370,8 +380,12 @@ fn main() {
 
     // 1а. Живое превью чужого перетаскивания тех же 1000 узлов (спека подсистемы 4, раздел 9):
     // кадр участника 20 раз в секунду — слой превью сцены по выделению и матрице жеста, без
-    // правки документа. Цель — как у своего движения.
-    presence_preview(&mut report, &mut ed, &children);
+    // правки документа. Цель — как у своего движения. При своём выделении всей страницы — не
+    // дороже прохода оверлея по своему выделению (своя рамка для других — не на каждый кадр).
+    presence_preview(&mut report, &mut ed, &children, (&[], "пусто", 4.0));
+    presence_preview(&mut report, &mut ed, &children, (&children, "1000", 4.0));
+    presence_preview(&mut report, &mut ed, &children, (&ids, "100 000", 10.0));
+    ed.select(&children);
 
     // 2. Запись перетаскивания 1000 узлов одной транзакцией и её отмена.
     let mut commits = Vec::new();

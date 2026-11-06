@@ -231,6 +231,8 @@ pub struct Scene {
     /// Растёт при каждом изменении сцены (`apply`, превью): холст по нему понимает,
     /// что нужен новый кадр, не сравнивая сцены.
     changes: u64,
+    /// Сколько раз из `changes` пришлось на слой чужого превью (`set_remote_preview`).
+    remote_changes: u64,
     /// Метка состава и имён: растёт на 1 при каждом `apply` и при превью имени.
     /// Превью геометрии и черновики её не меняют — по ней панель слоёв понимает,
     /// что кэш строк устарел.
@@ -349,6 +351,12 @@ impl Scene {
     /// сравнение с запомненным.
     pub fn change_counter(&self) -> u64 {
         self.changes
+    }
+
+    /// Как `change_counter`, но без изменений от слоя чужого превью: наложение и снятие слоя
+    /// его не меняют. По нему видно, что сменились документ или своё превью.
+    pub fn own_change_counter(&self) -> u64 {
+        self.changes.saturating_sub(self.remote_changes)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1299,6 +1307,7 @@ impl Scene {
         }
         if !dirty.is_empty() {
             self.changes += 1;
+            self.remote_changes += 1;
         }
         self.recompute(dirty, Vec::new());
         self.flush_tree();

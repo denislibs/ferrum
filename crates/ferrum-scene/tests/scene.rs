@@ -865,3 +865,33 @@ fn remote_preview_survives_rebuild_and_drops_with_deleted_node() {
     scene.set_remote_preview(&[]);
     assert_matches_rebuild(&scene, &mut doc, page);
 }
+
+#[test]
+fn own_change_counter_ignores_remote_layer_but_not_document_or_own_preview() {
+    let (mut doc, page, [_, r, g, _, _, l]) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let c0 = scene.own_change_counter();
+    // Слой чужого превью: наложение, замена и снятие — счётчик тот же, общий растёт.
+    let all = scene.change_counter();
+    scene.set_remote_preview(&[(r, x(300.0))]);
+    scene.set_remote_preview(&[(r, x(400.0))]);
+    assert!(scene.change_counter() > all);
+    scene.set_remote_preview(&[]);
+    assert_eq!(scene.own_change_counter(), c0);
+    // Своё превью — растёт.
+    scene.set_preview(&[(r, x(50.0))]);
+    let c1 = scene.own_change_counter();
+    assert!(c1 > c0);
+    scene.clear_preview();
+    // Правка документа под слоем — растёт, в том числе с пересборкой сцены.
+    scene.set_remote_preview(&[(r, x(300.0))]);
+    let c2 = scene.own_change_counter();
+    testing::forget(&mut scene, g);
+    doc.transact(page, vec![], |p| p.move_node(l, Some(g), 0).map(|_| vec![]))
+        .unwrap();
+    apply(&mut scene, &mut doc, page);
+    let c3 = scene.own_change_counter();
+    assert!(c3 > c2, "пересборка под слоем — правка");
+    scene.set_remote_preview(&[(r, x(500.0))]);
+    assert_eq!(scene.own_change_counter(), c3);
+}

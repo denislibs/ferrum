@@ -338,16 +338,14 @@ impl Core {
             }
             self.presence.parts_sent = false;
         }
-        // Рамка — заново, если сцена менялась.
+        // Рамка — заново, если менялись документ или своё превью; слой чужого превью не в счёт.
         let scene = self.editor.scene();
-        let key = (scene.generation(), scene.change_counter());
+        let key = (scene.generation(), scene.own_change_counter());
         if self.presence.bounds_key != Some(key) {
             let count = self.editor.selection().len().min(PRESENCE_SELECTION_MAX) as u32;
             // По документу: чужое превью моих узлов — не моя рамка.
             let bounds = self.editor.own_selection_bounds();
-            // Рамка могла наложить чужой слой заново — ключ после неё.
-            let scene = self.editor.scene();
-            self.presence.bounds_key = Some((scene.generation(), scene.change_counter()));
+            self.presence.bounds_key = Some(key);
             let n = self.presence.parts.as_ref().map_or(0, Vec::len);
             self.presence.selection = bounds
                 .filter(|b| n > 0 && [b.x0, b.y0, b.x1, b.y1].iter().all(|v| coord(*v)))

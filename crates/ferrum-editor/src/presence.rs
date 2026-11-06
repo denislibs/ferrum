@@ -125,7 +125,8 @@ pub struct PeerInfo {
 }
 
 type MarksCache = ((u64, u64, u64, PageId), Arc<[RemoteMark]>);
-/// Версия выделения, сцена (`generation`, `scene_epoch`) и счётчик её изменений.
+/// Версия выделения, сцена (`generation`, `scene_epoch`) и счётчик её изменений без чужого слоя
+/// (`Scene::own_change_counter`): наложение слоя рамку не старит.
 type OwnBoundsKey = (u64, u64, u64, u64);
 
 #[derive(Default)]
@@ -144,7 +145,7 @@ pub(crate) struct Presence {
     following_switch: bool,
     marks: RefCell<Option<MarksCache>>,
     /// Рамка своего выделения по документу, посчитанная перед наложением слоя, и с чем она
-    /// верна (`Editor::own_bounds_key` после наложения).
+    /// верна (`Editor::own_bounds_key`).
     own_bounds: Option<(OwnBoundsKey, Option<Rect>)>,
     now: f64,
 }
@@ -466,10 +467,14 @@ impl Editor {
             ));
         }
         if !patches.is_empty() {
-            // Сцена сейчас — документ: своя рамка для других считается здесь, а не под слоем.
-            let bounds = self.selection_world_bounds();
+            // Сцена сейчас — документ: своя рамка для других считается здесь, а не под слоем, и
+            // только если с прошлого раза сменились выделение или документ — не на каждый кадр
+            // участника (проход по своему выделению, до 100 000 узлов).
+            let key = self.own_bounds_key();
+            if self.presence.own_bounds.is_none_or(|(k, _)| k != key) {
+                self.presence.own_bounds = Some((key, self.selection_world_bounds()));
+            }
             self.scene.set_remote_preview(&patches);
-            self.presence.own_bounds = Some((self.own_bounds_key(), bounds));
         }
         self.presence.applied = Some((
             self.presence.preview_rev,
@@ -524,7 +529,7 @@ impl Editor {
             self.selection.version(),
             self.scene.generation(),
             self.scene_epoch,
-            self.scene.change_counter(),
+            self.scene.own_change_counter(),
         )
     }
 
