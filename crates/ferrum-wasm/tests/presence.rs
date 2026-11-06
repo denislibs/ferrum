@@ -765,3 +765,72 @@ fn escape_then_release_in_one_ring_batch_cancels_the_drag() {
         "жест снят у других"
     );
 }
+
+/// Ревью безопасности, H2: пачка сервера из 64 записей с жестами трёх участников по 1000 узлов —
+/// одна пересборка слоя чужого превью на пачку, а не на запись.
+#[test]
+fn server_batch_rebuilds_peer_preview_once() {
+    let mut c = core();
+    c.command(Command::Demo { nodes: 3500 });
+    c.take_events();
+    let scene = c.editor().scene();
+    let ids: Vec<String> = scene
+        .iter()
+        .filter(|(_, n)| n.parent.is_some())
+        .map(|(_, n)| n.id.to_string())
+        .take(3300)
+        .collect();
+    assert_eq!(ids.len(), 3300);
+    let p = page(&c);
+    let mut items = Vec::new();
+    for peer in 1..=3u32 {
+        items.push(join(peer));
+        let mine: Vec<String> = ids[(peer as usize - 1) * 1100..peer as usize * 1100].to_vec();
+        items.push(PresenceItemDto::Part {
+            participant: peer,
+            rev: 1,
+            index: 0,
+            parts: 1,
+            ids: mine,
+        });
+    }
+    c.command(Command::Presence { items });
+    c.take_events();
+    let remote = |c: &Core| {
+        let s = c.editor().scene();
+        s.change_counter() - s.own_change_counter()
+    };
+    let before = remote(&c);
+    let items = (0..64u32)
+        .map(|r| PresenceItemDto::State {
+            participant: r % 3 + 1,
+            page: p.clone(),
+            view: [0.0, 0.0, 800.0, 600.0],
+            cursor: Some([f64::from(r), 0.0]),
+            selection: Some(PresenceSelectionDto {
+                rev: 1,
+                count: 1100,
+                parts: 1,
+                bounds: [0.0, 0.0, 1.0, 1.0],
+            }),
+            gesture: Some(PresenceGestureDto {
+                kind: GestureKindDto::Move,
+                transform: [1.0, 0.0, 0.0, 1.0, f64::from(r + 1), 0.0],
+                frame: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                k: 1.0,
+            }),
+        })
+        .collect();
+    c.command(Command::Presence { items });
+    assert!(
+        remote(&c) - before <= 2,
+        "слой снят и наложен один раз: {}",
+        remote(&c) - before
+    );
+    // В слое — два участника из трёх: 2 × 1100 + 1100 > `PREVIEW_NODES`.
+    assert_eq!(
+        c.editor().scene().remote_patches().len(),
+        2 * 1100,
+        "пределы превью"
+    );
+}

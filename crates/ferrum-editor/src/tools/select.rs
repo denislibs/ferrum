@@ -725,12 +725,16 @@ impl SelectTool {
 /// Правки живого превью чужого жеста (спека подсистемы 4, раздел 9): те же функции, что у
 /// своего жеста этого вида, по выделению участника и матрице его жеста. Привязки и пиксели
 /// участник уже учёл в матрице. Сцена — без чужого превью: базы берутся из документа.
+///
+/// `budget` — сколько узлов жест может менять (с поддеревом у ресайза групп и «Масштаба»):
+/// больше — `None`, и правки не считаются (пределы живого превью, `presence::PREVIEW_*`).
 pub(crate) fn gesture_patches(
     scene: &ferrum_scene::Scene,
     selection: &[NodeId],
     g: &Gesture,
     fonts: &ferrum_text::SharedFonts,
-) -> Vec<(NodeId, PropsPatch)> {
+    budget: usize,
+) -> Option<Vec<(NodeId, PropsPatch)>> {
     let ids: Vec<NodeId> = top_level(scene, selection)
         .into_iter()
         .filter(|id| {
@@ -740,9 +744,17 @@ pub(crate) fn gesture_patches(
         })
         .collect();
     if ids.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    match g.kind {
+    let descend = match g.kind {
+        GestureKind::Move | GestureKind::Rotate => Descend::No,
+        GestureKind::Resize => Descend::Groups,
+        GestureKind::Scale => Descend::All,
+    };
+    if !nodes_within(scene, &ids, descend, budget) {
+        return None;
+    }
+    Some(match g.kind {
         GestureKind::Move => {
             let delta = g.transform.translation();
             ids.iter()
@@ -779,7 +791,57 @@ pub(crate) fn gesture_patches(
                 Err(_) => scale_patches(&bases, g.transform, g.frame, g.k, None),
             }
         }
+    })
+}
+
+/// Какие потомки меняет жест вместе с узлом: никакие, поддерево групп (ресайз, `bases` с
+/// детьми групп) или всё поддерево («Масштаб», `bases_deep`).
+#[derive(Clone, Copy, PartialEq)]
+enum Descend {
+    No,
+    Groups,
+    All,
+}
+
+/// Узлов, которые меняет жест над `ids`, не больше `budget`. Обход кончается, как только
+/// предел превышен: поддерево в 100 000 узлов не обходится целиком.
+fn nodes_within(
+    scene: &ferrum_scene::Scene,
+    ids: &[NodeId],
+    descend: Descend,
+    budget: usize,
+) -> bool {
+    let into = |s: Slot| match descend {
+        Descend::No => false,
+        Descend::Groups => scene.at(s).props.kind.is_group_like(),
+        Descend::All => true,
+    };
+    let mut n = 0usize;
+    let mut stack = Vec::new();
+    for id in ids {
+        let Some(slot) = scene.slot(*id) else {
+            continue;
+        };
+        n += 1;
+        if n > budget {
+            return false;
+        }
+        if into(slot) {
+            stack.push(slot);
+        }
+        while let Some(s) = stack.pop() {
+            for &c in &scene.at(s).children {
+                n += 1;
+                if n > budget {
+                    return false;
+                }
+                if into(c) {
+                    stack.push(c);
+                }
+            }
+        }
     }
+    true
 }
 
 /// Узлы, которые жест может менять: есть в сцене, не черновики, не заблокированы.

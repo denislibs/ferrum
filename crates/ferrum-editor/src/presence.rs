@@ -24,6 +24,23 @@ use crate::editor::{Editor, EditorEvent};
 
 /// Курсоры и рамки рисуются у стольких участников страницы, остальные — только в счётчике.
 pub const PEERS_DRAWN: usize = 50;
+/// Живое превью чужих жестов **(поведение)**: узлов у одного участника не больше
+/// `PREVIEW_PEER_NODES` (с поддеревом, которое меняет жест), у всех вместе — не больше
+/// `PREVIEW_NODES`, участников с превью — не больше `PREVIEW_PEERS`, первые по номеру. Сверх
+/// пределов превью участника нет: его курсор и рамка выделения, сдвинутая матрицей жеста,
+/// остаются. Пересборка слоя — работа ядра на каждой пачке, пока кто-то тянет: пределы держат
+/// её цену, сколько бы участников ни прислал сервер (ревью безопасности, H2). Перетаскивание
+/// 1000 узлов в них не упирается.
+pub const PREVIEW_PEER_NODES: usize = 2000;
+pub const PREVIEW_NODES: usize = 3000;
+pub const PREVIEW_PEERS: usize = 8;
+/// Узлы чужого выделения хранятся и обходятся у выделений не больше `PEER_SELECTION_MAX`
+/// узлов, у всех участников вместе — не больше `REMOTE_IDS_MAX`. Больше **(поведение)** — части
+/// не хранятся, выделение участника видно рамкой из его кадра (сдвинутой матрицей жеста) без
+/// рамок узлов и без превью: иначе память ядра и обход на смене сцены росли бы с каждым
+/// соединением (ревью безопасности, M3). Выделение больше предела превью всё равно не получает.
+pub const PEER_SELECTION_MAX: usize = PREVIEW_PEER_NODES;
+pub const REMOTE_IDS_MAX: usize = 100_000;
 /// Участник без кадров дольше этого пропадает (спека, раздел 9).
 pub const PEER_STALE_MS: f64 = 30_000.0;
 /// Плавное движение курсора: от прежнего положения к новому за промежуток между кадрами
@@ -98,21 +115,43 @@ struct Peer {
     /// Когда пришло прошлое положение курсора: длина плавного движения.
     cursor_at: f64,
     rev: u32,
+    /// Части нынешней версии; когда пришли все, их узлы переходят в `ids`, а здесь остаются
+    /// пустые отметки.
     parts: Vec<Option<Vec<NodeId>>>,
     /// Выделение целиком, когда пришли все части его версии.
     ids: Option<Arc<[NodeId]>>,
     seen: f64,
+    /// Растёт при всём, от чего зависят рамки выделения участника: его выделение, части, жест,
+    /// страница.
+    marks_rev: u64,
+    /// Рамки выделения и с чем они посчитаны: курсор движется каждый кадр, а рамки — только на
+    /// смене выделения участника или сцены (ревью безопасности, M3).
+    marks: RefCell<Option<(MarksKey, SelectionMarks)>>,
 }
+
+/// Рамки узлов выделения и общая рамка.
+type SelectionMarks = (Vec<(Affine, Rect)>, Option<Rect>);
+/// Версия рамок участника, сцена (счётчик изменений со слоем превью, `generation`,
+/// `scene_epoch`), страница и есть ли превью участника в слое.
+type MarksKey = (u64, u64, u64, u64, PageId, bool);
 
 impl Peer {
     fn on_page(&self, page: PageId) -> bool {
         self.state.as_ref().is_some_and(|s| s.page == Some(page))
     }
 
-    /// Выделение целиком, если пришли все части нынешней версии.
+    /// Выделение целиком, если пришли все части нынешней версии и узлов столько, сколько
+    /// сказано в заголовке.
     fn selection(&self) -> Option<&Arc<[NodeId]>> {
         let head = self.state.as_ref()?.selection?;
-        (head.rev == self.rev).then_some(self.ids.as_ref()?)
+        let ids = self.ids.as_ref()?;
+        (head.rev == self.rev && ids.len() == head.count as usize).then_some(ids)
+    }
+
+    /// Сколько узлов выделения хранится.
+    fn stored(&self) -> usize {
+        self.ids.as_ref().map_or(0, |ids| ids.len())
+            + self.parts.iter().flatten().map(Vec::len).sum::<usize>()
     }
 }
 
@@ -139,8 +178,12 @@ pub(crate) struct Presence {
     preview_rev: u64,
     /// С чем посчитан слой чужого превью в сцене: версия превью, сцена, страница.
     applied: Option<(u64, u64, u64, PageId)>,
+    /// Участники, чьё превью сейчас в слое (остальные с жестом — за пределами).
+    previewed: Vec<u32>,
     /// Своё действие идёт (`Editor::presence_hold`): слоя нет.
     holds: u32,
+    /// Идёт пачка записей (`Editor::presence_batch`): `emit` — в её конце.
+    batch: u32,
     pub(crate) follow: Option<u32>,
     /// Страница, на которую следование переключает само: это не действие человека.
     following_switch: bool,
@@ -173,6 +216,35 @@ pub fn peer_color(rgb: u32) -> Rgba {
 }
 
 impl Editor {
+    /// Записи одной пачки присутствия: слой чужого превью пересобирается и события уходят один раз
+    /// в конце, а не на каждую запись (иначе пачка из N записей с жестами стоила бы N пересборок
+    /// по всем участникам — ревью безопасности, H2). Пачки вкладываются.
+    pub fn presence_batch(&mut self, f: impl FnOnce(&mut Editor)) {
+        self.presence.batch += 1;
+        f(self);
+        self.presence.batch -= 1;
+        if self.presence.batch == 0 {
+            self.emit();
+        }
+    }
+
+    /// `emit` после записи присутствия — сразу или в конце пачки.
+    fn presence_emit(&mut self) {
+        if self.presence.batch == 0 {
+            self.emit();
+        }
+    }
+
+    /// Известен ли участник.
+    pub fn has_peer(&self, id: u32) -> bool {
+        self.presence.peers.contains_key(&id)
+    }
+
+    /// Сколько участников известно.
+    pub fn peer_count(&self) -> usize {
+        self.presence.peers.len()
+    }
+
     /// Участник пришёл: его человек, имя и цвет — с сервера. Повторный приход того же
     /// номера (имя сменилось) состояние не теряет.
     pub fn presence_join(&mut self, id: u32, user: &str, name: &str, color: Rgba) {
@@ -188,13 +260,15 @@ impl Editor {
             parts: Vec::new(),
             ids: None,
             seen: now,
+            marks_rev: 0,
+            marks: RefCell::new(None),
         });
         p.user = Arc::from(user);
         p.name = Arc::from(name);
         p.color = color;
         p.seen = now;
         self.presence.bump(false);
-        self.emit();
+        self.presence_emit();
     }
 
     /// Состояние участника. Участник без `join` пропускается: имя и цвет знает только сервер.
@@ -244,16 +318,28 @@ impl Editor {
             old.as_ref().map(|s| (s.gesture, s.selection, s.page))
                 != Some((new.gesture, new.selection, new.page))
         };
+        if preview {
+            p.marks_rev += 1;
+        }
         self.presence.bump(preview);
         if self.presence.follow == Some(id) {
             self.follow_peer();
         }
-        self.emit();
+        self.presence_emit();
     }
 
-    /// Часть чужого выделения. Часть другой версии начинает её заново.
+    /// Часть чужого выделения. Часть другой версии начинает её заново. Узлов больше, чем сказано
+    /// в заголовке, больше `PEER_SELECTION_MAX` или больше `REMOTE_IDS_MAX` у всех вместе — часть
+    /// не хранится: выделение видно рамкой из кадра.
     pub fn presence_part(&mut self, id: u32, rev: u32, index: u8, parts: u8, ids: Vec<NodeId>) {
         let now = self.presence.now;
+        let others: usize = self
+            .presence
+            .peers
+            .iter()
+            .filter(|(k, _)| **k != id)
+            .map(|(_, p)| p.stored())
+            .sum();
         let Some(p) = self.presence.peers.get_mut(&id) else {
             return;
         };
@@ -265,14 +351,33 @@ impl Editor {
             p.rev = rev;
             p.parts = vec![None; parts as usize];
             p.ids = None;
+        } else if p.ids.is_some() {
+            // Версия уже собрана: повтор части ничего не меняет.
+            return;
+        }
+        let count = p
+            .state
+            .as_ref()
+            .and_then(|s| s.selection)
+            .filter(|h| h.rev == rev)
+            .map_or(PEER_SELECTION_MAX, |h| h.count as usize);
+        let mine = p.stored() - p.parts[index as usize].as_ref().map_or(0, Vec::len) + ids.len();
+        if mine > count.min(PEER_SELECTION_MAX) || others + mine > REMOTE_IDS_MAX {
+            return;
         }
         p.parts[index as usize] = Some(ids);
         if p.parts.iter().all(Option::is_some) {
-            let all: Vec<NodeId> = p.parts.iter().flatten().flatten().copied().collect();
+            // Узлы переходят в `ids` целиком, в частях — пустые отметки: не храним дважды.
+            let all: Vec<NodeId> = p
+                .parts
+                .iter_mut()
+                .flat_map(|part| part.as_mut().map(std::mem::take).unwrap_or_default())
+                .collect();
             p.ids = Some(Arc::from(all));
         }
+        p.marks_rev += 1;
         self.presence.bump(true);
-        self.emit();
+        self.presence_emit();
     }
 
     /// Участник ушёл: его курсор, рамка и живое превью пропадают сразу; следование за ним
@@ -285,7 +390,7 @@ impl Editor {
             self.set_follow(None);
         }
         self.presence.bump(true);
-        self.emit();
+        self.presence_emit();
     }
 
     /// Соединение заново: участники придут снова, прежние не остаются двойниками.
@@ -298,7 +403,7 @@ impl Editor {
             self.set_follow(None);
         }
         self.presence.bump(true);
-        self.emit();
+        self.presence_emit();
     }
 
     /// Время ядра: плавное движение курсоров и уход молчащих участников.
@@ -429,6 +534,7 @@ impl Editor {
             self.scene.set_remote_preview(&[]);
         }
         self.presence.applied = None;
+        self.presence.previewed.clear();
     }
 
     /// Слой чужого превью по нынешним жестам участников этой страницы. Нет его, пока идёт
@@ -457,7 +563,11 @@ impl Editor {
             self.scene.set_remote_preview(&[]);
         }
         let mut patches: Vec<(NodeId, PropsPatch)> = Vec::new();
-        for p in self.presence.peers.values() {
+        let mut previewed = Vec::new();
+        for (id, p) in &self.presence.peers {
+            if previewed.len() == PREVIEW_PEERS {
+                break;
+            }
             if !p.on_page(self.page) {
                 continue;
             }
@@ -465,13 +575,22 @@ impl Editor {
                 continue;
             };
             let Some(ids) = p.selection() else { continue };
-            patches.extend(crate::tools::select::gesture_patches(
-                &self.scene,
-                ids,
-                &g,
-                &self.fonts,
-            ));
+            let budget = PREVIEW_PEER_NODES.min(PREVIEW_NODES - patches.len());
+            // Выделение больше остатка — превью нет, и обходить его не нужно.
+            if ids.len() > budget {
+                continue;
+            }
+            let Some(own) =
+                crate::tools::select::gesture_patches(&self.scene, ids, &g, &self.fonts, budget)
+            else {
+                continue;
+            };
+            if !own.is_empty() {
+                patches.extend(own);
+                previewed.push(*id);
+            }
         }
+        self.presence.previewed = previewed;
         if !patches.is_empty() {
             // Сцена сейчас — документ: своя рамка для других считается здесь, а не под слоем, и
             // только если с прошлого раза сменились выделение или документ — не на каждый кадр
@@ -490,8 +609,9 @@ impl Editor {
         ));
     }
 
-    /// Курсоры и рамки участников этой страницы для оверлея. Рамки считаются по сцене при её
-    /// смене, курсоры — каждый кадр (плавное движение).
+    /// Курсоры и рамки участников этой страницы для оверлея. Курсоры — каждый кадр (плавное
+    /// движение), рамки выделения — из кэша участника, пока не сменились его выделение, жест или
+    /// сцена.
     pub(crate) fn remote_marks(&self) -> Arc<[RemoteMark]> {
         let key = (
             self.presence.revision,
@@ -510,12 +630,29 @@ impl Editor {
         let marks: Vec<RemoteMark> = self
             .presence
             .peers
-            .values()
-            .filter(|p| p.on_page(page))
+            .iter()
+            .filter(|(_, p)| p.on_page(page))
             .take(PEERS_DRAWN)
-            .map(|p| {
+            .map(|(id, p)| {
                 let state = p.state.as_ref().expect("на странице — есть состояние");
-                let (boxes, frame) = selection_marks(scene, p, state);
+                let previewed = self.presence.previewed.contains(id);
+                let mk = (
+                    p.marks_rev,
+                    scene.change_counter(),
+                    scene.generation(),
+                    self.scene_epoch,
+                    page,
+                    previewed,
+                );
+                let mut cache = p.marks.borrow_mut();
+                let (boxes, frame) = match &*cache {
+                    Some((k, m)) if *k == mk => m.clone(),
+                    _ => {
+                        let m = selection_marks(scene, p, state, previewed);
+                        *cache = Some((mk, m.clone()));
+                        m
+                    }
+                };
                 RemoteMark {
                     color: p.color,
                     name: p.name.clone(),
@@ -621,12 +758,9 @@ pub struct OwnPresence {
 }
 
 /// Рамки чужого выделения: узлы, которые есть в сцене (не больше `REMOTE_BOXES_MAX`), и общая
-/// рамка. Пока части не пришли или их больше предела — рамка из кадра, сдвинутая жестом.
-fn selection_marks(
-    scene: &Scene,
-    p: &Peer,
-    state: &PeerState,
-) -> (Vec<(Affine, Rect)>, Option<Rect>) {
+/// рамка. Пока части не пришли, узлов больше предела или жест участника идёт без превью (за
+/// пределами превью) — рамка из кадра, сдвинутая жестом.
+fn selection_marks(scene: &Scene, p: &Peer, state: &PeerState, previewed: bool) -> SelectionMarks {
     let Some(head) = state.selection else {
         return (Vec::new(), None);
     };
@@ -640,7 +774,7 @@ fn selection_marks(
     let Some(ids) = p.selection() else {
         return fallback();
     };
-    if ids.len() < head.count as usize {
+    if state.gesture.is_some() && !previewed {
         return fallback();
     }
     let mut boxes = Vec::new();

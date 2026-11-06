@@ -607,3 +607,243 @@ fn own_selection_bounds_for_others_ignore_peer_preview() {
         Some(Rect::new(10.0, 10.0, 60.0, 50.0))
     );
 }
+
+/// `n` прямоугольников 10×10 одной правкой (в `parent` или на странице), по 20 в ряд.
+fn many(h: &mut H, parent: Option<NodeId>, n: usize) -> Vec<NodeId> {
+    h.ed.transact(|tx| {
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let id = tx.create_node(parent, None, ferrum_doc::NodeKind::Rect)?;
+            tx.set_props(
+                id,
+                &patch((i % 20) as f64 * 12.0, (i / 20) as f64 * 12.0, 10.0, 10.0),
+            )?;
+            ids.push(id);
+        }
+        Ok(ids)
+    })
+    .unwrap()
+}
+
+/// Сколько раз слой чужого превью менялся: счётчик сцены без своих изменений.
+fn remote_changes(h: &H) -> u64 {
+    h.ed.scene().change_counter() - h.ed.scene().own_change_counter()
+}
+
+/// Ревью безопасности, H2: пачка из многих записей с жестами — одна пересборка слоя и одно
+/// `emit`, а не по записи.
+#[test]
+fn batch_of_peer_frames_rebuilds_preview_once() {
+    let mut h = H::new();
+    let ids = many(&mut h, None, 30);
+    for p in 1..=3 {
+        join(&mut h, p);
+        let mine = &ids[(p as usize - 1) * 10..p as usize * 10];
+        h.ed.presence_part(p, 1, 0, 1, mine.to_vec());
+    }
+    h.ed.take_events();
+    let before = remote_changes(&h);
+    h.ed.presence_batch(|ed| {
+        for r in 0..64u32 {
+            let p = r % 3 + 1;
+            let mine = &ids[(p as usize - 1) * 10..p as usize * 10];
+            let s = moving(ed, mine, f64::from(r + 1));
+            ed.presence_state(p, s);
+        }
+    });
+    assert!(
+        remote_changes(&h) - before <= 2,
+        "слой снят и наложен один раз: {}",
+        remote_changes(&h) - before
+    );
+    let redraws =
+        h.ed.take_events()
+            .into_iter()
+            .filter(|e| *e == EditorEvent::NeedsRedraw)
+            .count();
+    assert_eq!(redraws, 1, "события — один раз на пачку");
+    // Слой — по последним записям каждого участника.
+    for (id, dx) in [(ids[0], 64.0), (ids[10], 62.0), (ids[20], 63.0)] {
+        let x = h.props(id).x;
+        assert_eq!(h.ed.scene().node(id).unwrap().props.x, x + dx);
+    }
+}
+
+/// (поведение) Пределы живого превью: выделение участника больше `PREVIEW_PEER_NODES` (с
+/// поддеревом «Масштаба»), сумма больше `PREVIEW_NODES` и участники сверх `PREVIEW_PEERS` —
+/// без превью; их курсор и рамка, сдвинутая жестом, остаются.
+#[test]
+fn peer_preview_is_capped_by_nodes_and_peers() {
+    let mut h = H::new();
+    // «Масштаб» фрейма с поддеревом больше предела участника: превью нет, обхода тоже.
+    let f = h.frame(None, 0.0, 0.0, 400.0, 400.0);
+    many(&mut h, Some(f), PREVIEW_PEER_NODES);
+    join(&mut h, 1);
+    h.ed.presence_part(1, 1, 0, 1, vec![f]);
+    let mut s = select(&h.ed, &[f], 1);
+    s.cursor = Some(Point::new(5.0, 5.0));
+    s.gesture = Some(Gesture {
+        kind: GestureKind::Scale,
+        transform: Affine::scale(2.0),
+        frame: Affine::IDENTITY,
+        k: 2.0,
+    });
+    h.ed.presence_state(1, s);
+    assert!(
+        !h.ed.scene().has_remote_preview(),
+        "поддерево {} > {PREVIEW_PEER_NODES}",
+        PREVIEW_PEER_NODES + 1
+    );
+    let m = h.ed.overlay().remote[0].clone();
+    assert_eq!(m.cursor, Some(Point::new(5.0, 5.0)), "курсор остаётся");
+    assert_eq!(
+        m.frame,
+        Some(Rect::new(0.0, 0.0, 2.0, 2.0)),
+        "рамка из кадра, сдвинутая жестом"
+    );
+    assert!(m.boxes.is_empty());
+    h.ed.presence_left(1);
+
+    // Сумма: у первого участника превью есть, у второго оно не поместилось бы.
+    let big = PREVIEW_NODES - PREVIEW_PEER_NODES + 1;
+    let a = many(&mut h, None, PREVIEW_PEER_NODES);
+    let b = many(&mut h, None, big);
+    join(&mut h, 2);
+    join(&mut h, 3);
+    drag_by(&mut h, 2, &a, 1000.0);
+    drag_by(&mut h, 3, &b, 1000.0);
+    assert_eq!(h.ed.scene().node(a[0]).unwrap().props.x, 1000.0);
+    assert_eq!(
+        h.ed.scene().node(b[0]).unwrap().props.x,
+        0.0,
+        "{} + {big} > {PREVIEW_NODES}",
+        PREVIEW_PEER_NODES
+    );
+    assert_eq!(h.ed.scene().remote_patches().len(), PREVIEW_PEER_NODES);
+    // Первый закончил — второй помещается.
+    let s = select(&h.ed, &a, 1);
+    h.ed.presence_state(2, s);
+    assert_eq!(h.ed.scene().node(b[0]).unwrap().props.x, 1000.0);
+    h.ed.presence_reset();
+
+    // Участников с превью — первые `PREVIEW_PEERS` по номеру.
+    let one = many(&mut h, None, PREVIEW_PEERS + 1);
+    for (i, id) in one.iter().enumerate() {
+        let p = 10 + i as u32;
+        join(&mut h, p);
+        drag_by(&mut h, p, &[*id], 1000.0);
+    }
+    let moved = one
+        .iter()
+        .filter(|id| h.ed.scene().node(**id).unwrap().props.x >= 1000.0)
+        .count();
+    assert_eq!(moved, PREVIEW_PEERS);
+    assert!(h.ed.scene().node(one[PREVIEW_PEERS]).unwrap().props.x < 1000.0);
+}
+
+fn fake_ids(from: usize, n: usize) -> Vec<NodeId> {
+    (from..from + n)
+        .map(|i| format!("{i}@99").parse().unwrap())
+        .collect()
+}
+
+/// Ревью безопасности, M3: узлов в частях больше, чем сказано в заголовке, — часть не
+/// хранится, выделение видно рамкой из кадра.
+#[test]
+fn peer_selection_parts_beyond_header_count_are_dropped() {
+    let mut h = H::new();
+    let a = h.rect(None, 10.0, 10.0, 50.0, 40.0);
+    let b = h.rect(None, 200.0, 100.0, 30.0, 30.0);
+    join(&mut h, 1);
+    let mut s = select(&h.ed, &[a], 1);
+    s.selection.as_mut().unwrap().bounds = Rect::new(1.0, 2.0, 3.0, 4.0);
+    h.ed.presence_state(1, s);
+    h.ed.presence_part(1, 1, 0, 1, vec![a, b]);
+    let m = h.ed.overlay().remote[0].clone();
+    assert!(m.boxes.is_empty(), "count = 1, пришло 2: {:?}", m.boxes);
+    assert_eq!(m.frame, Some(Rect::new(1.0, 2.0, 3.0, 4.0)));
+    // Правильная часть той же версии принимается.
+    h.ed.presence_part(1, 1, 0, 1, vec![a]);
+    assert_eq!(h.ed.overlay().remote[0].boxes.len(), 1);
+    // Заголовок той же версии с другим числом узлов — собранные узлы не годятся.
+    let mut s = select(&h.ed, &[a, b], 1);
+    s.selection.as_mut().unwrap().bounds = Rect::new(1.0, 2.0, 3.0, 4.0);
+    h.ed.presence_state(1, s);
+    assert!(h.ed.overlay().remote[0].boxes.is_empty());
+    let mut s = select(&h.ed, &[], 1);
+    s.selection.as_mut().unwrap().count = 0;
+    h.ed.presence_state(1, s);
+    assert!(
+        h.ed.overlay().remote[0].boxes.is_empty(),
+        "меньше пришедших"
+    );
+}
+
+/// Ревью безопасности, M3: узлы чужих выделений хранятся до `PEER_SELECTION_MAX` у участника и
+/// до `REMOTE_IDS_MAX` у всех; сверх — рамка из кадра.
+#[test]
+fn stored_peer_selection_ids_are_capped_per_peer_and_in_total() {
+    let mut h = H::new();
+    let bounds = Rect::new(1.0, 2.0, 3.0, 4.0);
+    let head = |ed: &Editor, n: usize| {
+        let mut s = select(ed, &[], 1);
+        let sel = s.selection.as_mut().unwrap();
+        sel.count = n as u32;
+        sel.bounds = bounds;
+        s
+    };
+    // Больше предела участника.
+    join(&mut h, 0);
+    let s = head(&h.ed, PEER_SELECTION_MAX + 1);
+    h.ed.presence_state(0, s);
+    h.ed.presence_part(0, 1, 0, 1, fake_ids(0, PEER_SELECTION_MAX + 1));
+    assert_eq!(h.ed.overlay().remote[0].frame, Some(bounds));
+    // Ровно предел — хранится: узлов нет в сцене, рамки нет.
+    let s = head(&h.ed, PEER_SELECTION_MAX);
+    h.ed.presence_state(0, s);
+    h.ed.presence_part(0, 1, 0, 1, fake_ids(0, PEER_SELECTION_MAX));
+    assert_eq!(h.ed.overlay().remote[0].frame, None);
+    h.ed.presence_reset();
+    // Сумма: участники 1…N заняли весь предел, участнику 0 места нет.
+    let n = REMOTE_IDS_MAX / PEER_SELECTION_MAX;
+    for p in 0..=n {
+        join(&mut h, p as u32);
+        let s = head(&h.ed, PEER_SELECTION_MAX);
+        h.ed.presence_state(p as u32, s);
+    }
+    for p in 1..=n {
+        h.ed.presence_part(
+            p as u32,
+            1,
+            0,
+            1,
+            fake_ids(p * PEER_SELECTION_MAX, PEER_SELECTION_MAX),
+        );
+    }
+    h.ed.presence_part(0, 1, 0, 1, fake_ids(0, PEER_SELECTION_MAX));
+    assert_eq!(h.ed.overlay().remote[0].frame, Some(bounds), "места нет");
+    assert_eq!(h.ed.overlay().remote[1].frame, None, "хранится");
+    // Один ушёл — место есть.
+    h.ed.presence_left(1);
+    h.ed.presence_part(0, 1, 0, 1, fake_ids(0, PEER_SELECTION_MAX));
+    assert_eq!(h.ed.overlay().remote[0].frame, None);
+}
+
+/// T5-M2: курсоры и рамки рисуются у первых `PEERS_DRAWN` участников страницы.
+#[test]
+fn only_peers_drawn_are_drawn() {
+    let mut h = H::new();
+    for p in 0..=PEERS_DRAWN as u32 {
+        join(&mut h, p);
+        let s = state(&h.ed, Some((f64::from(p), 0.0)));
+        h.ed.presence_state(p, s);
+    }
+    let remote = h.ed.overlay().remote;
+    assert_eq!(remote.len(), PEERS_DRAWN);
+    assert_eq!(
+        remote[0].cursor,
+        Some(Point::new(0.0, 0.0)),
+        "первые по номеру"
+    );
+    assert_eq!(h.ed.peers().len(), PEERS_DRAWN + 1, "в списке — все");
+}

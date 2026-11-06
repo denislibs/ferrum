@@ -57,7 +57,8 @@ pub use panel::{
 };
 pub use presence::{
     fit_view, peer_color, Gesture, GestureKind, OwnPresence, PeerInfo, PeerSelection, PeerState,
-    PEERS_DRAWN, PEER_STALE_MS,
+    PEERS_DRAWN, PEER_SELECTION_MAX, PEER_STALE_MS, PREVIEW_NODES, PREVIEW_PEERS,
+    PREVIEW_PEER_NODES, REMOTE_IDS_MAX,
 };
 pub use presets::{frame_presets, parse_presets, FramePreset, PresetError};
 pub use remote::{

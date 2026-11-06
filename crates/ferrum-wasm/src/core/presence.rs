@@ -10,7 +10,9 @@
 use std::str::FromStr;
 
 use ferrum_doc::{NodeId, PageId};
-use ferrum_editor::{peer_color, Gesture, GestureKind, PeerSelection, PeerState};
+use ferrum_editor::{
+    peer_color, Editor, Gesture, GestureKind, PeerSelection, PeerState, PEER_SELECTION_MAX,
+};
 use kurbo::{Affine, Point, Rect};
 use serde_bytes::ByteBuf;
 
@@ -218,111 +220,117 @@ pub fn encode_selection(ids: &[NodeId]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Одна запись пачки сервера — редактору; неверная пропускается.
+fn presence_item(editor: &mut Editor, item: PresenceItemDto) {
+    match item {
+        PresenceItemDto::Join {
+            participant,
+            user,
+            name,
+            color,
+        } => {
+            if !editor.has_peer(participant) && editor.peer_count() >= PRESENCE_PEERS_MAX {
+                return;
+            }
+            if user.is_empty() || user.len() > 128 || name.len() > 256 || color > 0xff_ffff {
+                return;
+            }
+            editor.presence_join(participant, &user, &name, peer_color(color));
+        }
+        PresenceItemDto::State {
+            participant,
+            page,
+            view,
+            cursor,
+            selection,
+            gesture: g,
+        } => {
+            let Some(view) = rect(view, true) else {
+                return;
+            };
+            let cursor = match cursor {
+                Some([x, y]) if coord(x) && coord(y) => Some(Point::new(x, y)),
+                Some(_) => return,
+                None => None,
+            };
+            let selection = match selection {
+                Some(s) => {
+                    let ok = s.count >= 1
+                        && s.count as usize <= PRESENCE_SELECTION_MAX
+                        && s.parts >= 1
+                        && s.parts as usize <= PRESENCE_PARTS_MAX;
+                    match rect(s.bounds, false).filter(|_| ok) {
+                        Some(bounds) => Some(PeerSelection {
+                            rev: s.rev,
+                            count: s.count,
+                            parts: s.parts,
+                            bounds,
+                        }),
+                        None => return,
+                    }
+                }
+                None => None,
+            };
+            let gesture = match g {
+                Some(g) => match gesture(g) {
+                    Some(g) => Some(g),
+                    None => return,
+                },
+                None => None,
+            };
+            // Страницы может ещё не быть (кадр участника обогнал её правку): номер
+            // остаётся, и следование перейдёт на неё, как только она дойдёт.
+            let page = PageId::from_str(&page).ok();
+            editor.presence_state(
+                participant,
+                PeerState {
+                    page,
+                    view,
+                    cursor,
+                    selection,
+                    gesture,
+                },
+            );
+        }
+        PresenceItemDto::Part {
+            participant,
+            rev,
+            index,
+            parts,
+            ids,
+        } => {
+            // Часть больше, чем ядро хранит у участника, не разбирается вовсе.
+            if ids.is_empty()
+                || ids.len() > PRESENCE_PART_IDS_MAX.min(PEER_SELECTION_MAX)
+                || parts == 0
+                || parts as usize > PRESENCE_PARTS_MAX
+                || index >= parts
+            {
+                return;
+            }
+            let Ok(ids) = ids.iter().map(|s| NodeId::from_str(s)).collect() else {
+                return;
+            };
+            editor.presence_part(participant, rev, index, parts, ids);
+        }
+        PresenceItemDto::Left { participant } => editor.presence_left(participant),
+    }
+}
+
 impl Core {
-    /// Записи пачки сервера — редактору. Неверная запись пропускается одна, остальные идут.
+    /// Записи пачки сервера — редактору одной пачкой: слой чужого превью пересобирается и события
+    /// уходят один раз на пачку (ревью безопасности, H2). Неверная запись пропускается одна,
+    /// остальные идут.
     pub(super) fn presence_items(&mut self, items: Vec<PresenceItemDto>) {
         if items.len() > PRESENCE_ITEMS_MAX {
             self.error("Слишком много записей присутствия за раз");
             return;
         }
-        for item in items {
-            match item {
-                PresenceItemDto::Join {
-                    participant,
-                    user,
-                    name,
-                    color,
-                } => {
-                    let known = self.editor.peers().iter().any(|p| p.id == participant);
-                    if !known && self.editor.peers().len() >= PRESENCE_PEERS_MAX {
-                        continue;
-                    }
-                    if user.is_empty() || user.len() > 128 || name.len() > 256 || color > 0xff_ffff
-                    {
-                        continue;
-                    }
-                    self.editor
-                        .presence_join(participant, &user, &name, peer_color(color));
-                }
-                PresenceItemDto::State {
-                    participant,
-                    page,
-                    view,
-                    cursor,
-                    selection,
-                    gesture: g,
-                } => {
-                    let Some(view) = rect(view, true) else {
-                        continue;
-                    };
-                    let cursor = match cursor {
-                        Some([x, y]) if coord(x) && coord(y) => Some(Point::new(x, y)),
-                        Some(_) => continue,
-                        None => None,
-                    };
-                    let selection = match selection {
-                        Some(s) => {
-                            let ok = s.count >= 1
-                                && s.count as usize <= PRESENCE_SELECTION_MAX
-                                && s.parts >= 1
-                                && s.parts as usize <= PRESENCE_PARTS_MAX;
-                            match rect(s.bounds, false).filter(|_| ok) {
-                                Some(bounds) => Some(PeerSelection {
-                                    rev: s.rev,
-                                    count: s.count,
-                                    parts: s.parts,
-                                    bounds,
-                                }),
-                                None => continue,
-                            }
-                        }
-                        None => None,
-                    };
-                    let gesture = match g {
-                        Some(g) => match gesture(g) {
-                            Some(g) => Some(g),
-                            None => continue,
-                        },
-                        None => None,
-                    };
-                    // Страницы может ещё не быть (кадр участника обогнал её правку): номер
-                    // остаётся, и следование перейдёт на неё, как только она дойдёт.
-                    let page = PageId::from_str(&page).ok();
-                    self.editor.presence_state(
-                        participant,
-                        PeerState {
-                            page,
-                            view,
-                            cursor,
-                            selection,
-                            gesture,
-                        },
-                    );
-                }
-                PresenceItemDto::Part {
-                    participant,
-                    rev,
-                    index,
-                    parts,
-                    ids,
-                } => {
-                    if ids.is_empty()
-                        || ids.len() > PRESENCE_PART_IDS_MAX
-                        || parts == 0
-                        || parts as usize > PRESENCE_PARTS_MAX
-                        || index >= parts
-                    {
-                        continue;
-                    }
-                    let Ok(ids) = ids.iter().map(|s| NodeId::from_str(s)).collect() else {
-                        continue;
-                    };
-                    self.editor
-                        .presence_part(participant, rev, index, parts, ids);
-                }
-                PresenceItemDto::Left { participant } => self.editor.presence_left(participant),
+        self.editor.presence_batch(|editor| {
+            for item in items {
+                presence_item(editor, item);
             }
-        }
+        });
     }
 
     /// Своё состояние для других: не чаще `PRESENCE_SEND_MS` и только при изменении.
