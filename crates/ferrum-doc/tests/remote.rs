@@ -1522,7 +1522,7 @@ proptest! {
 /// Пиры, чьи правки лежат в пачке.
 fn peers_of(bytes: &[u8]) -> std::collections::HashSet<u64> {
     let meta = loro::LoroDoc::decode_import_blob_meta(bytes, false).unwrap();
-    meta.partial_end_vv.iter().map(|(p, _)| *p).collect()
+    meta.partial_end_vv.keys().copied().collect()
 }
 
 /// Новый документ сервер не знает: подписка отвечает пустой версией.
