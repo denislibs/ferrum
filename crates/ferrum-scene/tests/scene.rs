@@ -761,3 +761,107 @@ fn text_revision_tracks_only_text_changes() {
     apply(&mut scene, &mut doc, page);
     assert!(scene.text_revision() > r2, "удаление текста меняет ревизию");
 }
+
+fn x(x: f64) -> PropsPatch {
+    PropsPatch {
+        x: Some(x),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn remote_preview_moves_scene_and_never_the_document() {
+    let (mut doc, page, [f, r, ..]) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    let before = snapshot(&scene);
+    scene.set_remote_preview(&[(r, x(300.0))]);
+    assert!(scene.has_remote_preview());
+    assert!(
+        !scene.has_preview(),
+        "свой жест чужое превью не видит своим"
+    );
+    assert_eq!(scene.node(r).unwrap().props.x, 300.0);
+    assert_eq!(doc.page(page).unwrap().props(r).unwrap().x, 10.0);
+    // Правка документа под чужим превью: превью остаётся поверх нового документа.
+    doc.transact(page, vec![], |p| {
+        p.set_props(
+            r,
+            &PropsPatch {
+                y: Some(50.0),
+                ..Default::default()
+            },
+        )
+        .map(|_| vec![])
+    })
+    .unwrap();
+    apply(&mut scene, &mut doc, page);
+    let n = scene.node(r).unwrap();
+    assert_eq!((n.props.x, n.props.y), (300.0, 50.0));
+    // Новый список заменяет прежний; пустой возвращает документ.
+    scene.set_remote_preview(&[(f, x(0.0))]);
+    assert_eq!(scene.node(r).unwrap().props.x, 10.0);
+    scene.set_remote_preview(&[]);
+    assert!(!scene.has_remote_preview());
+    assert_matches_rebuild(&scene, &mut doc, page);
+    assert_ne!(snapshot(&scene), before);
+}
+
+#[test]
+fn own_preview_wins_over_remote_and_each_returns_to_the_other() {
+    let (mut doc, page, [_, r, ..]) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    scene.set_remote_preview(&[(r, x(300.0))]);
+    // Свой жест над тем же узлом: видно своё.
+    scene.set_preview(&[(r, x(50.0))]);
+    assert_eq!(scene.node(r).unwrap().props.x, 50.0);
+    // Свой снят — снова чужое, а не документ и не смесь.
+    scene.clear_preview();
+    assert_eq!(scene.node(r).unwrap().props.x, 300.0);
+    // Чужое снято под своим — своё остаётся, документ — под ним.
+    scene.set_preview(&[(r, x(70.0))]);
+    scene.set_remote_preview(&[]);
+    assert_eq!(scene.node(r).unwrap().props.x, 70.0);
+    scene.clear_preview();
+    assert_eq!(scene.node(r).unwrap().props.x, 10.0);
+    assert_matches_rebuild(&scene, &mut doc, page);
+    // Своё превью поверх чужого берёт за основу документ, а не чужое превью.
+    scene.set_remote_preview(&[(r, x(300.0))]);
+    scene.set_preview(&[(
+        r,
+        PropsPatch {
+            y: Some(5.0),
+            ..Default::default()
+        },
+    )]);
+    assert_eq!(scene.node(r).unwrap().props.x, 10.0);
+    scene.clear_preview();
+    scene.set_remote_preview(&[]);
+    assert_matches_rebuild(&scene, &mut doc, page);
+}
+
+#[test]
+fn remote_preview_survives_rebuild_and_drops_with_deleted_node() {
+    let (mut doc, page, [_, r, g, _, _, l]) = sample();
+    let mut scene = Scene::from_page(doc.page(page).unwrap());
+    scene.set_remote_preview(&[(r, x(300.0)), (l, x(5.0))]);
+    testing::forget(&mut scene, g);
+    doc.transact(page, vec![], |p| p.move_node(l, Some(g), 0).map(|_| vec![]))
+        .unwrap();
+    apply(&mut scene, &mut doc, page);
+    assert_eq!(
+        scene.node(r).unwrap().props.x,
+        300.0,
+        "превью пережило перестройку"
+    );
+    doc.transact(page, vec![], |p| p.delete_nodes(&[r]).map(|_| vec![]))
+        .unwrap();
+    apply(&mut scene, &mut doc, page);
+    assert!(scene.node(r).is_none());
+    assert_eq!(
+        scene.remote_patches().len(),
+        1,
+        "превью удалённого узла ушло"
+    );
+    scene.set_remote_preview(&[]);
+    assert_matches_rebuild(&scene, &mut doc, page);
+}
