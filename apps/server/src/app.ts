@@ -7,6 +7,7 @@ import { apiHandler, type ApiDeps, type Ctx, type Limits, type Route } from './a
 import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
 import type { BlobStore, UploadPace } from './blob-store';
+import { clientIp, proxyMatcher } from './client-ip';
 import { fileRoutes, uploadGate } from './file-routes';
 import { imageRoutes } from './image-routes';
 import { shareRoutes } from './share-routes';
@@ -95,6 +96,7 @@ export function startServer(deps: AppDeps, port: number): Running {
     compactor.active = (file) => hub.isOpen(file);
   }
   const handleAuth = authRoutes({ ...deps, hub });
+  const trusted = proxyMatcher(deps.trustedProxies);
   const withHeaders = responseHeaders(deps.publicUrl);
   const api: ApiDeps = {
     ...apiDeps(deps),
@@ -114,7 +116,7 @@ export function startServer(deps: AppDeps, port: number): Running {
         withHeaders(await handleAuth(req, server.requestIP(req)?.address)),
       '/api/files/:id/sync': async (req: Bun.BunRequest<'/api/files/:id/sync'>, server: Bun.Server<ConnData>) => {
         if (!isUuid(req.params.id)) return withHeaders(new Response(null, { status: 404 }));
-        const refused = await hub.upgrade(req, server, req.params.id);
+        const refused = await hub.upgrade(req, server, req.params.id, clientIp(req, server.requestIP(req)?.address, trusted));
         return refused && withHeaders(refused);
       },
       '/api/*': async (req: Request) => withHeaders(await handleApi(req)),

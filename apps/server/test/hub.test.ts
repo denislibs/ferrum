@@ -1044,6 +1044,48 @@ test('пределы человека не обнуляются переподк
   }
 });
 
+test('открытие: бан и предел открытий — раньше запроса к базе; неудачные открытия ограничены по адресу', async () => {
+  const tight = await apiStand(
+    {
+      syncLimits: {
+        userOpensPerSecond: 0.001,
+        userOpensBurst: 1,
+        ipFailedOpensPerSecond: 0.001,
+        ipFailedOpensBurst: 3,
+        recheckMs: 3_600_000,
+        sessionCheckMs: 3_600_000,
+      },
+    },
+    true,
+  );
+  const pool = tight.pool as Pool & { query: (...a: unknown[]) => Promise<unknown> };
+  const real = pool.query.bind(pool) as (...a: unknown[]) => Promise<unknown>;
+  let roles = 0;
+  pool.query = ((...a: unknown[]) => {
+    if (typeof a[0] === 'string' && a[0].includes('file_role_rank($1, $2)')) roles++;
+    return real(...a);
+  }) as never;
+  try {
+    const who = await tight.signIn('opens@example.com');
+    const f = (await tight.newFile(who)).id;
+    const c = (await Client.open(tight, who, f))!;
+    expect(c).not.toBeNull();
+    c.close();
+    await c.waitClosed();
+    const before = roles;
+    // Бакет открытий пуст: отказ без запроса роли.
+    for (let i = 0; i < 5; i++) expect(await Client.open(tight, who, f)).toBeNull();
+    expect(roles).toBe(before);
+    // Без сессии — 401, пока бакет адреса не пуст, дальше — 429 без похода в Valkey.
+    const sync = `/api/files/${f}/sync?user=${who.id}`;
+    for (let i = 0; i < 3; i++) expect((await tight.call(null, 'GET', sync)).status).toBe(401);
+    expect((await tight.call(null, 'GET', sync)).status).toBe(429);
+  } finally {
+    pool.query = real as never;
+    await tight.stop();
+  }
+});
+
 test('подписка платит байтами и хранит только пиры, которые знает сервер', async () => {
   const big = new Map<string, number>();
   for (let i = 1; i <= 20_000; i++) big.set(String(i * 1000003), 1);

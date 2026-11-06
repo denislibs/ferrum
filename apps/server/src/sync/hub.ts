@@ -82,6 +82,10 @@ export interface SyncLimits {
    * открывает соединений, пока он не наполнится. */
   userFaultsPerSecond: number;
   userFaultsBurst: number;
+  /** Неудачных открытий с одного адреса (нет сессии, чужой `Origin`, вкладка за другого): каждое стоит запроса к Valkey,
+   * а пределы человека до входа не работают. */
+  ipFailedOpensPerSecond: number;
+  ipFailedOpensBurst: number;
   connectionsPerUser: number;
   connectionsTotal: number;
   /** Строк документов, которые человек заводит разом: каждая читает снимок документа целиком. Остальные подписки ждут. */
@@ -123,6 +127,8 @@ export const SYNC_LIMITS: SyncLimits = {
   userSubscribeBytesBurst: 16 * 1024 * 1024,
   userFaultsPerSecond: 1 / 300,
   userFaultsBurst: 3,
+  ipFailedOpensPerSecond: 1,
+  ipFailedOpensBurst: 64,
   connectionsPerUser: 64,
   connectionsTotal: 20_000,
   userDocStatesAtOnce: 2,
@@ -207,6 +213,8 @@ export class SyncHub {
   private readonly limits: SyncLimits;
   private readonly conns = new Map<string, Set<ConnData>>();
   private readonly users = new Map<string, UserState>();
+  /** Бакеты неудачных открытий по адресам: уходят, когда снова полны. */
+  private readonly failedOpens = new Map<string, Bucket>();
   private total = 0;
   private seq = 0;
   private readonly timers: Timer[] = [];
@@ -252,19 +260,32 @@ export class SyncHub {
     for (const t of this.timers) t.unref?.();
   }
 
-  /** Проверка перед открытием: `Origin` и живая сессия (`authorizeUpgrade`), вкладка за того же человека, роль, предел соединений. */
-  async upgrade(req: Request, server: Bun.Server<ConnData>, file: string): Promise<Response | undefined> {
+  /** Проверка перед открытием: `Origin` и живая сессия (`authorizeUpgrade`), вкладка за того же человека, бан, предел
+   * открытий и соединений, роль. Всё, что не стоит запроса, — раньше запросов: отказанный не тратит ни Valkey, ни базу.
+   * `ip` — адрес клиента для предела неудачных открытий. */
+  async upgrade(req: Request, server: Bun.Server<ConnData>, file: string, ip = 'unknown'): Promise<Response | undefined> {
     if (this.stopped) return new Response(null, { status: 503 });
+    const failed = this.failedOpens.get(ip);
+    const cooling = failed?.peek(1) ?? 0;
+    if (cooling > 0) return tooMany(cooling);
     let session: UpgradeSession | null;
     try {
       session = await authorizeUpgrade(req, this.auth, this.publicUrl);
     } catch {
       return new Response(null, { status: 503 });
     }
-    if (!session) return new Response(null, { status: 401 });
     // Вкладка работает за другого человека (вход сменили в другой вкладке): правки X не пишутся под Y.
-    const expected = new URL(req.url).searchParams.get('user');
-    if (expected !== session.userId) return new Response(null, { status: 401 });
+    if (!session || new URL(req.url).searchParams.get('user') !== session.userId) {
+      this.failedOpen(ip);
+      return new Response(null, { status: 401 });
+    }
+    const u = this.user(session.userId);
+    // Грубые нарушения исчерпали бакет: до его пополнения соединений нет.
+    const banned = u.faults.peek(1);
+    if (banned > 0) return tooMany(banned);
+    if (this.total >= this.limits.connectionsTotal || u.conns >= this.limits.connectionsPerUser) return tooMany(5000);
+    const wait = u.opens.take(1);
+    if (wait > 0) return tooMany(wait);
     let role: FileRole | null;
     try {
       role = await this.role(file, session.userId);
@@ -272,15 +293,6 @@ export class SyncHub {
       return new Response(null, { status: 503 });
     }
     if (!role) return new Response(null, { status: 404 });
-    const u = this.user(session.userId);
-    if (this.total >= this.limits.connectionsTotal || u.conns >= this.limits.connectionsPerUser) {
-      return new Response(null, { status: 429, headers: { 'Retry-After': '5' } });
-    }
-    // Грубые нарушения исчерпали бакет: до его пополнения соединений нет.
-    const banned = u.faults.peek(1);
-    if (banned > 0) return new Response(null, { status: 429, headers: { 'Retry-After': String(Math.ceil(banned / 1000)) } });
-    const wait = u.opens.take(1);
-    if (wait > 0) return new Response(null, { status: 429, headers: { 'Retry-After': String(Math.ceil(wait / 1000)) } });
     const data: ConnData = {
       id: ++this.seq,
       file,
@@ -300,6 +312,12 @@ export class SyncHub {
     };
     if (!server.upgrade(req, { data })) return new Response(null, { status: 400 });
     return undefined;
+  }
+
+  private failedOpen(ip: string): void {
+    let b = this.failedOpens.get(ip);
+    if (!b) this.failedOpens.set(ip, (b = new Bucket(this.limits.ipFailedOpensPerSecond, this.limits.ipFailedOpensBurst)));
+    b.take(1);
   }
 
   private user(id: string): UserState {
@@ -334,6 +352,7 @@ export class SyncHub {
       )
         this.users.delete(id);
     }
+    for (const [ip, b] of this.failedOpens) if (b.full()) this.failedOpens.delete(ip);
   }
 
   private async role(file: string, user: string): Promise<FileRole | null> {
@@ -1014,6 +1033,10 @@ function merge(version: VersionMap, end: Record<string, number>): void {
 
 function report(e: unknown): void {
   console.error('Синхронизация:', e instanceof Error ? e.message : e);
+}
+
+function tooMany(ms: number): Response {
+  return new Response(null, { status: 429, headers: { 'Retry-After': String(Math.ceil(ms / 1000)) } });
 }
 
 /** Обработчик сокета не должен ронять процесс. */
