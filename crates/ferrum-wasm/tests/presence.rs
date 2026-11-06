@@ -710,3 +710,58 @@ fn own_scale_collapsed_to_zero_still_goes_to_others() {
     assert_eq!(g.kind, GestureKindDto::Scale);
     assert!(g.k > 0.0 && g.k < 1e-3, "k = {}", g.k);
 }
+
+/// Esc и отпускание сразу за ним — одной пачкой кольца, как их кладёт основной поток (оба — в
+/// одно кольцо в порядке событий DOM): жест отменён, правки нет, другим жест больше не виден.
+#[test]
+fn escape_then_release_in_one_ring_batch_cancels_the_drag() {
+    use ferrum_wasm::input::{encode, Record};
+    let mut c = core();
+    c.command(Command::SyncStart);
+    let id = rect(&mut c);
+    let x0 = x_in_doc(&mut c, &id);
+    let steps = c.editor().step_count();
+    let at = |x: f64, t: f64| PointerEvent::new((x, 150.0), Modifiers::NONE, t);
+    let mut recs = vec![Record::Input(Input::PointerDown(at(150.0, 3000.0)))];
+    for i in 1..=6 {
+        recs.push(Record::Input(Input::PointerMove(at(
+            150.0 + 10.0 * i as f64,
+            3000.0 + i as f64,
+        ))));
+    }
+    let bytes: Vec<u8> = recs.iter().flat_map(encode).collect();
+    c.apply_input(&bytes);
+    c.set_time(4000.0);
+    let sent = presence_events(&mut c);
+    assert!(
+        matches!(
+            sent.last(),
+            Some(CoreEvent::Presence {
+                gesture: Some(_),
+                ..
+            })
+        ),
+        "жест идёт и виден другим"
+    );
+    let tail = [
+        Record::Input(Input::KeyDown(ferrum_editor::KeyEvent::new(
+            "Escape",
+            Modifiers::NONE,
+        ))),
+        Record::Input(Input::PointerUp(at(210.0, 3010.0))),
+        Record::Input(Input::KeyUp(ferrum_editor::KeyEvent::new(
+            "Escape",
+            Modifiers::NONE,
+        ))),
+    ];
+    let bytes: Vec<u8> = tail.iter().flat_map(encode).collect();
+    assert_eq!(c.apply_input(&bytes), 3);
+    assert_eq!(x_in_doc(&mut c, &id), x0, "правки нет");
+    assert_eq!(c.editor().step_count(), steps);
+    c.set_time(5000.0);
+    let sent = presence_events(&mut c);
+    assert!(
+        matches!(sent.last(), Some(CoreEvent::Presence { gesture: None, .. })),
+        "жест снят у других"
+    );
+}

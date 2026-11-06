@@ -243,8 +243,8 @@ test('аватары и следование: другая страница, к�
   await a.getByRole('button', { name: 'Добавить страницу' }).click();
   await expect(avatar).toHaveClass(/fe-avatar--away/);
   await expect(avatar).toHaveAccessibleName('Анна Смирнова — на другой странице');
-  // Страница дошла правкой, и после неё — кадр участника. Присутствие идёт мимо очереди правок и может её обогнать, а страницу,
-  // которой ещё нет, ядро у участника не запоминает: перейдёт за ним на следующем его кадре.
+  // Страница дошла правкой, и после неё — кадр участника. Присутствие идёт мимо очереди правок и может её обогнать: страницу,
+  // которой ещё нет, ядро помнит, и следование перейдёт на неё, как только она дойдёт.
   const newPage = await a.evaluate(() => window.__ferrum!.ui!.pages.current);
   await expect.poll(() => b.evaluate(() => window.__ferrum!.ui!.pages.list.map((p) => p.id))).toContain(newPage);
   await hoverWorld(a, 20, 20);

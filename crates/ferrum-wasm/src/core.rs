@@ -729,8 +729,8 @@ impl Core {
     fn run_input(&mut self, input: Input) {
         self.editor.take_text_pending();
         let retry = input.clone();
-        // Нажатие, отпускание и клавиши — своё действие: чужое превью снимает сам
-        // `Editor::handle` до первого чтения сцены (ядро сцену до него не читает).
+        // Своё действие под чужим превью: слой снимает сам редактор перед записью (нажатие
+        // инструмента, команда клавиши, вход в правку); ядро сцену до него не читает.
         self.editor.handle(input);
         if self.editor.take_text_pending() {
             self.wait(fonts::Waiting::Input(retry));
