@@ -1108,3 +1108,33 @@ fn total_preview_limit_counts_subtrees() {
     h.ed.presence_state(1, s);
     assert_eq!(h.ed.scene().node(b).unwrap().props.x, 1500.0);
 }
+
+/// Повторное ревью 2, M2: рамка выделенной группы собирается по детям — когда другой тянет
+/// её ребёнка, рамка группы едет вместе с ним.
+#[test]
+fn selected_group_frame_follows_peer_drag_of_its_child() {
+    let mut h = H::new();
+    let a = h.rect(None, 10.0, 10.0, 20.0, 20.0);
+    let b = h.rect(None, 100.0, 10.0, 20.0, 20.0);
+    h.ed.select(&[a, b]);
+    h.ed.execute(CommandId::Group);
+    let g = h.sel()[0];
+    h.ed.select(&[]);
+    join(&mut h, 1);
+    join(&mut h, 2);
+    h.ed.presence_part(1, 1, 0, 1, vec![g]);
+    let s = select(&h.ed, &[g], 1);
+    h.ed.presence_state(1, s);
+    let left = |h: &H| {
+        let m = &h.ed.overlay().remote[0];
+        m.boxes[0].0.transform_rect_bbox(m.boxes[0].1).x0
+    };
+    assert_eq!(left(&h), 10.0);
+    for dx in [200.0, 250.0] {
+        drag_by(&mut h, 2, &[a], dx);
+        assert_eq!(left(&h), 100.0, "левый край — у оставшегося ребёнка");
+    }
+    // Ребёнок вернулся налево — рамка снова от него.
+    drag_by(&mut h, 2, &[a], -5.0);
+    assert_eq!(left(&h), 5.0);
+}

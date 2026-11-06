@@ -196,6 +196,9 @@ pub(crate) struct Presence {
     /// Узлы слоя чужого превью и номер этого набора: растёт, только когда набор меняется (жест
     /// начался, кончился, сменилось выделение тянущего), а не на каждой пачке.
     layer_ids: HashSet<NodeId>,
+    /// Узлы слоя и все их предки: рамка группы собирается по детям, и выделенная группа, у
+    /// которой слой двигает потомка, тоже задета.
+    layer_up: HashSet<NodeId>,
     layer_rev: u64,
     /// В слое только переносы: матрицы под ним отличаются от документа лишь сдвигом, и следующий
     /// перенос считается поверх слоя без его снятия (`move_patches_over_layer`).
@@ -660,13 +663,26 @@ impl Editor {
 
     fn set_layer_ids(&mut self, ids: HashSet<NodeId>) {
         if ids != self.presence.layer_ids {
+            let mut up = HashSet::with_capacity(ids.len());
+            for id in &ids {
+                let mut cur = self.scene.slot(*id);
+                while let Some(s) = cur {
+                    let n = self.scene.at(s);
+                    if !up.insert(n.id) {
+                        break;
+                    }
+                    cur = n.parent;
+                }
+            }
             self.presence.layer_ids = ids;
+            self.presence.layer_up = up;
             self.presence.layer_rev += 1;
         }
     }
 
-    /// Задевает ли слой чужого превью выделение участника: узел выделения или его предок в слое.
-    /// Обход выделения — только на смене выделения, документа или набора узлов слоя.
+    /// Задевает ли слой чужого превью выделение участника: узел выделения, его предок или потомок
+    /// в слое (рамка группы собирается по детям). Обход выделения — только на смене выделения,
+    /// документа или набора узлов слоя.
     fn peer_touched(&self, p: &Peer) -> bool {
         if self.presence.layer_ids.is_empty() {
             return false;
@@ -683,8 +699,13 @@ impl Editor {
             }
         }
         let layer = &self.presence.layer_ids;
+        let up = &self.presence.layer_up;
         let t = p.selection().is_some_and(|ids| {
             ids.iter().any(|id| {
+                // Сам в слое или потомок его в слое.
+                if up.contains(id) {
+                    return true;
+                }
                 let mut cur = self.scene.slot(*id);
                 while let Some(s) = cur {
                     let n = self.scene.at(s);
