@@ -74,7 +74,7 @@ const s = await apiStand(
       userOpensBurst: 100_000,
       framesBurst: 1_000_000,
       userFramesBurst: 1_000_000,
-      // Окно группы журнала для сравнения (спека: 20 мс): `PROBE_GROUP_MS=1 bun test/sync-load-probe.ts latency …`.
+      // Окно группы журнала для сравнения (по умолчанию `GROUP_MS`, прежнее по спеке — 20 мс): `PROBE_GROUP_MS=20 bun test/sync-load-probe.ts latency …`.
       log: process.env.PROBE_GROUP_MS ? { groupMs: Number(process.env.PROBE_GROUP_MS) } : {},
     },
   },

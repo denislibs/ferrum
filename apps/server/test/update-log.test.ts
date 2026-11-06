@@ -3,7 +3,7 @@
 
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { apiStand } from './api-stand';
-import { UpdateLog, type Item } from '../src/sync/update-log';
+import { GROUP_MS, UpdateLog, type Item } from '../src/sync/update-log';
 import { TEST_DATABASE_URL } from './helpers';
 
 const s = await apiStand();
@@ -236,4 +236,55 @@ test('остановка дописывает принятое', async () => {
   await log.stop();
   expect(await pending).toEqual({ kind: 'written', seq: 1 });
   expect(await log.submit(item())).toEqual({ kind: 'refused', code: 'UNAVAILABLE' });
+});
+
+test('группа без окна 20 мс: пачки одного тика — одна транзакция, следующая ждёт только идущую транзакцию', async () => {
+  // Цель §13.1 (40 мс p95 от кадра до рассылки) важнее окна «каждые 20 мс» §7.3: окно само съедало половину срока.
+  expect(GROUP_MS).toBeLessThanOrEqual(2);
+  const log = new UpdateLog(s.pool);
+  const groups: number[][] = [];
+  log.onCommitted = (items) => groups.push(items.map((i) => i.seq));
+  // Транзакция первой группы ждёт блокировку строки файла: так видно, что пачки, пришедшие во время неё, копятся.
+  const other = await s.pool.connect();
+  try {
+    await other.query('BEGIN');
+    await other.query('SELECT 1 FROM file WHERE id = $1 FOR UPDATE', [file]);
+    // Один тик — одна группа: соседи первой пачки не ждут её транзакцию.
+    const first = [0, 1, 2].map((i) => log.submit(item({ start: { '1': i }, end: { '1': i + 1 } })));
+    for (let i = 0; i < 500; i++) {
+      const { rows: w } = await s.pool.query(
+        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`,
+      );
+      if (w.length > 0) break;
+      await Bun.sleep(5);
+    }
+    const second = [3, 4].map((i) => log.submit(item({ start: { '1': i }, end: { '1': i + 1 } })));
+    await other.query('COMMIT');
+    await Promise.all([...first, ...second]);
+  } finally {
+    await other.query('ROLLBACK').catch(() => {});
+    other.release();
+  }
+  expect(groups).toEqual([
+    [1, 2, 3],
+    [4, 5],
+  ]);
+  await log.stop();
+});
+
+test('file.edited_at — не чаще раза в секунду: строка файла не обновляется в каждой группе', async () => {
+  const log = new UpdateLog(s.pool, { groupMs: 1 });
+  const edited = async () => (await s.pool.query<{ t: Date }>('SELECT edited_at AS t FROM file WHERE id = $1', [file])).rows[0].t.getTime();
+  // Давняя правка: время двигается.
+  await s.pool.query(`UPDATE file SET edited_at = now() - interval '1 hour' WHERE id = $1`, [file]);
+  const old = await edited();
+  expect(await log.submit(item())).toMatchObject({ kind: 'written' });
+  const fresh = await edited();
+  expect(fresh).toBeGreaterThan(old + 3_000_000);
+  // Свежая (меньше секунды назад) — строка не трогается.
+  await s.pool.query(`UPDATE file SET edited_at = now() - interval '200 milliseconds' WHERE id = $1`, [file]);
+  const recent = await edited();
+  expect(await log.submit(item({ start: { '1': 1 }, end: { '1': 2 } }))).toMatchObject({ kind: 'written' });
+  expect(await edited()).toBe(recent);
+  await log.stop();
 });
