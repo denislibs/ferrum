@@ -1,0 +1,1605 @@
+//! Чужие правки (спека подсистемы 4, раздел 8): зеркало обновляется по изменённым узлам и совпадает с
+//! полной сборкой из Loro при любом порядке и повторах пачек; отменяются только свои шаги; курсор
+//! синхронизации шлёт только своё и считает версии независимо от журнала.
+
+use std::collections::HashMap;
+
+use ferrum_doc::container::{decode, encode_full};
+use ferrum_doc::*;
+use proptest::prelude::*;
+
+/// Две вкладки одного файла: общий снимок, у каждой свой пир.
+fn pair() -> (Document, Document, PageId) {
+    let doc = Document::new();
+    let bytes = encode_full(&doc).unwrap();
+    let mut a = decode(&bytes).unwrap().document;
+    let mut b = decode(&bytes).unwrap().document;
+    let page = a.pages()[0].0;
+    for d in [&mut a, &mut b] {
+        d.sync_start();
+        d.page(page).unwrap();
+        let subs = d.take_sync_subscribes();
+        for (k, v) in subs {
+            d.sync_subscribed(k, v);
+        }
+    }
+    (a, b, page)
+}
+
+fn deliver(from: &mut Document, to: &mut [&mut Document]) -> Vec<RemoteOutcome> {
+    let mut out = Vec::new();
+    for batch in from.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+        for d in to.iter_mut() {
+            out.push(d.apply_remote(batch.doc, &[&batch.bytes]).unwrap());
+        }
+        from.sync_acked(batch.doc, &batch.end);
+    }
+    out
+}
+
+fn sync(a: &mut Document, b: &mut Document) {
+    deliver(a, &mut [&mut *b]);
+    deliver(b, &mut [&mut *a]);
+}
+
+fn rect(doc: &mut Document, page: PageId) -> NodeId {
+    doc.transact(page, vec![], |tx| {
+        Ok(vec![tx.create_node(None, None, NodeKind::Rect)?])
+    })
+    .unwrap()[0]
+}
+
+fn set_x(doc: &mut Document, page: PageId, id: NodeId, x: f64) {
+    doc.transact(page, vec![], |tx| {
+        tx.set_props(
+            id,
+            &PropsPatch {
+                x: Some(x),
+                ..Default::default()
+            },
+        )?;
+        Ok(vec![id])
+    })
+    .unwrap();
+}
+
+/// Узлы страницы: родитель, позиция и свойства — всё, что читает сцена.
+fn nodes(doc: &mut Document, page: PageId) -> HashMap<NodeId, (Option<NodeId>, Props)> {
+    let p = doc.page(page).unwrap();
+    p.walk()
+        .into_iter()
+        .map(|n| (n, (p.parent(n), p.props(n).unwrap())))
+        .collect()
+}
+
+/// Зеркало совпадает с тем, что строится из Loro с нуля.
+fn assert_mirror(doc: &mut Document, page: PageId) {
+    let snapshot = doc.page(page).unwrap().export_full_snapshot().unwrap();
+    let fresh = PageDoc::from_snapshot(&snapshot).unwrap();
+    let want: HashMap<_, _> = fresh
+        .walk()
+        .into_iter()
+        .map(|n| (n, (fresh.parent(n), fresh.props(n).unwrap())))
+        .collect();
+    assert_eq!(
+        nodes(doc, page),
+        want,
+        "зеркало расходится с полной сборкой"
+    );
+}
+
+#[test]
+fn foreign_create_edit_move_delete_reach_mirror_and_changes() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    let group = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    let c = b.take_changes(page);
+    assert!(
+        c.created.contains(&id) && c.created.contains(&group),
+        "{c:?}"
+    );
+    assert_eq!(
+        b.page(page).unwrap().props(id).unwrap().kind,
+        NodeKind::Rect
+    );
+
+    set_x(&mut a, page, id, 42.0);
+    sync(&mut a, &mut b);
+    let c = b.take_changes(page);
+    assert_eq!(c.props, vec![id], "изменён только этот узел");
+    assert_eq!(b.page(page).unwrap().props(id).unwrap().x, 42.0);
+
+    a.transact(page, vec![], |tx| {
+        tx.move_node(id, None, 1)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    assert!(b.take_changes(page).moved.contains(&id));
+    assert_eq!(b.page(page).unwrap().children(None)[1], id);
+
+    a.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[id])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    assert!(b.take_changes(page).deleted.contains(&id));
+    assert!(!b.page(page).unwrap().contains(id));
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn deleting_a_frame_removes_descendants_from_mirror() {
+    let (mut a, mut b, page) = pair();
+    let (frame, kid) = {
+        let ids = a
+            .transact(page, vec![], |tx| {
+                let f = tx.create_node(None, None, NodeKind::Frame)?;
+                Ok(vec![f, tx.create_node(Some(f), None, NodeKind::Rect)?])
+            })
+            .unwrap();
+        (ids[0], ids[1])
+    };
+    sync(&mut a, &mut b);
+    b.take_changes(page);
+    a.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[frame])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    let c = b.take_changes(page);
+    assert!(
+        c.deleted.contains(&frame) && c.deleted.contains(&kid),
+        "{c:?}"
+    );
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn own_edits_are_not_counted_as_foreign_and_undo_history_survives() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    set_x(&mut a, page, id, 5.0);
+    let mine = rect(&mut b, page);
+    b.take_changes(page);
+    sync(&mut a, &mut b);
+    assert!(b.can_undo());
+    assert_eq!(b.undo().unwrap().unwrap().page, page);
+    assert!(!b.page(page).unwrap().contains(mine), "отменён свой узел");
+    assert_eq!(
+        b.page(page).unwrap().props(id).unwrap().x,
+        5.0,
+        "чужая правка на месте"
+    );
+}
+
+#[test]
+fn undo_returns_own_value_even_if_other_changed_it() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    set_x(&mut a, page, id, 10.0);
+    sync(&mut a, &mut b);
+    set_x(&mut b, page, id, 20.0);
+    sync(&mut a, &mut b);
+    assert_eq!(a.page(page).unwrap().props(id).unwrap().x, 20.0);
+    a.undo().unwrap();
+    assert_eq!(
+        a.page(page).unwrap().props(id).unwrap().x,
+        0.0,
+        "своё прежнее значение"
+    );
+    sync(&mut a, &mut b);
+    assert_eq!(b.page(page).unwrap().props(id).unwrap().x, 0.0);
+}
+
+#[test]
+fn step_over_node_deleted_by_other_is_skipped_and_undo_goes_on() {
+    let (mut a, mut b, page) = pair();
+    let first = rect(&mut a, page);
+    let second = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    set_x(&mut a, page, first, 1.0);
+    set_x(&mut a, page, second, 2.0);
+    sync(&mut a, &mut b);
+    b.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[second])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    // Верхний шаг — про удалённый узел: пропущен, отменился шаг про `first`.
+    let restore = a.undo().unwrap();
+    assert!(restore.is_some());
+    assert_eq!(a.page(page).unwrap().props(first).unwrap().x, 0.0);
+    assert!(
+        !a.page(page).unwrap().contains(second),
+        "чужое удаление отмена не трогает"
+    );
+}
+
+#[test]
+fn restoring_deleted_node_under_parent_removed_by_other_is_skipped() {
+    let (mut a, mut b, page) = pair();
+    let ids = a
+        .transact(page, vec![], |tx| {
+            let f = tx.create_node(None, None, NodeKind::Frame)?;
+            Ok(vec![f, tx.create_node(Some(f), None, NodeKind::Rect)?])
+        })
+        .unwrap();
+    let (frame, kid) = (ids[0], ids[1]);
+    sync(&mut a, &mut b);
+    a.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[kid])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    b.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[frame])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    // Ни удаление ребёнка, ни создание: от создания фрейма осталось только его создание.
+    a.undo().unwrap();
+    assert!(!a.page(page).unwrap().contains(kid));
+    assert_mirror(&mut a, page);
+}
+
+#[test]
+fn undo_of_move_that_would_make_a_cycle_is_skipped() {
+    let (mut a, mut b, page) = pair();
+    // Узлы создал b: у a в стеке только перенос.
+    let ids = b
+        .transact(page, vec![], |tx| {
+            let y = tx.create_node(None, None, NodeKind::Frame)?;
+            let x = tx.create_node(Some(y), None, NodeKind::Frame)?;
+            Ok(vec![x, y])
+        })
+        .unwrap();
+    let (x, y) = (ids[0], ids[1]);
+    sync(&mut a, &mut b);
+    a.transact(page, vec![], |tx| {
+        tx.move_node(x, None, 0)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    b.transact(page, vec![], |tx| {
+        tx.move_node(y, Some(x), 0)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    // Отмена вернула бы x внутрь y, а y теперь внутри x: цикл, шаг пропускается без ошибки.
+    assert_eq!(a.undo().unwrap(), None);
+    assert_eq!(a.page(page).unwrap().parent(y), Some(x));
+    assert_eq!(a.page(page).unwrap().parent(x), None);
+    assert_mirror(&mut a, page);
+}
+
+#[test]
+fn text_undo_keeps_foreign_insert_before_and_inside() {
+    let (mut a, mut b, page) = pair();
+    let id = a
+        .transact(page, vec![], |tx| {
+            Ok(vec![tx.create_node(None, None, NodeKind::Text)?])
+        })
+        .unwrap()[0];
+    sync(&mut a, &mut b);
+    a.transact(page, vec![id], |tx| {
+        tx.insert_text(id, 0, "абв", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    b.transact(page, vec![id], |tx| {
+        tx.insert_text(id, 0, "!", None)?;
+        tx.insert_text(id, 2, "?", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    let t = |d: &mut Document| -> String {
+        let c = d
+            .page(page)
+            .unwrap()
+            .props(id)
+            .unwrap()
+            .text
+            .unwrap()
+            .content
+            .clone();
+        c.runs.iter().map(|r| r.text.as_str()).collect()
+    };
+    assert_eq!(t(&mut a), "!а?бв\n");
+    a.undo().unwrap();
+    assert_eq!(t(&mut a), "!?\n", "убраны только свои символы");
+    a.redo().unwrap();
+    assert_eq!(t(&mut a).chars().filter(|c| "абв".contains(*c)).count(), 3);
+    sync(&mut a, &mut b);
+    assert_eq!(t(&mut a), t(&mut b));
+}
+
+fn text_node(doc: &mut Document, page: PageId) -> NodeId {
+    doc.transact(page, vec![], |tx| {
+        Ok(vec![tx.create_node(None, None, NodeKind::Text)?])
+    })
+    .unwrap()[0]
+}
+
+/// Текст узла вместе с последним переводом строки.
+fn text_of(doc: &mut Document, page: PageId, id: NodeId) -> String {
+    doc.page(page)
+        .unwrap()
+        .props(id)
+        .unwrap()
+        .text
+        .unwrap()
+        .content
+        .runs
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect()
+}
+
+fn insert(doc: &mut Document, page: PageId, id: NodeId, at: usize, s: &str) {
+    doc.transact(page, vec![id], |tx| {
+        tx.insert_text(id, at, s, None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+}
+
+fn delete(doc: &mut Document, page: PageId, id: NodeId, range: std::ops::Range<usize>) {
+    doc.transact(page, vec![id], |tx| {
+        tx.delete_text(id, range)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+}
+
+#[test]
+fn undo_at_the_place_of_foreign_insert_removes_own_char_not_foreign() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    insert(&mut b, page, id, 0, "аб");
+    sync(&mut a, &mut b);
+    insert(&mut a, page, id, 1, "x");
+    delete(&mut a, page, id, 1..2);
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 1, "F");
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), "аFб\n");
+    a.undo().unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "аFб\n", "чужой символ на месте");
+    a.redo().unwrap();
+    a.redo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "аFб\n");
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), text_of(&mut b, page, id));
+}
+
+#[test]
+fn undo_of_replaced_word_keeps_foreign_insert_at_the_seam() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut a, page);
+    insert(&mut a, page, id, 0, "abc");
+    sync(&mut a, &mut b);
+    delete(&mut a, page, id, 0..3);
+    insert(&mut a, page, id, 0, "xyz");
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 0, "F");
+    sync(&mut a, &mut b);
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "F\n", "своё слово снято");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "Fabc\n", "прежнее вернулось");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "F\n", "своего не осталось");
+}
+
+#[test]
+fn foreign_delete_across_two_own_steps_transforms_the_whole_stack() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    sync(&mut a, &mut b);
+    insert(&mut a, page, id, 0, "abc");
+    insert(&mut a, page, id, 3, "def");
+    sync(&mut a, &mut b);
+    delete(&mut b, page, id, 2..4);
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), "abef\n");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "ab\n");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "\n");
+    a.redo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "ab\n");
+    a.redo().unwrap();
+    assert_eq!(
+        text_of(&mut a, page, id),
+        "abef\n",
+        "повтор — без удалённого"
+    );
+    sync(&mut a, &mut b);
+    assert_eq!(text_of(&mut a, page, id), text_of(&mut b, page, id));
+}
+
+#[test]
+fn foreign_typing_in_other_node_keeps_own_typing_one_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    let other = text_node(&mut b, page);
+    sync(&mut a, &mut b);
+    let mark = |before, after, at_ms| TextMerge {
+        node: id,
+        before,
+        after,
+        style: 0,
+        at_ms,
+    };
+    a.transact_merging(page, vec![id], mark(0, 1, 0.0), |tx| {
+        tx.insert_text(id, 0, "п", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    insert(&mut b, page, other, 0, "Z");
+    sync(&mut a, &mut b);
+    a.transact_merging(page, vec![id], mark(1, 2, 10.0), |tx| {
+        tx.insert_text(id, 1, "р", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "\n", "один шаг ввода");
+    assert_eq!(text_of(&mut a, page, other), "Z\n");
+}
+
+#[test]
+fn foreign_typing_on_other_page_keeps_own_typing_one_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    let second = b.add_page("Вторая").unwrap();
+    sync(&mut a, &mut b);
+    for d in [&mut a, &mut b] {
+        for (k, v) in d.take_sync_subscribes() {
+            d.sync_subscribed(k, v);
+        }
+    }
+    let other = text_node(&mut b, second);
+    sync(&mut a, &mut b);
+    assert_eq!(
+        text_of(&mut a, second, other),
+        "\n",
+        "вторая страница доходит"
+    );
+    let mark = |before, after, at_ms| TextMerge {
+        node: id,
+        before,
+        after,
+        style: 0,
+        at_ms,
+    };
+    a.transact_merging(page, vec![id], mark(0, 1, 0.0), |tx| {
+        tx.insert_text(id, 0, "п", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    insert(&mut b, second, other, 0, "Z");
+    sync(&mut a, &mut b);
+    a.transact_merging(page, vec![id], mark(1, 2, 10.0), |tx| {
+        tx.insert_text(id, 1, "р", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "\n", "один шаг ввода");
+}
+
+#[test]
+fn foreign_typing_in_the_same_node_breaks_own_typing_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    sync(&mut a, &mut b);
+    let mark = |before, after, at_ms| TextMerge {
+        node: id,
+        before,
+        after,
+        style: 0,
+        at_ms,
+    };
+    a.transact_merging(page, vec![id], mark(0, 1, 0.0), |tx| {
+        tx.insert_text(id, 0, "п", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 0, "Z");
+    sync(&mut a, &mut b);
+    // Позиция та же, что в метке: без сброса склейки шаг слился бы, хотя текст уже другой.
+    a.transact_merging(page, vec![id], mark(1, 2, 10.0), |tx| {
+        tx.insert_text(id, 1, "р", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "Zп\n", "снят только второй шаг");
+}
+
+#[test]
+fn undo_over_the_text_limit_is_an_error_and_keeps_the_step() {
+    let (mut a, mut b, page) = pair();
+    let id = text_node(&mut b, page);
+    insert(&mut b, page, id, 0, &"п".repeat(10));
+    sync(&mut a, &mut b);
+    a.transact(page, vec![id], |tx| {
+        tx.set_props(
+            id,
+            &PropsPatch {
+                name: Some("новое".into()),
+                ..Default::default()
+            },
+        )?;
+        tx.delete_text(id, 0..10)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    // Другой заполнил текст до предела: вернуть удалённые символы некуда.
+    insert(&mut b, page, id, 0, &"я".repeat(MAX_TEXT_CHARS));
+    sync(&mut a, &mut b);
+    let name = a.page(page).unwrap().props(id).unwrap().name.clone();
+    assert!(matches!(a.undo(), Err(DocError::TextTooLong)));
+    assert!(a.can_undo(), "шаг не потерян");
+    assert_eq!(
+        a.page(page).unwrap().props(id).unwrap().name,
+        name,
+        "шаг применён целиком или никак"
+    );
+    assert_mirror(&mut a, page);
+    // Место появилось: тот же шаг применяется.
+    delete(&mut b, page, id, 0..100);
+    sync(&mut a, &mut b);
+    a.undo().unwrap();
+    assert!(text_of(&mut a, page, id).contains(&"п".repeat(10)));
+    assert_mirror(&mut a, page);
+}
+
+#[test]
+fn text_shift_moves_caret_with_foreign_edits() {
+    let (mut a, mut b, page) = pair();
+    let id = a
+        .transact(page, vec![], |tx| {
+            Ok(vec![tx.create_node(None, None, NodeKind::Text)?])
+        })
+        .unwrap()[0];
+    a.transact(page, vec![id], |tx| {
+        tx.insert_text(id, 0, "абвгд", None)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    b.transact(page, vec![id], |tx| {
+        tx.insert_text(id, 1, "XY", None)?;
+        tx.delete_text(id, 5..6)?;
+        Ok(vec![id])
+    })
+    .unwrap();
+    let got = deliver(&mut b, &mut [&mut a]);
+    let shifts: Vec<&TextShift> = got
+        .iter()
+        .flat_map(|o| o.text.iter().map(|(_, s)| s))
+        .collect();
+    assert_eq!(shifts.len(), 1);
+    let s = shifts[0];
+    assert_eq!(s.map(0), 0);
+    assert_eq!(
+        s.map(1),
+        1,
+        "вставка ровно в позиции курсора его не двигает"
+    );
+    assert_eq!(s.map(2), 4);
+    assert_eq!(s.map(5), 6);
+}
+
+#[test]
+fn foreign_page_add_and_remove_update_document_and_forget_steps() {
+    let (mut a, mut b, _) = pair();
+    let added = a.add_page("Вторая").unwrap();
+    let got = deliver(&mut a, &mut [&mut b]);
+    assert!(got.iter().any(|o| o.added_pages == vec![added]), "{got:?}");
+    assert_eq!(b.pages().len(), 2);
+    let subs = b.take_sync_subscribes();
+    assert!(
+        subs.iter().any(|(k, _)| *k == DocKey::Page(added)),
+        "подписка на новую страницу"
+    );
+
+    let own = rect(&mut b, added);
+    assert!(b.can_undo());
+    let _ = own;
+    a.delete_page(added).unwrap();
+    let got = deliver(&mut a, &mut [&mut b]);
+    assert!(got.iter().any(|o| o.removed_pages == vec![added]));
+    assert_eq!(b.pages().len(), 1);
+    assert!(!b.can_undo(), "шаги удалённой страницы забыты");
+}
+
+#[test]
+fn viewer_applies_foreign_edits_and_sends_nothing() {
+    let (mut a, mut b, page) = pair();
+    b.set_view_only(true);
+    let id = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    assert!(b.page(page).unwrap().contains(id));
+    assert!(b
+        .take_sync_updates(MAX_SYNC_BATCH_BYTES)
+        .unwrap()
+        .is_empty());
+    assert!(!b.sync_unacked());
+}
+
+#[test]
+fn downgraded_editor_keeps_unacked_visible_and_sends_nothing() {
+    let (mut a, _b, page) = pair();
+    rect(&mut a, page);
+    a.set_view_only(true);
+    assert!(a
+        .take_sync_updates(MAX_SYNC_BATCH_BYTES)
+        .unwrap()
+        .is_empty());
+    assert!(a.sync_unacked(), "правка не дошла, и это видно");
+}
+
+#[test]
+fn newer_schema_from_other_becomes_read_only_but_keeps_applying() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    a.force_schema_version_for_tests(SCHEMA_VERSION + 1);
+    let got = deliver(&mut a, &mut [&mut b]);
+    assert!(got.iter().any(|o| o.became_read_only), "{got:?}");
+    assert!(b.is_read_only());
+    assert!(
+        b.page(page).unwrap().contains(id),
+        "чужие правки применяются"
+    );
+}
+
+#[test]
+fn unknown_kind_from_other_makes_read_only_with_rebuild() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    b.take_changes(page);
+    a.page(page).unwrap().force_kind_for_tests(id, "star");
+    let got = deliver(&mut a, &mut [&mut b]);
+    let o = got.iter().find(|o| o.page == Some(page)).unwrap();
+    assert!(o.rebuilt && o.became_read_only, "{o:?}");
+    assert!(
+        !b.page(page).unwrap().contains(id),
+        "скрыт от модели, в Loro остался"
+    );
+    let later = PageDoc::from_snapshot(&b.page(page).unwrap().export_full_snapshot().unwrap());
+    assert!(later.unwrap().has_unknown_nodes());
+}
+
+/// Правка узлов другим редактором прямо в Loro: то, что наш код сам не записывает.
+fn foreign_raw_edit(
+    doc: &mut Document,
+    page: PageId,
+    edit: impl FnOnce(&loro::LoroTree),
+) -> Vec<u8> {
+    let snapshot = doc.page(page).unwrap().export_full_snapshot().unwrap();
+    let raw = loro::LoroDoc::from_snapshot(&snapshot).unwrap();
+    let from = raw.oplog_vv();
+    edit(&raw.get_tree("nodes"));
+    raw.commit();
+    raw.export(loro::ExportMode::updates(&from)).unwrap()
+}
+
+#[test]
+fn non_string_type_hides_node_and_keeps_batch_and_file_whole() {
+    let (mut a, mut b, page) = pair();
+    let keep = rect(&mut a, page);
+    let bad = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    b.take_changes(page);
+    let tid = |t: &loro::LoroTree, want: NodeId| {
+        t.children(loro::TreeParentId::Root)
+            .unwrap()
+            .into_iter()
+            .find(|k| k.to_string() == want.to_string())
+            .unwrap()
+    };
+    let blob = foreign_raw_edit(&mut b, page, |t| {
+        t.get_meta(tid(t, keep))
+            .unwrap()
+            .insert("x", 777.0)
+            .unwrap();
+        t.get_meta(tid(t, bad)).unwrap().insert("x", 777.0).unwrap();
+        t.get_meta(tid(t, bad))
+            .unwrap()
+            .insert("type", 5i64)
+            .unwrap();
+    });
+    let o = b.apply_remote(DocKey::Page(page), &[&blob]).unwrap();
+    assert!(o.rebuilt && o.became_read_only && !o.failed, "{o:?}");
+    let doc = b.page(page).unwrap();
+    assert_eq!(doc.props(keep).unwrap().x, 777.0, "пачка применена целиком");
+    assert!(!doc.contains(bad), "узел скрыт");
+    assert!(b.is_read_only());
+    assert_mirror(&mut b, page);
+    assert!(
+        b.take_sync_updates(MAX_SYNC_BATCH_BYTES)
+            .unwrap()
+            .is_empty(),
+        "чужое обратно не отправляется"
+    );
+    assert!(!b.sync_unacked(), "курсор сдвинут: чужое подтверждено");
+    // Файл открывается у всех.
+    let later = PageDoc::from_snapshot(&b.page(page).unwrap().export_full_snapshot().unwrap());
+    assert!(later.unwrap().has_unknown_nodes());
+}
+
+#[test]
+fn grouping_by_other_does_not_rebuild_and_matches_mirror() {
+    let (mut a, mut b, page) = pair();
+    let ids: Vec<NodeId> = (0..3).map(|_| rect(&mut a, page)).collect();
+    sync(&mut a, &mut b);
+    b.take_changes(page);
+    let frame = a
+        .transact(page, vec![], |tx| {
+            let f = tx.create_node(None, None, NodeKind::Frame)?;
+            tx.move_node(ids[0], Some(f), 0)?;
+            tx.move_node(ids[1], Some(f), 1)?;
+            // Свойства переносимого узла в той же транзакции: они не должны потеряться.
+            tx.set_props(
+                ids[0],
+                &PropsPatch {
+                    x: Some(55.0),
+                    ..Default::default()
+                },
+            )?;
+            Ok(vec![f])
+        })
+        .unwrap()[0];
+    let got = deliver(&mut a, &mut [&mut b]);
+    let o = got.iter().find(|o| o.page == Some(page)).unwrap();
+    assert!(!o.rebuilt, "{o:?}");
+    let c = b.take_changes(page);
+    assert!(c.created.contains(&frame), "{c:?}");
+    assert!(
+        c.moved.contains(&ids[0]) && c.moved.contains(&ids[1]),
+        "{c:?}"
+    );
+    assert!(!c.created.contains(&ids[0]), "{c:?}");
+    assert!(c.props.contains(&ids[0]), "{c:?}");
+    assert_eq!(b.page(page).unwrap().props(ids[0]).unwrap().x, 55.0);
+    assert_eq!(b.page(page).unwrap().parent(ids[1]), Some(frame));
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn ungrouping_by_other_does_not_rebuild_and_matches_mirror() {
+    let (mut a, mut b, page) = pair();
+    let ids = a
+        .transact(page, vec![], |tx| {
+            let f = tx.create_node(None, None, NodeKind::Frame)?;
+            Ok(vec![f, tx.create_node(Some(f), None, NodeKind::Rect)?])
+        })
+        .unwrap();
+    sync(&mut a, &mut b);
+    a.transact(page, vec![], |tx| {
+        tx.move_node(ids[1], None, 0)?;
+        tx.delete_nodes(&[ids[0]])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    let got = deliver(&mut a, &mut [&mut b]);
+    assert!(got.iter().all(|o| !o.rebuilt), "{got:?}");
+    assert!(b.page(page).unwrap().contains(ids[1]));
+    assert_mirror(&mut b, page);
+}
+
+/// Узел перенесён внутрь узла, который для модели ещё не существует (половина чужой транзакции):
+/// полная сборка его скрывает, значит, и зеркало по частям не должно его показывать.
+#[test]
+fn move_under_node_without_type_matches_rebuild() {
+    let (mut a, mut b, page) = pair();
+    let kid = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    let blob = foreign_raw_edit(&mut b, page, |t| {
+        let half = t.create(loro::TreeParentId::Root).unwrap();
+        let k = t
+            .children(loro::TreeParentId::Root)
+            .unwrap()
+            .into_iter()
+            .find(|k| k.to_string() == kid.to_string())
+            .unwrap();
+        t.mov(k, loro::TreeParentId::Node(half)).unwrap();
+    });
+    b.apply_remote(DocKey::Page(page), &[&blob]).unwrap();
+    assert!(!b.page(page).unwrap().contains(kid));
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn own_edit_before_subscription_counts_as_unacked() {
+    let doc = Document::new();
+    let bytes = encode_full(&doc).unwrap();
+    let mut a = decode(&bytes).unwrap().document;
+    let page = a.pages()[0].0;
+    a.sync_start();
+    a.page(page).unwrap();
+    assert!(a.sync_unacked(), "сервера ещё не спрашивали");
+    rect(&mut a, page);
+    assert!(a.sync_unacked());
+    // Подписка только на корень: правка страницы всё ещё без ответа.
+    a.sync_subscribed(DocKey::Root, SyncVersion::default());
+    assert!(a.sync_unacked());
+}
+
+#[test]
+fn broken_bytes_are_reported_without_harm() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    sync(&mut a, &mut b);
+    let o = b
+        .apply_remote(DocKey::Page(page), &[b"not a loro blob"])
+        .unwrap();
+    assert!(o.failed);
+    assert!(b.page(page).unwrap().contains(id));
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn update_without_its_dependencies_waits_and_applies_later() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    let first = a.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap();
+    set_x(&mut a, page, id, 7.0);
+    let second = a.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap();
+    let doc = DocKey::Page(page);
+    let f = first.iter().find(|x| x.doc == doc).unwrap();
+    let s = second.iter().find(|x| x.doc == doc).unwrap();
+    let o = b.apply_remote(doc, &[&s.bytes]).unwrap();
+    assert!(o.pending);
+    assert!(!b.page(page).unwrap().contains(id));
+    b.apply_remote(doc, &[&f.bytes]).unwrap();
+    assert_eq!(b.page(page).unwrap().props(id).unwrap().x, 7.0);
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn cursor_sends_only_unsent_and_resends_after_reconnect() {
+    let (mut a, mut b, page) = pair();
+    let id = rect(&mut a, page);
+    let batches = a.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap();
+    assert!(!batches.is_empty());
+    assert!(
+        a.take_sync_updates(MAX_SYNC_BATCH_BYTES)
+            .unwrap()
+            .is_empty(),
+        "второй раз нечего"
+    );
+    assert!(a.sync_unacked());
+    // Обрыв до ack: подписка заново, сервер сообщает прежнюю версию, правка уходит снова.
+    a.sync_reset();
+    let old = SyncVersion::default();
+    for (k, _) in a.take_sync_subscribes() {
+        a.sync_subscribed(
+            k,
+            if k == DocKey::Root {
+                SyncVersion::default()
+            } else {
+                old.clone()
+            },
+        );
+    }
+    let again = a.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap();
+    assert!(again.iter().any(|x| x.doc == DocKey::Page(page)));
+    for x in &again {
+        // Повтор безвреден: Loro пропускает известное.
+        b.apply_remote(x.doc, &[&x.bytes]).unwrap();
+        b.apply_remote(x.doc, &[&x.bytes]).unwrap();
+        a.sync_acked(x.doc, &x.end);
+    }
+    assert!(b.page(page).unwrap().contains(id));
+    assert!(!a.sync_unacked());
+    assert_mirror(&mut b, page);
+}
+
+#[test]
+fn foreign_updates_are_not_sent_back() {
+    let (mut a, mut b, page) = pair();
+    rect(&mut a, page);
+    sync(&mut a, &mut b);
+    assert!(
+        b.take_sync_updates(MAX_SYNC_BATCH_BYTES)
+            .unwrap()
+            .is_empty(),
+        "чужое не шлём"
+    );
+    assert!(!b.sync_unacked());
+}
+
+#[test]
+fn journal_marks_are_covered_only_after_ack() {
+    let (mut a, _b, page) = pair();
+    rect(&mut a, page);
+    let batches = a.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap();
+    let marks = a.sync_versions();
+    assert!(!a.sync_covers(&marks));
+    for x in &batches {
+        a.sync_acked(x.doc, &x.end);
+    }
+    assert!(a.sync_covers(&marks));
+}
+
+#[test]
+fn big_edit_is_split_under_the_limit_and_converges() {
+    let (mut a, mut b, page) = pair();
+    a.transact(page, vec![], |tx| {
+        for _ in 0..2000 {
+            tx.create_node(None, None, NodeKind::Rect)?;
+        }
+        Ok(vec![])
+    })
+    .unwrap();
+    let limit = 16 * 1024;
+    let batches = a.take_sync_updates(limit).unwrap();
+    assert!(batches.len() > 1);
+    assert!(batches.iter().all(|x| x.bytes.len() <= limit));
+    for x in &batches {
+        b.apply_remote(x.doc, &[&x.bytes]).unwrap();
+        a.sync_acked(x.doc, &x.end);
+        // Снимок между кусками (сжатие на сервере): половина транзакции файл не ломает.
+        assert_mirror(&mut b, page);
+    }
+    assert_eq!(nodes(&mut a, page), nodes(&mut b, page));
+    assert_mirror(&mut b, page);
+    assert!(!a.sync_unacked());
+}
+
+#[test]
+fn version_wire_format_round_trips_and_rejects_garbage() {
+    let (mut a, _b, page) = pair();
+    rect(&mut a, page);
+    let v = a.sync_versions();
+    let (_, version) = v.iter().find(|(k, _)| *k == DocKey::Page(page)).unwrap();
+    let bytes = version.encode();
+    assert_eq!(SyncVersion::decode(&bytes).unwrap(), *version);
+    assert!(SyncVersion::decode(&bytes[..bytes.len() - 1]).is_none());
+    assert!(SyncVersion::decode(&u32::MAX.to_le_bytes()).is_none());
+    let k = DocKey::Page(page);
+    assert_eq!(DocKey::parse(&k.to_string()), Some(k));
+    assert_eq!(DocKey::parse("root"), Some(DocKey::Root));
+    assert_eq!(DocKey::parse("../etc"), None);
+}
+
+#[test]
+fn concurrent_revive_and_restore_converge_with_rebuild() {
+    // a удаляет узел и отменяет удаление (новый `TreeID` с прежним `NodeId`), а b параллельно его переносит:
+    // перенос может оживить старый узел. У обоих — одно и то же, ничего не потеряно.
+    for _ in 0..8 {
+        let (mut a, mut b, page) = pair();
+        let id = rect(&mut a, page);
+        let other = rect(&mut a, page);
+        sync(&mut a, &mut b);
+        a.transact(page, vec![], |tx| {
+            tx.delete_nodes(&[id])?;
+            Ok(vec![])
+        })
+        .unwrap();
+        a.undo().unwrap();
+        b.transact(page, vec![], |tx| {
+            tx.move_node(id, None, 5)?;
+            Ok(vec![])
+        })
+        .unwrap();
+        b.transact(page, vec![], |tx| {
+            tx.move_node(other, None, 0)?;
+            Ok(vec![])
+        })
+        .unwrap();
+        sync(&mut a, &mut b);
+        sync(&mut a, &mut b);
+        assert_mirror(&mut a, page);
+        assert_mirror(&mut b, page);
+        assert_eq!(nodes(&mut a, page), nodes(&mut b, page));
+    }
+}
+
+/// Два живых узла с одним `NodeId` у обоих участников: a удалил и отменил (новый `TreeID`), а перенос
+/// b позже удаления по часам Lamport оживил старый узел. Возвращает `(исходный, новый под своим TreeID)`.
+fn twins(kind: NodeKind) -> (Document, Document, PageId, NodeId, NodeId) {
+    let (mut a, mut b, page) = pair();
+    let id = a
+        .transact(page, vec![], |tx| {
+            Ok(vec![tx.create_node(None, None, kind)?])
+        })
+        .unwrap()[0];
+    sync(&mut a, &mut b);
+    a.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[id])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    a.undo().unwrap();
+    // Часы b уходят вперёд: его перенос побеждает удаление независимо от случайных пиров.
+    let spare = rect(&mut b, page);
+    for x in 0..8 {
+        set_x(&mut b, page, spare, x as f64);
+    }
+    b.transact(page, vec![], |tx| {
+        tx.move_node(id, None, 5)?;
+        Ok(vec![])
+    })
+    .unwrap();
+    sync(&mut a, &mut b);
+    sync(&mut a, &mut b);
+    assert_eq!(a.page(page).unwrap().walk().len(), 3, "двойник жив");
+    assert_mirror(&mut a, page);
+    assert_mirror(&mut b, page);
+    let alias = a
+        .page(page)
+        .unwrap()
+        .walk()
+        .into_iter()
+        .find(|n| *n != id && *n != spare)
+        .unwrap();
+    (a, b, page, id, alias)
+}
+
+#[test]
+fn deleting_named_twin_gives_its_name_to_the_other() {
+    let (mut a, mut b, page, id, alias) = twins(NodeKind::Rect);
+    a.take_changes(page);
+    a.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[id])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    assert_mirror(&mut a, page);
+    let doc = a.page(page).unwrap();
+    assert!(doc.contains(id), "оставшийся двойник получил имя");
+    assert!(!doc.contains(alias));
+    let c = a.take_changes(page);
+    assert!(
+        c.deleted.contains(&alias) && c.created.contains(&id),
+        "{c:?}"
+    );
+
+    sync(&mut a, &mut b);
+    assert_mirror(&mut b, page);
+    assert_eq!(nodes(&mut a, page), nodes(&mut b, page));
+
+    // `Restore` пропускается (имя занято), отмена уходит к шагу создания и убирает оставшегося двойника:
+    // редкий случай, узел возвращается повтором (бэклог). Здесь важно, что зеркало не расходится.
+    a.undo().unwrap();
+    assert_mirror(&mut a, page);
+    sync(&mut a, &mut b);
+    assert_eq!(nodes(&mut a, page), nodes(&mut b, page));
+}
+
+#[test]
+fn deleting_second_twin_keeps_names_and_undo_returns_it() {
+    let (mut a, mut b, page, id, alias) = twins(NodeKind::Rect);
+    a.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[alias])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    assert_mirror(&mut a, page);
+    assert!(a.page(page).unwrap().contains(id));
+    a.undo().unwrap();
+    assert_mirror(&mut a, page);
+    assert!(a.page(page).unwrap().contains(alias));
+    sync(&mut a, &mut b);
+    assert_mirror(&mut b, page);
+    assert_eq!(nodes(&mut a, page), nodes(&mut b, page));
+}
+
+#[test]
+fn renamed_twin_reports_its_children_to_the_scene() {
+    // Имя меняется у фрейма с ребёнком: сцена должна перецепить ребёнка, а не удалить вместе со старым.
+    let (mut a, mut b, page, id, alias) = twins(NodeKind::Frame);
+    let kid = a
+        .transact(page, vec![], |tx| {
+            Ok(vec![tx.create_node(Some(alias), None, NodeKind::Rect)?])
+        })
+        .unwrap()[0];
+    assert_mirror(&mut a, page);
+    a.take_changes(page);
+    a.transact(page, vec![], |tx| {
+        tx.delete_nodes(&[id])?;
+        Ok(vec![])
+    })
+    .unwrap();
+    assert_mirror(&mut a, page);
+    assert_eq!(a.page(page).unwrap().parent(kid), Some(id));
+    let c = a.take_changes(page);
+    assert!(c.moved.contains(&kid), "{c:?}");
+    assert!(
+        c.deleted.contains(&alias) && c.created.contains(&id),
+        "{c:?}"
+    );
+    sync(&mut a, &mut b);
+    assert_eq!(nodes(&mut a, page), nodes(&mut b, page));
+}
+
+#[derive(Debug, Clone)]
+enum Op {
+    Create {
+        who: usize,
+        parent: usize,
+    },
+    Move {
+        who: usize,
+        node: usize,
+        parent: usize,
+        index: usize,
+    },
+    Delete {
+        who: usize,
+        node: usize,
+    },
+    SetX {
+        who: usize,
+        node: usize,
+        x: i32,
+    },
+    Undo {
+        who: usize,
+    },
+    Redo {
+        who: usize,
+    },
+    /// Доставка: пачки в перемешанном порядке и с повторами.
+    Sync {
+        seed: u64,
+    },
+}
+
+fn op() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        3 => (0usize..3, 0usize..40).prop_map(|(who, parent)| Op::Create { who, parent }),
+        2 => (0usize..3, 0usize..40, 0usize..40, 0usize..6)
+            .prop_map(|(who, node, parent, index)| Op::Move { who, node, parent, index }),
+        1 => (0usize..3, 0usize..40).prop_map(|(who, node)| Op::Delete { who, node }),
+        3 => (0usize..3, 0usize..40, -500i32..500).prop_map(|(who, node, x)| Op::SetX { who, node, x }),
+        2 => (0usize..3).prop_map(|who| Op::Undo { who }),
+        1 => (0usize..3).prop_map(|who| Op::Redo { who }),
+        3 => any::<u64>().prop_map(|seed| Op::Sync { seed }),
+    ]
+}
+
+fn shuffle<T>(v: &mut [T], mut seed: u64) {
+    for i in (1..v.len()).rev() {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        v.swap(i, (seed >> 33) as usize % (i + 1));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Спека, раздел 13.2: случайные правки нескольких клиентов с перестановкой и повтором пачек, отмена
+    /// вперемешку с импортом; все приходят к одному дереву, зеркало совпадает с полной сборкой.
+    #[test]
+    fn random_edits_converge_and_mirror_matches_rebuild(ops in proptest::collection::vec(op(), 1..70)) {
+        let doc = Document::new();
+        let bytes = encode_full(&doc).unwrap();
+        let mut docs: Vec<Document> = (0..3).map(|_| decode(&bytes).unwrap().document).collect();
+        let page = docs[0].pages()[0].0;
+        for d in &mut docs {
+            d.sync_start();
+            d.page(page).unwrap();
+            for (k, v) in d.take_sync_subscribes() {
+                d.sync_subscribed(k, v);
+            }
+        }
+        let mut log: Vec<(usize, DocKey, Vec<u8>)> = Vec::new();
+        let pick = |d: &mut Document, n: usize| {
+            let all = d.page(page).unwrap().walk();
+            if all.is_empty() { None } else { Some(all[n % all.len()]) }
+        };
+        for o in &ops {
+            match o {
+                Op::Create { who, parent } => {
+                    let d = &mut docs[*who];
+                    let p = pick(d, *parent).filter(|n| d.page(page).unwrap().kind(*n).unwrap() == NodeKind::Frame);
+                    let kind = if parent % 2 == 0 { NodeKind::Frame } else { NodeKind::Rect };
+                    let _ = d.transact(page, vec![], |tx| Ok(vec![tx.create_node(p, None, kind)?]));
+                }
+                Op::Move { who, node, parent, index } => {
+                    let d = &mut docs[*who];
+                    let (Some(n), p) = (pick(d, *node), pick(d, *parent)) else { continue };
+                    let p = p.filter(|x| d.page(page).unwrap().kind(*x).unwrap() == NodeKind::Frame);
+                    let _ = d.transact(page, vec![], |tx| { tx.move_node(n, p, *index)?; Ok(vec![n]) });
+                }
+                Op::Delete { who, node } => {
+                    let d = &mut docs[*who];
+                    let Some(n) = pick(d, *node) else { continue };
+                    let _ = d.transact(page, vec![], |tx| { tx.delete_nodes(&[n])?; Ok(vec![]) });
+                }
+                Op::SetX { who, node, x } => {
+                    let d = &mut docs[*who];
+                    let Some(n) = pick(d, *node) else { continue };
+                    let _ = d.transact(page, vec![], |tx| {
+                        tx.set_props(n, &PropsPatch { x: Some(*x as f64), ..Default::default() })?;
+                        Ok(vec![n])
+                    });
+                }
+                Op::Undo { who } => { docs[*who].undo().unwrap(); }
+                Op::Redo { who } => { docs[*who].redo().unwrap(); }
+                Op::Sync { seed } => {
+                    for (who, d) in docs.iter_mut().enumerate() {
+                        for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+                            log.push((who, b.doc, b.bytes));
+                        }
+                    }
+                    let mut part: Vec<_> = log.clone();
+                    shuffle(&mut part, *seed);
+                    part.truncate(part.len() / 2 + 1);
+                    for (who, doc, bytes) in part {
+                        let to = (who + 1 + (*seed as usize % 2)) % 3;
+                        docs[to].apply_remote(doc, &[&bytes]).unwrap();
+                    }
+                }
+            }
+            for d in &mut docs {
+                assert_mirror(d, page);
+            }
+        }
+        // Финал: всё всем в обычном порядке и ещё раз с повторами.
+        for (who, d) in docs.iter_mut().enumerate() {
+            for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+                log.push((who, b.doc, b.bytes));
+            }
+        }
+        for round in 0..2 {
+            let _ = round;
+            for (_, doc, bytes) in &log {
+                for d in &mut docs {
+                    d.apply_remote(*doc, &[bytes]).unwrap();
+                }
+            }
+        }
+        let want = nodes(&mut docs[0], page);
+        for d in &mut docs {
+            assert_mirror(d, page);
+            prop_assert_eq!(&nodes(d, page), &want);
+        }
+    }
+}
+
+#[test]
+fn text_undo_works_on_a_page_rebuilt_on_every_foreign_edit() {
+    // Страница с двойником: каждая чужая правка идёт сборкой, дельта текста всё равно доходит до стека.
+    let (mut a, mut b, page, _, _) = twins(NodeKind::Rect);
+    let id = text_node(&mut a, page);
+    insert(&mut a, page, id, 0, "ab");
+    sync(&mut a, &mut b);
+    insert(&mut b, page, id, 1, "F");
+    let got = deliver(&mut b, &mut [&mut a]);
+    let o = got.iter().find(|o| o.page == Some(page)).unwrap();
+    assert!(o.rebuilt && !o.text.is_empty(), "{o:?}");
+    a.undo().unwrap();
+    assert_eq!(text_of(&mut a, page, id), "F\n");
+    assert_mirror(&mut a, page);
+}
+
+/// Операция случайного теста текста. Каждый участник вставляет символы своего класса и удаляет только
+/// свои и ничьи (начальный текст), поэтому отмена не вправе менять символы других классов.
+#[derive(Debug, Clone)]
+enum TextOp {
+    Insert {
+        who: usize,
+        at: usize,
+        n: usize,
+    },
+    Delete {
+        who: usize,
+        at: usize,
+        n: usize,
+    },
+    Format {
+        who: usize,
+        at: usize,
+        n: usize,
+        size: u8,
+    },
+    /// Шаг из правки текста и свойства: отмена проходит смесь `Text` и `Props`.
+    InsertRenamed {
+        who: usize,
+        at: usize,
+    },
+    Undo {
+        who: usize,
+    },
+    Redo {
+        who: usize,
+    },
+    /// Свои пачки в журнал, журнал — всем или часть одному, в перемешанном порядке и с повторами.
+    Deliver {
+        seed: u64,
+    },
+}
+
+fn text_op() -> impl Strategy<Value = TextOp> {
+    // Позиции близко друг к другу: вся суть теста в правках одного места, в том числе в ничьих.
+    let at = 0usize..6;
+    prop_oneof![
+        5 => (0usize..3, at.clone(), 1usize..4).prop_map(|(who, at, n)| TextOp::Insert { who, at, n }),
+        3 => (0usize..3, at.clone(), 1usize..4).prop_map(|(who, at, n)| TextOp::Delete { who, at, n }),
+        1 => (0usize..3, at.clone(), 1usize..5, 8u8..14).prop_map(|(who, at, n, size)| TextOp::Format { who, at, n, size }),
+        1 => (0usize..3, at).prop_map(|(who, at)| TextOp::InsertRenamed { who, at }),
+        4 => (0usize..3).prop_map(|who| TextOp::Undo { who }),
+        2 => (0usize..3).prop_map(|who| TextOp::Redo { who }),
+        4 => any::<u64>().prop_map(|seed| TextOp::Deliver { seed }),
+    ]
+}
+
+/// Класс символов участника: у каждого свой.
+fn glyph(who: usize, n: u32) -> char {
+    let (base, span) = [('a', 26), ('A', 26), ('α', 24)][who];
+    char::from_u32(base as u32 + n % span).unwrap()
+}
+
+fn class_of(c: char) -> Option<usize> {
+    (0..3).find(|who| (0..26).any(|n| glyph(*who, n) == c))
+}
+
+/// Символы других участников в порядке текста: инвариант отмены.
+fn foreign_chars(text: &str, who: usize) -> String {
+    text.chars()
+        .filter(|c| class_of(*c).is_some_and(|k| k != who))
+        .collect()
+}
+
+/// Спека, раздел 8: отменяются только свои шаги. Три участника правят один текст, отмена и повтор
+/// вперемешку с импортом в любом порядке; чужие символы отмена не трогает, зеркало совпадает с
+/// полной сборкой, а в конце все приходят к одному тексту.
+fn text_scenario(ops: &[TextOp]) -> Result<(), TestCaseError> {
+    let mut seed = Document::new();
+    let page = seed.pages()[0].0;
+    let id = text_node(&mut seed, page);
+    insert(&mut seed, page, id, 0, "...");
+    let bytes = encode_full(&seed).unwrap();
+    let mut docs: Vec<Document> = (0..3).map(|_| decode(&bytes).unwrap().document).collect();
+    for d in &mut docs {
+        d.sync_start();
+        d.page(page).unwrap();
+        for (k, v) in d.take_sync_subscribes() {
+            d.sync_subscribed(k, v);
+        }
+    }
+    let mut log: Vec<(DocKey, Vec<u8>)> = Vec::new();
+    for (counter, o) in (1u32..).zip(ops) {
+        match o {
+            TextOp::Insert { who, at, n } => {
+                let d = &mut docs[*who];
+                let len = text_of(d, page, id).chars().count();
+                let s: String = (0..*n as u32).map(|i| glyph(*who, counter + i)).collect();
+                insert(d, page, id, at % len, &s);
+            }
+            TextOp::Delete { who, at, n } => {
+                let d = &mut docs[*who];
+                let chars: Vec<char> = text_of(d, page, id).chars().collect();
+                // Последний перевод строки не символ пользователя.
+                let last = chars.len() - 1;
+                let start = at % chars.len();
+                let end = (start + n).min(last);
+                let own = |c: &char| matches!(class_of(*c), Some(k) if k == *who) || *c == '.';
+                if start < end && chars[start..end].iter().all(own) {
+                    delete(d, page, id, start..end);
+                }
+            }
+            TextOp::Format { who, at, n, size } => {
+                let d = &mut docs[*who];
+                let len = text_of(d, page, id).chars().count();
+                let start = at % len;
+                let end = (start + n).min(len - 1);
+                if start < end {
+                    let set = TextAttrs {
+                        size: Some(*size as f64),
+                        ..Default::default()
+                    };
+                    d.transact(page, vec![id], |tx| {
+                        tx.format_text(id, start..end, &set, &[])?;
+                        Ok(vec![id])
+                    })
+                    .unwrap();
+                }
+            }
+            TextOp::InsertRenamed { who, at } => {
+                let d = &mut docs[*who];
+                let len = text_of(d, page, id).chars().count();
+                d.transact(page, vec![id], |tx| {
+                    tx.set_props(
+                        id,
+                        &PropsPatch {
+                            name: Some(format!("имя {counter}")),
+                            ..Default::default()
+                        },
+                    )?;
+                    tx.insert_text(id, at % len, &glyph(*who, counter).to_string(), None)?;
+                    Ok(vec![id])
+                })
+                .unwrap();
+            }
+            TextOp::Undo { who } => {
+                let d = &mut docs[*who];
+                let before = foreign_chars(&text_of(d, page, id), *who);
+                d.undo().unwrap();
+                prop_assert_eq!(
+                    foreign_chars(&text_of(d, page, id), *who),
+                    before,
+                    "отмена задела чужие"
+                );
+            }
+            TextOp::Redo { who } => {
+                let d = &mut docs[*who];
+                let before = foreign_chars(&text_of(d, page, id), *who);
+                d.redo().unwrap();
+                prop_assert_eq!(
+                    foreign_chars(&text_of(d, page, id), *who),
+                    before,
+                    "повтор задел чужие"
+                );
+            }
+            TextOp::Deliver { seed } => {
+                for d in docs.iter_mut() {
+                    for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+                        log.push((b.doc, b.bytes));
+                    }
+                }
+                let mut part = log.clone();
+                shuffle(&mut part, *seed);
+                // Чаще всё всем: чужая правка доходит до стека отмены; иначе часть и одному.
+                if seed % 4 == 0 {
+                    part.truncate(part.len() / 2 + 1);
+                    let to = (*seed >> 8) as usize % 3;
+                    for (doc, bytes) in part {
+                        docs[to].apply_remote(doc, &[&bytes]).unwrap();
+                    }
+                } else {
+                    for (doc, bytes) in part {
+                        for d in docs.iter_mut() {
+                            d.apply_remote(doc, &[&bytes]).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        for d in &mut docs {
+            assert_mirror(d, page);
+        }
+    }
+    for d in docs.iter_mut() {
+        for b in d.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+            log.push((b.doc, b.bytes));
+        }
+    }
+    for _ in 0..2 {
+        for (doc, bytes) in &log {
+            for d in &mut docs {
+                d.apply_remote(*doc, &[bytes]).unwrap();
+            }
+        }
+    }
+    let want = text_of(&mut docs[0], page, id);
+    for d in &mut docs {
+        assert_mirror(d, page);
+        prop_assert_eq!(&text_of(d, page, id), &want);
+    }
+    let props = nodes(&mut docs[0], page);
+    for d in &mut docs {
+        prop_assert_eq!(&nodes(d, page), &props);
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    #[test]
+    fn random_text_undo_keeps_foreign_chars_and_converges(ops in proptest::collection::vec(text_op(), 1..80)) {
+        text_scenario(&ops)?;
+    }
+}
+
+/// Пиры, чьи правки лежат в пачке.
+fn peers_of(bytes: &[u8]) -> std::collections::HashSet<u64> {
+    let meta = loro::LoroDoc::decode_import_blob_meta(bytes, false).unwrap();
+    meta.partial_end_vv.keys().copied().collect()
+}
+
+/// Новый документ сервер не знает: подписка отвечает пустой версией.
+fn subscribe_new(d: &mut Document) {
+    for (k, _) in d.take_sync_subscribes() {
+        d.sync_subscribed(k, SyncVersion::default());
+    }
+}
+
+#[test]
+fn redo_of_duplicate_sends_only_own_peer_and_keeps_later_steps() {
+    // Анна дублирует страницу и рисует на копии, Борис тоже рисует на копии. Анна отменяет свою фигуру и дубль, потом
+    // повторяет оба шага. Копия возвращается под новым id страницы — для сервера это новый документ: в его пачках не должно
+    // быть пира Бориса, иначе сервер ответит `FOREIGN_PEER`.
+    let (mut a, mut b, page) = pair();
+    let q = a.duplicate_page(page, "Копия", page, vec![]).unwrap();
+    subscribe_new(&mut a);
+    deliver(&mut a, &mut [&mut b]);
+    subscribe_new(&mut b);
+    let own = rect(&mut a, q);
+    deliver(&mut a, &mut [&mut b]);
+    let foreign = rect(&mut b, q);
+    let mut b_peers = std::collections::HashSet::new();
+    for batch in b.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap() {
+        b_peers.extend(peers_of(&batch.bytes));
+        a.apply_remote(batch.doc, &[&batch.bytes]).unwrap();
+        b.sync_acked(batch.doc, &batch.end);
+    }
+    assert!(!b_peers.is_empty());
+
+    a.undo().unwrap();
+    a.undo().unwrap();
+    assert_eq!(a.pages().len(), 1, "дубль отменён");
+    a.redo().unwrap();
+    let restored = a.pages()[1].0;
+    assert_ne!(restored, q, "копия вернулась под новым id");
+    assert!(
+        a.page(restored).unwrap().contains(foreign),
+        "правка Бориса в копии осталась"
+    );
+    assert!(!a.page(restored).unwrap().contains(own));
+    // Шаг после дубля повторяется: узлы копии — под прежними `NodeId`.
+    a.redo().unwrap();
+    assert!(a.page(restored).unwrap().contains(own));
+    assert_mirror(&mut a, restored);
+
+    subscribe_new(&mut a);
+    let mut batches = a.take_sync_updates(MAX_SYNC_BATCH_BYTES).unwrap();
+    // Корень раньше: страницу, которой ещё нет в корне, Борис не знает (на сервере он подпишется на неё позже).
+    batches.sort_by_key(|x| x.doc != DocKey::Root);
+    let mut sent_page = false;
+    for batch in &batches {
+        if batch.doc == DocKey::Page(restored) {
+            sent_page = true;
+            let peers = peers_of(&batch.bytes);
+            assert!(
+                peers.is_disjoint(&b_peers),
+                "в документе новой страницы — правки пира Бориса: {peers:?}"
+            );
+        }
+        b.apply_remote(batch.doc, &[&batch.bytes]).unwrap();
+        a.sync_acked(batch.doc, &batch.end);
+    }
+    assert!(sent_page, "копия ушла на сервер");
+    assert!(!a.sync_unacked());
+    // Борис видит ту же копию.
+    assert_eq!(b.pages().len(), 2);
+    assert_eq!(nodes(&mut a, restored), nodes(&mut b, restored));
+    assert_mirror(&mut b, restored);
+
+    // Второй круг отмены и повтора — так же.
+    a.undo().unwrap();
+    a.undo().unwrap();
+    a.redo().unwrap();
+    a.redo().unwrap();
+    let again = a.pages()[1].0;
+    assert!(a.page(again).unwrap().contains(own));
+    assert!(a.page(again).unwrap().contains(foreign));
+    assert_mirror(&mut a, again);
+}

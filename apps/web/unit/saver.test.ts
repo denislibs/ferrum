@@ -13,8 +13,12 @@ import {
   FULL_MAX_MS,
   JOURNAL_MS,
   newSession,
+  NOT_ON_SERVER,
   sessionAfter,
   SETTLE_MS,
+  SERVER_REFUSED,
+  SYNC_WAIT_MS,
+  THUMB_MS,
   withTimeout,
   type SaverOptions,
 } from '../src/ui/saver';
@@ -107,9 +111,13 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
   let hangAppend = false;
   let warning: string | undefined;
   const created: string[] = [];
+  const thumbs: (ArrayBuffer | null)[] = [];
+  const cuts: JournalMark[] = [];
   const files = {
     fullHistory,
     remote,
+    putThumb: (_id: string, thumb: ArrayBuffer | null) => void thumbs.push(thumb),
+    cutJournal: async (_id: string, mark: JournalMark) => void cuts.push(mark),
     createFrom: async (name: string) => (created.push(name), { id: 'новый' }),
     appendJournal: async (_id: string, mark: JournalMark) => {
       if (hangAppend) await new Promise(() => {});
@@ -135,6 +143,8 @@ function harness(stored: boolean, journalSession?: number | null, fullHistory?: 
     writes,
     timers,
     created,
+    thumbs,
+    cuts,
     advance,
     now: () => now,
     failAppends: (on: boolean) => void (failAppend = on),
@@ -670,4 +680,177 @@ test('закрытие вкладки: спрашивает, только пок
   await stored.tick();
   expect(stored.saver.pending()).toBe(false);
   expect(ask(stored)).toBe(false);
+});
+
+// --- Журнал сервера: файл целиком пишется только первый раз ---
+
+const synced = (stored: boolean, opts: SaverOptions = {}) => harness(stored, null, true, true, { sync: true, ...opts });
+
+test('журнал сервера: правки идут журналом, полный файл не пишется ни в простое, ни со временем', async () => {
+  const h = synced(true);
+  h.emit({ type: 'modified', modified: true });
+  h.advance(FULL_MAX_MS * 3);
+  await h.tick();
+  expect(h.sent.some((c) => c.type === 'flushJournal')).toBe(true);
+  expect(h.sent.some((c) => c.type === 'snapshot')).toBe(false);
+  expect(h.writes).toHaveLength(0);
+});
+
+test('журнал сервера: новый файл записывается сразу, без правок; потом можно подключаться', async () => {
+  let stored = 0;
+  const h = harness(false, null, true, true, { sync: true, onStored: () => stored++ });
+  await h.tick();
+  expect(h.sent.find((c) => c.type === 'snapshot')).toBeTruthy();
+  h.snapshot(0);
+  await h.tick();
+  await h.tick();
+  expect(h.writes).toHaveLength(1);
+  expect(stored).toBe(1);
+  expect(h.saver.stored()).toBe(true);
+});
+
+test('журнал сервера: читатель первую запись не делает', async () => {
+  const h = harness(false, null, true, true, { sync: true, viewer: true });
+  await h.tick();
+  expect(h.sent.some((c) => c.type === 'snapshot')).toBe(false);
+});
+
+test('журнал сервера: первую запись опередили, своих правок нет — файл открывается заново, а не теряет чужое', async () => {
+  let taken = 0;
+  const h = harness(false, null, true, true, { sync: true, onTaken: () => taken++ });
+  h.failWrites(true, 'CONFLICT');
+  await h.tick();
+  h.snapshot(0);
+  await h.tick();
+  await h.tick();
+  expect(taken).toBe(1);
+});
+
+test('журнал сервера: первую запись опередили, а правки уже есть — честный вопрос, правки не пропадают молча', async () => {
+  let taken = 0;
+  let diverged = 0;
+  const h = harness(false, null, true, true, { sync: true, onTaken: () => taken++, onDiverged: () => diverged++ });
+  h.failWrites(true, 'CONFLICT');
+  h.emit({ type: 'modified', modified: true });
+  await h.tick();
+  h.snapshot(0);
+  await h.tick();
+  await h.tick();
+  expect(taken).toBe(0);
+  expect(diverged).toBe(1);
+});
+
+test('журнал сервера: «Сохранить» ждёт сервера; подтвердил — записано', async () => {
+  const h = synced(true);
+  h.emit({ type: 'modified', modified: true });
+  h.emit({ type: 'syncState', unacked: true });
+  const saved = h.saver.save();
+  await h.tick();
+  h.emit({ type: 'journal', batch: 1, bytes: new Uint8Array([1]), failed: false });
+  await h.tick();
+  await h.tick();
+  h.emit({ type: 'syncState', unacked: false });
+  expect(await saved).toBe(true);
+  expect(h.saver.failure()).toBeNull();
+});
+
+test('журнал сервера: сервер не подтвердил за срок — уход спросит, причина не пугает: правки в браузере', async () => {
+  const h = synced(true);
+  h.emit({ type: 'modified', modified: true });
+  h.emit({ type: 'syncState', unacked: true });
+  const saved = h.saver.save();
+  await h.tick();
+  h.emit({ type: 'journal', batch: 1, bytes: new Uint8Array([1]), failed: false });
+  await h.tick();
+  await h.tick();
+  h.advance(SYNC_WAIT_MS);
+  expect(await saved).toBe(false);
+  expect(h.saver.failure()).toBe(NOT_ON_SERVER);
+  // Позже подтвердил: причина снята.
+  h.emit({ type: 'syncState', unacked: false });
+  expect(h.saver.failure()).toBeNull();
+});
+
+test('журнал сервера: после пяти минут работы превью не рендерится по каждой пачке (T9-I3)', async () => {
+  const h = synced(true);
+  h.advance(FULL_MAX_MS + 1);
+  h.emit({ type: 'modified', modified: true });
+  for (let i = 1; i <= 5; i++) {
+    h.emit({ type: 'document', canUndo: true, canRedo: false, steps: i });
+    h.advance(JOURNAL_MS);
+    h.batch(i);
+    await h.tick();
+    await h.tick();
+  }
+  // Правки шли 10 с: превью ещё не положено (раз в минуту), пачка журнала — одна на каждую.
+  expect(h.sent.filter((c) => c.type === 'thumbnail')).toHaveLength(0);
+  expect(h.sent.filter((c) => c.type === 'flushJournal')).toHaveLength(5);
+  h.advance(THUMB_MS);
+  expect(h.sent.filter((c) => c.type === 'thumbnail')).toHaveLength(1);
+});
+
+test('журнал сервера: сервер правки не примет — уход спрашивает сразу и говорит правду (T9-I1)', async () => {
+  let why: string | null = null;
+  const h = synced(true, { refused: () => why });
+  h.emit({ type: 'modified', modified: true });
+  h.emit({ type: 'syncState', unacked: true });
+  why = SERVER_REFUSED;
+  const saved = h.saver.save();
+  await h.tick();
+  h.emit({ type: 'journal', batch: 1, bytes: new Uint8Array([1]), failed: false });
+  await h.tick();
+  await h.tick();
+  // Не ждёт срока: исход известен.
+  expect(await saved).toBe(false);
+  expect(h.saver.failure()).toBe(SERVER_REFUSED);
+  expect(h.saver.failure()).not.toBe(NOT_ON_SERVER);
+});
+
+test('журнал сервера: соединение не запустилось — «Сохранить» не отвечает «записано» (T9-M4)', async () => {
+  const h = synced(true, { refused: () => SERVER_REFUSED });
+  // Ядро без синхронизации: «изменён», но `syncState` не приходит.
+  h.emit({ type: 'modified', modified: true });
+  const saved = h.saver.save();
+  await h.tick();
+  h.batch(1);
+  await h.tick();
+  await h.tick();
+  expect(await saved).toBe(false);
+  expect(h.saver.failure()).toBe(SERVER_REFUSED);
+});
+
+test('журнал сервера: пачка не записалась в браузере, а сервер всё подтвердил — файл сохранён (T9-M1)', async () => {
+  const h = synced(true);
+  h.emit({ type: 'modified', modified: true });
+  h.emit({ type: 'syncState', unacked: true });
+  h.failAppends(true);
+  h.advance(JOURNAL_MS);
+  h.batch(1);
+  await h.tick();
+  await h.tick();
+  expect(h.saver.pending()).toBe(true);
+  // Полных записей нет: потерянная пачка не заводит «Сохранить» по таймеру (и превью с ним).
+  const flushes = h.sent.filter((c) => c.type === 'flushJournal').length;
+  h.advance(FULL_IDLE_MS);
+  await h.tick();
+  expect(h.sent.filter((c) => c.type === 'flushJournal')).toHaveLength(flushes);
+  expect(h.sent.some((c) => c.type === 'snapshot' || c.type === 'thumbnail')).toBe(false);
+  h.failAppends(false);
+  h.emit({ type: 'syncState', unacked: false });
+  h.emit({ type: 'modified', modified: false });
+  expect(h.saver.pending()).toBe(false);
+  const saved = h.saver.save();
+  await h.tick();
+  h.batch(2);
+  await h.tick();
+  await h.tick();
+  expect(await saved).toBe(true);
+  expect(h.saver.failure()).toBeNull();
+});
+
+test('журнал сервера: подтверждение снимает журнал браузера отметкой своего сеанса', async () => {
+  const h = synced(true);
+  h.emit({ type: 'journalCovered', batch: 3 });
+  await h.tick();
+  expect(h.cuts.map((m) => m.batch)).toEqual([3]);
 });

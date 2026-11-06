@@ -2,6 +2,7 @@
 // фазе mutate планировщика (одна `batch()` на кадр), живые значения жеста — из
 // общей памяти в фазе measure. Здесь ничего не вычисляется о документе.
 
+import type { SyncStatus } from '../core/sync-client';
 import { createStore, reconcile } from 'solid-js/store';
 import type {
   ConflictInfo,
@@ -45,6 +46,8 @@ export interface UiState {
   documentName: string;
   /** Роль в открытом файле на сервере; нет — файл свой, без ролей. */
   fileRole: FileRole | null;
+  /** Соединение файла на сервере (спека подсистемы 4, раздел 8.1); `null` — файл не на сервере. */
+  syncStatus: SyncStatus | null;
   /** Сервер разрешает звать людей в открытый файл (пришедшему по ссылке — нет). */
   fileCanShare: boolean;
   layers: { start: number; total: number; rows: LayerRow[]; reveal: number | null; revealSeq: number };
@@ -96,6 +99,7 @@ const initial: UiState = {
   modified: false,
   documentName: '',
   fileRole: null,
+  syncStatus: null,
   fileCanShare: false,
   layers: { start: 0, total: 0, rows: [], reveal: null, revealSeq: 0 },
   summary: null,

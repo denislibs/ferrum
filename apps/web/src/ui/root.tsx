@@ -154,7 +154,8 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
         return;
       }
     }
-    const lock = await lockFile(file.id);
+    // Файл с журналом сервера: вторая вкладка — такой же участник (спека подсистемы 4, раздел 8).
+    const lock: Lock = files.sync ? { release: () => {} } : await lockFile(file.id);
     if (my !== seq) {
       if ('release' in lock) lock.release();
       return;

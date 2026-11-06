@@ -6,8 +6,12 @@ import { MAX_FILE_NAME_CHARS } from '@ferrum/protocol';
 import type { FileMeta, IoResults, JournalMark, Section } from '../../core/file-list';
 import type { AccessState } from '../../core/server-files';
 import type { FromServer, ServerOp, ServerResults, ToServer } from '../../core/server-messages';
-import { IdbFileStore, type FileStore } from '../file-store';
+import type { FromSync, ToSync } from '../../core/sync-messages';
+import { IdbFileStore, type FileStore, type SyncCore, type SyncEvents } from '../file-store';
 import type { SettingsBackend } from '../settings-store';
+
+/** Версия схемы документа этой сборки: то же, что `SCHEMA_VERSION` ядра. Растёт вместе с ней. */
+const SCHEMA_VERSION = 1;
 
 export class ServerFileStore implements FileStore, SettingsBackend {
   /** Файлы, настройки и шрифты в браузере. */
@@ -23,7 +27,7 @@ export class ServerFileStore implements FileStore, SettingsBackend {
   private broken: string | null = null;
   private readonly onVisibility = () => this.post({ t: 'visible', on: document.visibilityState === 'visible' });
 
-  constructor(user: string) {
+  constructor(private readonly user: string) {
     this.worker = new Worker(new URL('../../worker/server.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<FromServer>) => this.onMessage(e.data);
     // Обновили образ при открытой вкладке: старого файла worker'а больше нет (B-208).
@@ -137,8 +141,43 @@ export class ServerFileStore implements FileStore, SettingsBackend {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
-  /** Доступ к открытому файлу: понижение роли, снятие доступа, конец сессии. Этап 3 заменит опрос
-   * сообщениями `role` и `access-revoked`, у получателя ничего не изменится. */
+  /** Соединение файла: свой worker, с worker'ом ядра — прямой порт. Доступ теперь сообщает оно, а получатели `watch` те же. */
+  sync(file: string, core: SyncCore, events: SyncEvents) {
+    const worker = new Worker(new URL('../../worker/sync.worker.ts', import.meta.url), { type: 'module' });
+    const channel = new MessageChannel();
+    core.connectSync(channel.port1);
+    worker.onmessage = (e: MessageEvent<FromSync>) => {
+      const m = e.data;
+      if (m.t === 'status') events.status(m.status, m.detail);
+      else if (m.t === 'reload') events.reload();
+      else for (const w of this.watchers.get(file) ?? []) w(m.state);
+    };
+    worker.onerror = (e) => {
+      e.preventDefault?.();
+      events.status('rejected', 'Не удалось запустить часть приложения — обновите страницу');
+    };
+    worker.postMessage({ t: 'start', file, user: this.user, schema: SCHEMA_VERSION, port: channel.port2 } satisfies ToSync, [
+      channel.port2,
+    ]);
+    this.stopPolling(file);
+    return {
+      stop: () => {
+        // Сначала ядро: его таймер пачек и порт живут в его worker'е, `terminate` этого worker'а их не снимает.
+        core.disconnectSync();
+        worker.terminate();
+      },
+    };
+  }
+  stopPolling(file: string) {
+    if (this.watchers.has(file)) this.post({ t: 'watch', file, on: true, poll: false });
+  }
+  async cutJournal(file: string, mark: JournalMark) {
+    await this.call({ op: 'cutJournal', file, session: mark.session, upTo: mark.batch });
+  }
+  putThumb(file: string, thumb: ArrayBuffer | null) {
+    void this.call({ op: 'putThumb', file, thumb }, thumb ? [thumb] : []).catch(() => {});
+  }
+  /** Доступ к открытому файлу: понижение роли, снятие доступа, конец сессии. До соединения файла — опрос, с ним — его сообщения. */
   watch(file: string, listener: (state: AccessState) => void) {
     const set = this.watchers.get(file) ?? new Set();
     this.watchers.set(file, set);

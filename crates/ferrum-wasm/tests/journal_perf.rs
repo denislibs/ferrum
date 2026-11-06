@@ -64,6 +64,7 @@ fn journal_of_100k_nodes_is_cheap() {
     back.command(Command::OpenWithJournal {
         bytes: ByteBuf::from(file),
         journal: vec![batch.clone()],
+        remote: None,
     });
     let open = t.elapsed();
     assert!(back

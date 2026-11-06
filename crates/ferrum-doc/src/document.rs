@@ -16,6 +16,9 @@ use crate::images::ImageStore;
 use crate::journal::{self, BatchWriter, Replayed};
 use crate::page::{Inverse, PageDoc, Tx};
 use crate::scene_cache::SceneRow;
+use crate::sync::{
+    self, Cursor, DocKey, RemoteOutcome, SyncBatch, SyncCursors, SyncVersion, TextShift,
+};
 use crate::types::{Color, NodeId, PageId, PropsPatch};
 
 /// Текущая версия схемы документа. Растёт при несовместимых изменениях схемы.
@@ -97,6 +100,10 @@ pub struct Document {
     /// Растёт при каждой смене направляющих страницы (кэш линий редактора):
     /// у фрейма то же самое видно по счётчику сцены.
     guides_revision: u64,
+    /// Файл на сервере: курсоры синхронизации. `None` — локальный файл, чужих правок не бывает.
+    sync: Option<SyncCursors>,
+    /// Файл на сервере: журналу не хватает правок, которые ещё придут с сервера, это не повреждение.
+    catches_up: bool,
 }
 
 impl Document {
@@ -134,6 +141,8 @@ impl Document {
             journaled_pages: HashMap::new(),
             parked: HashMap::new(),
             guides_revision: 0,
+            sync: None,
+            catches_up: false,
         }
     }
 
@@ -184,6 +193,12 @@ impl Document {
             }
             _ => SCHEMA_VERSION,
         }
+    }
+
+    /// Только для тестов: версия схемы, как будто корень правит более новая сборка.
+    #[doc(hidden)]
+    pub fn force_schema_version_for_tests(&mut self, version: u32) {
+        self.force_schema_version(version);
     }
 
     pub(crate) fn force_schema_version(&mut self, version: u32) {
@@ -583,6 +598,9 @@ impl Document {
             self.unloaded.remove(&id);
             // Загруженное из файла уже в нём: журнал пишет правки после загрузки.
             self.journaled_pages.insert(id, page.oplog_vv());
+            if self.sync.is_some() {
+                page.listen();
+            }
             self.loaded.insert(id, page);
         }
         self.loaded
@@ -674,7 +692,7 @@ impl Document {
         // И при ошибке: откат вернул эти узлы в прежнее состояние, а если сорвался —
         // сцене тем более нужно сверить их со страницей.
         self.changes.entry(page).or_default().record(&ops);
-        match result {
+        let out = match result {
             Ok(selection_after) => {
                 if !ops.is_empty() {
                     let entry = HistoryEntry {
@@ -696,7 +714,19 @@ impl Document {
             }
             // Откат: применяем обратные операции, в историю ничего не попадает.
             Err(e) => Err(rollback(p, &ops, e)),
-        }
+        };
+        self.settle_duplicates(page, out)
+    }
+
+    /// Зеркало после своей правки, если на странице есть двойники (`PageDoc::settle_duplicates`).
+    /// Ошибка самой правки важнее сбоя сборки и не заслоняется им.
+    fn settle_duplicates<T>(&mut self, page: PageId, out: DocResult<T>) -> DocResult<T> {
+        let settled = match self.loaded.get(&page) {
+            Some(p) => p.settle_duplicates(self.changes.entry(page).or_default()),
+            None => Ok(()),
+        };
+        let out = out?;
+        settled.map(|()| out)
     }
 
     /// Следующая `transact_merging` не сольётся с прошлой правкой, даже если та её
@@ -709,6 +739,11 @@ impl Document {
     /// Сцена вызывает это раз за кадр и пересчитывает только эти узлы.
     pub fn take_changes(&mut self, page: PageId) -> Changes {
         self.changes.remove(&page).unwrap_or_default()
+    }
+
+    /// Изменения страницы, ещё не забранные `take_changes`.
+    pub fn pending_changes(&self, page: PageId) -> Option<&Changes> {
+        self.changes.get(&page)
     }
 
     /// Забывает историю отмены и повтора: документ, собранный программно (пример,
@@ -805,7 +840,7 @@ impl Document {
         }
         for data in &root {
             match self.root.import(data) {
-                Ok(status) => lost |= status.pending.is_some(),
+                Ok(status) => lost |= status.pending.is_some() && !self.catches_up,
                 Err(_) => lost = true,
             }
         }
@@ -836,7 +871,8 @@ impl Document {
             let page = self.loaded.get(&id).expect("загружена выше");
             let refs: Vec<&[u8]> = list.iter().map(Vec::as_slice).collect();
             match page.import_updates(&refs) {
-                Ok(complete) => lost |= !complete,
+                // Файл на сервере: Loro держит такие правки у себя и применит, когда придут предыдущие.
+                Ok(complete) => lost |= !complete && !self.catches_up,
                 Err(_) => lost = true,
             }
             if page.has_unknown_nodes() || page.has_oversized_text() {
@@ -844,7 +880,11 @@ impl Document {
             }
         }
         for (hash, bytes) in images {
-            self.images.insert_verified(hash, bytes);
+            if self.catches_up {
+                self.images.insert_unsynced(hash, bytes);
+            } else {
+                self.images.insert_verified(hash, bytes);
+            }
         }
         if skipped_read_only {
             out.warnings
@@ -872,6 +912,309 @@ impl Document {
         out
     }
 
+    /// Файл на сервере, ещё до применения журнала: неполный журнал — не повреждение.
+    pub fn set_catches_up(&mut self) {
+        self.catches_up = true;
+    }
+
+    /// Включает синхронизацию: зеркала страниц начинают слушать чужие правки, а на следующем
+    /// `take_sync_subscribes` — подписка на корень и все загруженные страницы.
+    pub fn sync_start(&mut self) {
+        self.catches_up = true;
+        if self.sync.is_none() {
+            self.sync = Some(SyncCursors::default());
+        }
+        for page in self.loaded.values() {
+            page.listen();
+        }
+    }
+
+    /// Соединение оборвалось: на новом всё начинается с подписки, а неподтверждённое уйдёт снова.
+    pub fn sync_reset(&mut self) {
+        if let Some(s) = &mut self.sync {
+            s.subscribed.clear();
+            for c in s.docs.values_mut() {
+                c.ready = false;
+            }
+        }
+    }
+
+    /// Документы, на которые ещё нет подписки, с их версиями. Незагруженной страницы здесь нет:
+    /// подписка — когда её откроют, её снимок потом догонит журнал.
+    pub fn take_sync_subscribes(&mut self) -> Vec<(DocKey, SyncVersion)> {
+        let Some(s) = &mut self.sync else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if s.subscribed.insert(DocKey::Root) {
+            out.push((DocKey::Root, SyncVersion(self.root.oplog_vv())));
+        }
+        for (id, page) in &self.loaded {
+            if s.subscribed.insert(DocKey::Page(*id)) {
+                out.push((DocKey::Page(*id), SyncVersion(page.oplog_vv())));
+            }
+        }
+        out
+    }
+
+    /// Сервер ответил на подписку: всё сверх его версии надо отправить.
+    pub fn sync_subscribed(&mut self, doc: DocKey, server: SyncVersion) {
+        if let Some(s) = &mut self.sync {
+            s.docs.insert(
+                doc,
+                Cursor {
+                    ready: true,
+                    failed: false,
+                    sent: server.0.clone(),
+                    acked: server.0,
+                },
+            );
+        }
+    }
+
+    /// Свои правки, которых сервер ещё не получал, кусками до `limit` байт. Просмотр и файл только для
+    /// чтения правок не шлют, что бы ни было в журнале документа.
+    ///
+    /// Документ, который не экспортируется, не держит остальные: его курсор стоит на месте, а ошибка один раз до следующей
+    /// подписки уходит в [`Document::take_sync_failures`].
+    pub fn take_sync_updates(&mut self, limit: usize) -> DocResult<Vec<SyncBatch>> {
+        self.take_sync_updates_with(|_, doc, from| {
+            sync::split_updates(doc, from, limit, sync::MAX_SYNC_FLUSH_BYTES)
+        })
+    }
+
+    /// Документы, чьи правки не собрались для сервера, с причиной. Каждый — один раз до новой подписки.
+    pub fn take_sync_failures(&mut self) -> Vec<(DocKey, String)> {
+        self.sync
+            .as_mut()
+            .map(|s| std::mem::take(&mut s.failures))
+            .unwrap_or_default()
+    }
+
+    fn take_sync_updates_with(
+        &mut self,
+        mut split: impl FnMut(
+            DocKey,
+            &LoroDoc,
+            &VersionVector,
+        ) -> DocResult<Vec<(Vec<u8>, VersionVector)>>,
+    ) -> DocResult<Vec<SyncBatch>> {
+        if self.is_read_only() {
+            return Ok(Vec::new());
+        }
+        let Some(s) = &mut self.sync else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for (key, c) in s.docs.iter_mut().filter(|(_, c)| c.ready && !c.failed) {
+            let doc = match key {
+                DocKey::Root => Some(self.root.clone()),
+                DocKey::Page(id) => self.loaded.get(id).map(|p| p.loro().clone()),
+            };
+            let Some(doc) = doc else { continue };
+            if c.sent.includes_vv(&doc.oplog_vv()) {
+                continue;
+            }
+            let parts = match split(*key, &doc, &c.sent) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    c.failed = true;
+                    s.failures.push((*key, e.to_string()));
+                    continue;
+                }
+            };
+            for (bytes, end) in parts {
+                // Отправлено ровно то, что собрано: остаток заберёт следующий вызов.
+                sync::merge(&mut c.sent, &end);
+                out.push(SyncBatch {
+                    doc: *key,
+                    bytes,
+                    end: SyncVersion(end),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Сервер записал пачку на диск базы.
+    pub fn sync_acked(&mut self, doc: DocKey, end: &SyncVersion) {
+        if let Some(c) = self.sync.as_mut().and_then(|s| s.docs.get_mut(&doc)) {
+            sync::merge(&mut c.acked, &end.0);
+        }
+    }
+
+    /// Текущие версии документов: отметка пачки журнала, которую потом можно снять.
+    pub fn sync_versions(&self) -> Vec<(DocKey, SyncVersion)> {
+        if self.sync.is_none() {
+            return Vec::new();
+        }
+        let mut out = vec![(DocKey::Root, SyncVersion(self.root.oplog_vv()))];
+        out.extend(
+            self.loaded
+                .iter()
+                .map(|(id, p)| (DocKey::Page(*id), SyncVersion(p.oplog_vv()))),
+        );
+        out
+    }
+
+    /// Сервер подтвердил всё, что было в документе на момент отметки.
+    pub fn sync_covers(&self, marks: &[(DocKey, SyncVersion)]) -> bool {
+        let Some(s) = &self.sync else {
+            return false;
+        };
+        marks.iter().all(|(k, v)| {
+            // Документа больше нет (страницу удалили): его правки ждать незачем.
+            let gone = matches!(k, DocKey::Page(id) if !self.loaded.contains_key(id));
+            gone || s.docs.get(k).is_some_and(|c| c.acked.includes_vv(&v.0))
+        })
+    }
+
+    /// Есть правки, которых сервер не подтвердил (или ещё не подключались).
+    pub fn sync_unacked(&self) -> bool {
+        let Some(s) = &self.sync else {
+            return false;
+        };
+        // Сервера ещё не спрашивали: своё ли там, неизвестно, значит, не подтверждено.
+        let behind = |key: DocKey, vv: &VersionVector| match s.docs.get(&key) {
+            Some(c) => !c.acked.includes_vv(vv),
+            None => true,
+        };
+        behind(DocKey::Root, &self.root.oplog_vv())
+            || self
+                .loaded
+                .iter()
+                .any(|(id, p)| behind(DocKey::Page(*id), &p.oplog_vv()))
+    }
+
+    /// Применяет пачку чужих правок документа `doc` (спека подсистемы 4, раздел 8). Шаги отмены
+    /// остаются, зеркало обновляется по изменённым узлам, изменения — обычным путём `take_changes`.
+    /// Работает и в режиме просмотра, и в файле только для чтения: правки других применяются всегда.
+    pub fn apply_remote(&mut self, doc: DocKey, batches: &[&[u8]]) -> DocResult<RemoteOutcome> {
+        let mut out = match doc {
+            DocKey::Root => self.apply_remote_root(batches),
+            DocKey::Page(id) => self.apply_remote_page(id, batches),
+        };
+        // Принесённое сервером отправлять незачем, и оно уже подтверждено.
+        if let Some(c) = self.sync.as_mut().and_then(|s| s.docs.get_mut(&doc)) {
+            for bytes in batches {
+                let end = sync::blob_end(bytes);
+                sync::merge(&mut c.sent, &end);
+                sync::merge(&mut c.acked, &end);
+            }
+        }
+        out.missing_images.sort();
+        out.missing_images.dedup();
+        Ok(out)
+    }
+
+    fn apply_remote_root(&mut self, batches: &[&[u8]]) -> RemoteOutcome {
+        let mut out = RemoteOutcome {
+            root_changed: true,
+            ..RemoteOutcome::default()
+        };
+        let was_read_only = self.is_read_only();
+        for data in batches {
+            match self.root.import(data) {
+                Ok(status) => out.pending |= status.pending.is_some(),
+                Err(_) => out.failed = true,
+            }
+        }
+        let listed: Vec<PageId> = self.pages().into_iter().map(|(id, _)| id).collect();
+        for id in &listed {
+            if !self.loaded.contains_key(id) && !self.unloaded.contains_key(id) {
+                // Страница другого участника: содержимое придёт по подписке, загружать нечего.
+                let page = PageDoc::new();
+                if self.sync.is_some() {
+                    page.listen();
+                }
+                self.loaded.insert(*id, page);
+                self.journaled_pages.insert(*id, VersionVector::default());
+                out.added_pages.push(*id);
+            }
+        }
+        let known: Vec<PageId> = self
+            .loaded
+            .keys()
+            .chain(self.unloaded.keys())
+            .copied()
+            .collect();
+        for id in known {
+            if !listed.contains(&id) {
+                self.loaded.remove(&id);
+                self.unloaded.remove(&id);
+                self.changes.remove(&id);
+                self.journaled_pages.remove(&id);
+                for orphan in self.history.forget_page(id) {
+                    self.parked.remove(&orphan);
+                }
+                if let Some(s) = &mut self.sync {
+                    s.docs.remove(&DocKey::Page(id));
+                    s.subscribed.remove(&DocKey::Page(id));
+                }
+                out.removed_pages.push(id);
+            }
+        }
+        self.forget_parked();
+        // Чужая правка могла сменить направляющие страницы и версию схемы.
+        self.guides_revision += 1;
+        if self.schema_version() > SCHEMA_VERSION {
+            self.read_only = true;
+        }
+        out.became_read_only = self.is_read_only() && !was_read_only;
+        out
+    }
+
+    fn apply_remote_page(&mut self, id: PageId, batches: &[&[u8]]) -> RemoteOutcome {
+        // Страница, которую уже удалили, или ещё не загруженная: подписки на неё нет,
+        // а опоздавший кадр догонит журнал при открытии.
+        let Some(page) = self.loaded.get(&id) else {
+            return RemoteOutcome::default();
+        };
+        let was_read_only = self.is_read_only();
+        let applied = page.apply_remote(batches);
+        let mut out = RemoteOutcome {
+            page: Some(id),
+            failed: applied.failed,
+            pending: applied.pending,
+            rebuilt: applied.rebuilt,
+            vectors: applied.vectors,
+            text: applied
+                .text
+                .iter()
+                .map(|(n, d)| (*n, TextShift(d.clone())))
+                .collect(),
+            ..RemoteOutcome::default()
+        };
+        if page.has_unknown_nodes() || page.has_oversized_text() {
+            self.read_only = true;
+        }
+        out.became_read_only = self.is_read_only() && !was_read_only;
+        if applied.rebuilt {
+            // Сцена строится заново, частичные изменения ей не нужны; сверить все хэши дешевле, чем помнить их.
+            self.changes.remove(&id);
+            match page.image_refs() {
+                Ok(refs) => {
+                    out.missing_images = refs
+                        .into_iter()
+                        .filter(|h| self.images.get(h).is_none())
+                        .collect();
+                }
+                Err(_) => out.failed = true,
+            }
+        } else {
+            out.missing_images = applied
+                .images
+                .into_iter()
+                .filter(|h| self.images.get(h).is_none())
+                .collect();
+            self.changes.entry(id).or_default().extend(applied.changes);
+        }
+        for (node, delta) in &applied.text {
+            self.history.transform_text(id, *node, delta);
+        }
+        out
+    }
+
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
@@ -888,8 +1231,9 @@ impl Document {
         self.page(entry.page)?;
         self.writable()?;
         let p = self.loaded.get(&entry.page).expect("загружена");
-        // При сбое apply_inverse сам откатывает уже применённую часть шага.
-        let result = p.apply_inverse(&entry.ops);
+        // При сбое apply_inverse сам откатывает уже применённую часть шага. Узлы, которые успел
+        // убрать другой участник, шаг пропускает.
+        let result = p.apply_step(&entry.ops);
         // Применённые операции записывают обратные к себе — это и есть изменения.
         // При сбое сверяем все узлы шага: откат мог и не удаться.
         let changes = self.changes.entry(entry.page).or_default();
@@ -897,7 +1241,7 @@ impl Document {
             Ok(done) => changes.record(done),
             Err(_) => changes.record(&entry.ops),
         }
-        let ops = result?;
+        let ops = self.settle_duplicates(entry.page, result)?;
         match self.apply_doc_ops(&entry.doc_ops) {
             Ok((doc_ops, remap)) => Ok(Replay {
                 ops,
@@ -910,13 +1254,14 @@ impl Document {
                 let back = p.apply_inverse(&ops);
                 let changes = self.changes.entry(entry.page).or_default();
                 changes.record(&ops);
-                Err(match back {
+                let failed = Err(match back {
                     Ok(_) => e,
                     Err(rollback) => DocError::RollbackFailed {
                         original: Box::new(e),
                         rollback: Box::new(rollback),
                     },
-                })
+                });
+                self.settle_duplicates(entry.page, failed)
             }
         }
     }
@@ -983,9 +1328,15 @@ impl Document {
                     background,
                     guides,
                 } => {
-                    if !self.parked.contains_key(page) {
+                    let Some(parked) = self.parked.get(page) else {
                         return Err(DocError::PageNotFound(page.to_string()));
-                    }
+                    };
+                    // Скрытые узлы неизвестного типа копия потеряла бы: файл только для чтения повтор не делает.
+                    self.writable()?;
+                    // Под новым id — новый документ: без чужой истории (сервер не примет чужие пиры) и с полной своей
+                    // (снимок shallow от пустой версии не экспортируется). Собирается до правки списка: отказ не оставляет
+                    // пустой страницы.
+                    let doc = parked.rebuilt()?;
                     let at = (*index).min(self.pages().len());
                     let t = self.pages_tree.create_at(TreeParentId::Root, at)?;
                     let meta = self.pages_tree.get_meta(t)?;
@@ -998,7 +1349,10 @@ impl Document {
                     }
                     self.root.commit();
                     let new = PageId(t);
-                    let doc = self.parked.remove(page).expect("проверено выше");
+                    self.parked.remove(page);
+                    if self.sync.is_some() {
+                        doc.listen();
+                    }
                     self.loaded.insert(new, doc);
                     // Копия целиком — в следующую пачку журнала, как новая страница.
                     self.journaled_pages.insert(new, VersionVector::default());
@@ -1012,10 +1366,20 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> DocResult<Option<Restore>> {
-        let Some(entry) = self.history.pop_undo() else {
-            return Ok(None);
-        };
+        // Шаг, от которого чужие правки не оставили ничего, пропускается: отмена идёт к следующему.
+        while let Some(entry) = self.history.pop_undo() {
+            match self.undo_entry(entry)? {
+                Some(restore) => return Ok(Some(restore)),
+                None => continue,
+            }
+        }
+        Ok(None)
+    }
+
+    fn undo_entry(&mut self, entry: HistoryEntry) -> DocResult<Option<Restore>> {
+        let empty = entry.ops.is_empty() && entry.doc_ops.is_empty();
         match self.replay(&entry) {
+            Ok(r) if !empty && r.ops.is_empty() && r.doc_ops.is_empty() => Ok(None),
             Ok(r) => {
                 let restore = Restore {
                     page: entry.page,
@@ -1037,10 +1401,19 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> DocResult<Option<Restore>> {
-        let Some(entry) = self.history.pop_redo() else {
-            return Ok(None);
-        };
+        while let Some(entry) = self.history.pop_redo() {
+            match self.redo_entry(entry)? {
+                Some(restore) => return Ok(Some(restore)),
+                None => continue,
+            }
+        }
+        Ok(None)
+    }
+
+    fn redo_entry(&mut self, entry: HistoryEntry) -> DocResult<Option<Restore>> {
+        let empty = entry.ops.is_empty() && entry.doc_ops.is_empty();
         match self.replay(&entry) {
+            Ok(r) if !empty && r.ops.is_empty() && r.doc_ops.is_empty() => Ok(None),
             Ok(r) => {
                 let mut next = HistoryEntry {
                     ops: r.ops,
@@ -1092,6 +1465,73 @@ mod tests {
     use super::*;
     use crate::history::HistoryEntry;
     use crate::types::{NodeKind, PropsPatch};
+
+    /// Правка на странице и в корне, подписка на оба документа от пустой версии сервера.
+    fn syncing() -> (Document, PageId) {
+        let mut doc = Document::new();
+        let page = doc.pages()[0].0;
+        doc.sync_start();
+        doc.page(page).unwrap();
+        doc.transact(page, vec![], |p| {
+            Ok(vec![p.create_node(None, None, NodeKind::Rect)?])
+        })
+        .unwrap();
+        doc.set_name("Файл").unwrap();
+        for (k, _) in doc.take_sync_subscribes() {
+            doc.sync_subscribed(k, SyncVersion::default());
+        }
+        (doc, page)
+    }
+
+    #[test]
+    fn export_failure_of_one_doc_does_not_hold_back_the_others() {
+        // Отказ экспорта одного документа (T3-M3): пачки остальных уходят и их курсоры двигаются, у отказавшего — нет.
+        // Документы в `HashMap`, отказ бывает и до собранного, и после: проверяются оба документа.
+        for fail_root in [true, false] {
+            let (mut doc, page) = syncing();
+            let broken = if fail_root {
+                DocKey::Root
+            } else {
+                DocKey::Page(page)
+            };
+            let other = if fail_root {
+                DocKey::Page(page)
+            } else {
+                DocKey::Root
+            };
+            let split = |key: DocKey, d: &LoroDoc, from: &VersionVector| {
+                if key == broken {
+                    return Err(DocError::InvalidId("сбой экспорта".into()));
+                }
+                sync::split_updates(
+                    d,
+                    from,
+                    sync::MAX_SYNC_BATCH_BYTES,
+                    sync::MAX_SYNC_FLUSH_BYTES,
+                )
+            };
+            let batches = doc.take_sync_updates_with(split).unwrap();
+            assert!(!batches.is_empty());
+            assert!(
+                batches.iter().all(|b| b.doc == other),
+                "ушёл только исправный"
+            );
+            let failed = doc.take_sync_failures();
+            assert_eq!(failed.len(), 1);
+            assert_eq!(failed[0].0, broken);
+            // Сообщается один раз, а не на каждом шаге таймера; исправный документ своё уже отдал.
+            assert!(doc.take_sync_updates_with(split).unwrap().is_empty());
+            assert!(doc.take_sync_failures().is_empty());
+            assert!(doc.sync_unacked(), "правки отказавшего не подтверждены");
+            // Новое соединение — новая попытка: курсор заводит ответ на подписку.
+            doc.sync_reset();
+            for (k, _) in doc.take_sync_subscribes() {
+                doc.sync_subscribed(k, SyncVersion::default());
+            }
+            let again = doc.take_sync_updates(sync::MAX_SYNC_BATCH_BYTES).unwrap();
+            assert!(again.iter().any(|b| b.doc == broken));
+        }
+    }
 
     /// Идентификатор узла, которого нет на свежей странице.
     fn missing_node() -> NodeId {
@@ -1295,8 +1735,9 @@ mod tests {
         assert!(d2.page(p1).is_ok());
     }
 
+    /// Шаг про узел, которого больше нет (убрал другой участник), пропускается, а не блокирует стек.
     #[test]
-    fn failed_undo_keeps_history_entry() {
+    fn undo_step_over_missing_node_is_skipped() {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         doc.history.push(HistoryEntry {
@@ -1308,13 +1749,13 @@ mod tests {
             selection_before: vec![],
             selection_after: vec![],
         });
-        assert!(doc.undo().is_err());
-        assert!(doc.can_undo());
+        assert_eq!(doc.undo().unwrap(), None);
+        assert!(!doc.can_undo());
         assert!(!doc.can_redo());
     }
 
     #[test]
-    fn failed_redo_keeps_history_entry() {
+    fn redo_step_over_missing_node_is_skipped() {
         let mut doc = Document::new();
         let page = doc.pages()[0].0;
         doc.history.push_redo(HistoryEntry {
@@ -1326,8 +1767,8 @@ mod tests {
             selection_before: vec![],
             selection_after: vec![],
         });
-        assert!(doc.redo().is_err());
-        assert!(doc.can_redo());
+        assert_eq!(doc.redo().unwrap(), None);
+        assert!(!doc.can_redo());
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 import type { FileMeta, FromIo, IoOp, IoResults, JournalMark, Section, ToIo } from '../core/file-list';
 import type { AccessState } from '../core/server-files';
+import type { SyncStatus } from '../core/sync-client';
 import { nameFromFile } from '../core/file-list';
 import { mb } from '../core/limits';
 import { MAX_COMMAND_BYTES } from '../core/messages';
@@ -15,6 +16,17 @@ import type { SettingsBackend } from './settings-store';
 import { createDiskFiles, fsaSupported, type DiskFiles, type DiskIo } from './disk';
 
 export type { FileMeta, JournalMark, Section } from '../core/file-list';
+
+export interface SyncEvents {
+  status(status: SyncStatus, detail?: string): void;
+  reload(): void;
+}
+
+/** Ядро для соединения файла: прямой порт к `sync.worker` и его конец. */
+export interface SyncCore {
+  connectSync(port: MessagePort): void;
+  disconnectSync(): void;
+}
 
 export interface FileStore {
   /** Окно списка раздела (не больше 200 строк) и общее число записей в нём. */
@@ -65,12 +77,20 @@ export interface FileStore {
   readonly fullHistory?: boolean;
   /** Запись зависит от сети: неудачная повторяется сама, закрытие вкладки спрашивает о незаписанном. */
   readonly remote?: boolean;
+  /** Соединение файла (спека подсистемы 4, раздел 7): правки идут журналом сервера, файл целиком пишется только первый раз. */
+  sync?(id: string, core: SyncCore, events: SyncEvents): { stop(): void };
+  /** Сервер подтвердил правки: снять пачки журнала браузера. */
+  cutJournal?(id: string, mark: JournalMark): Promise<void>;
+  /** Превью при правках журналом. `null` — убрать. */
+  putThumb?(id: string, thumb: ArrayBuffer | null): void;
   /** Новый файл из снимка ядра (буфер передаётся); нет — спасать правки в новый файл негде. */
   createFrom?(name: string, bytes: ArrayBuffer): Promise<FileMeta>;
   /** Подпись кнопки импорта, если она не «Импорт…». */
   readonly importLabel?: string;
   /** Доступ к открытому файлу (файл на сервере); возвращает отписку. Нет — доступ не меняется. */
   watch?(id: string, listener: (state: AccessState) => void): () => void;
+  /** Доступ теперь сообщает соединение файла: опрос не нужен. */
+  stopPolling?(id: string): void;
   /** Открыть файл по ссылке «Поделиться»; `false` — ссылка не действует. */
   redeemLink?(id: string, token: string): Promise<boolean>;
   /** Попросить доступ к файлу. Есть у хранилища с ролями: файла без доступа там отличить нельзя. */

@@ -15,8 +15,10 @@ pub mod journal;
 mod loro_ext;
 mod page;
 mod scene_cache;
+mod sync;
 mod text;
 mod text_codec;
+mod text_ot;
 mod types;
 mod vector;
 
@@ -30,6 +32,10 @@ pub use images::ImageStore;
 pub use journal::Replayed;
 pub use page::{PageDoc, Tx};
 pub use scene_cache::SceneRow;
+pub use sync::{
+    DocKey, RemoteOutcome, SyncBatch, SyncVersion, TextShift, MAX_SYNC_BATCH_BYTES,
+    MAX_VERSION_PEERS,
+};
 pub use text::*;
 pub use types::*;
 pub use vector::*;

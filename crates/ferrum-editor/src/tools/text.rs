@@ -155,6 +155,13 @@ impl Tool for TextTool {
         !matches!(self.state, State::Idle)
     }
 
+    fn touches(&self, gone: &dyn Fn(NodeId) -> bool) -> bool {
+        match &self.state {
+            State::Idle => false,
+            State::Pressed(s) | State::Drawing(s, _) => s.parent.is_some_and(gone),
+        }
+    }
+
     fn cursor(&self) -> Cursor {
         Cursor::Text
     }

@@ -26,6 +26,9 @@
 // заберёт полный файл. Пока журнал неполон (пачка не собрана или потеряна), правки
 // не отодвигают полный файл дальше `FULL_MAX_MS` от прошлого. После неудачной
 // полной записи следующая сама по себе — не раньше чем через `FULL_IDLE_MS`.
+// Файл с журналом сервера (`opts.sync`): правки идут по соединению файла, а полный файл пишется только первый раз, чтобы журналу
+// было к чему лечь. Журнал браузера держит неподтверждённое и снимается по подтверждению сервера (`journalCovered`). «Сохранить» —
+// дождаться сервера; не дождались (нет сети) — уход спрашивает, правки при этом в журнале браузера и уйдут при следующем открытии.
 // Запись через сеть (`files.remote`): после сбоя она повторяется сама с растущей паузой, от `FULL_IDLE_MS` до
 // десяти минут (удача или правка начинают заново), кроме отказов, которые повтор не исправит. Без сети и за
 // ночь со скрытой вкладкой выходит несколько десятков снимков, а не сотни. Закрытие вкладки спрашивает, пока
@@ -86,7 +89,29 @@ export interface SaverOptions {
   journalSession?: number | null;
   /** Файл без записи уже записал другой человек: правки больше не лягут в него. */
   onDiverged?: () => void;
+  /** Файл на сервере с журналом: правки идут соединением файла, а не записью целиком. */
+  sync?: boolean;
+  /** Читатель: первую запись делает не он. */
+  viewer?: boolean;
+  /** Файл теперь есть на сервере: можно подключаться. */
+  onStored?: () => void;
+  /** Первую запись опередил другой, своих правок ещё не было: открыть файл заново, его содержимое и есть правда. */
+  onTaken?: () => void;
+  /** Почему сервер правки сейчас не примет (отказ, доступ снят, роль понижена, соединение не запустилось); `null` — примет. Тогда
+   * «Сохранить» и уход не ждут подтверждения, а сразу называют причину. */
+  refused?: () => string | null;
 }
+
+/** Сколько «Сохранить» и уход ждут подтверждения сервера. */
+export const SYNC_WAIT_MS = 5000;
+/** Превью при правках журналом — не чаще этого (раздел 6.2). */
+export const THUMB_MS = 60_000;
+/** Текст вопроса при уходе: правки не потеряются, но и на сервере их нет. */
+export const NOT_ON_SERVER =
+  'Правки ещё не дошли до сервера. Они сохранены в этом браузере и уйдут, когда вы откроете файл снова при подключении';
+/** Текст вопроса при уходе, когда сервер правки не примет (отказ, доступ снят, роль понижена): ждать нечего. */
+export const SERVER_REFUSED =
+  'Правки не сохранены на сервере и не уйдут туда сами. Они есть только в этом браузере — сохраните копию на диск';
 
 export interface Saver {
   /** Сохранить полный файл, если документ изменён; `true` — записано (или нечего). */
@@ -103,6 +128,10 @@ export interface Saver {
   failure(): string | null;
   /** Поколение файла, на котором основана следующая запись. */
   version(): number;
+  /** Есть ли у файла запись на сервере. */
+  stored(): boolean;
+  /** Документ изменён (у файла с журналом сервера — не всё на сервере), по событиям ядра без задержки кадра. */
+  modified(): boolean;
   /** Человек согласился уйти: закрытие вкладки больше не спрашивает. */
   release(): void;
   /** Правки — в новый файл (когда в этот они больше не лягут). `null` — не вышло, причина показана. */
@@ -181,11 +210,20 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   /** Правки уже в новом файле: этому редактору записывать нечего. */
   let rescued = false;
   let disposed = false;
+  /** Подтверждение сервера: ждущие «Сохранить» и уход. */
+  let unacked = false;
+  let ackWaiters: ((ok: boolean) => void)[] = [];
+  let thumbTimer = 0;
+  /** Первая запись нужна и без правок: журналу надо к чему лечь. */
+  let needBase = opts.sync === true && !stored && opts.viewer !== true;
+  const synced = () => opts.sync === true && stored;
   const unjournaled = () => lost > covered;
   /** Последняя пачка не собрана ядром: правки ждут следующей. */
   let unbuilt = false;
-  /** Полный файл в простое; пока журнал неполон — не позже срока `fullDue`. */
+  /** Полный файл в простое; пока журнал неполон — не позже срока `fullDue`. С журналом сервера полных записей нет: правки
+   * сохраняет сервер, а «Сохранить» лишь ждёт его (и каждый раз рендерил бы превью). */
   const armFull = () => {
+    if (synced()) return;
     clearTimeout(fullTimer);
     const left = unbuilt || unjournaled() ? fullDue() - performance.now() : fullIdleMs;
     fullTimer = window.setTimeout(() => void save(), Math.max(0, Math.min(fullIdleMs, left)));
@@ -199,6 +237,16 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     clearTimeout(fullTimer);
     if (!stored) {
       fullTimer = window.setTimeout(() => void save(), AUTOSAVE_MS);
+      return;
+    }
+    if (synced()) {
+      if (!journalTimer) journalTimer = window.setTimeout(() => void flushJournal(), journalMs);
+      if (!thumbTimer && files.putThumb) {
+        thumbTimer = window.setTimeout(() => {
+          thumbTimer = 0;
+          ed.send({ type: 'thumbnail' });
+        }, opts.fullIdleMs ?? THUMB_MS);
+      }
       return;
     }
     // Пачка — не позже `journalMs` после первой правки: правки подряд её не откладывают.
@@ -220,6 +268,21 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
         break;
       case 'journal':
         onJournal(e);
+        break;
+      case 'journalCovered':
+        void files.cutJournal?.(id, { session, batch: e.batch }).catch(() => {
+          // Не снялось — останется до следующего раза, при открытии его пропустит Loro.
+        });
+        break;
+      case 'syncState':
+        unacked = e.unacked;
+        if (!unacked) {
+          for (const w of ackWaiters.splice(0)) w(true);
+          failure = null;
+        }
+        break;
+      case 'thumbnail':
+        if (!e.keep) files.putThumb?.(id, e.bytes ? ownBuffer(e.bytes) : null);
         break;
       case 'saveRequested':
         // После всей пачки событий: правка и Ctrl+S в одном кадре ядра присылают
@@ -299,7 +362,7 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   /** Долгая работа без пауз: полный файл не реже `FULL_MAX_MS` (после неудачи — по
    * `fullDue`). Пачка перед снимком идущей записи второй снимок не просит. */
   function fullIfLong(): void {
-    if (stored && modified && !running && performance.now() > fullDue()) void save();
+    if (stored && !synced() && modified && !running && performance.now() > fullDue()) void save();
   }
 
   function flushJournal(): Promise<boolean> {
@@ -323,9 +386,42 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
     return snap;
   }
 
+  /** Файл ведёт журнал сервера: «записано» — это подтвердил сервер. */
+  async function waitServer(): Promise<boolean> {
+    // Человек сохраняет или уходит: превью не ждёт своего срока.
+    if (thumbTimer) {
+      clearTimeout(thumbTimer);
+      thumbTimer = 0;
+      ed.send({ type: 'thumbnail' });
+    }
+    const flushed = await flushJournal();
+    // Исход известен заранее: сервер эти правки сейчас не примет, ждать подтверждения нечего.
+    const why = opts.refused?.() ?? null;
+    if (why && (unacked || modified)) {
+      failure = why;
+      return false;
+    }
+    // Сервер подтвердил всё («изменён» снят ядром): записано, даже если пачка журнала браузера не легла.
+    if (!unacked) return flushed || !modified;
+    const ok = await new Promise<boolean>((resolve) => {
+      const timer = window.setTimeout(() => {
+        ackWaiters = ackWaiters.filter((w) => w !== done);
+        resolve(false);
+      }, SYNC_WAIT_MS);
+      const done = (v: boolean) => {
+        clearTimeout(timer);
+        resolve(v);
+      };
+      ackWaiters.push(done);
+    });
+    if (!ok) failure = NOT_ON_SERVER;
+    return ok;
+  }
+
   async function write(): Promise<boolean> {
     clearTimeout(fullTimer);
-    if (!modified || rescued) return true;
+    if (synced()) return rescued ? true : waitServer();
+    if ((!modified && !needBase) || rescued) return true;
     // Отказ не изменится, а причина уже показана: вопрос при уходе назовёт её.
     if (diverged) return false;
     if (ed.store.state.stopped) {
@@ -350,6 +446,8 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
       const meta = await files.write(id, ownBuffer(snap.bytes), thumb, base, journal);
       base = meta.version;
       stored = true;
+      needBase = false;
+      if (opts.sync) opts.onStored?.();
       lastFull = performance.now();
       covered = Math.max(covered, seen);
       resetRetries();
@@ -364,6 +462,10 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
       if (!wasStored) dirty = true;
       failedAt = performance.now();
       const code = (err as { code?: unknown }).code;
+      if (files.remote && !wasStored && code === 'CONFLICT' && !modified && opts.onTaken) {
+        opts.onTaken();
+        return false;
+      }
       if (files.remote && !wasStored && code === 'CONFLICT') {
         diverged = true;
         fail(NEW_FILE_TAKEN);
@@ -403,7 +505,9 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   const onVisibility = () => {
     if (document.visibilityState === 'hidden') void flushJournal();
   };
-  const pending = () => !rescued && (dirty || unjournaled() || (!stored && modified));
+  /** С журналом сервера правка в безопасности, если она в журнале браузера или её подтвердил сервер. */
+  const pending = () =>
+    !rescued && (synced() ? (dirty || unjournaled()) && (unacked || modified) : dirty || unjournaled() || (!stored && modified));
   const onBeforeUnload = (e: BeforeUnloadEvent) => {
     if (!pending() && appending === 0) return;
     e.preventDefault();
@@ -414,10 +518,14 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
   if (files.remote) window.addEventListener('beforeunload', onBeforeUnload);
   const release = () => window.removeEventListener('beforeunload', onBeforeUnload);
 
+  if (needBase) queueMicrotask(() => void save());
+
   return {
     save,
     flushJournal,
     pending,
+    stored: () => stored,
+    modified: () => modified,
     settled: () =>
       withTimeout(
         appended.then(() => true),
@@ -446,6 +554,8 @@ export function createSaver(ed: Editor, files: FileStore, id: string, base: numb
       release();
       clearTimeout(journalTimer);
       clearTimeout(fullTimer);
+      clearTimeout(thumbTimer);
+      for (const w of ackWaiters.splice(0)) w(false);
       off();
       window.removeEventListener('pagehide', onHide);
       document.removeEventListener('visibilitychange', onVisibility);

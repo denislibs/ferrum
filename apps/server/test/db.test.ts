@@ -60,5 +60,8 @@ test('обрыв занятого соединения: запрос получ�
     afterInvites: 200,
     next: 200,
     afterValkey: 200,
+    journal: 'UNAVAILABLE',
+    journalNext: 1,
+    afterJournal: 200,
   });
 }, 60_000);

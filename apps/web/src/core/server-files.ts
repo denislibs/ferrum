@@ -61,6 +61,8 @@ export function failureMessage(code: Failure): string {
       return 'Слишком много запросов — повторите позже';
     case 'UNAVAILABLE':
       return 'Сервер недоступен — повторите позже';
+    case 'INCOMPLETE':
+      return 'Копию не собрать целиком: часть файла на сервере не сжимается. Правки целы — откройте файл и сохраните копию из редактора';
     case 'MISSING_IMAGES':
       return 'Картинки файла не дошли до сервера — повторите позже';
     case 'TOO_MANY_IMAGES':
@@ -110,7 +112,11 @@ export interface JournalEntries {
   entries: ArrayBuffer[];
   session: number | null;
   tooLarge: boolean;
+  /** Ключи `entries`: снять именно их, когда сервер подтвердил. */
+  keys?: JournalKey[];
 }
+
+export type JournalKey = [file: string, session: number, batch: number];
 
 /** Журнал правок этого человека (в браузере — IndexedDB с разделением по пользователю). */
 export interface JournalStore {
@@ -118,6 +124,8 @@ export interface JournalStore {
   read(file: string): Promise<JournalEntries>;
   /** Снимок вобрал пачки до `upTo` этого сеанса и все прежние. */
   cut(file: string, session: number, upTo: number): Promise<void>;
+  /** Только эти пачки: у журнала сервера файл открыт в нескольких вкладках, пачки других вкладок ещё нужны. */
+  cutExact(keys: readonly JournalKey[]): Promise<void>;
   drop(file: string): Promise<void>;
 }
 
@@ -242,6 +250,8 @@ export class ServerFiles {
   private readonly knownImages = new Map<string, Set<string>>();
   private readonly thumbs = new Map<string, { last: number; pending: ArrayBuffer | null | undefined; timer: unknown }>();
   private readonly lastAccess = new Map<string, string>();
+  /** Пачки журнала, прочитанные при открытии файла: они вошли в документ, их снимает подтверждение сервера. */
+  private readonly readKeys = new Map<string, readonly JournalKey[]>();
 
   constructor(
     private readonly http: typeof fetch,
@@ -532,6 +542,8 @@ export class ServerFiles {
     // Читатель правок не применяет: журнал остаётся до тех пор, пока ему вернут право. Сеанс нужен и ему:
     // новые пачки идут после прежних.
     const held = m.role === 'viewer' && (j.tooLarge || j.entries.length > 0);
+    // Читатель журнал не применил: его подтверждение ничего о нём не значит, пачки ждут, пока вернут право.
+    this.readKeys.set(file, m.role === 'viewer' ? [] : (j.keys ?? []));
     if (held) this.heldJournal.add(file);
     else this.heldJournal.delete(file);
     const applied = m.role !== 'viewer';
@@ -548,6 +560,28 @@ export class ServerFiles {
 
   /** Файл `.ferrum` с картинками: «Скачать копию» (читателю тоже, раздел 6.1). */
   async blob(file: string): Promise<Blob | null> {
+    // Правки могут быть ещё в журнале сервера: сначала он собирает файл целиком. Срок — как у передачи всего файла.
+    let compacted: Response;
+    try {
+      compacted = await this.http(`${API_FILES}/${file}/compact`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(transferTimeout(MAX_OPEN_BYTES)),
+      });
+    } catch {
+      throw new ServerFailure('NETWORK');
+    }
+    // Сервер сжимает файл или недавно сжал: просит подождать (`Retry-After`), а не недоступен.
+    const retry = Number(compacted.headers.get('retry-after'));
+    if (compacted.status === 503 && Number.isFinite(retry) && retry > 0) {
+      void compacted.body?.cancel().catch(() => {});
+      throw new ServerFailure('UNAVAILABLE', `Копия собирается — повторите через ${Math.ceil(retry)} с`);
+    }
+    // Журнал документа, который видят люди, в файл не вошёл: копия была бы неполной, повтор не поможет.
+    if (compacted.status === 503) {
+      const body: unknown = await compacted.json().catch(() => null);
+      throw new ServerFailure(record(body)?.error === 'INCOMPLETE' ? 'INCOMPLETE' : 'UNAVAILABLE');
+    }
+    if (!compacted.ok) await this.readReply(compacted, (_v): _v is never => false);
     const { bytes } = await this.download(file);
     return bytes ? new Blob([bytes], { type: 'application/x-ferrum' }) : null;
   }
@@ -699,7 +733,8 @@ export class ServerFiles {
     if (!state || state.pending === undefined) return;
     const thumb = state.pending;
     state.pending = undefined;
-    state.last = this.clock.now();
+    // Убрать превью (страница пуста) — не повод откладывать первое настоящее.
+    if (thumb) state.last = this.clock.now();
     try {
       const res = await this.http(
         `${API_FILES}/${file}/thumb`,
@@ -711,6 +746,81 @@ export class ServerFiles {
     } catch {
       // Превью обновится со следующей записью.
     }
+  }
+
+  /** Картинка новой правки (`sync.worker`): раньше самой правки. Есть у файла — байты не идут. */
+  async uploadOneImage(file: string, hash: string, bytes: Uint8Array): Promise<void> {
+    await this.uploadImages(file, [{ hash, size: bytes.length, part: bytes as Uint8Array<ArrayBuffer> }]);
+  }
+
+  /** Картинка по чужой ссылке. Нет у файла — `null`. */
+  downloadOneImage(file: string, hash: string): Promise<ArrayBuffer | null> {
+    return this.image(file, hash);
+  }
+
+  /** Снимок одного документа: клиент отстал сильнее журнала. Сверх предела частоты ждёт, сколько просит сервер. Сроки — как у
+   * картинки: заголовки — как небольшой запрос, тело — по размеру; застывший ответ не держит отправку правок. */
+  async fetchSnapshot(path: string): Promise<ArrayBuffer> {
+    const ctl = new AbortController();
+    let timer: unknown;
+    try {
+      let res: Response;
+      try {
+        // Срок — только на сам запрос: пауза после 429 бывает дольше него и обрывом не считается.
+        res = await this.paced(async () => {
+          timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+          const reply = await this.http(path, { signal: ctl.signal });
+          this.clock.clearTimeout(timer);
+          return reply;
+        });
+      } catch {
+        throw new ServerFailure('NETWORK');
+      }
+      timer = this.clock.setTimeout(() => ctl.abort(), JSON_TIMEOUT_MS);
+      if (!res.ok) {
+        await this.readReply(res, (_v): _v is never => false);
+        throw new ServerFailure('NETWORK');
+      }
+      // Снимок идёт потоком без `Content-Length`: длину сервер называет своим заголовком.
+      const declared = Number(res.headers.get('content-length') ?? res.headers.get('x-ferrum-size') ?? 0);
+      if (declared > MAX_OPEN_BYTES) throw new ServerFailure('TOO_LARGE');
+      this.clock.clearTimeout(timer);
+      timer = this.clock.setTimeout(() => ctl.abort(), transferTimeout(Number.isFinite(declared) ? declared : 0));
+      try {
+        return await res.arrayBuffer();
+      } catch {
+        throw new ServerFailure('NETWORK');
+      }
+    } finally {
+      this.clock.clearTimeout(timer);
+    }
+  }
+
+  /** Доступ сейчас, без памяти наблюдений. Сеть — `null`: это не сообщение о доступе. */
+  async accessOnce(file: string): Promise<AccessState | null> {
+    try {
+      const a = await this.json<FileAccessDto>(`${API_FILES}/${file}/access`, isFileAccess);
+      return { kind: 'role', role: a.role, version: a.version, canShare: a.canShare === true, own: true };
+    } catch (e) {
+      if (e instanceof ServerFailure && e.code === 'NOT_FOUND') return { kind: 'none' };
+      if (e instanceof ServerFailure && e.code === 'UNAUTHORIZED') return { kind: 'session' };
+      return null;
+    }
+  }
+
+  /** Сервер подтвердил правки журнала до пачки `upTo` этого сеанса (0 — только прочитанное при открытии). Прочитанное при открытии
+   * снимается при любом `upTo`: ядро подтверждает отметки по порядку и сообщает последнюю, так что отметка N значит и отметку 0.
+   * Чужие сеансы не трогает: это другая вкладка, а её правки могут быть ещё только здесь. */
+  async cutJournal(file: string, session: number, upTo: number): Promise<void> {
+    const keys = this.readKeys.get(file) ?? [];
+    this.readKeys.delete(file);
+    const own: JournalKey[] = Array.from({ length: upTo }, (_, i): JournalKey => [file, session, i + 1]);
+    if (keys.length + own.length > 0) await this.journal.cutExact([...keys, ...own]);
+  }
+
+  /** Превью при правках журналом: файл целиком больше не пишется. */
+  putThumb(file: string, thumb: ArrayBuffer | null): void {
+    this.offerThumb(file, thumb);
   }
 
   appendJournal(file: string, session: number, batch: number, bytes: ArrayBuffer): Promise<void> {

@@ -11,6 +11,7 @@
 
 mod fonts;
 mod panels;
+mod sync;
 mod text;
 
 use std::collections::{HashSet, VecDeque};
@@ -99,6 +100,8 @@ pub struct Core {
     /// и что о нём сообщено последним (`None` — документ заменён: сообщить).
     modified: bool,
     modified_sent: Option<bool>,
+    /// Синхронизация с сервером: не включена у локальных файлов.
+    sync: sync::SyncCore,
     /// Ревизия правок: растёт с каждой правкой и заменой документа. Снимок несёт её,
     /// а `MarkSaved` снимает `modified`, только если с тех пор она не сменилась.
     revision: u64,
@@ -196,6 +199,14 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::LoadFont { .. }
             | Command::Open { .. }
             | Command::OpenWithJournal { .. }
+            | Command::SyncStart
+            | Command::SyncReset
+            | Command::SyncSubscribed { .. }
+            | Command::SyncAcked { .. }
+            | Command::SyncFlush
+            | Command::ApplyRemote { .. }
+            | Command::AddRemoteImage { .. }
+            | Command::Thumbnail
             | Command::Demo { .. }
             | Command::DemoText { .. }
             | Command::FlushJournal
@@ -274,6 +285,7 @@ impl Core {
             modified_sent: Some(false),
             revision: 0,
             journal_batch: 0,
+            sync: sync::SyncCore::default(),
             fonts,
             font_state: fonts::FontState::default(),
             text_state: text::TextState::default(),
@@ -339,6 +351,7 @@ impl Core {
             self.push_command_states(changed);
         }
         self.images = DocImages::default();
+        self.sync = sync::SyncCore::default();
         self.selection = None;
         self.layers.reset();
         self.selected.clear();
@@ -397,9 +410,27 @@ impl Core {
     /// (команда `FlushJournal`: интерфейс по ответу знает, что всё отдано); перед
     /// снимком — только если есть что записать.
     fn flush_journal(&mut self, reply: bool) {
+        // Файл на сервере: своего неподтверждённого нет — журнал незачем писать, сервер всё знает
+        // (чужие правки, идущие потоком, в браузер не складываются).
+        if self.sync.on && !self.editor.sync_unacked() {
+            self.editor.mark_journal();
+            if reply {
+                self.events.push(CoreEvent::Journal {
+                    batch: self.journal_batch as f64,
+                    bytes: None,
+                    failed: false,
+                });
+            }
+            return;
+        }
         match self.editor.take_journal() {
             Ok(Some(bytes)) => {
                 self.journal_batch += 1;
+                if self.sync.on {
+                    self.sync
+                        .marks
+                        .push_back((self.journal_batch, self.editor.sync_versions()));
+                }
                 self.events.push(CoreEvent::Journal {
                     batch: self.journal_batch as f64,
                     bytes: Some(ByteBuf::from(bytes)),
@@ -563,6 +594,10 @@ impl Core {
     /// (восстановление после сбоя). Повреждённое в журнале — предупреждение в
     /// `Opened`; восстановленное ещё не в файле — документ изменён.
     pub fn open_with_journal(&mut self, bytes: &[u8], journal: &[ByteBuf]) {
+        self.open_journaled(bytes, journal, false);
+    }
+
+    fn open_journaled(&mut self, bytes: &[u8], journal: &[ByteBuf], remote: bool) {
         if journal.len() > MAX_JOURNAL_BATCHES {
             self.error(format!(
                 "Не удалось открыть файл: в журнале изменений больше {MAX_JOURNAL_BATCHES} записей"
@@ -577,6 +612,9 @@ impl Core {
             }
         };
         let batches: Vec<&[u8]> = journal.iter().map(|b| b.as_slice()).collect();
+        if remote {
+            opened.document.set_catches_up();
+        }
         let replayed = opened.document.apply_journal(&batches);
         opened.warnings.extend(replayed.warnings);
         if let Err(e) = self.replace_document(opened.document) {
@@ -737,10 +775,25 @@ impl Core {
             | Command::LoadFont { .. }
             | Command::ReplaceMissingFont { .. }
             | Command::TestCreateText { .. }) => self.font_command(cmd),
-            Command::OpenWithJournal { bytes, journal } => self.open_with_journal(&bytes, &journal),
+            Command::OpenWithJournal {
+                bytes,
+                journal,
+                remote,
+            } => self.open_journaled(&bytes, &journal, remote.unwrap_or(false)),
+            Command::SyncStart => self.sync_start(),
+            Command::SyncReset => self.sync_reset(),
+            Command::SyncSubscribed { doc, version } => self.sync_subscribed(&doc, &version),
+            Command::SyncAcked { doc, client_seq } => self.sync_acked(&doc, client_seq),
+            Command::SyncFlush => self.sync_flush(),
+            Command::ApplyRemote { doc, batches } => self.apply_remote(&doc, &batches),
+            Command::AddRemoteImage { hash, bytes } => {
+                self.add_remote_image(&hash, bytes.into_vec())
+            }
+            Command::Thumbnail => self.push_thumbnail(),
             Command::FlushJournal => {
                 self.settle_waiting_fonts();
                 self.flush_journal(true);
+                self.sync_note();
             }
             // Правка текста; ждущая шрифтов — в очередь.
             cmd if text::is_text_command(&cmd) => self.text_command(cmd),
@@ -882,6 +935,20 @@ impl Core {
                     let (cursor, angle) = cursor(c);
                     self.events.push(CoreEvent::Cursor { cursor, angle });
                 }
+                EditorEvent::RemoteChanged => {
+                    document = true;
+                    self.ui.layers = true;
+                    self.ui.properties = true;
+                }
+                EditorEvent::RemoteRebuilt => {
+                    self.layers.reset();
+                    self.summary = None;
+                    self.ui.layers = true;
+                    self.ui.properties = true;
+                }
+                EditorEvent::Notice(message) => self.events.push(CoreEvent::Notice {
+                    message: message.to_string(),
+                }),
                 EditorEvent::PageChanged(p) => {
                     self.events.push(CoreEvent::Page { id: p.to_string() });
                     self.preload_page_fonts();
@@ -952,6 +1019,8 @@ impl Core {
             self.events
                 .retain(|e| !matches!(e, CoreEvent::Document { .. }));
             self.push_document();
+            // Своя правка: индикатор и «Сохранить» знают сразу, что сервер её ещё не подтвердил.
+            self.sync_note();
         }
         let properties = self.ui.properties;
         self.flush_ui();

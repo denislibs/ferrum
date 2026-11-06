@@ -68,7 +68,19 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
   const dataDir = mkdtempSync(join(tmpdir(), 'ferrum-files-'));
   const blobs = new FsBlobStore(dataDir);
   const server = startServer(
-    { pool, valkey, webDist: '/nonexistent', auth, publicUrl, trustedProxies: [], blobs, mailer, secret: TEST_SECRET, ...over },
+    {
+      pool,
+      valkey,
+      webDist: '/nonexistent',
+      auth,
+      publicUrl,
+      trustedProxies: [],
+      blobs,
+      mailer,
+      secret: TEST_SECRET,
+      ...over,
+      ...(over.compact ? { compact: { ...over.compact, init: { ...over.compact.init, dataDir } } } : {}),
+    },
     port,
   );
 
@@ -114,12 +126,16 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
     return who;
   };
 
+  // Строка файла — первой, как у сервера (журнал и сжатие блокируют файл, потом документы): очистка посреди фонового
+  // сжатия прошлого теста дождётся его, а не сцепится с ним.
   const reset = () =>
     pool.query(
-      'TRUNCATE file, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
+      'TRUNCATE file, doc_state, doc_update, doc_peer, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
     );
 
   const stop = async () => {
+    server.compactor?.stop();
+    await server.hub.stop();
     server.stop(true);
     valkey.close();
     await pool.end();
@@ -186,6 +202,8 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
     blobs,
     dataDir,
     server,
+    hub: server.hub,
+    compactor: server.compactor,
     call,
     signIn,
     waitMail,

@@ -107,8 +107,13 @@ function stand(replies: Record<string, ((c: Call) => Response | Promise<Response
       this.appended.push([f, s, b]);
     },
     async read() {
-      return { entries: this.entries, session: this.session, tooLarge: false };
+      return { entries: this.entries, session: this.session, tooLarge: false, keys: this.keys };
     },
+    exact: [] as unknown[][],
+    async cutExact(keys: readonly unknown[]) {
+      this.exact.push([...keys]);
+    },
+    keys: undefined as [string, number, number][] | undefined,
     async cut(f: string, s: number, u: number) {
       this.cuts.push([f, s, u]);
     },
@@ -830,4 +835,155 @@ test('загрузка картинок: 429 у HEAD и PUT — пауза и п
   }
   await attempt;
   expect(failure).toMatchObject({ code: 'TOO_MANY_REQUESTS' });
+});
+
+test('журнал сервера: подтверждение снимает прочитанное при открытии и своё, а пачки другой вкладки остаются', async () => {
+  const s = stand({
+    'GET /api/files/f': json(meta({ id: 'f' })),
+    'GET /api/files/f/content': new Response(container(ROOT), { headers: { 'x-ferrum-version': '1' } }),
+  });
+  s.journal.entries = [new ArrayBuffer(1), new ArrayBuffer(1)];
+  s.journal.session = 7;
+  s.journal.keys = [
+    ['f', 5, 1],
+    ['f', 7, 3],
+  ];
+  await s.files.read('f');
+  await s.files.cutJournal('f', 100, 0);
+  expect(s.journal.exact[0]).toEqual([
+    ['f', 5, 1],
+    ['f', 7, 3],
+  ]);
+  // Прочитанное снято один раз; новые пачки другой вкладки в этот список не попадают.
+  await s.files.cutJournal('f', 100, 0);
+  expect(s.journal.exact).toHaveLength(1);
+  await s.files.cutJournal('f', 100, 2);
+  expect(s.journal.exact[1]).toEqual([
+    ['f', 100, 1],
+    ['f', 100, 2],
+  ]);
+});
+
+test('журнал читателя подтверждение не снимает: он не применён и ждёт, пока вернут право', async () => {
+  const s = stand({
+    'GET /api/files/v': json(meta({ id: 'v', role: 'viewer' })),
+    'GET /api/files/v/content': new Response(container(ROOT), { headers: { 'x-ferrum-version': '1' } }),
+  });
+  s.journal.entries = [new ArrayBuffer(1)];
+  s.journal.session = 7;
+  s.journal.keys = [['v', 7, 1]];
+  await s.files.read('v');
+  await s.files.cutJournal('v', 100, 0);
+  expect(s.journal.exact).toEqual([]);
+});
+
+test('журнал прошлых сеансов снимается и тогда, когда отметку 0 подтвердили вместе с поздней пачкой (T8-I4)', async () => {
+  const s = stand({
+    'GET /api/files/f': json(meta({ id: 'f' })),
+    'GET /api/files/f/content': new Response(container(ROOT), { headers: { 'x-ferrum-version': '1' } }),
+  });
+  s.journal.entries = [new ArrayBuffer(1)];
+  s.journal.session = 7;
+  s.journal.keys = [['f', 7, 3]];
+  await s.files.read('f');
+  // Ядро подтвердило отметки 0 и 2 разом: одно событие с последней.
+  await s.files.cutJournal('f', 100, 2);
+  expect(s.journal.exact.flat()).toEqual([
+    ['f', 7, 3],
+    ['f', 100, 1],
+    ['f', 100, 2],
+  ]);
+  // Прочитанное снимается один раз.
+  await s.files.cutJournal('f', 100, 3);
+  expect(s.journal.exact.flat().filter((k) => (k as unknown[])[1] === 7)).toHaveLength(1);
+});
+
+test('снимок документа: застывшие заголовки и тело обрываются по сроку (T8-I2)', async () => {
+  const path = '/api/files/f/docs/root/snapshot';
+  const silent = stand({ [`GET ${path}`]: untilAborted });
+  const a = code(silent.files.fetchSnapshot(path));
+  await expect.poll(() => silent.calls.length).toBe(1);
+  silent.clock.advance(15_000);
+  expect(await a).toBe('NETWORK');
+
+  const ctl = { signal: null as AbortSignal | null };
+  const frozen = stand({
+    [`GET ${path}`]: (c) => {
+      ctl.signal = c.signal ?? null;
+      const body = new ReadableStream({
+        start(out) {
+          ctl.signal?.addEventListener('abort', () => out.error(new DOMException('срок', 'AbortError')));
+        },
+      });
+      return new Response(body, { headers: { 'content-length': '1000' } });
+    },
+  });
+  const b = code(frozen.files.fetchSnapshot(path));
+  await expect.poll(() => ctl.signal !== null).toBe(true);
+  await flush();
+  frozen.clock.advance(15_000);
+  expect(ctl.signal!.aborted).toBe(false);
+  frozen.clock.advance(transferTimeout(1000));
+  expect(await b).toBe('NETWORK');
+});
+
+test('снимок документа потоком без `Content-Length`: срок на тело — по длине из `X-Ferrum-Size`, а не 60 с', async () => {
+  const path = '/api/files/f/docs/root/snapshot';
+  const size = 40 * 1024 * 1024;
+  const ctl = { signal: null as AbortSignal | null };
+  const slow = stand({
+    [`GET ${path}`]: (c) => {
+      ctl.signal = c.signal ?? null;
+      const body = new ReadableStream({
+        start(out) {
+          ctl.signal?.addEventListener('abort', () => out.error(new DOMException('срок', 'AbortError')));
+        },
+      });
+      return new Response(body, { headers: { 'x-ferrum-size': String(size) } });
+    },
+  });
+  const a = code(slow.files.fetchSnapshot(path));
+  await expect.poll(() => ctl.signal !== null).toBe(true);
+  await flush();
+  slow.clock.advance(transferTimeout(0) + 1);
+  expect(ctl.signal!.aborted).toBe(false);
+  slow.clock.advance(transferTimeout(size));
+  expect(await a).toBe('NETWORK');
+
+  const big = stand({ [`GET ${path}`]: () => new Response('', { headers: { 'x-ferrum-size': String(2 ** 40) } }) });
+  expect(await code(big.files.fetchSnapshot(path))).toBe('TOO_LARGE');
+});
+
+test('«Скачать копию»: сервер просит подождать — «повторите через N с», а не «сервер недоступен»', async () => {
+  const s = stand({
+    'POST /api/files/f/compact': new Response(JSON.stringify({ error: 'UNAVAILABLE' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json', 'retry-after': '27' },
+    }),
+  });
+  const e = await s.files.blob('f').then(
+    () => null,
+    (x: unknown) => x as ServerFailure,
+  );
+  expect(e).toBeInstanceOf(ServerFailure);
+  expect(e!.code).toBe('UNAVAILABLE');
+  expect(e!.message).toBe('Копия собирается — повторите через 27 с');
+  // Без срока — обычный текст.
+  const plain = stand({ 'POST /api/files/f/compact': new Response('', { status: 503 }) });
+  expect(((await plain.files.blob('f').catch((x: unknown) => x)) as ServerFailure).message).toBe(failureMessage('UNAVAILABLE'));
+});
+
+test('«Скачать копию»: копия была бы неполной (503 `INCOMPLETE`) — своя причина, а не «сервер недоступен»', async () => {
+  const s = stand({
+    'POST /api/files/f/compact': new Response(JSON.stringify({ error: 'INCOMPLETE' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+  const e = (await s.files.blob('f').catch((x: unknown) => x)) as ServerFailure;
+  expect(e).toBeInstanceOf(ServerFailure);
+  expect(e.code).toBe('INCOMPLETE');
+  expect(e.message).toBe(
+    'Копию не собрать целиком: часть файла на сервере не сжимается. Правки целы — откройте файл и сохраните копию из редактора',
+  );
 });

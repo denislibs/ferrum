@@ -5,11 +5,13 @@
 // `RESTART_WINDOW_MS` — иначе повторяющийся сбой крутился бы вечно; дальше остаётся
 // плашка остановки ядра.
 
+import type { FileRole } from '@ferrum/protocol';
 import type { Backend } from '../wasm/ferrum_wasm';
 
 export interface Restart {
-  /** `role`: файл открывали читателем, право вернули, и журнал нужно применить. */
-  reason: 'crash' | 'gpu' | 'role';
+  /** `role`: файл открывали читателем, право вернули, и журнал нужно применить. `reopen`: файл без записи записал другой участник,
+   * своих правок не было — его содержимое и есть правда. */
+  reason: 'crash' | 'gpu' | 'role' | 'reopen';
   /** Были правки ни в журнале, ни в файле — они потеряны. */
   lost: boolean;
   /** Бэкенд нового ядра (после потери GPU — запасной). */
@@ -34,9 +36,26 @@ const LOST = 'Правки последних секунд не сохранил
 /** Уведомление в новом редакторе. */
 export function restartText(r: Restart): string {
   if (r.reason === 'role') return 'Теперь вы можете редактировать файл. Ваши несохранённые правки восстановлены';
+  if (r.reason === 'reopen') return 'Файл записан другим участником — открыт заново';
   if (r.reason === 'gpu') {
     const name = r.backend === 'webgl' ? 'WebGL2' : r.backend === 'webgpu' ? 'WebGPU' : 'на процессоре';
     return `Видеокарта недоступна — редактор перезапущен с рендером ${name}${r.lost ? `. ${LOST}` : ''}`;
   }
   return r.lost ? `Редактор перезапущен. ${LOST}` : 'Редактор перезапущен, изменения сохранены';
+}
+
+/** Файл без записи записал другой, пока он был открыт, а своих правок нет: открыть заново. Своя запись в пути или с неизвестным
+ * исходом (`own`) — не «другой»: новое поколение может быть своим. */
+export function takenByOther(access: { version: number; own: boolean }, saver: { stored: boolean; modified: boolean }): boolean {
+  return !saver.stored && !saver.modified && !access.own && access.version > 0;
+}
+
+/** Почему открытый файл не пишется на сервер: доступ снят, сессия кончилась, документ разошёлся с файлом, сервер отказал. */
+export type Lost = 'none' | 'session' | 'diverged' | 'rejected' | null;
+
+/** Что меняет ответ о роли в открытом файле. Роль приходит на каждом новом соединении (`role` после `hello`), а отказ сервера
+ * окончателен до перезагрузки: его плашку роль не снимает. После «вышла новая версия — обновите страницу» правок нет до
+ * перезагрузки, какой бы ни была роль. */
+export function afterRole(lost: Lost, role: FileRole, reload: boolean): { lost: Lost; viewOnly: boolean } {
+  return { lost: lost === 'rejected' ? lost : null, viewOnly: role === 'viewer' || reload };
 }

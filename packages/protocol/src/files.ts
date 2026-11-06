@@ -28,6 +28,9 @@ export const API_ERROR_CODES = [
   'TOO_MANY_IMAGES',
   /** Слишком много одновременных загрузок. */
   'BUSY',
+  /** «Скачать копию»: журнал документа, который видят люди, в файл не входит (больше предела сервера, сбой сжатия). Файл
+   * был бы неполной копией; правки целы на сервере. */
+  'INCOMPLETE',
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 export interface ApiErrorBody {

@@ -9,7 +9,7 @@
 //! нового кадра вечно.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ferrum_doc::ImageStore;
@@ -46,10 +46,29 @@ struct Inner {
     decoded: u64,
     placeholders: u64,
     broken: Arc<Pixmap>,
+    /// Картинки без байтов, вместо которых отдана постоянная заглушка: её мог запечь растр фрейма.
+    absent: HashSet<String>,
+    /// Растёт, когда байты такой картинки появились (`ImageProvider::generation`).
+    generation: u64,
 }
 
 pub struct DocImages {
     inner: RefCell<Inner>,
+}
+
+impl DocImages {
+    /// Байты картинки появились позже заглушки (чужая ссылка, скачанная по запросу): декодировать заново,
+    /// а растры, куда заглушка могла попасть, построить заново. Картинка, которую ещё не рисовали
+    /// (другая страница, вне кадра), растры не трогает.
+    pub fn forget(&self, hash: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(e) = inner.map.remove(hash) {
+            inner.bytes = inner.bytes.saturating_sub(e.bytes());
+        }
+        if inner.absent.remove(hash) {
+            inner.generation += 1;
+        }
+    }
 }
 
 impl Default for DocImages {
@@ -82,6 +101,8 @@ impl DocImages {
                 decoded: 0,
                 placeholders: 0,
                 broken: Arc::new(broken),
+                absent: HashSet::new(),
+                generation: 0,
             }),
         }
     }
@@ -186,6 +207,10 @@ pub struct Provider<'a> {
 }
 
 impl ImageProvider for Provider<'_> {
+    fn generation(&self) -> u64 {
+        self.images.inner.borrow().generation
+    }
+
     fn image(&self, hash: &str) -> Option<Arc<Pixmap>> {
         let mut i = self.images.inner.borrow_mut();
         let frame = i.frame;
@@ -200,6 +225,7 @@ impl ImageProvider for Provider<'_> {
         let Some(bytes) = self.store.get(hash) else {
             // Байтов нет (файл открыт без части картинок): постоянная заглушка.
             i.placeholders += 1;
+            i.absent.insert(hash.to_string());
             return Some(i.broken.clone());
         };
         let Some(cost) = png_decoded_bytes(bytes) else {

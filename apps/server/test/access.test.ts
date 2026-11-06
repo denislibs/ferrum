@@ -102,6 +102,9 @@ const SAMPLES: Record<string, Sample> = {
   'GET /api/files/:id/access': { params: file, allowed: viewer },
   'GET /api/files/:id/content': { params: file, allowed: viewer, status: 204 },
   'PUT /api/files/:id/content': { params: file, body: container(), headers: {}, allowed: editor, denied: [viewer] },
+  'POST /api/files/:id/compact': { params: file, allowed: viewer },
+  // Документа нет в файле: 404 и у читателя, но это уже после проверки доступа.
+  'GET /api/files/:id/docs/:doc/snapshot': { params: (w) => ({ id: w.file, doc: 'root' }), allowed: viewer, status: 404 },
   'GET /api/files/:id/thumb': { params: file, allowed: viewer, status: 204 },
   'PUT /api/files/:id/thumb': { params: file, body: PNG, allowed: editor, denied: [viewer] },
   'DELETE /api/files/:id/thumb': { params: file, allowed: editor, denied: [viewer] },
@@ -151,7 +154,7 @@ const key = (r: { method: string; path: string }) => `${r.method} ${r.path}`;
 const OPEN_ROUTES = new Set(['POST /api/files/:id/redeem', 'POST /api/files/:id/request-access']);
 
 function pathOf(path: string, params: Record<string, string>): string {
-  return path.replace(/:(\w+)/g, (_, name: string) => params[name] ?? (name === 'hash' ? HASH : NOBODY));
+  return path.replace(/:(\w+)/g, (_, name: string) => params[name] ?? (name === 'hash' ? HASH : name === 'doc' ? 'root' : NOBODY));
 }
 
 const headersOf = (route: { path: string; method: string }, sample: Sample) =>

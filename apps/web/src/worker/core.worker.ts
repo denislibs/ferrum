@@ -18,6 +18,8 @@ import {
   type FromWorker,
   type ToWorker,
 } from '../core/messages';
+import type { CoreSyncEvent } from '../core/sync-client';
+import { SyncLink } from '../core/sync-link';
 import { imageSize } from '../core/image-size';
 import { isFontPath, manifestFamilies } from '../core/fonts';
 import { addSaturating, drainRing, holdInput, writeLive as writeLiveSlots, type Held } from '../core/shared';
@@ -90,6 +92,7 @@ function fatal(e: unknown): void {
   const message = panicText !== null ? `паника в ядре: ${panicText}` : e instanceof Error ? e.message : String(e);
   post({ t: 'fatal', message });
   core = null;
+  syncLink.stop();
 }
 
 /** Ошибка для пользователя без остановки ядра (неверное сообщение). */
@@ -231,11 +234,47 @@ async function loadBundled(family: string, files: string[]): Promise<void> {
   );
 }
 
+const SYNC_EVENTS: ReadonlySet<string> = new Set(['syncSubscribe', 'localImage', 'localUpdates', 'syncState', 'imagesNeeded']);
+
+function runSync(cmd: Parameters<WasmCore['command']>[0]): void {
+  if (!core) return;
+  try {
+    core.command(cmd);
+    sendEvents();
+  } catch (e) {
+    fatal(e);
+  }
+}
+
+/** Прямой порт к `sync.worker` (файл на сервере): трафик синхронизации идёт мимо основного потока. */
+const syncLink = new SyncLink({
+  run: (cmd) => runSync(cmd as Parameters<WasmCore['command']>[0]),
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (t) => clearInterval(t as ReturnType<typeof setInterval>),
+});
+
+function sendToSync(events: CoreEvent[]): void {
+  for (const e of events) {
+    const transfer: Transferable[] = [];
+    if (e.type === 'localUpdates' || e.type === 'localImage') transfer.push(e.bytes.buffer as ArrayBuffer);
+    if (e.type === 'syncSubscribe') transfer.push(e.version.buffer as ArrayBuffer);
+    syncLink.post({ t: 'event', event: e as CoreSyncEvent }, transfer);
+  }
+}
+
 /** Байты событий уходят без копии: их буферы передаются основному потоку. */
 function sendEvents(): void {
   if (!core) return;
   let events: CoreEvent[] = core.takeEvents();
   if (events.length === 0) return;
+  // Ядро что-то сделало: следующий шаг таймера пачек соберёт правки. В простое событий нет — и сборки нет.
+  syncLink.touch();
+  // Трафик синхронизации основному потоку не нужен. `syncState` нужен обоим: индикатор считает `sync.worker`, а «Сохранить» ждёт сервер.
+  if (syncLink.connected && events.some((e) => SYNC_EVENTS.has(e.type))) {
+    sendToSync(events.filter((e) => SYNC_EVENTS.has(e.type)));
+    events = events.filter((e) => !SYNC_EVENTS.has(e.type) || e.type === 'syncState');
+    if (events.length === 0) return;
+  }
   // Вшитые шрифты качает этот worker; основному потоку — только системные.
   for (const e of events) if (e.type === 'fontRequest' && e.source === 'bundled') void loadBundled(e.family, e.files);
   events = events.filter((e) => !(e.type === 'fontRequest' && e.source === 'bundled'));
@@ -384,6 +423,12 @@ function handle(msg: ToWorker): void {
         // Паника бросает исключение: его ловит общий обработчик ниже (`fatal`).
         if (testHooks) core.panicForTests();
         else postError('Неверное сообщение для ядра');
+        break;
+      case 'syncPort':
+        syncLink.connect(msg.port);
+        break;
+      case 'syncStop':
+        syncLink.stop();
         break;
       case 'init':
         break;

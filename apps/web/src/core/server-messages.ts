@@ -18,6 +18,8 @@ export type ServerOp =
       journal: { session: number; upTo: number } | null;
     }
   | { op: 'appendJournal'; file: string; session: number; batch: number; bytes: ArrayBuffer }
+  | { op: 'cutJournal'; file: string; session: number; upTo: number }
+  | { op: 'putThumb'; file: string; thumb: ArrayBuffer | null }
   | { op: 'blob'; file: string }
   | { op: 'rename'; file: string; name: string }
   | { op: 'touch'; file: string }
@@ -36,6 +38,8 @@ export interface ServerResults {
   read: IoResults['read'];
   write: FileMeta;
   appendJournal: null;
+  cutJournal: null;
+  putThumb: null;
   blob: Blob | null;
   rename: FileMeta;
   touch: FileMeta;
@@ -47,7 +51,11 @@ export interface ServerResults {
 }
 
 export type ToServer =
-  { t: 'init'; user: string } | { t: 'visible'; on: boolean } | { t: 'watch'; file: string; on: boolean } | ({ t: 'req' } & ServerRequest);
+  | { t: 'init'; user: string }
+  | { t: 'visible'; on: boolean }
+  /** `poll: false` — состояние доступа приходит по соединению файла, опрашивать не нужно. */
+  | { t: 'watch'; file: string; on: boolean; poll?: boolean }
+  | ({ t: 'req' } & ServerRequest);
 
 export type FromServer =
   | { t: 'res'; id: number; ok: true; value: unknown }

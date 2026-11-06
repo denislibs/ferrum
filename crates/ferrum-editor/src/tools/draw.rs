@@ -323,6 +323,13 @@ impl Tool for DrawTool {
         !matches!(self.state, State::Idle)
     }
 
+    fn touches(&self, gone: &dyn Fn(NodeId) -> bool) -> bool {
+        match &self.state {
+            State::Idle => false,
+            State::Pressed(s) | State::Drawing { start: s, .. } => s.parent.is_some_and(gone),
+        }
+    }
+
     fn cursor(&self) -> Cursor {
         Cursor::Crosshair
     }

@@ -140,10 +140,13 @@ fn read_boolean_op(map: &LoroMap, id: &NodeId) -> DocResult<BooleanOp> {
 /// Тип узла читается отдельно: по нему выбираются значения по умолчанию.
 pub(crate) fn read_kind(map: &LoroMap, id: &NodeId) -> DocResult<NodeKind> {
     let raw = value(map, key::TYPE)
-        .as_ref()
-        .and_then(as_str)
         .ok_or_else(|| DocError::Corrupted(format!("у узла {id} не записан тип")))?;
-    NodeKind::parse(&raw).ok_or_else(|| DocError::UnknownKind(id.to_string(), raw))
+    // Не строка — чужой или более новый редактор: как неизвестный тип, узел скрыт, файл открывается
+    // только для чтения. Ошибка здесь сделала бы файл неоткрываемым для всех.
+    let Some(name) = as_str(&raw) else {
+        return Err(DocError::UnknownKind(id.to_string(), format!("{raw:?}")));
+    };
+    NodeKind::parse(&name).ok_or_else(|| DocError::UnknownKind(id.to_string(), name))
 }
 
 /// Отсутствующие ключи заменяются значениями по умолчанию для типа узла,
@@ -207,6 +210,11 @@ pub(crate) fn read_props(map: &LoroMap, id: &NodeId) -> DocResult<Props> {
 
 /// Хэши изображений в заливках узла — без разбора остальных свойств и типа узла:
 /// так читаются и узлы неизвестного типа, скрытые от модели.
+/// Записан ли тип узла. Нет — половина чужой транзакции: узел создан, свойства ещё в пути.
+pub(crate) fn has_kind(map: &LoroMap) -> bool {
+    value(map, key::TYPE).is_some()
+}
+
 pub(crate) fn read_image_refs(map: &LoroMap) -> Vec<String> {
     match value(map, key::FILLS) {
         Some(v) => read_list(&v, read_fill)

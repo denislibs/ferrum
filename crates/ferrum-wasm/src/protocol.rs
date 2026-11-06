@@ -573,7 +573,43 @@ pub enum Command {
         bytes: ByteBuf,
         #[tsify(type = "Uint8Array[]")]
         journal: Vec<ByteBuf>,
+        /// Файл на сервере: журналу может не хватать правок, которые придут при догонянии.
+        #[serde(default)]
+        #[tsify(optional)]
+        remote: Option<bool>,
     },
+    /// Синхронизация с сервером (спека подсистемы 4, разделы 7 и 8). Команды этой группы идут из
+    /// `sync.worker`, основной поток трафика не видит.
+    SyncStart,
+    /// Соединение оборвалось: на следующем всё с подписки, неподтверждённое уйдёт снова.
+    SyncReset,
+    /// Сервер ответил на подписку своей версией документа.
+    SyncSubscribed {
+        doc: String,
+        #[tsify(type = "Uint8Array")]
+        version: ByteBuf,
+    },
+    /// Сервер записал пачку `clientSeq` на диск базы.
+    SyncAcked {
+        doc: String,
+        client_seq: u32,
+    },
+    /// Отдать новые подписки и свои правки: не реже 30 раз в секунду, пока есть правки и есть куда.
+    SyncFlush,
+    /// Чужие правки документа, по порядку.
+    ApplyRemote {
+        doc: String,
+        #[tsify(type = "Uint8Array[]")]
+        batches: Vec<ByteBuf>,
+    },
+    /// Картинка по чужой ссылке, скачанная с сервера.
+    AddRemoteImage {
+        hash: String,
+        #[tsify(type = "Uint8Array")]
+        bytes: ByteBuf,
+    },
+    /// Только превью первой страницы для экрана файлов (ответ — `Thumbnail`): файл пишет журнал сервера.
+    Thumbnail,
     /// Отдать журналу правки с прошлой пачки: ответ — `Journal` (и без правок).
     FlushJournal,
     /// Команда редактора по ключу таблицы команд (`edit.undo`, `tool.rect`…).
@@ -1132,6 +1168,47 @@ pub enum CoreEvent {
         #[tsify(type = "Uint8Array | undefined")]
         bytes: Option<ByteBuf>,
         failed: bool,
+    },
+    /// На какие документы подписаться и с какой версией (`SyncVersion::encode`).
+    SyncSubscribe {
+        doc: String,
+        #[tsify(type = "Uint8Array")]
+        version: ByteBuf,
+    },
+    /// Новая картинка: уходит на сервер раньше правок, идущих за ней.
+    LocalImage {
+        hash: String,
+        #[tsify(type = "Uint8Array")]
+        bytes: ByteBuf,
+    },
+    /// Своя правка для сервера.
+    LocalUpdates {
+        doc: String,
+        client_seq: u32,
+        #[tsify(type = "Uint8Array")]
+        bytes: ByteBuf,
+    },
+    /// Есть ли правки, которых сервер не подтвердил. Только при смене.
+    SyncState {
+        unacked: bool,
+    },
+    /// Пачки журнала до этой включительно сервер подтвердил: их можно снять.
+    JournalCovered {
+        batch: f64,
+    },
+    /// Чужие правки ссылаются на картинки, которых нет в памяти: скачать и прислать `AddRemoteImage`.
+    ImagesNeeded {
+        hashes: Vec<String>,
+    },
+    /// Сообщение для человека, не ошибка.
+    Notice {
+        message: String,
+    },
+    /// Ответ на команду `Thumbnail`: `keep` — показать нечего или не вышло, прежнее оставить.
+    Thumbnail {
+        #[tsify(type = "Uint8Array | undefined")]
+        bytes: Option<ByteBuf>,
+        keep: bool,
     },
     /// Перед `Opened`: поверх файла применены пачки журнала — правки, которые не
     /// успели попасть в файл (документ изменён).

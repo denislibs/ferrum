@@ -3,7 +3,7 @@
 // файлов идёт только пока вкладка видна.
 
 import { MAX_JOURNAL_ENTRIES } from '../core/limits';
-import { ACCESS_POLL_MS, asUser, ServerFiles, type JournalEntries, type JournalStore } from '../core/server-files';
+import { ACCESS_POLL_MS, asUser, ServerFiles, type JournalEntries, type JournalKey, type JournalStore } from '../core/server-files';
 import type { FromServer, ServerRequest, ToServer } from '../core/server-messages';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -57,13 +57,29 @@ function journalStore(user: string): JournalStore {
       const s = Array.isArray(last) ? last[1] : null;
       const session = typeof s === 'number' && Number.isSafeInteger(s) ? s : null;
       if (count > MAX_JOURNAL_ENTRIES) return { entries: [], session, tooLarge: true };
-      const all = (await request(d.transaction('journal').objectStore('journal').getAll(range(file)))) as unknown[];
-      return { entries: all.filter((b): b is ArrayBuffer => b instanceof ArrayBuffer), session, tooLarge: false };
+      const tx = d.transaction('journal');
+      const [all, keys] = await Promise.all([
+        request(tx.objectStore('journal').getAll(range(file))) as Promise<unknown[]>,
+        request(tx.objectStore('journal').getAllKeys(range(file))) as Promise<unknown[]>,
+      ]);
+      return {
+        entries: all.filter((b): b is ArrayBuffer => b instanceof ArrayBuffer),
+        session,
+        tooLarge: false,
+        keys: keys as JournalKey[],
+      };
     },
     async cut(file, session, upTo) {
       const d = await open();
       const tx = d.transaction('journal', 'readwrite', { durability: 'strict' });
       tx.objectStore('journal').delete(IDBKeyRange.bound([file], [file, session, upTo]));
+      await finished(tx);
+    },
+    async cutExact(keys) {
+      const d = await open();
+      const tx = d.transaction('journal', 'readwrite', { durability: 'strict' });
+      const store = tx.objectStore('journal');
+      for (const key of keys) store.delete(key);
       await finished(tx);
     },
     async drop(file) {
@@ -78,6 +94,7 @@ function journalStore(user: string): JournalStore {
 const channel = new BroadcastChannel('ferrum-server-files');
 let files: ServerFiles | null = null;
 const watched = new Set<string>();
+const synced = new Set<string>();
 let visible = true;
 let poll: ReturnType<typeof setInterval> | null = null;
 
@@ -94,7 +111,7 @@ function replan(): void {
   if (!visible) return;
   poll = setInterval(() => {
     // Открытые файлы — проверка доступа; экран файлов — новое в списке (чужие приглашения и правки).
-    if (watched.size === 0) post({ t: 'changed' });
+    if (watched.size === 0 && synced.size === 0) post({ t: 'changed' });
     for (const f of watched) void files?.checkAccess(f);
   }, ACCESS_POLL_MS);
 }
@@ -115,6 +132,12 @@ async function run(r: ServerRequest, f: ServerFiles): Promise<{ value: unknown; 
       return { value: await f.write(r.file, r.bytes, r.thumb, r.base, r.journal) };
     case 'appendJournal':
       await f.appendJournal(r.file, r.session, r.batch, r.bytes);
+      return { value: null };
+    case 'cutJournal':
+      await f.cutJournal(r.file, r.session, r.upTo);
+      return { value: null };
+    case 'putThumb':
+      f.putThumb(r.file, r.thumb);
       return { value: null };
     case 'blob':
       return { value: await f.blob(r.file) };
@@ -166,10 +189,17 @@ scope.onmessage = (e: MessageEvent<ToServer>) => {
     return;
   }
   if (m.t === 'watch') {
+    if (m.on && m.poll === false) {
+      // Доступ сообщает соединение файла: опрос снят, список файлов на экране файлов и без него.
+      watched.delete(m.file);
+      synced.add(m.file);
+      return;
+    }
     if (m.on) {
       watched.add(m.file);
       void files?.watchAccess(m.file);
     } else {
+      synced.delete(m.file);
       watched.delete(m.file);
       files?.forgetAccess(m.file);
     }

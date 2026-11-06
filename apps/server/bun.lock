@@ -8,6 +8,7 @@
         "@ferrum/protocol": "file:../../packages/protocol",
         "@noble/hashes": "2.4.0",
         "better-auth": "1.7.16",
+        "loro-crdt": "1.16.2",
         "nodemailer": "10.2.0",
         "pg": "8.23.1",
       },
@@ -64,6 +65,8 @@
     "jose": ["jose@6.2.15", "", {}, "sha512-qdF6ewcZARtef63fJ9AKKZPgxw+t7USH6HLXYcD4CrdmSvDp79rpJSPFEKc90QBeGS63u1KQtN2MZQHC0yDIzA=="],
 
     "kysely": ["kysely@0.29.8", "", {}, "sha512-ixHU1H4R+LeC5Y0nAhYgiGRFpFRHm2DXKEmJSs/vbes9sKXyssyzxzE/NYiOJX5fY0BL28biCre3GqlCqUwyXQ=="],
+
+    "loro-crdt": ["loro-crdt@1.16.2", "", {}, "sha512-Jbfy/P6ggYWa3joyz/P+Vqtg66+pUdF+a6PrC69bTnNQIaElJd/Tx5xBPZBa9rgMjoU3YW67v9CSMLqRi8TeQA=="],
 
     "nanostores": ["nanostores@1.5.5", "", {}, "sha512-FixtE239Gl6Gz0ZGCK0WzvNwObNCIwVT+L7zQcf1QgcA6AzBxblzqe9OT88qiucNkhsjSOqiogSaF5jVbJiqSA=="],
 

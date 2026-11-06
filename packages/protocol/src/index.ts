@@ -4,3 +4,4 @@
 export * from './auth';
 export * from './files';
 export * from './container';
+export * from './sync';

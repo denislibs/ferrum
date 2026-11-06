@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { apiError, busy, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
 import { BlobStalled, BlobTooLarge, type UploadPace } from './blob-store';
+import { findDocSection } from './sync/container-read';
 import { inTransaction } from './db';
 
 /** Клиент молчит дольше этого посреди загрузки — обрыв. */
@@ -40,6 +41,11 @@ export const BLOB_GRACE_SECONDS = 120;
  * несколько аккаунтов, переподключаясь без единого байта. 1024 слота требуют 128 аккаунтов. */
 export const MAX_UPLOADS_PER_USER = 8;
 export const MAX_UPLOADS = 1024;
+/** Одновременных отдач снимка документа: на человека и на сервер. Отдача идёт потоком и памяти не держит, держит дескриптор
+ * файла и поток. Клиент качает снимок на документ, когда отстал сильнее журнала, — при открытии давно не открытого файла это
+ * несколько страниц разом; сверх предела — 429 `BUSY`, клиент повторит. */
+export const MAX_SNAPSHOTS_PER_USER = 16;
+export const MAX_SNAPSHOTS = 1024;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 export const trashBlob = (c: PoolClient, key: string | null) =>
@@ -164,13 +170,13 @@ function sectionWhere(q: ListQuery): { from: string; where: string; order: strin
 const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /** Счётчики одновременных загрузок: живут в процессе, сервер один. */
-export function uploadGate() {
+export function uploadGate(perUserMax = MAX_UPLOADS_PER_USER, totalMax = MAX_UPLOADS) {
   const perUser = new Map<string, number>();
   let total = 0;
   return {
     enter(user: string): boolean {
       const mine = perUser.get(user) ?? 0;
-      if (mine >= MAX_UPLOADS_PER_USER || total >= MAX_UPLOADS) return false;
+      if (mine >= perUserMax || total >= totalMax) return false;
       perUser.set(user, mine + 1);
       total++;
       return true;
@@ -184,6 +190,35 @@ export function uploadGate() {
   };
 }
 export type UploadGate = ReturnType<typeof uploadGate>;
+
+/** Поток, который зовёт `done` один раз — дочитан, оборван или сломан. */
+function untilDone(source: ReadableStream<Uint8Array>, done: () => void): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let over = false;
+  const finish = () => {
+    if (over) return;
+    over = true;
+    done();
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(c) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          finish();
+          c.close();
+        } else c.enqueue(next.value);
+      } catch (e) {
+        finish();
+        c.error(e);
+      }
+    },
+    cancel(reason) {
+      finish();
+      return reader.cancel(reason);
+    },
+  });
+}
 
 /** Ответ на неудачную загрузку потоком. Неизвестное — сбой маршрута, его показывает конвейер. */
 export function uploadFailure(e: unknown): Response | null {
@@ -200,6 +235,12 @@ function writeAllowed(row: { version: string; last_write_id: string | null }, ba
   return version === base || (previous !== null && row.last_write_id === previous && version === base + 1);
 }
 
+/** Правки уже идут журналом: запись файла целиком (вкладка прежней версии приложения) затёрла бы их. */
+async function journalStarted(db: Pool | PoolClient, file: string): Promise<boolean> {
+  const { rowCount } = await db.query('SELECT 1 FROM doc_state WHERE file_id = $1 AND next_seq > 1 LIMIT 1', [file]);
+  return (rowCount ?? 0) > 0;
+}
+
 /** Запись не оставляет ссылку без байтов: очистка могла снять картинку, пока клиент считал её известной.
  * Строки под блокировкой: очистка, начатая раньше, уже прошла, а начатая позже увидит снятый срок. */
 async function missingImages(c: PoolClient, file: string, refs: string[], lost: number): Promise<Response | null> {
@@ -213,6 +254,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
   const idle = deps.uploadIdleMs ?? UPLOAD_IDLE_MS;
   const pace = deps.uploadPace ?? UPLOAD_PACE;
   const maxContent = deps.maxContentBytes ?? MAX_CONTENT_BYTES;
+  const snapshots = uploadGate(MAX_SNAPSHOTS_PER_USER, MAX_SNAPSHOTS);
   const fresh = async (ctx: Ctx) => {
     const meta = await loadFile(pool, ctx.params.id, ctx.user.id);
     return meta ? ok(meta) : apiError(404, 'NOT_FOUND');
@@ -279,7 +321,8 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
       access: { kind: 'user' },
       limit: 'write',
       handle: async (ctx) => {
-        await inTransaction(pool, async (c) => {
+        // Сверка ролей — только удалённых файлов: пустая корзина ничего не меняет.
+        ctx.touched = await inTransaction(pool, async (c) => {
           const { rows } = await c.query<{ id: string; content_key: string | null; thumb_key: string | null }>(
             `SELECT id, content_key, thumb_key FROM file
              WHERE trashed_at IS NOT NULL AND (owner_id = $1 OR trashed_by = $1) AND file_role_rank(id, $1) = 3 FOR UPDATE`,
@@ -290,6 +333,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             await trashBlob(c, r.thumb_key);
           }
           await c.query('DELETE FROM file WHERE id = ANY($1::uuid[])', [rows.map((r) => r.id)]);
+          return rows.map((r) => r.id);
         });
         return ok({ ok: true });
       },
@@ -444,6 +488,7 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
         );
         if (!before.rows[0]) return apiError(404, 'NOT_FOUND');
         if (!writeAllowed(before.rows[0], write.base, write.previous)) return apiError(409, 'CONFLICT');
+        if (await journalStarted(pool, ctx.params.id)) return apiError(409, 'CONFLICT');
         if (!gate.enter(ctx.user.id)) return busy();
         const key = `files/${ctx.params.id}/content-${randomUUID()}`;
         try {
@@ -475,13 +520,17 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             const refused =
               commitRefusal(row) ??
               (writeAllowed(row, write.base, write.previous) ? null : apiError(409, 'CONFLICT')) ??
+              ((await journalStarted(c, ctx.params.id)) ? apiError(409, 'CONFLICT') : null) ??
               (await missingImages(c, ctx.params.id, refs, write.lost));
             const settled = await settleUpload(c, key, refused);
             if (settled) return settled;
             await trashBlob(c, row.content_key);
+            // Журнала нет: строки документов описывали прежние байты, следующая подписка заведёт новые.
+            await c.query('DELETE FROM doc_state WHERE file_id = $1', [ctx.params.id]);
             await c.query(
-              `UPDATE file SET version = version + 1, size = $2, content_key = $3, last_write_id = $4, edited_at = now() WHERE id = $1`,
-              [ctx.params.id, size, key, write.write],
+              `UPDATE file SET version = version + 1, size = $2, content_key = $3, last_write_id = $4, content_by = $5, edited_at = now()
+               WHERE id = $1`,
+              [ctx.params.id, size, key, write.write, ctx.user.id],
             );
             // Ссылки из содержимого: картинка без ссылки живёт ещё 30 дней (отмена может её вернуть).
             await c.query(
@@ -495,10 +544,56 @@ export function fileRoutes(deps: ApiDeps, gate: UploadGate): Route[] {
             await blobs.delete(key).catch(() => {});
             return outcome;
           }
+          deps.contentReplaced?.(ctx.params.id);
           return await fresh(ctx);
         } finally {
           gate.leave(ctx.user.id);
         }
+      },
+    },
+    {
+      // «Скачать копию» с экрана файлов: содержимое без журнала было бы старше того, что видят люди. Читателю тоже: экспорт ему
+      // разрешён. Сжатие занимает секунды на большом файле, поэтому общего срока API нет: свой срок и предел частоты на файл
+      // держит `Compactor.manual`, отказ — 503 с `Retry-After`. Журнал документа не входит в файл (больше предела, паника
+      // при сжатии) — 503 `INCOMPLETE`: неполная копия — не успех.
+      method: 'POST',
+      path: '/api/files/:id/compact',
+      access: { kind: 'file', min: 'viewer' },
+      limit: 'write',
+      stream: true,
+      handle: async (ctx) => {
+        const done = deps.compactNow ? await deps.compactNow(ctx.params.id, ctx.user.id) : { ok: true as const };
+        if (done.ok) return ok({ ok: true });
+        return 'incomplete' in done
+          ? apiError(503, 'INCOMPLETE')
+          : apiError(503, 'UNAVAILABLE', { 'Retry-After': String(done.retryAfter) });
+      },
+    },
+    {
+      // Клиент отстал сильнее журнала (спека, раздел 7.3): снимок одного документа, поверх него — журнал. Кусок файла идёт
+      // потоком, как `content`: секция бывает в сотни мегабайт, а медленный читатель держал бы её в памяти целиком. Поток свой,
+      // чтобы место в пределе освобождалось с концом отдачи; `Content-Length` Bun у такого потока не ставит (идёт `chunked`).
+      method: 'GET',
+      path: '/api/files/:id/docs/:doc/snapshot',
+      access: { kind: 'file', min: 'viewer' },
+      limit: 'read',
+      handle: async (ctx) => {
+        const { rows } = await pool.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1', [ctx.params.id]);
+        const section = await findDocSection(blobs, rows[0]?.content_key ?? null, ctx.params.doc);
+        if (!section) return apiError(404, 'NOT_FOUND');
+        if (!snapshots.enter(ctx.user.id)) return busy();
+        const user = ctx.user.id;
+        const body = untilDone(section.blob.slice(section.start, section.start + section.size).stream(), () => snapshots.leave(user));
+        return new Response(body, {
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': 'attachment',
+            'Cache-Control': 'no-store',
+            'Cross-Origin-Resource-Policy': 'same-origin',
+            // Длина потока без `Content-Length`: по ней клиент считает срок на тело.
+            'X-Ferrum-Size': String(section.size),
+          },
+        });
       },
     },
     {

@@ -21,6 +21,7 @@ fn commands() -> Vec<Command> {
         Command::OpenWithJournal {
             bytes: bytes(b"FERRUM"),
             journal: vec![bytes(b"FERRUMJ"), bytes(b"")],
+            remote: None,
         },
         Command::FlushJournal,
         Command::Execute {
@@ -200,6 +201,31 @@ fn commands() -> Vec<Command> {
         Command::ResetKeymap { command: None },
         Command::ImportKeymap { json: "{}".into() },
         Command::SetSettings { pixel_snap: false },
+        Command::OpenWithJournal {
+            bytes: bytes(&[1]),
+            journal: vec![bytes(&[2])],
+            remote: Some(true),
+        },
+        Command::SyncStart,
+        Command::SyncReset,
+        Command::SyncSubscribed {
+            doc: "root".into(),
+            version: bytes(&[0]),
+        },
+        Command::SyncAcked {
+            doc: "root".into(),
+            client_seq: 7,
+        },
+        Command::SyncFlush,
+        Command::ApplyRemote {
+            doc: "3@4".into(),
+            batches: vec![bytes(&[1])],
+        },
+        Command::AddRemoteImage {
+            hash: "h".into(),
+            bytes: bytes(&[1]),
+        },
+        Command::Thumbnail,
     ]
 }
 
@@ -433,6 +459,31 @@ fn events() -> Vec<CoreEvent> {
             name: "Лендинг".into(),
         },
         CoreEvent::Modified { modified: true },
+        CoreEvent::SyncSubscribe {
+            doc: "root".into(),
+            version: bytes(&[0]),
+        },
+        CoreEvent::LocalUpdates {
+            doc: "3@4".into(),
+            client_seq: 7,
+            bytes: bytes(&[1]),
+        },
+        CoreEvent::LocalImage {
+            hash: "h".into(),
+            bytes: bytes(&[1]),
+        },
+        CoreEvent::JournalCovered { batch: 2.0 },
+        CoreEvent::SyncState { unacked: true },
+        CoreEvent::ImagesNeeded {
+            hashes: vec!["h".into()],
+        },
+        CoreEvent::Notice {
+            message: "текст".into(),
+        },
+        CoreEvent::Thumbnail {
+            bytes: Some(bytes(&[1])),
+            keep: false,
+        },
     ]
 }
 
