@@ -152,8 +152,14 @@ export async function compactFile(
   const stateOf = new Map(states.map((s) => [s.doc, s]));
   const cutOf = (doc: string): number => Number(stateOf.get(doc)?.next_seq ?? 1) - 1;
 
-  /** Документ со снимком и журналом до `cut`. `rows` — вошедшие записи, `kept` — те, что не применились: они остаются в журнале. */
-  const build = async (doc: string, kind: number, id: string, cut: number): Promise<{ loro: LoroDoc; rows: number; kept: number[] }> => {
+  /** Документ со снимком и журналом до `cut`. `rows` — вошедшие записи, `kept` — те, что не применились: они остаются в журнале;
+   * `keptBytes` — их байты. */
+  const build = async (
+    doc: string,
+    kind: number,
+    id: string,
+    cut: number,
+  ): Promise<{ loro: LoroDoc; rows: number; kept: number[]; keptBytes: number }> => {
     const span = spanOf(kind, id);
     const snapshot = span ? await read(span.data, span.data + span.size) : null;
     let loro: LoroDoc;
@@ -166,7 +172,7 @@ export async function compactFile(
     let total = 0;
     let after = 0;
     /** Не применились при импорте: ждут неизвестного или не разбираются. */
-    const odd: { seq: number; end: Record<string, number> }[] = [];
+    const odd: { seq: number; end: Record<string, number>; size: number }[] = [];
     for (;;) {
       const page = await pool.query<{ seq: string; bytes: Uint8Array; end_vv: Record<string, number> }>(
         'SELECT seq, bytes, end_vv FROM doc_update WHERE file_id = $1 AND doc = $2 AND seq > $3 AND seq <= $4 ORDER BY seq LIMIT $5',
@@ -178,18 +184,18 @@ export async function compactFile(
         total++;
         try {
           const status = loro.import(r.bytes);
-          if (status.pending != null) odd.push({ seq: after, end: r.end_vv });
+          if (status.pending != null) odd.push({ seq: after, end: r.end_vv, size: r.bytes.length });
         } catch (e) {
           if (isPanic(e)) throw new CompactPanic(doc, after, e);
           // Не разобралась: клиенты её тоже не применят. Следующие записи — как у них.
-          odd.push({ seq: after, end: r.end_vv });
+          odd.push({ seq: after, end: r.end_vv, size: r.bytes.length });
         }
       }
     }
     // Ждавшая запись могла дождаться следующих: остаётся только то, чего в документе так и нет.
     const have = plain(loro);
-    const kept = odd.filter((o) => !covers(have, o.end)).map((o) => o.seq);
-    return { loro, rows: total - kept.length, kept };
+    const left = odd.filter((o) => !covers(have, o.end));
+    return { loro, rows: total - left.length, kept: left.map((o) => o.seq), keptBytes: left.reduce((n, o) => n + o.size, 0) };
   };
 
   const failed: CompactFailure[] = [];
@@ -198,9 +204,9 @@ export async function compactFile(
   const incomplete: string[] = [];
   /** Отложенные до срока: больше предела или корень их не знает. */
   const deferred = new Set<string>();
-  const replaced = new Map<string, { version: Record<string, number>; refs: string[]; kept: number[] }>();
-  /** Документ, в котором не применилось ничего нового: секция та же, запоминается только число пропущенных записей. */
-  const keptOnly = new Map<string, number>();
+  const replaced = new Map<string, { version: Record<string, number>; refs: string[]; kept: number[]; keptBytes: number }>();
+  /** Документ, в котором не применилось ничего нового: секция та же, запоминаются только число и байты пропущенных записей. */
+  const keptOnly = new Map<string, { count: number; bytes: number }>();
   const fresh: Section[] = [];
   let totalRows = 0;
   const tmp = join(tmpdir(), `ferrum-compact-${randomUUID()}`);
@@ -217,10 +223,10 @@ export async function compactFile(
   const tooLarge = (doc: string, kind: number, id: string) =>
     (spanOf(kind, id)?.size ?? 0) + Number(stateOf.get(doc)?.log_bytes ?? 0) > opts.maxDocBytes;
   /** Собран: пропущенные записи названы. Ничего нового не применилось — секция та же, `false`. */
-  const settle = (doc: string, built: { rows: number; kept: number[] }): boolean => {
+  const settle = (doc: string, built: { rows: number; kept: number[]; keptBytes: number }): boolean => {
     for (const seq of built.kept) skipped.push({ doc, seq });
     if (built.rows > 0) return true;
-    keptOnly.set(doc, built.kept.length);
+    keptOnly.set(doc, { count: built.kept.length, bytes: built.keptBytes });
     return false;
   };
 
@@ -241,7 +247,7 @@ export async function compactFile(
     const pages = rootBuilt ? pageIds(rootBuilt.loro) : null;
     if (rootBuilt && rootCut > 0 && settle('root', rootBuilt)) {
       totalRows += rootBuilt.rows;
-      replaced.set('root', { version: plain(rootBuilt.loro), refs: [], kept: rootBuilt.kept });
+      replaced.set('root', { version: plain(rootBuilt.loro), refs: [], kept: rootBuilt.kept, keptBytes: rootBuilt.keptBytes });
       await keep(SECTION_ROOT, '', rootBuilt.loro.export({ mode: 'snapshot' }));
     }
     rootBuilt?.loro.free();
@@ -274,14 +280,16 @@ export async function compactFile(
       }
       totalRows += built.rows;
       const refs = imageRefs(built.loro);
-      replaced.set(s.doc, { version: plain(built.loro), refs, kept: built.kept });
+      replaced.set(s.doc, { version: plain(built.loro), refs, kept: built.kept, keptBytes: built.keptBytes });
       await keep(SECTION_PAGE, s.doc, built.loro.export({ mode: 'snapshot' }));
       await keep(SECTION_PAGE_REFS, s.doc, new TextEncoder().encode(refs.join('\n')));
       built.loro.free();
     }
     await sink.end();
 
-    /** Отложенные ждут срока; у документов без нового запоминается число пропущенных записей. */
+    /** Отложенные ждут срока; у документов без нового запоминаются число и байты пропущенных записей. Только под блокировкой
+     * строки файла (порядок блокировок общий) и в той транзакции, что сверила `content_key`: иначе запись файла целиком
+     * между чтением и записью отдала бы число новой строке документа. */
     const note = async (c: Pick<Pool, 'query'>) => {
       if (deferred.size > 0) {
         await c.query(
@@ -291,14 +299,21 @@ export async function compactFile(
       }
       if (keptOnly.size > 0) {
         await c.query(
-          `UPDATE doc_state s SET log_kept = u.k FROM unnest($2::text[], $3::int[]) AS u(d, k) WHERE s.file_id = $1 AND s.doc = u.d`,
-          [file, [...keptOnly.keys()], [...keptOnly.values()]],
+          `UPDATE doc_state s SET log_kept = u.k, log_kept_bytes = u.b FROM unnest($2::text[], $3::int[], $4::bigint[]) AS u(d, k, b)
+           WHERE s.file_id = $1 AND s.doc = u.d`,
+          [file, [...keptOnly.keys()], [...keptOnly.values()].map((k) => k.count), [...keptOnly.values()].map((k) => k.bytes)],
         );
       }
     };
     const left: Left = { failed, skipped, incomplete, deferred: [...deferred] };
     if (replaced.size === 0) {
-      await note(pool);
+      if (deferred.size > 0 || keptOnly.size > 0) {
+        await inTransaction(pool, async (c) => {
+          const locked = await c.query<{ content_key: string | null }>('SELECT content_key FROM file WHERE id = $1 FOR UPDATE', [file]);
+          // Файл заменён: строки документов описывают уже другие байты.
+          if (locked.rows[0]?.content_key === contentKey) await note(c);
+        });
+      }
       return failed.length > 0 ? { kind: 'failed', ...left } : { kind: 'empty', ...left };
     }
 
@@ -376,9 +391,18 @@ export async function compactFile(
           [file, doc, cutOf(doc), r.kept],
         );
         await c.query(
-          `UPDATE doc_state SET base_vv = $3::jsonb, log_count = log_count - $4, log_bytes = log_bytes - $5, log_kept = $6, compact_after = NULL
+          `UPDATE doc_state SET base_vv = $3::jsonb, log_count = log_count - $4, log_bytes = log_bytes - $5, log_kept = $6,
+             log_kept_bytes = $7, compact_after = NULL
            WHERE file_id = $1 AND doc = $2`,
-          [file, doc, JSON.stringify(r.version), removed.rowCount ?? 0, removed.rows.reduce((n, x) => n + x.size, 0), r.kept.length],
+          [
+            file,
+            doc,
+            JSON.stringify(r.version),
+            removed.rowCount ?? 0,
+            removed.rows.reduce((n, x) => n + x.size, 0),
+            r.kept.length,
+            r.keptBytes,
+          ],
         );
       }
       await note(c);

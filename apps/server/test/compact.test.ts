@@ -562,6 +562,90 @@ test('документ, который ждёт срока, порог не сч
   }
 });
 
+test('байты пропущенных записей порог не считают: правка рядом с ними не переписывает файл', async () => {
+  const d = LoroDoc.fromSnapshot(page.export({ mode: 'snapshot' }));
+  const c = await joined(pageId, peers(page));
+  await writes(1, d, c);
+  // Пропущенная запись на 10 КБ: больше порога байт сжатия ниже, а правки рядом — меньше.
+  const g = new LoroDoc();
+  g.setPeerId(78n as never);
+  g.getMap('g').set('a', 1);
+  g.commit();
+  const first = g.oplogVersion();
+  g.getMap('g').set('b', 'x'.repeat(10_000));
+  g.commit();
+  const big = g.export({ mode: 'update', from: first });
+  const { rows } = await s.pool.query<{ seq: string }>(
+    `UPDATE doc_state SET next_seq = next_seq + 1, log_count = log_count + 1, log_bytes = log_bytes + $3
+     WHERE file_id = $1 AND doc = $2 RETURNING next_seq - 1 AS seq`,
+    [file, pageId, big.length],
+  );
+  await s.pool.query(
+    `INSERT INTO doc_update (file_id, doc, seq, start_vv, end_vv, bytes) VALUES ($1, $2, $3, '{"78":1}', '{"78":2}', $4)`,
+    [file, pageId, rows[0].seq, Buffer.from(big)],
+  );
+  expect(await compactFile(s.pool, s.blobs, file)).toMatchObject({ kind: 'done', skipped: [{ doc: pageId, seq: Number(rows[0].seq) }] });
+  const state = await s.pool.query<{ log_bytes: string; log_kept_bytes: string }>(
+    'SELECT log_bytes, log_kept_bytes FROM doc_state WHERE file_id = $1 AND doc = $2',
+    [file, pageId],
+  );
+  expect(state.rows[0]).toEqual({ log_bytes: String(big.length), log_kept_bytes: String(big.length) });
+  const tight = new Compactor(s.pool, { databaseUrl: TEST_DATABASE_URL, dataDir: s.dataDir }, { maxLogBytes: 5000, tickMs: 3_600_000 });
+  const done: string[] = [];
+  tight.onResult = (f) => done.push(f);
+  const wired = s.hub.onLog;
+  s.hub.onLog = (f, doc, n, bytes) => tight.note(f, doc, n, bytes);
+  try {
+    const before = await fileVersion();
+    await writes(2, d, c);
+    // Порог по базе — тоже без них: задача по порогу, поставленная руками, файл не переписывает.
+    tight.enqueue(file, 'threshold');
+    const sentinel = (await s.newFile(owner)).id;
+    tight.enqueue(sentinel);
+    for (let i = 0; i < 400 && !done.includes(sentinel); i++) await Bun.sleep(10);
+    expect(done).toContain(sentinel);
+    expect(done).not.toContain(file);
+    expect(await fileVersion()).toBe(before);
+  } finally {
+    s.hub.onLog = wired;
+    tight.stop();
+  }
+});
+
+test('файл заменён целиком, пока шло сжатие без нового: число пропущенных записей не ложится на новую строку документа', async () => {
+  await joined(pageId, peers(page));
+  await ghost();
+  let replaced = false;
+  const pool = new Proxy(s.pool, {
+    get(target, prop) {
+      if (prop !== 'query') {
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      }
+      return async (...a: unknown[]) => {
+        const out = await (target.query as (...x: unknown[]) => Promise<unknown>)(...a);
+        const page =
+          typeof a[0] === 'string' && a[0].startsWith('SELECT seq, bytes, end_vv FROM doc_update') && (a[1] as unknown[])[1] === pageId;
+        if (!replaced && page) {
+          replaced = true;
+          // Запись файла целиком: строки документов удалены, новая подписка завела строку заново.
+          await target.query(`UPDATE file SET content_key = 'files/' || id || '/content-new' WHERE id = $1`, [file]);
+          await target.query('DELETE FROM doc_state WHERE file_id = $1', [file]);
+          await target.query('INSERT INTO doc_state (file_id, doc) VALUES ($1, $2)', [file, pageId]);
+        }
+        return out;
+      };
+    },
+  });
+  expect(await compactFile(pool, s.blobs, file)).toMatchObject({ kind: 'empty', skipped: [{ doc: pageId, seq: 1 }] });
+  expect(replaced).toBe(true);
+  const { rows } = await s.pool.query<{ log_kept: number; log_kept_bytes: string }>(
+    'SELECT log_kept, log_kept_bytes FROM doc_state WHERE file_id = $1 AND doc = $2',
+    [file, pageId],
+  );
+  expect(rows[0]).toEqual({ log_kept: 0, log_kept_bytes: '0' });
+});
+
 test('таймер сжатия берёт таблицы в том же порядке, что журнал и очистка стенда: файл, потом документы', async () => {
   const c = new Compactor(s.pool, { databaseUrl: TEST_DATABASE_URL, dataDir: s.dataDir }, { tickMs: 20 });
   const other = await s.pool.connect();

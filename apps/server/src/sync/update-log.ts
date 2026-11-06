@@ -62,8 +62,9 @@ interface DocRow {
   vv: Record<string, number>;
   log_bytes: string;
   log_count: number;
-  /** Записи, которые сжатие оставило в журнале неприменимыми: порог сжатия их не считает. */
+  /** Записи, которые сжатие оставило в журнале неприменимыми, и их байты: порог сжатия их не считает. */
   log_kept: number;
+  log_kept_bytes: string;
 }
 
 const covers = (vv: Record<string, number>, end: Record<string, number>): boolean =>
@@ -79,8 +80,8 @@ export class UpdateLog {
   private timer: Timer | null = null;
   private flushing = false;
   private stopped = false;
-  /** После фиксации группы: рассылка и сжатие. Размеры журнала — вместе с этой группой; число записей — без тех, что сжатие
-   * оставило неприменимыми. */
+  /** После фиксации группы: рассылка и сжатие. Размеры журнала — вместе с этой группой; число и байты записей — без тех, что
+   * сжатие оставило неприменимыми. Предел журнала файла (`maxLogBytesPerFile`) их считает: они лежат на диске. */
   onCommitted: (items: { item: Item; seq: number }[], states: { file: string; doc: string; logCount: number; logBytes: number }[]) => void =
     () => {};
   private readonly limits: LogLimits;
@@ -145,7 +146,12 @@ export class UpdateLog {
       if (written.length > 0) {
         this.onCommitted(
           written,
-          states.map((s) => ({ file: s.file_id, doc: s.doc, logCount: s.log_count - s.log_kept, logBytes: Number(s.log_bytes) })),
+          states.map((s) => ({
+            file: s.file_id,
+            doc: s.doc,
+            logCount: s.log_count - s.log_kept,
+            logBytes: Number(s.log_bytes) - Number(s.log_kept_bytes),
+          })),
         );
       }
     } catch (e) {
@@ -194,7 +200,7 @@ export class UpdateLog {
       );
     }
     const { rows } = await c.query<DocRow>(
-      `SELECT s.file_id, s.doc, s.next_seq, s.vv, s.log_bytes, s.log_count, s.log_kept FROM doc_state s
+      `SELECT s.file_id, s.doc, s.next_seq, s.vv, s.log_bytes, s.log_count, s.log_kept, s.log_kept_bytes FROM doc_state s
        JOIN unnest($1::uuid[], $2::text[]) AS u(f, d) ON u.f = s.file_id AND u.d = s.doc
        ORDER BY s.file_id, s.doc FOR UPDATE OF s`,
       [pairs.map((p) => p.file), pairs.map((p) => p.doc)],

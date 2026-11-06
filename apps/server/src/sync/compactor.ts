@@ -79,7 +79,7 @@ export class Compactor {
     this.timer.unref?.();
   }
 
-  /** После фиксации журнала: документ перерос предел. `logCount` — без пропущенных записей (`log_kept`). */
+  /** После фиксации журнала: документ перерос предел. `logCount` и `logBytes` — без пропущенных записей (`log_kept`). */
   note(file: string, doc: string, logCount: number, logBytes: number): void {
     if (logCount <= this.limits.maxLogCount && logBytes <= this.limits.maxLogBytes) return;
     const until = this.waiting.get(`${file}/${doc}`);
@@ -209,7 +209,7 @@ export class Compactor {
   /** Порог перешёл документ, который не ждёт срока: иначе сжимать по порогу нечего. */
   private async overThreshold(file: string): Promise<boolean> {
     const { rows } = await this.pool.query<{ any: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM doc_state WHERE file_id = $1 AND (log_count - log_kept > $2 OR log_bytes > $3)
+      `SELECT EXISTS (SELECT 1 FROM doc_state WHERE file_id = $1 AND (log_count - log_kept > $2 OR log_bytes - log_kept_bytes > $3)
                       AND (compact_after IS NULL OR compact_after <= now())) AS any`,
       [file, this.limits.maxLogCount, this.limits.maxLogBytes],
     );
