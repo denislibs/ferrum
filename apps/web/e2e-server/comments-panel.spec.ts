@@ -1,6 +1,7 @@
 // Панель комментариев с 1000 обсуждений (проба плана, спека подсистемы 4, раздел 10.3): список виртуальный — строк в DOM столько,
-// сколько видно; живое изменение одного обсуждения не пересобирает остальные строки (тот же элемент DOM). Длинные задачи
-// основного потока и время открытия панели печатаются для заметок, без проверок по времени.
+// сколько видно; живое изменение одного обсуждения не пересобирает остальные строки (тот же элемент DOM). Время открытия панели
+// и длинные задачи основного потока (при открытии, прокрутке и живом изменении) печатаются и проверяются с большим запасом:
+// ловят порядок «секунды», а не доли секунды.
 
 import { expect, test, type Page } from '@playwright/test';
 import { editorReady, fileId, testMode } from '../e2e/helpers';
@@ -9,6 +10,9 @@ import { compose, newEmail, resetStand, signIn } from './stand';
 test.beforeEach(resetStand);
 
 const THREADS = 1000;
+// Замер на стенде: открытие ~200 мс, длинных задач нет. Предел открытия — 5× замера, длинной задачи — 200 мс (порог «долгой» — 50).
+const OPEN_MS_MAX = 1000;
+const LONG_TASK_MS_MAX = 200;
 
 const psql = (sql: string) => compose('exec', '-T', 'postgres', 'psql', '-U', 'ferrum', '-d', 'ferrum', '-v', 'ON_ERROR_STOP=1', '-c', sql);
 
@@ -36,8 +40,9 @@ test('панель с 1000 обсуждений: строк в DOM — види�
   // 1000 обсуждений прямо в базе: через API их не набрать — 60 комментариев в минуту на человека.
   psql(
     `WITH t AS (
-       INSERT INTO comment_thread (id, file_id, page_id, node_id, x, y, wx, wy, first_id, created_by, created_at, seq, replies, last_at, participants)
+       INSERT INTO comment_thread (id, file_id, page_id, node_id, x, y, wx, wy, first_id, preview, preview_more, bytes, created_by, created_at, seq, replies, last_at, participants)
        SELECT gen_random_uuid(), '${id}', '${pageId}', NULL, (i % 40) * 60, (i / 40) * 60, (i % 40) * 60, (i / 40) * 60, gen_random_uuid(),
+              'Обсуждение ' || i, false, octet_length('Обсуждение ' || i),
               '${user}', now() - make_interval(mins => i), i, 0, now() - make_interval(mins => i), ARRAY['${user}']
        FROM generate_series(1, ${THREADS}) i RETURNING id, first_id, created_at, seq)
      INSERT INTO comment (id, thread_id, author_id, body, created_at)
@@ -47,23 +52,26 @@ test('панель с 1000 обсуждений: строк в DOM — види�
   await page.reload();
   await editorReady(page);
   await expect(page.locator('.fe-sync')).toHaveText('Синхронизировано', { timeout: 15_000 });
-  await longTasks(page);
   await expect(page.getByRole('button', { name: 'Комментарий', exact: true })).toBeVisible();
+  await longTasks(page);
   await page.locator('canvas').focus();
   const t0 = Date.now();
   await page.keyboard.press('KeyC');
   const panel = page.getByRole('region', { name: 'Комментарии' });
-  await expect(panel.locator('.fe-comments__row').first()).toContainText('Обсуждение 1');
+  const text = panel.locator('.fe-comments__text');
+  await expect(text.first()).toHaveText('Обсуждение 1');
   const openMs = Date.now() - t0;
+  const openLong = await takeLong(page);
   const rows = await panel.locator('.fe-comments__row').count();
   expect(rows).toBeLessThan(40);
+  expect(openMs).toBeLessThan(OPEN_MS_MAX);
   // Прокрутка в конец: те же десятки строк, последние обсуждения.
   const scroller = panel.locator('.fe-comments__scroll');
   await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
-  await expect(panel.locator('.fe-comments__row').last()).toContainText(`Обсуждение ${THREADS}`);
+  await expect(text.last()).toHaveText(`Обсуждение ${THREADS}`);
   expect(await panel.locator('.fe-comments__row').count()).toBeLessThan(40);
   await scroller.evaluate((el) => (el.scrollTop = 0));
-  await expect(panel.locator('.fe-comments__row').first()).toContainText('Обсуждение 1');
+  await expect(text.first()).toHaveText('Обсуждение 1');
   // Метка на строке, которая не изменится: после живого изменения другого обсуждения элемент тот же.
   await panel
     .locator('.fe-comments__row')
@@ -86,7 +94,7 @@ test('панель с 1000 обсуждений: строк в DOM — види�
     { id, thread: target.id },
   );
   expect(res).toBe(201);
-  await expect(panel.locator('.fe-comments__row').first()).toContainText('Ответов: 1');
+  await expect(panel.locator('.fe-comments__replies').first()).toHaveText('Ответов: 1');
   expect(
     await panel
       .locator('.fe-comments__row')
@@ -95,6 +103,13 @@ test('панель с 1000 обсуждений: строк в DOM — види�
   ).toBe(1);
   const updateLong = await takeLong(page);
   console.log(
-    `ПРОБА панели: ${THREADS} обсуждений, открытие ${openMs} мс, строк в DOM ${rows}, длинные задачи: прокрутка ${JSON.stringify(scrollLong)}, живое изменение ${JSON.stringify(updateLong)}`,
+    `ПРОБА панели: ${THREADS} обсуждений, открытие ${openMs} мс, строк в DOM ${rows}, длинные задачи: открытие ${JSON.stringify(openLong)}, прокрутка ${JSON.stringify(scrollLong)}, живое изменение ${JSON.stringify(updateLong)}`,
   );
+  for (const [name, tasks] of [
+    ['открытие', openLong],
+    ['прокрутка', scrollLong],
+    ['живое изменение', updateLong],
+  ] as const) {
+    expect(Math.max(0, ...tasks), `длинные задачи: ${name}`).toBeLessThan(LONG_TASK_MS_MAX);
+  }
 });

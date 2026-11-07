@@ -47,6 +47,7 @@ async function newFile(page: Page): Promise<string> {
 const invite = async (owner: Page, id: string, email: string, role: 'editor' | 'viewer') =>
   expect((await api(owner, 'POST', `/api/files/${id}/share/invite`, { email, role })).status).toBe(200);
 
+/** Файл открывается заново: переход по адресу внутри страницы (`#/file/…`) файл не перезагружает, а `reload` даёт чистый запуск. */
 async function openFile(page: Page, id: string, query = ''): Promise<void> {
   await page.goto(`/#/file/${id}${query}`);
   await page.reload();
@@ -77,6 +78,9 @@ test('два браузера: комментарий с упоминанием,
   await invite(a, id, emailB, 'editor');
   await openFile(b, id);
   // Борис открыл файл: имя знают только у тех, кто открывал — подсказка упоминаний его находит.
+  // Борис заходит в режим комментариев, чтобы видеть панель: строка в ней — доказательство, что обсуждение пришло живым событием.
+  await commentMode(b);
+  await expect(b.getByRole('region', { name: 'Комментарии' }).getByText('Обсуждений нет')).toBeVisible();
   await commentMode(a);
   const at = await appScreen(a, await live(a), 40, 30);
   await a.mouse.click(at.x, at.y);
@@ -94,20 +98,46 @@ test('два браузера: комментарий с упоминанием,
   await expect(threadA.locator('.fe-comment__body')).toHaveText('@Борис посмотри <b>это</b>');
   await expect(threadA.locator('.fe-comment__body b')).toHaveCount(0);
 
-  // У Бориса метка уже есть: щелчок по ней (вне режима комментариев) открывает обсуждение.
-  const pin = await pinAt(b, 40, 30);
-  await b.mouse.click(pin.x, pin.y);
+  // Обсуждение пришло Борису живым событием, без перезагрузки: строка в его панели.
+  const panelB = b.getByRole('region', { name: 'Комментарии' });
+  await expect(panelB.locator('.fe-comments__row')).toHaveCount(1);
+  await expect(panelB.locator('.fe-comments__text')).toHaveText('@Борис посмотри <b>это</b>');
+  // Метка пришла вместе с ним: выходим из режима (V) и щелкаем по ней — окно открывается. Щелчок повторяется, пока метку не нарисовали.
+  await b.keyboard.press('KeyV');
+  await expect(panelB).toHaveCount(0);
   const threadB = b.getByRole('dialog', { name: 'Обсуждение' });
+  await expect(async () => {
+    const pin = await pinAt(b, 40, 30);
+    await b.mouse.click(pin.x, pin.y);
+    await expect(threadB).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 15_000 });
   await expect(threadB.locator('.fe-comment__body').first()).toHaveText('@Борис посмотри <b>это</b>');
   // Ответ — у Анны в открытом окне сразу.
   const reply = threadB.getByLabel('Ответ');
   await reply.fill('Готово');
   await reply.press('Enter');
   await expect(threadA.locator('.fe-comment__body')).toHaveText(['@Борис посмотри <b>это</b>', 'Готово']);
-  // Закрытие обсуждения — у Анны сразу; в панели закрытые скрыты, «Показать закрытые» возвращает.
+  // Редактор удаляет только своё: у Бориса «Удалить» — один раз (его ответ), чужой первый комментарий сервер не даёт удалить;
+  // владелец (Анна) видит «Удалить» у обоих комментариев.
+  await expect(threadB.getByRole('button', { name: 'Удалить' })).toHaveCount(1);
+  await expect(threadA.getByRole('button', { name: 'Удалить' })).toHaveCount(2);
+  const threadId = ((await api(a, 'GET', `/api/files/${id}/comments?after=0&limit=10`)).body as { threads: { id: string }[] }).threads[0]
+    .id;
+  const firstA = ((await api(b, 'GET', `/api/files/${id}/comments/${threadId}`)).body as { comments: { id: string }[] }).comments[0].id;
+  expect((await api(b, 'DELETE', `/api/files/${id}/comments/${threadId}/comments/${firstA}`)).status).toBe(403);
+  // Закрытие обсуждения — у Анны сразу.
   await threadB.getByRole('button', { name: 'Закрыть обсуждение' }).click();
   await expect(threadA.getByRole('button', { name: 'Открыть снова' })).toBeVisible();
   await expect(threadA.getByText('Обсуждение закрыто: Борис')).toBeVisible();
+  // Открытие снова — вторым участником (Анной): у Бориса обсуждение опять открыто, закрыть его можно.
+  await threadA.getByRole('button', { name: 'Открыть снова' }).click();
+  await expect(threadA.getByRole('button', { name: 'Закрыть обсуждение' })).toBeVisible();
+  await expect(threadB.getByRole('button', { name: 'Закрыть обсуждение' })).toBeVisible();
+  await expect(threadB.getByRole('button', { name: 'Открыть снова' })).toHaveCount(0);
+  await expect(threadB.getByText('Обсуждение закрыто: Борис')).toHaveCount(0);
+  // Снова закрываем; в панели закрытые скрыты, «Показать закрытые» возвращает.
+  await threadB.getByRole('button', { name: 'Закрыть обсуждение' }).click();
+  await expect(threadA.getByRole('button', { name: 'Открыть снова' })).toBeVisible();
   await a.keyboard.press('Escape');
   await expect(threadA).toHaveCount(0);
   const panel = a.getByRole('region', { name: 'Комментарии' });
@@ -169,6 +199,29 @@ test('упоминание — письмо, ссылка из письма от
   // Сервер тоже не даёт: удалить чужой комментарий — 403.
   const first = ((await api(vv, 'GET', `/api/files/${id}/comments/${threadId}`)).body as { comments: { id: string }[] }).comments[0].id;
   expect((await api(vv, 'DELETE', `/api/files/${id}/comments/${threadId}/comments/${first}`)).status).toBe(403);
+
+  // Читатель создаёт и новое обсуждение (метку), не только отвечает: оно у Анны сразу, в панели.
+  await vv.keyboard.press('Escape');
+  await expect(threadV).toHaveCount(0);
+  await commentMode(vv);
+  const atV = await appScreen(vv, await live(vv), 200, 120);
+  await vv.mouse.click(atV.x, atV.y);
+  const draftV = vv.getByRole('dialog', { name: 'Новый комментарий' }).getByLabel('Комментарий');
+  await draftV.pressSequentially('вопрос читателя');
+  await draftV.press('Enter');
+  await expect(vv.getByRole('dialog', { name: 'Обсуждение' }).locator('.fe-comment__body')).toHaveText('вопрос читателя');
+  const panelA = a.getByRole('region', { name: 'Комментарии' });
+  await expect(panelA.locator('.fe-comments__row')).toHaveCount(2);
+  const rowV = panelA.locator('.fe-comments__row').filter({ hasText: 'вопрос читателя' });
+  await expect(rowV).toHaveCount(1);
+  // Владелец удаляет чужое: открывает обсуждение читателя из панели, «Удалить» с подтверждением — обсуждение исчезает и у читателя.
+  await rowV.getByRole('button').click();
+  const dialogV = a.getByRole('dialog', { name: 'Обсуждение' }).filter({ hasText: 'вопрос читателя' });
+  await dialogV.getByRole('button', { name: 'Удалить' }).click();
+  await dialogV.getByRole('button', { name: 'Удалить обсуждение?' }).click();
+  await expect(panelA.locator('.fe-comments__row')).toHaveCount(1);
+  await expect(panelA.locator('.fe-comments__row').filter({ hasText: 'вопрос читателя' })).toHaveCount(0);
+  await expect(vv.getByText('вопрос читателя')).toHaveCount(0);
 
   // Без доступа: ссылка ведёт на «Нет доступа», а запрос обсуждения неотличим от несуществующего.
   const g = await person(browser, newEmail('mg'), 'Галина');

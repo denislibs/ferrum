@@ -136,9 +136,3 @@ export async function mailsMatching(email: string, subject: RegExp, count = 1): 
     })),
   );
 }
-
-/** Все письма на адрес с такой темой — сейчас, без ожидания. */
-export async function mailsNow(email: string, subject: RegExp): Promise<number> {
-  const list = (await (await fetch(`${MAILPIT}/messages`)).json()) as { messages: MailSummary[] };
-  return list.messages.filter((m) => subject.test(m.Subject) && m.To.some((t) => t.Address === email)).length;
-}
