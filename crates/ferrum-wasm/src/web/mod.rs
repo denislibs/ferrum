@@ -15,7 +15,7 @@ use web_sys::OffscreenCanvas;
 
 use crate::core::Core;
 use crate::present::{Action, PresentWatch, Soft, SoftErrors};
-use crate::protocol::{Backend, Command, CoreEvent};
+use crate::protocol::{command_list_limit, Backend, Command, CoreEvent};
 use crate::recover::{OnLost, Recovery};
 pub use clock::PerformanceClock;
 use surface::{Pixels, Readback, Surface};
@@ -96,8 +96,27 @@ impl WasmSurface {
     }
 }
 
-/// Команда из JS-объекта. Неверная форма — текст ошибки, не паника.
+/// Команда из JS-объекта. Неверная форма — текст ошибки, не паника. Список длиннее предела
+/// (`command_list_limit`) режется до предела до разбора — в мелкой копии команды, хвост массива
+/// не обходится; разбор берёт первые элементы.
 pub fn parse_command(cmd: JsValue) -> Result<Command, String> {
+    let kind = js_sys::Reflect::get(&cmd, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|t| t.as_string());
+    let mut cmd = cmd;
+    if let Some((field, max)) = kind.as_deref().and_then(command_list_limit) {
+        let key = JsValue::from_str(field);
+        let long = js_sys::Reflect::get(&cmd, &key)
+            .ok()
+            .and_then(|l| l.dyn_into::<js_sys::Array>().ok())
+            .filter(|a| a.length() as usize > max);
+        if let (Some(list), Some(obj)) = (long, cmd.dyn_ref::<js_sys::Object>()) {
+            let copy = js_sys::Object::assign(&js_sys::Object::new(), obj);
+            js_sys::Reflect::set(&copy, &key, &list.slice(0, max as u32))
+                .map_err(|_| "Неверная команда: список не укоротить".to_string())?;
+            cmd = copy.into();
+        }
+    }
     serde_wasm_bindgen::from_value::<Command>(cmd).map_err(|e| format!("Неверная команда: {e}"))
 }
 

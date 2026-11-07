@@ -25,7 +25,8 @@ use crate::tools::{ToolKind, DRAG_THRESHOLD_PX, HIT_TOLERANCE_PX};
 /// десять раз меньше).
 pub const COMMENT_PINS_MAX: usize = 10_000;
 /// Метки ближе этого на экране (CSS-пиксели, между точками меток) слипаются в группу: капли
-/// перекрылись бы.
+/// перекрылись бы. **(поведение)**: группы при любом масштабе, порог в экранных пикселях, как в
+/// Figma (спека говорит «при маленьком масштабе» — на крупном метки просто дальше друг от друга).
 pub const PIN_CLUSTER_DISTANCE: f64 = PIN_SIZE;
 /// Поле вокруг меток группы при щелчке по ней — CSS-пиксели: крайние метки не у края холста.
 pub const PIN_CLUSTER_FIT_PADDING: f64 = 4.0 * PIN_SIZE;
@@ -70,6 +71,10 @@ enum Press {
     },
     Cluster {
         members: Vec<Point>,
+        /// Экранная точка нажатия и ушёл ли указатель дальше порога: протяжка — не щелчок,
+        /// группа не приближается (как у `Place`).
+        start: Point,
+        moved: bool,
     },
     Place {
         start: Point,
@@ -616,7 +621,11 @@ impl Editor {
             Some(Hit {
                 target: Target::Cluster(members),
                 ..
-            }) => Press::Cluster { members },
+            }) => Press::Cluster {
+                members,
+                start: e.point,
+                moved: false,
+            },
             None if mode => Press::Place {
                 start: e.point,
                 moved: false,
@@ -625,6 +634,8 @@ impl Editor {
         };
         self.comments.press = Some(press);
         self.comments.hover = false;
+        // Жест метки: наведение узла под точкой нажатия не замирает на время протяжки.
+        self.hover = None;
         true
     }
 
@@ -654,10 +665,12 @@ impl Editor {
                     }
                 }
             }
-            Press::Place { start, moved: m } => {
+            Press::Place { start, moved: m }
+            | Press::Cluster {
+                start, moved: m, ..
+            } => {
                 *m |= (e.point - *start).hypot() > DRAG_THRESHOLD_PX;
             }
-            Press::Cluster { .. } => {}
         }
         if moved {
             self.comments_bump();
@@ -701,7 +714,12 @@ impl Editor {
                     .events
                     .push(EditorEvent::CommentMoved { id, anchor });
             }
-            Press::Cluster { members, .. } => self.zoom_to_pins(&members),
+            Press::Cluster {
+                members,
+                moved: false,
+                ..
+            } => self.zoom_to_pins(&members),
+            Press::Cluster { moved: true, .. } => {}
             Press::Place { moved: false, .. } => {
                 let anchor = self.anchor_at(self.camera.screen_to_world(e.point));
                 self.out.events.push(EditorEvent::CommentPlace {
@@ -745,6 +763,20 @@ impl Editor {
         let catches =
             self.comments.available && (kind == ToolKind::Comment || kind.is_select_like());
         self.comments.hover = catches && self.comment_hit(e.point).is_some();
+    }
+
+    /// Над меткой узел под ней не наводится: щелчок уйдёт метке, рамка наведения узла под каплей
+    /// обманывала бы. Зовётся после того, как инструмент выставил наведение.
+    pub(crate) fn drop_hover_under_pin(&mut self) {
+        if self.comments.hover {
+            self.hover = None;
+        }
+    }
+
+    /// Ловит ли метка (или группа) нажатие в экранной точке у «Перемещения»: метки рисуются над
+    /// направляющими, поэтому направляющая под меткой не берётся (`grabbable_guide`).
+    pub(crate) fn pin_catches(&self, p: Point) -> bool {
+        self.comments.available && self.comment_hit(p).is_some()
     }
 
     /// Привязка точки мира: верхний узел страницы под ней (по тому, что видно) и точка в его

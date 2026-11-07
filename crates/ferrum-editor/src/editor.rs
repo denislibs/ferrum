@@ -879,6 +879,7 @@ impl Editor {
         }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
+        self.drop_hover_under_pin();
         self.guide_hover_update(&e);
     }
 
@@ -973,7 +974,8 @@ impl Editor {
     /// hit-test, что и при движении. Точка — из колеса или щипка, иначе последняя
     /// точка указателя. Наведение есть только у «Перемещения».
     fn rehover(&mut self, point: Option<Point>, modifiers: Option<Modifiers>) {
-        if self.is_busy() || !self.tool.kind().is_select_like() {
+        // Нажатая метка — тоже жест: наведение не меняется до отпускания.
+        if self.is_busy() || self.comment_pressed() || !self.tool.kind().is_select_like() {
             return;
         }
         let mut e = match (self.last_pointer, point) {
@@ -993,6 +995,9 @@ impl Editor {
         }
         let (tool, mut cx) = self.split();
         tool.pointer_move(&mut cx, &e);
+        // Под неподвижным указателем могла оказаться метка (или уйти из-под него).
+        self.comment_hover(&e);
+        self.drop_hover_under_pin();
         self.guide_hover_update(&e);
     }
 

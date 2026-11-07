@@ -782,4 +782,212 @@ mod comments {
         }
         assert_eq!(r.pin_sprites(), PIN_SPRITE_LIMIT);
     }
+
+    /// Цвет выделения тёмной темы (оверлей по умолчанию).
+    fn select() -> [u8; 3] {
+        let s = OverlayTheme::dark().select.to_rgba8().to_u8_array();
+        [s[0], s[1], s[2]]
+    }
+
+    /// `PIN_BUILDS_PER_FRAME` разных меток в правой части холста 400 × 100: они забирают
+    /// построения кадра, следующая за ними метка в этом кадре — простой заливкой.
+    fn fillers() -> Vec<PinMark> {
+        (0..PIN_BUILDS_PER_FRAME)
+            .map(|i| {
+                pin(
+                    Point::new(200.0 + i as f64 * 22.0, 95.0),
+                    &format!("з{i}"),
+                    0,
+                    false,
+                )
+            })
+            .collect()
+    }
+
+    fn with_kind(at: Point, kind: PinKind) -> PinMark {
+        PinMark { at, kind }
+    }
+
+    fn kind(replies: u32, resolved: bool, open: bool) -> PinKind {
+        PinKind::Pin {
+            initials: "АБ".into(),
+            color: Rgba::from_rgba8(BLUE[0], BLUE[1], BLUE[2], 255),
+            replies,
+            unread: false,
+            resolved,
+            open,
+        }
+    }
+
+    #[test]
+    fn open_pin_has_a_ring_in_selection_colour() {
+        let cam = camera(200.0, 100.0);
+        // Капля с остриём (40, 60): квадрат x 40..68, y 32..60. Кольцо — за белой обводкой.
+        let draw = |open: bool| {
+            render_overlay(
+                &Scene::new(),
+                &cam,
+                &overlay(vec![with_kind(
+                    Point::new(40.0, 60.0),
+                    kind(0, false, open),
+                )]),
+                BLACK,
+            )
+        };
+        let open = draw(true);
+        assert_px(&open, 37, 52, select(), 30);
+        assert_px(&open, 54, 29, select(), 30);
+        assert_px(&open, 44, 56, BLUE, 30);
+        let closed = draw(false);
+        assert_px(&closed, 37, 52, [0, 0, 0], 0);
+        assert_px(&closed, 54, 29, [0, 0, 0], 0);
+    }
+
+    #[test]
+    fn resolved_pin_is_grey_as_sprite_and_as_plain_fill() {
+        const GREY: [u8; 3] = [0x8f, 0x8a, 0x84];
+        let cam = camera(400.0, 100.0);
+        let mut marks = fillers();
+        marks.push(with_kind(Point::new(40.0, 60.0), kind(0, true, false)));
+        let o = overlay(marks);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(400, 100);
+        // Первый кадр: построения ушли на другие метки — закрытая простой заливкой.
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.pin_sprites(), PIN_BUILDS_PER_FRAME);
+        let plain = cpu.render();
+        assert_px(&plain, 44, 56, GREY, 6);
+        assert_px(&plain, 60, 40, GREY, 6);
+        // Следующий кадр — картинкой, тоже серой.
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.pin_sprites(), PIN_BUILDS_PER_FRAME + 1);
+        let sprite = cpu.render();
+        assert_px(&sprite, 44, 56, GREY, 6);
+        assert!(whites(&sprite, (46, 38, 62, 52)) > 5, "инициалов не видно");
+    }
+
+    #[test]
+    fn draft_pin_is_a_drop_in_selection_colour_without_text() {
+        let cam = camera(400.0, 100.0);
+        let mut marks = fillers();
+        marks.push(with_kind(Point::new(40.0, 60.0), PinKind::Draft));
+        let o = overlay(marks);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(400, 100);
+        frame(&mut r, &mut cpu, &cam, &o);
+        let plain = cpu.render();
+        assert_px(&plain, 44, 56, select(), 6);
+        assert_px(&plain, 60, 40, select(), 6);
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.pin_sprites(), PIN_BUILDS_PER_FRAME + 1);
+        let sprite = cpu.render();
+        assert_px(&sprite, 44, 56, select(), 6);
+        assert_px(&sprite, 54, 45, select(), 6);
+        assert_eq!(
+            whites(&sprite, (44, 36, 64, 56)),
+            0,
+            "у черновика нет текста"
+        );
+        // Белая обводка по краю капли.
+        assert_px(&sprite, 39, 50, [255, 255, 255], 90);
+    }
+
+    #[test]
+    fn reply_count_over_99_is_one_badge_for_any_number() {
+        let cam = camera(200.0, 100.0);
+        let o = overlay(vec![
+            with_kind(Point::new(20.0, 60.0), kind(100, false, false)),
+            with_kind(Point::new(100.0, 60.0), kind(150, false, false)),
+            with_kind(Point::new(160.0, 60.0), kind(100_000, false, false)),
+        ]);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(200, 100);
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.pin_sprites(), 2, "одна капля и одна плашка «99+»");
+        let o = overlay(vec![with_kind(
+            Point::new(20.0, 60.0),
+            kind(99, false, false),
+        )]);
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.pin_sprites(), 3, "99 — своя плашка");
+    }
+
+    #[test]
+    fn plain_cluster_is_a_dark_circle_and_plain_badges_are_skipped() {
+        let cam = camera(400.0, 100.0);
+        let mut marks = fillers();
+        // Круг группы с центром (60, 50), радиус 16; точка «не прочитано» — центр (72, 38).
+        marks.push(with_kind(
+            Point::new(60.0, 50.0),
+            PinKind::Cluster {
+                count: 12,
+                unread: true,
+            },
+        ));
+        // Метка с непрочитанным: капля x 120..148, y 38..66, её точка — центр (145, 41).
+        marks.push(PinMark {
+            at: Point::new(120.0, 66.0),
+            kind: PinKind::Pin {
+                initials: "АБ".into(),
+                color: Rgba::from_rgba8(BLUE[0], BLUE[1], BLUE[2], 255),
+                replies: 0,
+                unread: true,
+                resolved: false,
+                open: false,
+            },
+        });
+        let o = overlay(marks);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(400, 100);
+        frame(&mut r, &mut cpu, &cam, &o);
+        let plain = cpu.render();
+        // Без картинки: круг одной заливкой, без числа и обводки; плашек нет.
+        assert_px(&plain, 60, 50, [0x2c, 0x2a, 0x28], 6);
+        assert_px(&plain, 50, 44, [0x2c, 0x2a, 0x28], 6);
+        assert_eq!(whites(&plain, (40, 30, 80, 70)), 0, "ни числа, ни обводки");
+        assert_px(&plain, 73, 36, [0, 0, 0], 0);
+        assert_px(&plain, 140, 46, BLUE, 30);
+        assert_px(&plain, 147, 38, [0, 0, 0], 0);
+        // С картинками — число, обводка и точки цвета выделения.
+        for _ in 0..3 {
+            frame(&mut r, &mut cpu, &cam, &o);
+        }
+        let sprite = cpu.render();
+        assert!(whites(&sprite, (52, 44, 68, 56)) > 5, "числа не видно");
+        assert_px(&sprite, 73, 36, select(), 30);
+        assert_px(&sprite, 147, 38, select(), 30);
+    }
+
+    #[test]
+    fn sprites_out_of_frame_make_room_for_new_ones() {
+        let cam = camera(800.0, 800.0);
+        let old: Vec<_> = (0..PIN_SPRITE_LIMIT)
+            .map(|i| {
+                pin(
+                    Point::new(5.0 + (i % 30) as f64 * 26.0, 30.0 + (i / 30) as f64 * 26.0),
+                    &format!("{i}"),
+                    0,
+                    false,
+                )
+            })
+            .collect();
+        let o = overlay(old);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(800, 800);
+        for _ in 0..PIN_SPRITE_LIMIT / PIN_BUILDS_PER_FRAME + 2 {
+            frame(&mut r, &mut cpu, &cam, &o);
+        }
+        assert_eq!(r.pin_sprites(), PIN_SPRITE_LIMIT, "кэш полон");
+        // Прежних меток в кадре нет: их картинки уступают место новой.
+        let o = overlay(vec![pin(Point::new(400.0, 400.0), "НВ", 0, false)]);
+        for _ in 0..3 {
+            frame(&mut r, &mut cpu, &cam, &o);
+        }
+        let img = cpu.render();
+        assert!(
+            whites(&img, (406, 378, 422, 392)) > 5,
+            "новая метка всё ещё простой заливкой"
+        );
+        assert!(r.pin_sprites() < PIN_SPRITE_LIMIT);
+    }
 }

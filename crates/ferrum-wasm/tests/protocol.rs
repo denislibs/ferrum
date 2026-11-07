@@ -826,3 +826,47 @@ fn find_layers_field_names() {
     )
     .is_err());
 }
+
+/// Списки меток и идентификаторов длиннее `COMMENT_PINS_MAX`: берутся первые `COMMENT_PINS_MAX`,
+/// хвост не разбирается — элемент неверной формы в нём не ошибка (файл с 10 001 обсуждением
+/// показывает 10 000 меток, а не ни одной).
+#[test]
+fn comment_lists_keep_the_first_max_and_skip_the_tail() {
+    let pin = |i: usize| {
+        json!({
+            "id": format!("t{i}"), "page": "1@1", "x": 0.0, "y": 0.0, "wx": 0.0, "wy": 0.0,
+            "initials": "А", "color": 0, "replies": 0, "unread": false, "resolved": false,
+            "movable": false
+        })
+    };
+    let mut long: Vec<_> = (0..COMMENT_PINS_MAX + 1).map(pin).collect();
+    long.push(json!(5));
+    let cmd: Command = serde_json::from_value(json!({
+        "type": "commentPins", "pins": long, "replace": true
+    }))
+    .unwrap();
+    let Command::CommentPins { pins, .. } = cmd else {
+        panic!("{cmd:?}")
+    };
+    assert_eq!(pins.len(), COMMENT_PINS_MAX);
+    assert_eq!(pins[0].id, "t0");
+    assert_eq!(
+        pins[COMMENT_PINS_MAX - 1].id,
+        format!("t{}", COMMENT_PINS_MAX - 1)
+    );
+    let mut ids = vec![json!("t"); COMMENT_PINS_MAX];
+    ids.push(json!({ "не": "строка" }));
+    let cmd: Command =
+        serde_json::from_value(json!({ "type": "commentPinsRemove", "ids": ids })).unwrap();
+    assert!(matches!(cmd, Command::CommentPinsRemove { ids } if ids.len() == COMMENT_PINS_MAX));
+    // Мост режет массив JS до разбора по тем же пределам.
+    assert_eq!(
+        command_list_limit("commentPins"),
+        Some(("pins", COMMENT_PINS_MAX))
+    );
+    assert_eq!(
+        command_list_limit("commentPinsRemove"),
+        Some(("ids", COMMENT_PINS_MAX))
+    );
+    assert_eq!(command_list_limit("presence"), None);
+}

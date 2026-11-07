@@ -638,3 +638,275 @@ fn pin_store_is_bounded_and_removal_closes_the_open_thread() {
         .iter()
         .any(|e| matches!(e, EditorEvent::CommentAnchor { visible: false, .. })));
 }
+
+#[test]
+fn dragged_pin_stays_under_pointer_when_camera_moves_mid_drag() {
+    let mut h = available();
+    let p = world_pin(&h, "mine", 300.0, 300.0, true);
+    h.ed.set_comment_pins(vec![p], true);
+    h.drag_hold((310.0, 290.0), (410.0, 340.0), none());
+    assert_eq!(pins_on_screen(&h), vec![Point::new(400.0, 350.0)]);
+    // Колесо посреди протяжки: вид едет на 40 px вверх, метка — за указателем, а не с миром.
+    h.ev(Input::Wheel(WheelEvent {
+        point: Point::new(410.0, 340.0),
+        delta: Vec2::new(0.0, 40.0),
+        modifiers: none(),
+    }));
+    assert_eq!(pins_on_screen(&h), vec![Point::new(400.0, 350.0)]);
+    h.up(410.0, 340.0, none());
+    let a =
+        h.ed.take_events()
+            .into_iter()
+            .find_map(|e| match e {
+                EditorEvent::CommentMoved { anchor, .. } => Some(anchor),
+                _ => None,
+            })
+            .expect("CommentMoved");
+    assert!(close_pt(a.world, Point::new(400.0, 390.0)), "{:?}", a.world);
+}
+
+#[test]
+fn draft_is_drawn_as_draft_pin_and_reports_its_anchor() {
+    let mut h = available();
+    let page = h.ed.page();
+    h.ed.take_events();
+    h.ed.set_comment_draft(Some(anchor(page, None, (300.0, 250.0), (300.0, 250.0))));
+    let marks = h.ed.overlay().comments;
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].kind, PinKind::Draft);
+    assert!(close_pt(marks[0].at, Point::new(300.0, 250.0)));
+    assert!(h.ed.take_events().contains(&EditorEvent::CommentAnchor {
+        screen: Point::new(300.0, 250.0),
+        visible: true
+    }));
+    // Окно черновика едет с камерой.
+    h.ev(Input::Wheel(WheelEvent {
+        point: Point::new(500.0, 400.0),
+        delta: Vec2::new(-30.0, 0.0),
+        modifiers: none(),
+    }));
+    assert!(h.ed.take_events().contains(&EditorEvent::CommentAnchor {
+        screen: Point::new(330.0, 250.0),
+        visible: true
+    }));
+    // Черновика нет — последний раз «не видно».
+    h.ed.set_comment_draft(None);
+    assert!(h.ed.overlay().comments.is_empty());
+    assert!(h.ed.take_events().contains(&EditorEvent::CommentAnchor {
+        screen: Point::new(330.0, 250.0),
+        visible: false
+    }));
+}
+
+#[test]
+fn cursor_over_pins_in_comment_mode() {
+    let mut h = available();
+    let p = world_pin(&h, "mine", 300.0, 300.0, true);
+    let q = world_pin(&h, "theirs", 600.0, 300.0, false);
+    h.ed.set_comment_pins(vec![p, q], true);
+    h.key("KeyC", none());
+    h.hover(800.0, 600.0);
+    assert_eq!(h.ed.cursor(), Cursor::Crosshair, "режим — прицел");
+    h.hover(310.0, 290.0);
+    assert_eq!(h.ed.cursor(), Cursor::Default, "над меткой — стрелка");
+    h.down(310.0, 290.0, none());
+    assert_eq!(h.ed.cursor(), Cursor::Default, "нажата, ещё не тянется");
+    h.mv(410.0, 340.0, none());
+    assert_eq!(h.ed.cursor(), Cursor::Grabbing, "тянется");
+    h.up(410.0, 340.0, none());
+    // Чужая метка не тянется: стрелка и при движении.
+    h.down(610.0, 290.0, none());
+    h.mv(700.0, 340.0, none());
+    assert_eq!(h.ed.cursor(), Cursor::Default);
+    h.up(700.0, 340.0, none());
+}
+
+#[test]
+fn pins_beyond_canvas_edge_are_not_laid_out() {
+    let mut h = available();
+    // Холст 1000 × 800, поле — две капли (56 px).
+    let pins = vec![
+        world_pin(&h, "near", 1040.0, 300.0, false),
+        world_pin(&h, "right", 1100.0, 300.0, false),
+        world_pin(&h, "below", 300.0, 900.0, false),
+        world_pin(&h, "far", -5000.0, 300.0, false),
+    ];
+    h.ed.set_comment_pins(pins, true);
+    assert_eq!(pins_on_screen(&h), vec![Point::new(1040.0, 300.0)]);
+    assert_eq!(h.ed.overlay().comments.len(), 1);
+}
+
+#[test]
+fn ruler_does_not_pull_guides_in_comment_mode() {
+    let mut h = available();
+    h.ed.set_view(Some(true), Some(true));
+    h.key("KeyC", none());
+    h.ed.take_events();
+    let page = h.ed.page();
+    let steps = h.ed.step_count();
+    let before = h.state();
+    // Протяжка из верхней линейки (20 px) на холст.
+    h.hover(300.0, 10.0);
+    assert_eq!(
+        h.ed.cursor(),
+        Cursor::Default,
+        "линейка не предлагает линию"
+    );
+    h.drag((300.0, 10.0), (300.0, 150.0), none());
+    assert!(h.ed.document().page_guides(page).is_empty());
+    assert!(h.ed.overlay().active_guide.is_none());
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(h.state(), before);
+    // Нажатие на линейку — ей: ни нового комментария, ни выхода из режима.
+    h.click(300.0, 10.0, none());
+    assert!(!h
+        .ed
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, EditorEvent::CommentPlace { .. })));
+    assert_eq!(h.ed.tool_kind(), ToolKind::Comment);
+    // У «Перемещения» линейка по-прежнему тянет линию.
+    h.key("KeyV", none());
+    h.drag((300.0, 10.0), (300.0, 150.0), none());
+    assert_eq!(h.ed.document().page_guides(page).len(), 1);
+}
+
+#[test]
+fn node_under_pin_is_not_hovered_and_hover_does_not_freeze_during_pin_drag() {
+    let mut h = available();
+    let a = h.rect(None, 200.0, 200.0, 200.0, 200.0);
+    let b = h.rect(None, 600.0, 200.0, 200.0, 200.0);
+    let p = world_pin(&h, "mine", 300.0, 300.0, true);
+    h.ed.set_comment_pins(vec![p], true);
+    // Над узлом мимо метки — наведение узла.
+    h.hover(250.0, 350.0);
+    assert_eq!(h.ed.overlay().hover, Some(a));
+    // Над меткой — нет: щелчок уйдёт метке.
+    h.hover(310.0, 290.0);
+    assert_eq!(h.ed.overlay().hover, None);
+    // Нажатие прямо на метку без движения к ней (касание): наведение снято сразу.
+    h.hover(250.0, 350.0);
+    assert_eq!(h.ed.overlay().hover, Some(a));
+    h.down(310.0, 290.0, none());
+    assert_eq!(h.ed.overlay().hover, None);
+    h.mv(500.0, 290.0, none());
+    h.mv(650.0, 290.0, none());
+    assert_eq!(
+        h.ed.overlay().hover,
+        None,
+        "наведение не замерло на узле нажатия"
+    );
+    h.up(650.0, 290.0, none());
+    h.hover(700.0, 380.0);
+    assert_eq!(h.ed.overlay().hover, Some(b), "после жеста — как обычно");
+}
+
+#[test]
+fn hover_after_camera_move_respects_pins() {
+    let mut h = available();
+    let a = h.rect(None, 200.0, 200.0, 200.0, 200.0);
+    let _b = h.rect(None, 600.0, 200.0, 200.0, 200.0);
+    let p = world_pin(&h, "theirs", 300.0, 300.0, false);
+    h.ed.set_comment_pins(vec![p], true);
+    // Чужая метка нажата и не едет; указатель ушёл на другой узел, камера сдвинулась —
+    // наведение не появляется, пока метка нажата.
+    h.down(310.0, 290.0, none());
+    h.mv(500.0, 300.0, none());
+    h.mv(700.0, 300.0, none());
+    h.ev(Input::Wheel(WheelEvent {
+        point: Point::new(700.0, 300.0),
+        delta: Vec2::new(0.0, 5.0),
+        modifiers: none(),
+    }));
+    assert_eq!(h.ed.overlay().hover, None);
+    h.up(700.0, 300.0, none());
+    h.ed.set_comment_open(None);
+    // Указатель стоит над узлом, камера привела под него метку — наведения узла нет.
+    let mut cam = h.ed.camera().clone();
+    cam.set_center(Point::new(500.0, 400.0));
+    h.ed.set_camera(cam);
+    h.hover(250.0, 350.0);
+    assert_eq!(h.ed.overlay().hover, Some(a));
+    h.ev(Input::Wheel(WheelEvent {
+        point: Point::new(250.0, 350.0),
+        delta: Vec2::new(60.0, -60.0),
+        modifiers: none(),
+    }));
+    assert_eq!(h.ed.overlay().hover, None, "под указателем теперь метка");
+    assert_eq!(h.ed.cursor(), Cursor::Default);
+}
+
+#[test]
+fn drag_started_on_cluster_does_not_zoom_in() {
+    let mut h = available();
+    let page = h.ed.page();
+    let pins: Vec<_> = (0..10)
+        .map(|i| {
+            let x = 100.0 + i as f64 * 60.0;
+            pin(
+                &format!("p{i}"),
+                anchor(page, None, (x, 300.0), (x, 300.0)),
+                false,
+            )
+        })
+        .collect();
+    h.ed.set_comment_pins(pins, true);
+    for _ in 0..4 {
+        h.ed.execute(CommandId::ZoomOut);
+    }
+    assert_eq!(clusters(&h), vec![10]);
+    let (at, _) = h.ed.comment_layout_for_tests()[0].clone();
+    let cam = h.ed.camera().clone();
+    h.drag((at.x, at.y), (at.x + 60.0, at.y + 40.0), none());
+    assert_eq!(*h.ed.camera(), cam, "протяжка — не щелчок");
+    assert_eq!(clusters(&h), vec![10]);
+    // Дрожание в пределах порога — ещё щелчок.
+    h.drag((at.x, at.y), (at.x + 1.0, at.y), none());
+    assert!(h.ed.camera().zoom() >= cam.zoom() * 2.0);
+}
+
+/// Метка над направляющей страницы у «Перемещения»: нажатие, наведение и курсор — метки
+/// (метки рисуются над направляющими); направляющая рядом с меткой берётся как обычно.
+#[test]
+fn pin_on_a_page_guide_wins_over_the_guide() {
+    let mut h = available();
+    h.ed.set_view(Some(true), Some(true));
+    let page = h.ed.page();
+    let guide = ferrum_doc::Guide::new(ferrum_doc::GuideAxis::X, 300.0);
+    h.ed.set_guides(
+        ferrum_doc::GuideOwner::Page(page),
+        vec![guide],
+        Phase::Commit,
+    )
+    .unwrap();
+    // Капля x 290..318, y 372..400 — поверх линии x = 300.
+    let p = world_pin(&h, "mine", 290.0, 400.0, true);
+    h.ed.set_comment_pins(vec![p], true);
+    h.ed.take_events();
+    let steps = h.ed.step_count();
+    h.hover(300.0, 600.0);
+    assert!(
+        matches!(h.ed.cursor(), Cursor::Resize { .. }),
+        "мимо метки линия берётся"
+    );
+    h.hover(300.0, 390.0);
+    assert_eq!(h.ed.cursor(), Cursor::Default, "над меткой — её стрелка");
+    // Щелчок открывает метку, линия на месте.
+    h.click(300.0, 390.0, none());
+    assert_eq!(h.ed.comment_open(), Some("mine"));
+    assert!(h
+        .ed
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, EditorEvent::CommentOpened { .. })));
+    // Протяжка двигает метку, а не линию.
+    h.drag((300.0, 390.0), (400.0, 450.0), none());
+    assert!(h
+        .ed
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, EditorEvent::CommentMoved { .. })));
+    assert_eq!(h.ed.document().page_guides(page), [guide]);
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(pins_on_screen(&h), vec![Point::new(390.0, 460.0)]);
+}
