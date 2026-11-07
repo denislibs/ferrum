@@ -27,7 +27,7 @@ const t = (id: string, o: Partial<ThreadView> & { page?: string }): ThreadView =
     resolvedAt: null,
     resolvedBy: null,
     seq: 1,
-    first: { id: `${id}c`, thread: id, author, body: 'текст', createdAt: 0, editedAt: null, mentions: {} },
+    first: { id: `${id}c`, author, body: 'текст', more: false, createdAt: 0, editedAt: null, mentions: {} },
     replies: 0,
     lastAt: 0,
     participants: [author.id ?? ''],

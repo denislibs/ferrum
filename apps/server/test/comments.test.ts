@@ -5,10 +5,16 @@
 import {
   COMMENT_BODY_MAX,
   COMMENT_PAGE_MAX,
+  COMMENT_PREVIEW_MAX,
+  COMMENT_THREADS_MAX,
+  COMMENT_THREADS_PER_USER_MAX,
+  commentLength,
+  commentPreview,
   parseCommentList,
   parseCommentWrite,
   parseMentionList,
   parseThreadDetail,
+  THREAD_BYTES_MAX,
   THREAD_COMMENTS_MAX,
   type CommentListDto,
   type CommentWriteDto,
@@ -58,6 +64,8 @@ async function world(): Promise<{ file: string; other: string }> {
     'c'.repeat(64),
   ]);
   await s.pool.query('INSERT INTO file_link_user (file_id, user_id) VALUES ($1, $2)', [file, linked.id]);
+  // Все уже открывали файл: приглашённого, не открывавшего его, подсказка не предлагает и письма ему не идут (M3, L1).
+  for (const p of [editor, viewer, linked, member]) await opened(p, file);
   // Другой файл того же владельца, где у всех тех же людей тоже есть доступ: чужие id проверяются не только доступом.
   const other = (await s.newFile(owner, 'Другой')).id;
   await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'editor'), ($1, $3, 'viewer')`, [
@@ -69,6 +77,12 @@ async function world(): Promise<{ file: string; other: string }> {
 }
 
 const base = (file: string) => `/api/files/${file}/comments`;
+/** Человек открывал файл (`file_recent`) — час назад. */
+const opened = (who: Person, file: string) =>
+  s.pool.query(`INSERT INTO file_recent (user_id, file_id, opened_at) VALUES ($1, $2, now() - interval '1 hour') ON CONFLICT DO NOTHING`, [
+    who.id,
+    file,
+  ]);
 
 async function write(res: Response, status = 201): Promise<CommentWriteDto> {
   const text = await res.text();
@@ -369,8 +383,8 @@ test('предел обсуждения: ответ сверх — 409 THREAD_FU
   expect((await detail(owner, file, t.thread.id)).comments).toHaveLength(THREAD_COMMENTS_MAX);
   // Страница: 501 обсуждение — 500 и `more`.
   await s.pool.query(
-    `INSERT INTO comment_thread (id, file_id, page_id, x, y, wx, wy, first_id, created_by, created_at, seq)
-     SELECT gen_random_uuid(), $1, '1@1', 0, 0, 0, 0, gen_random_uuid(), $2, now(), 1000 + i FROM generate_series(1, 501) i`,
+    `INSERT INTO comment_thread (id, file_id, page_id, x, y, wx, wy, first_id, preview, preview_more, created_by, created_at, seq)
+     SELECT gen_random_uuid(), $1, '1@1', 0, 0, 0, 0, gen_random_uuid(), 'x', false, $2, now(), 1000 + i FROM generate_series(1, 501) i`,
     [file, owner.id],
   );
   await s.pool.query(
@@ -421,9 +435,9 @@ test('функции изменения сверяют роль сами: сня
   const before = await rows('SELECT seq FROM comment_file');
   // Маршрут проверил роль, а между проверкой и записью её сняли: запись видит это сама.
   const calls: [string, unknown[]][] = [
-    ['comment_create($1, $2, $3, NULL, 0, 0, 0, 0, $4, $5, $6, 1000)', [file, stranger.id, pin.page, 'x', [], []]],
-    ['comment_reply($1, $2, $3, $4, $5, $6, 1000, 500)', [file, stranger.id, t.thread.id, 'x', [], []]],
-    ['comment_edit($1, $2, $3, $4, $5, $6)', [file, stranger.id, t.thread.id, t.comment!.id, 'x', []]],
+    ['comment_create($1, $2, $3, NULL, 0, 0, 0, 0, $4, $4, false, $5, $6, 1000, 10000, 1000)', [file, stranger.id, pin.page, 'x', [], []]],
+    ['comment_reply($1, $2, $3, $4, $5, $6, 1000, 500, 524288)', [file, stranger.id, t.thread.id, 'x', [], []]],
+    ['comment_edit($1, $2, $3, $4, $5, $5, false, $6, 524288)', [file, stranger.id, t.thread.id, t.comment!.id, 'x', []]],
     ['comment_delete($1, $2, $3, $4)', [file, stranger.id, t.thread.id, t.comment!.id]],
     ['comment_resolve($1, $2, $3, true)', [file, stranger.id, t.thread.id]],
     ['comment_move($1, $2, $3, $4, NULL, 0, 0, 0, 0)', [file, stranger.id, t.thread.id, pin.page]],
@@ -521,10 +535,11 @@ test('очередь писем: ждущих строк у человека н�
   for (let i = 0; i < 52; i++) {
     const f = (await s.newFile(owner, `ф${i}`)).id;
     await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [f, viewer.id]);
+    await opened(viewer, f);
     files.push(f);
   }
   for (const f of files)
-    await s.pool.query(`SELECT comment_create($1, $2, '1@1', NULL, 0, 0, 0, 0, $3, $4, '{}', 1000)`, [
+    await s.pool.query(`SELECT comment_create($1, $2, '1@1', NULL, 0, 0, 0, 0, $3, $3, false, $4, '{}', 1000, 10000, 1000)`, [
       f,
       owner.id,
       `@[${viewer.id}]`,
@@ -532,7 +547,7 @@ test('очередь писем: ждущих строк у человека н�
     ]);
   expect((await outbox()).length).toBe(50);
   // В уже ждущую строку новое по-прежнему сливается.
-  await s.pool.query(`SELECT comment_create($1, $2, '1@1', NULL, 0, 0, 0, 0, $3, $4, '{}', 1000)`, [
+  await s.pool.query(`SELECT comment_create($1, $2, '1@1', NULL, 0, 0, 0, 0, $3, $3, false, $4, '{}', 1000, 10000, 1000)`, [
     files[0],
     owner.id,
     `@[${viewer.id}]`,
@@ -677,8 +692,8 @@ test('страницы `?after=`: больше 500 надгробий и сме�
   const known = (await create(owner, file, 'начало')).seq;
   // 600 надгробий, потом 300 живых вперемешку с 300 надгробиями.
   await s.pool.query(
-    `INSERT INTO comment_thread (id, file_id, page_id, x, y, wx, wy, first_id, created_by, created_at, seq, deleted_at)
-     SELECT gen_random_uuid(), $1, '1@1', 0, 0, 0, 0, gen_random_uuid(), $2, now(), 1000 + i,
+    `INSERT INTO comment_thread (id, file_id, page_id, x, y, wx, wy, first_id, preview, preview_more, created_by, created_at, seq, deleted_at)
+     SELECT gen_random_uuid(), $1, '1@1', 0, 0, 0, 0, gen_random_uuid(), 'x', false, $2, now(), 1000 + i,
             CASE WHEN i <= 600 OR i % 2 = 0 THEN now() END
      FROM generate_series(1, 1200) i`,
     [file, owner.id],
@@ -763,4 +778,151 @@ test('места в работе: ушедший из очереди (срок �
   c.release();
   c.release();
   expect(slots.count('u')).toEqual({ running: 0, waiting: 0 });
+});
+
+/** Живые обсуждения напрямую в базе: `n` штук человека `who`, без комментариев (пределы считают обсуждения). */
+const seedThreads = (file: string, who: Person, n: number) =>
+  s.pool.query(
+    `INSERT INTO comment_thread (id, file_id, page_id, x, y, wx, wy, first_id, preview, preview_more, created_by, created_at, seq)
+     SELECT gen_random_uuid(), $1, '1@1', 0, 0, 0, 0, gen_random_uuid(), 'x', false, $2, now(),
+            (SELECT COALESCE(max(seq), 0) FROM comment_thread WHERE file_id = $1) + i
+     FROM generate_series(1, $3) i`,
+    [file, who.id, n],
+  );
+
+test('H1: обсуждений в файле — не больше 10 000, у человека в файле — не больше 1000; сверх — 409 без записи и номера', async () => {
+  const { file, other } = await world();
+  // Файл: 9 999 чужих, 10 000-е проходит, 10 001-е — 409 FILE_FULL, и у другого человека тоже.
+  await seedThreads(file, member, COMMENT_THREADS_MAX - 1);
+  await s.pool.query(`INSERT INTO comment_file (file_id, seq) VALUES ($1, $2)`, [file, COMMENT_THREADS_MAX]);
+  await create(viewer, file);
+  const seq = await rows('SELECT seq FROM comment_file WHERE file_id = $1', [file]);
+  for (const who of [viewer, owner]) {
+    const res = await s.call(who, 'POST', base(file), { pin, body: 'лишнее' });
+    expect([res.status, await res.json()]).toEqual([409, { error: 'FILE_FULL' }]);
+  }
+  expect(await rows('SELECT seq FROM comment_file WHERE file_id = $1', [file])).toEqual(seq);
+  expect(await rows('SELECT count(*)::int AS n FROM comment_thread WHERE file_id = $1', [file])).toEqual([{ n: COMMENT_THREADS_MAX }]);
+  // Удалённое не считается: место освободилось — новое проходит.
+  await s.pool.query(`UPDATE comment_thread SET deleted_at = now() WHERE id = (SELECT id FROM comment_thread WHERE file_id = $1 LIMIT 1)`, [
+    file,
+  ]);
+  await create(owner, file);
+  // Человек: 999 своих, 1000-е проходит, 1001-е — 409 AUTHOR_FULL; другому в том же файле — можно.
+  await seedThreads(other, viewer, COMMENT_THREADS_PER_USER_MAX - 1);
+  await s.pool.query(`INSERT INTO comment_file (file_id, seq) VALUES ($1, $2)`, [other, COMMENT_THREADS_PER_USER_MAX]);
+  await create(viewer, other);
+  const mine = await s.call(viewer, 'POST', base(other), { pin, body: 'лишнее' });
+  expect([mine.status, await mine.json()]).toEqual([409, { error: 'AUTHOR_FULL' }]);
+  await create(editor, other);
+});
+
+test('H1: список — начало первого текста и «есть ещё», целиком — в обсуждении; страница 500 предельных обсуждений — меньше 1 МБ', async () => {
+  const { file } = await world();
+  const long = 'Длинный текст. '
+    .repeat(400)
+    .slice(0, COMMENT_BODY_MAX - 100)
+    .trim();
+  const t = await create(editor, file, `@[${viewer.id}] ${long}`);
+  expect(t.thread.first.more).toBe(true);
+  expect(commentLength(t.thread.first.body)).toBeLessThanOrEqual(COMMENT_PREVIEW_MAX);
+  expect(t.thread.first.mentions).toEqual({ [viewer.id]: 'Вера' });
+  const [listed] = (await list(owner, file)).threads;
+  expect(listed.first).toEqual(t.thread.first);
+  expect((await detail(owner, file, t.thread.id)).comments[0].body).toBe(`@[${viewer.id}] ${long}`);
+  // Правка первого меняет и начало; короткое — без «есть ещё».
+  const edited = await write(
+    await s.call(editor, 'PATCH', `${base(file)}/${t.thread.id}/comments/${t.comment!.id}`, { body: 'коротко' }),
+    200,
+  );
+  expect([edited.thread.first.body, edited.thread.first.more]).toEqual(['коротко', false]);
+  // 500 обсуждений с предельными текстами разных видов (кириллица, четырёхбайтные, упоминания) — одна страница.
+  const bodies = ['я'.repeat(COMMENT_BODY_MAX), '😀'.repeat(COMMENT_BODY_MAX), `@[${viewer.id}] `.repeat(20) + 'ж'.repeat(3000)];
+  for (const [i, body] of bodies.entries()) {
+    const p = commentPreview(body);
+    await s.pool.query(
+      `SELECT comment_create($1, $2, '1@1', NULL, k, 0, k, 0, $3, $4, $5, $6, '{}', 0, 10000, 1000) FROM generate_series(1, $7) k`,
+      [file, [owner, editor, viewer][i].id, body, p.text, p.more, i === 2 ? [viewer.id] : [], i === 0 ? 168 : 166],
+    );
+  }
+  const res = await s.call(owner, 'GET', `${base(file)}?after=${edited.seq}`);
+  const text = await res.text();
+  const page = parseCommentList(JSON.parse(text))!;
+  console.log('страница 500 предельных обсуждений, байт:', text.length, new TextEncoder().encode(text).length);
+  expect(page.threads).toHaveLength(COMMENT_PAGE_MAX);
+  expect(page.threads.every((x) => x.first.more)).toBe(true);
+  // Было 8,3 МБ (полные тексты). Сейчас ~0,63 МБ: начало текста — до 280 кодовых точек (до 1,1 КБ у четырёхбайтных), а
+  // остальное обсуждение (id, метка, автор, участники) — ~0,68 КБ и без текста; только четырёхбайтные — ~0,9 МБ.
+  expect(new TextEncoder().encode(text).length).toBeLessThan(1024 * 1024);
+});
+
+test('M1: текст обсуждения — не больше 512 КБ: ответ и правка сверх — 409 THREAD_FULL без записи', async () => {
+  const { file } = await world();
+  const t = await create(owner, file);
+  const big = 'ж'.repeat(COMMENT_BODY_MAX); // 8000 байт
+  await s.pool.query(
+    `INSERT INTO comment (id, thread_id, author_id, body, created_at)
+     SELECT gen_random_uuid(), $1, $2, $3, now() + make_interval(secs => i) FROM generate_series(1, $4) i`,
+    [t.thread.id, viewer.id, big, Math.floor(THREAD_BYTES_MAX / 8000)],
+  );
+  const near = await reply(viewer, file, t.thread.id, 'ещё');
+  const over = await s.call(viewer, 'POST', `${base(file)}/${t.thread.id}/comments`, { body: big });
+  expect([over.status, await over.json()]).toEqual([409, { error: 'THREAD_FULL' }]);
+  const grow = await s.call(viewer, 'PATCH', `${base(file)}/${t.thread.id}/comments/${near.comment!.id}`, { body: big });
+  expect([grow.status, await grow.json()]).toEqual([409, { error: 'THREAD_FULL' }]);
+  expect((await list(owner, file)).seq).toBe(near.seq);
+  // Правка, которая не растит текст, проходит.
+  await write(await s.call(viewer, 'PATCH', `${base(file)}/${t.thread.id}/comments/${near.comment!.id}`, { body: 'ещ' }), 200);
+  const d = await detail(owner, file, t.thread.id);
+  expect(d.comments.reduce((n, c) => n + new TextEncoder().encode(c.body).length, 0)).toBeLessThanOrEqual(THREAD_BYTES_MAX);
+});
+
+test('M1: список и обсуждение всех людей — под общим семафором; остальные маршруты не ждут, сверх очереди — 429 BUSY', async () => {
+  const heavySlots = new UserSlots({ running: 2, waiting: 3 });
+  const tight = await apiStand({ heavySlots, commentMail: false }, true);
+  try {
+    const { file } = await world();
+    const t = await create(editor, file);
+    // Оба места заняты: тяжёлые чтения трёх людей ждут, не держа соединения базы.
+    const held = [heavySlots.take('')!, heavySlots.take('')!];
+    const waiting = [
+      tight.call(viewer, 'GET', base(file)),
+      tight.call(editor, 'GET', `${base(file)}/${t.thread.id}`),
+      tight.call(linked, 'GET', base(file)),
+    ];
+    while (heavySlots.count('').waiting < 3) await Bun.sleep(1);
+    const over = await tight.call(owner, 'GET', base(file));
+    expect([over.status, await over.json()]).toEqual([429, { error: 'BUSY' }]);
+    // Лёгкие маршруты и запись — сразу.
+    expect((await tight.call(owner, 'GET', `/api/files/${file}/mentions`)).status).toBe(200);
+    expect((await tight.call(owner, 'GET', '/api/me/prefs')).status).toBe(200);
+    expect((await tight.call(owner, 'POST', `${base(file)}/${t.thread.id}/comments`, { body: 'пока ждут' })).status).toBe(201);
+    for (const h of held) h.release();
+    expect((await Promise.all(waiting)).map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(heavySlots.count('')).toEqual({ running: 0, waiting: 0 });
+  } finally {
+    await tight.stop();
+  }
+});
+
+test('L2: правка, перенос и закрытие — свой предел 60 в минуту, а не общий `write`', async () => {
+  const { file } = await world();
+  const t = await create(viewer, file);
+  const ops = [
+    () => s.call(viewer, 'PATCH', `${base(file)}/${t.thread.id}`, { resolved: true }),
+    () => s.call(viewer, 'PATCH', `${base(file)}/${t.thread.id}`, { pin }),
+    () => s.call(viewer, 'PATCH', `${base(file)}/${t.thread.id}/comments/${t.comment!.id}`, { body: 'правка' }),
+  ];
+  for (let i = 0; i < 60; i++) expect((await ops[i % 3]()).status, `${i}`).toBe(200);
+  for (const op of ops) expect((await op()).status).toBe(429);
+  // Общий `write` не задет: прочтение проходит.
+  expect((await s.call(viewer, 'POST', `${base(file)}/${t.thread.id}/read`)).status).toBe(200);
+});
+
+test('L4: невидимые знаки убираются, текст только из них — 400', async () => {
+  const { file } = await world();
+  for (const body of ['​‌⁠', 'ㅤ', '‍', '́́'])
+    expect((await s.call(owner, 'POST', base(file), { pin, body })).status, JSON.stringify(body)).toBe(400);
+  const t = await create(owner, file, 'а​б⁣в 👩‍💻' + '́'.repeat(30));
+  expect(t.comment!.body).toBe('а' + 'бв 👩‍💻' + '́'.repeat(8));
 });

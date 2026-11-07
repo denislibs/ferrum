@@ -2,7 +2,7 @@
 // `sync.worker` подменены, события и ответы — из теста.
 
 import { expect, test, type Page } from '@playwright/test';
-import type { CommentDto, ThreadView } from '@ferrum/protocol';
+import type { CommentDto, CommentHeadDto, ThreadView } from '@ferrum/protocol';
 import type { CommentRequest, CommentResult, CommentsToMain } from '../src/core/comments-store';
 import type { CoreEvent } from '../src/wasm/ferrum_wasm';
 
@@ -19,8 +19,29 @@ const comment = (thread: string, id: string, by = author(ME, 'Я'), body = 'те
   mentions,
 });
 
+/** Первый комментарий в списке — началом текста. */
+const head = (c: CommentDto, more = false): CommentHeadDto => ({
+  id: c.id,
+  author: c.author,
+  body: c.body,
+  more,
+  createdAt: c.createdAt,
+  editedAt: c.editedAt,
+  mentions: c.mentions,
+});
+/** Первый комментарий обсуждения целиком (окно). */
+const full = (t: ThreadView): CommentDto => ({
+  id: t.first.id,
+  thread: t.id,
+  author: t.first.author,
+  body: t.first.body,
+  createdAt: t.first.createdAt,
+  editedAt: t.first.editedAt,
+  mentions: t.first.mentions,
+});
+
 const thread = (id: string, o: Partial<ThreadView> = {}): ThreadView => {
-  const first = o.first ?? comment(id, `${id}c`);
+  const first = o.first ?? head(comment(id, `${id}c`));
   return {
     id,
     pin: { page: '1@1', node: null, x: 0, y: 0, wx: 0, wy: 0 },
@@ -51,7 +72,7 @@ const answer = (page: Page, k: CommentRequest['k'], r: CommentResult) =>
 const toasts = (page: Page) => page.evaluate(() => window.harness.toasts);
 
 /** Открыть обсуждение щелчком по метке (событие ядра) и прислать его комментарии. */
-async function openThread(page: Page, t: ThreadView, comments: CommentDto[] = [t.first], at = { sx: 200, sy: 200 }): Promise<void> {
+async function openThread(page: Page, t: ThreadView, comments: CommentDto[] = [full(t)], at = { sx: 200, sy: 200 }): Promise<void> {
   await core(page, { type: 'commentOpened', id: t.id, ...at });
   await emit(page, { t: 'detail', thread: t.id, view: t, comments });
   await expect(page.getByRole('dialog', { name: 'Обсуждение' })).toBeVisible();
@@ -142,7 +163,7 @@ test('окно у метки у правого нижнего края не вы
 test('панель: при росте колонки рисуются и нижние строки', async ({ page }) => {
   await mount(page, { panelHeight: 300 });
   const upserts = Array.from({ length: 60 }, (_, i) => thread(`t${i}`, { lastAt: 1000 - i, seq: i + 1 }));
-  await emit(page, { t: 'threads', reset: true, upserts, removed: [] });
+  await emit(page, { t: 'threads', reset: true, upserts, removed: [], more: false });
   const rows = page.locator('.fe-comments__row');
   await expect(rows.first()).toBeVisible();
   const before = await rows.count();
@@ -154,14 +175,14 @@ test('панель: при росте колонки рисуются и ниж�
 
 test('«не прочитано» в строке панели озвучивается', async ({ page }) => {
   await mount(page);
-  await emit(page, { t: 'threads', reset: true, upserts: [thread('t1', { unread: true }), thread('t2')], removed: [] });
+  await emit(page, { t: 'threads', reset: true, upserts: [thread('t1', { unread: true }), thread('t2')], removed: [], more: false });
   await expect(page.getByRole('button', { name: /не прочитано/ })).toHaveCount(1);
 });
 
 test('упоминание без имени — «@Участник» и в тексте, и в правке', async ({ page }) => {
   await mount(page);
   const c = comment('t1', 't1c', author(ME, 'Я'), 'для @[u3] ок', { u3: '' });
-  await openThread(page, thread('t1', { first: c }));
+  await openThread(page, thread('t1', { first: head(c) }), [c]);
   const dialog = page.getByRole('dialog', { name: 'Обсуждение' });
   await expect(dialog.locator('.fe-comment__body')).toHaveText('для @Участник ок');
   await dialog.getByRole('button', { name: 'Изменить' }).click();
@@ -186,7 +207,7 @@ test('автор, удаливший своё обсуждение, не пол�
 
 test('ссылка на обсуждение включает режим комментариев и открывает его', async ({ page }) => {
   await mount(page, { link: 't1', mode: false });
-  await emit(page, { t: 'threads', reset: true, upserts: [thread('t1')], removed: [] });
+  await emit(page, { t: 'threads', reset: true, upserts: [thread('t1')], removed: [], more: false });
   const sent = await page.evaluate(() => window.harness.sent);
   expect(sent).toContainEqual({ type: 'setTool', tool: 'comment' });
   expect(sent.findIndex((c) => c.type === 'setTool')).toBeLessThan(sent.findIndex((c) => c.type === 'commentFocus'));
@@ -226,4 +247,38 @@ test('«Аккаунт»: настройка писем не загрузила�
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(toggle).toBeEnabled();
   await expect(toggle).not.toBeChecked();
+});
+
+test('H1: список заново приходит пачками — «Загрузка…» до последней, ссылка ищется во всём списке; начало текста — с многоточием', async ({
+  page,
+}) => {
+  await mount(page, { link: 't9' });
+  const one = Array.from({ length: 3 }, (_, i) => thread(`t${i}`, { seq: i + 1 }));
+  await emit(page, { t: 'threads', reset: true, upserts: one, removed: [], more: true });
+  await expect(page.getByText('Загрузка…')).toBeVisible();
+  // Ссылка — на обсуждение из второй пачки: после первой оно ещё не найдено, тоста нет.
+  expect(await toasts(page)).toEqual([]);
+  const long = thread('t9', { seq: 9, first: head(comment('t9', 't9c', author(ME, 'Я'), 'начало длинного'), true) });
+  await emit(page, { t: 'threads', reset: false, upserts: [long], removed: [], more: false });
+  expect(await toasts(page)).toEqual([]);
+  const sent = await page.evaluate(() => window.harness.sent);
+  expect(sent).toContainEqual({ type: 'commentFocus', id: 't9' });
+  await expect(page.locator('.fe-comments__row')).toHaveCount(4);
+  await expect(page.locator('.fe-comments__text').filter({ hasText: 'начало длинного…' })).toHaveCount(1);
+});
+
+test('H1: предел обсуждений файла и своих — понятный текст, черновик остаётся', async ({ page }) => {
+  await mount(page);
+  for (const [failure, text] of [
+    ['FILE_FULL', 'В файле слишком много обсуждений. Удалите или закройте старые'],
+    ['AUTHOR_FULL', 'У вас слишком много обсуждений в этом файле. Удалите старые'],
+  ] as const) {
+    await answer(page, 'create', { ok: false, failure });
+    await core(page, place(300, 300));
+    const field = page.getByRole('dialog', { name: 'Новый комментарий' }).getByRole('textbox', { name: 'Комментарий' });
+    await field.fill('ещё одно');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => toasts(page)).toContain(text);
+    await expect(field).toHaveValue('ещё одно');
+  }
 });

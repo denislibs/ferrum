@@ -62,8 +62,9 @@ export type CommentRequest =
 export type CommentResult = { ok: true; value?: unknown } | { ok: false; failure: string };
 
 export type CommentsToMain =
-  /** Изменившиеся обсуждения; `reset` — список целиком заново (новый файл или первая загрузка). */
-  | { t: 'threads'; reset: boolean; upserts: ThreadView[]; removed: string[] }
+  /** Изменившиеся обсуждения; `reset` — список целиком заново (новый файл или первая загрузка). Больше
+   * `COMMENTS_POST_BATCH` — пачками: `more` — следом идёт ещё пачка того же изменения (`reset` — только у первой). */
+  | { t: 'threads'; reset: boolean; upserts: ThreadView[]; removed: string[]; more: boolean }
   /** Открытое обсуждение: все его комментарии по порядку; `null` — его больше нет (удалено или нет доступа). */
   | { t: 'detail'; thread: string; view: ThreadView | null; comments: CommentDto[] }
   | { t: 'result'; id: number; result: CommentResult }
@@ -82,6 +83,8 @@ export interface CommentsEnv {
 
 /** Изменения панели уходят основному потоку не чаще: поток событий не перерисовывает панель на каждое. */
 export const COMMENTS_FLUSH_MS = 50;
+/** Обсуждений в одном сообщении основному потоку: первая загрузка (до 10 000) — пачками, а не одним структурным копированием. */
+export const COMMENTS_POST_BATCH = 500;
 /** Сбой догоняния по сети — снова через столько. */
 const RETRY_MS = 5000;
 
@@ -315,7 +318,20 @@ export class CommentStore {
     this.upserts.clear();
     this.removedOut.clear();
     this.resetOut = false;
-    if (reset || upserts.length > 0 || removed.length > 0) this.env.post({ t: 'threads', reset, upserts, removed });
+    if (!reset && upserts.length === 0 && removed.length === 0) return;
+    // Пачками по `COMMENTS_POST_BATCH`: `reset` и удалённые — в первой, `more` — у всех, кроме последней. Панель считает список
+    // загруженным (и открывает ссылку на обсуждение) только по последней.
+    for (let at = 0; at === 0 || at < upserts.length; at += COMMENTS_POST_BATCH) {
+      const more = at + COMMENTS_POST_BATCH < upserts.length;
+      const first = at === 0;
+      this.env.post({
+        t: 'threads',
+        reset: reset && first,
+        upserts: upserts.slice(at, at + COMMENTS_POST_BATCH),
+        removed: first ? removed : [],
+        more,
+      });
+    }
   }
 
   /** Обсуждение — для тестов и проб. */

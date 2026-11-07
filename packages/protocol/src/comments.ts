@@ -2,7 +2,7 @@
 // WebSocket файла. Комментарии живут в Postgres, а не в Loro: не шаг отмены, не часть документа, не экспорт. Разбор не
 // доверяет данным: неверное — `null`, лишние поля тоже неверны (событие приходит из сети, запрос — от чужого клиента).
 
-import { MAX_NAME_CHARS } from './auth';
+import { INVISIBLE_BUT_ZWJ_RE, MAX_NAME_CHARS } from './auth';
 import { isUuid } from './files';
 import { isPageDoc } from './presence';
 
@@ -13,8 +13,19 @@ export const COMMENT_BODY_MAX = 4000;
 export const COMMENT_MENTIONS_MAX = 20;
 /** Обсуждений в одной странице списка: больше `limit` урезается до этого. */
 export const COMMENT_PAGE_MAX = 500;
+/** Живых обсуждений в файле — как `COMMENT_PINS_MAX` ядра: новое сверх — 409 `FILE_FULL`. Иначе любой с доступом, и читатель по
+ * ссылке, набил бы файл так, что каждое открытие грузило бы сотни мегабайт. */
+export const COMMENT_THREADS_MAX = 10_000;
+/** Живых обсуждений одного человека в файле: сверх — 409 `AUTHOR_FULL`. Один человек не занимает весь предел файла. */
+export const COMMENT_THREADS_PER_USER_MAX = 1000;
 /** Комментариев в обсуждении: ответ сверх — 409 `THREAD_FULL`. Обсуждение отдаётся целиком одним ответом. */
 export const THREAD_COMMENTS_MAX = 500;
+/** Байт текста (UTF-8) всех комментариев обсуждения: ответ или правка сверх — 409 `THREAD_FULL`. Обсуждение отдаётся целиком
+ * одним ответом (окно показывает его всё), поэтому предел — у объёма, а не страницы: 500 комментариев по 1 КБ помещаются,
+ * 500 предельных по 16 КБ (8 МБ на каждое открытие окна) — нет. */
+export const THREAD_BYTES_MAX = 512 * 1024;
+/** Начало текста первого комментария в списке и событии (`commentPreview`): панели больше не нужно, целиком — в окне. */
+export const COMMENT_PREVIEW_MAX = 280;
 /** Подсказка упоминаний: столько людей и строка поиска не длиннее `MENTION_QUERY_MAX`. */
 export const MENTION_SUGGEST_MAX = 8;
 export const MENTION_QUERY_MAX = 64;
@@ -32,8 +43,12 @@ const MENTION_RE = /@\[([A-Za-z0-9_-]{1,64})\]/g;
 /** Управляющие C0 (кроме перевода строки и табуляции), DEL и C1. */
 // eslint-disable-next-line no-control-regex
 const CONTROLS_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
-/** Знаки направления текста (RLO, LRM, ALM и родня): переставляют показ чужого текста, в письме — тоже. Тот же класс, что у имён (`auth.ts`). */
-const BIDI_RE = /\p{Bidi_Control}/gu;
+/** Соединитель нулевой ширины не внутри эмодзи (👩‍💻 держится им, а сам по себе он невидим). */
+const LOOSE_ZWJ_RE = /(?<!\p{Extended_Pictographic}(?:\u{fe0f}|\p{Emoji_Modifier})?)\u200d|\u200d(?!\p{Extended_Pictographic})/gu;
+/** Комбинирующих знаков подряд (на одну графему) — не больше 8: сверх них строка «наползает» на соседние в окне и панели. */
+const MARKS_RE = /(\p{M}{8})\p{M}+/gu;
+/** Видимое: не пробел, не формат, не комбинирующий знак сам по себе. */
+const VISIBLE_RE = /[^\s\p{Cf}\p{Cc}\p{Mn}\p{Me}]/u;
 
 export const isCommentUserId = (v: unknown): v is string => typeof v === 'string' && USER_ID_RE.test(v);
 
@@ -44,16 +59,52 @@ export function commentLength(s: string): number {
   return n;
 }
 
-/** Текст комментария: только текст. Переводы строк — `\n`, управляющие и знаки направления убираются, одиночные
- * суррогаты заменяются, края обрезаются. Пусто или длиннее `COMMENT_BODY_MAX` — `null`. Сервер хранит уже нормальный
- * текст: клиент показывает его как есть, без HTML. */
+/** Очистка текста без проверок: переводы строк — `\n`, управляющие, знаки направления и невидимые (тот же класс, что у имён,
+ * `auth.ts`; ZWJ — только вне эмодзи) убираются, комбинирующих знаков подряд — не больше 8, одиночные суррогаты заменяются,
+ * края обрезаются. Повторная очистка ничего не меняет. */
+function cleanCommentText(s: string): string {
+  return s
+    .toWellFormed()
+    .replace(/\r\n?/g, '\n')
+    .replace(CONTROLS_RE, '')
+    .replace(INVISIBLE_BUT_ZWJ_RE, '')
+    .replace(LOOSE_ZWJ_RE, '')
+    .replace(MARKS_RE, '$1')
+    .trim();
+}
+
+/** Текст комментария: только текст (`cleanCommentText`) и хотя бы один видимый знак — комментарий из невидимых выглядел бы
+ * пустым. Пусто или длиннее `COMMENT_BODY_MAX` — `null`. Сервер хранит уже нормальный текст: клиент показывает его как есть,
+ * без HTML. Одна функция у поля ввода и сервера. */
 export function normalizeCommentBody(s: unknown): string | null {
   if (typeof s !== 'string') return null;
   // Предел до разбора: строка из запроса уже не больше JSON, но разбор чужого мегабайта не нужен и клиенту.
   if (s.length > COMMENT_BODY_MAX * 4) return null;
-  const body = s.toWellFormed().replace(/\r\n?/g, '\n').replace(CONTROLS_RE, '').replace(BIDI_RE, '').trim();
-  return body.length > 0 && commentLength(body) <= COMMENT_BODY_MAX ? body : null;
+  const body = cleanCommentText(s);
+  return VISIBLE_RE.test(body) && commentLength(body) <= COMMENT_BODY_MAX ? body : null;
 }
+
+/** Начало нормального текста для списка и события: не больше `COMMENT_PREVIEW_MAX` кодовых точек, упоминание на краю не
+ * режется пополам, края обрезаны; `more` — текст длиннее. Сервер считает его при записи, клиент только показывает. */
+export function commentPreview(body: string): { text: string; more: boolean } {
+  if (commentLength(body) <= COMMENT_PREVIEW_MAX) return { text: body, more: false };
+  let text = '';
+  let n = 0;
+  for (const ch of body) {
+    if (++n > COMMENT_PREVIEW_MAX) break;
+    text += ch;
+  }
+  // Упоминание без закрывающей скобки показалось бы текстом `@[id`: оно уходит целиком.
+  const at = text.lastIndexOf('@[');
+  if (at >= 0 && !/^@\[[A-Za-z0-9_-]{1,64}\]/.test(text.slice(at))) text = text.slice(0, at);
+  // Край мог отрезать эмодзи после соединителя: висящий ZWJ очистка убрала бы, начало должно быть уже чистым.
+  return { text: cleanCommentText(text), more: true };
+}
+
+/** Начало текста с провода: чистое (очистка его не меняет) и не длиннее предела. Видимость не требуется: у текста она может
+ * начинаться дальше края, а неверное начало отвергло бы всю страницу списка. */
+const isPreview = (v: unknown): v is string =>
+  typeof v === 'string' && v.length <= COMMENT_PREVIEW_MAX * 2 && commentLength(v) <= COMMENT_PREVIEW_MAX && cleanCommentText(v) === v;
 
 /** Люди, упомянутые в тексте: без повторов, по порядку появления. */
 export function mentionIds(body: string): string[] {
@@ -96,6 +147,18 @@ export interface CommentDto {
   mentions: Record<string, string>;
 }
 
+/** Первый комментарий в списке, событии и ответе изменения: начало текста (`commentPreview`), `more` — текст длиннее;
+ * упоминания — только те, что в начале. Целиком — в `GET …/:threadId` (окно у метки). */
+export interface CommentHeadDto {
+  id: string;
+  author: CommentAuthor;
+  body: string;
+  more: boolean;
+  createdAt: number;
+  editedAt: number | null;
+  mentions: Record<string, string>;
+}
+
 /** Метка: `page`/`node` — `TreeID` Loro (`counter@peer`); `x`,`y` — в координатах узла или мира страницы (`node: null`);
  * `wx`,`wy` — последнее мировое положение: им метка держится, когда узла нет или он скрыт **(поведение)**. */
 export interface PinDto {
@@ -116,7 +179,7 @@ export interface ThreadDto {
   resolvedBy: CommentAuthor | null;
   /** Номер последнего изменения обсуждения в счётчике файла: события и `?after=` сходятся по нему. */
   seq: number;
-  first: CommentDto;
+  first: CommentHeadDto;
   replies: number;
   lastAt: number;
   /** Кто пишет в обсуждении и кого в нём упомянули, не больше `THREAD_PARTICIPANTS_MAX`. */
@@ -260,6 +323,15 @@ function parseMentionNames(v: unknown): Record<string, string> | null {
   return Object.fromEntries(entries) as Record<string, string>;
 }
 
+function parseHead(v: unknown): CommentHeadDto | null {
+  const o = exact(v, ['id', 'author', 'body', 'more', 'createdAt', 'editedAt', 'mentions']);
+  if (!o || !isUuid(o.id) || !isTime(o.createdAt) || !(o.editedAt === null || isTime(o.editedAt))) return null;
+  const author = parseAuthor(o.author);
+  const mentions = parseMentionNames(o.mentions);
+  if (!author || !mentions || !isPreview(o.body) || typeof o.more !== 'boolean') return null;
+  return { id: o.id, author, body: o.body, more: o.more, createdAt: o.createdAt, editedAt: o.editedAt, mentions };
+}
+
 export function parseComment(v: unknown): CommentDto | null {
   const o = exact(v, ['id', 'thread', 'author', 'body', 'createdAt', 'editedAt', 'mentions']);
   if (!o || !isUuid(o.id) || !isUuid(o.thread) || !isTime(o.createdAt) || !(o.editedAt === null || isTime(o.editedAt))) return null;
@@ -278,9 +350,9 @@ function threadFields(o: Obj): ThreadDto | null {
   const pin = parsePin(o.pin);
   const author = parseAuthor(o.author);
   const resolvedBy = o.resolvedBy === null ? null : parseAuthor(o.resolvedBy);
-  const first = parseComment(o.first);
+  const first = parseHead(o.first);
   const p = o.participants;
-  if (!pin || !author || (o.resolvedBy !== null && !resolvedBy) || !first || first.thread !== o.id) return null;
+  if (!pin || !author || (o.resolvedBy !== null && !resolvedBy) || !first) return null;
   if (!Array.isArray(p) || p.length > THREAD_PARTICIPANTS_MAX || !p.every(isCommentUserId)) return null;
   return {
     id: o.id,

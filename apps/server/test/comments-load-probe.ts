@@ -136,8 +136,9 @@ if (mode === 'hostile') {
 async function seed(pool: Pool, file: string, people: Person[], threads = 1000, per = 20): Promise<void> {
   const ids = people.map((p) => p.id);
   await pool.query(
-    `INSERT INTO comment_thread (id, file_id, page_id, node_id, x, y, wx, wy, first_id, created_by, created_at, seq)
+    `INSERT INTO comment_thread (id, file_id, page_id, node_id, x, y, wx, wy, first_id, preview, preview_more, created_by, created_at, seq)
      SELECT gen_random_uuid(), $1, '3@7910247476534078275', (i % 50) || '@7910247476534078275', i, i, i, i, gen_random_uuid(),
+            'Текст комментария.', true,
             ($2::text[])[1 + i % 5], now() - make_interval(secs => 1000000 - i * 100), i
      FROM generate_series(1, $3) i`,
     [file, ids, threads],

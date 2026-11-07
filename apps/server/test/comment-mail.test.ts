@@ -78,7 +78,16 @@ async function write(res: Response): Promise<CommentWriteDto> {
   expect(res.status, text).toBeLessThan(300);
   return parseCommentWrite(JSON.parse(text))!;
 }
-const create = async (who: Person, body: string, f = file) => write(await s.call(who, 'POST', base(f), { pin, body }));
+/** Все, у кого есть доступ, уже открывали файл — час назад: письма идут только им (L1). */
+const openedAll = () =>
+  s.pool.query(
+    `INSERT INTO file_recent (user_id, file_id, opened_at) SELECT user_id, file_id, now() - interval '1 hour' FROM file_access
+     ON CONFLICT DO NOTHING`,
+  );
+const create = async (who: Person, body: string, f = file) => {
+  await openedAll();
+  return write(await s.call(who, 'POST', base(f), { pin, body }));
+};
 const reply = async (who: Person, thread: string, body: string) =>
   write(await s.call(who, 'POST', `${base(file)}/${thread}/comments`, { body }));
 /** Срок группировки вышел. */

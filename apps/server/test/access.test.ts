@@ -71,7 +71,7 @@ async function world(): Promise<World> {
   const member = await s.pool.query<{ id: string }>('SELECT id FROM team_member WHERE team_id = $1 AND user_id = $2', [t, editor.id]);
   const project = await s.pool.query<{ id: string }>(`INSERT INTO project (team_id, name) VALUES ($1, 'Проект') RETURNING id`, [t]);
   const c = await s.pool.query<{ r: { thread: { id: string; first: { id: string } } } }>(
-    `SELECT comment_create($1, $2, '1@1', NULL, 0, 0, 0, 0, 'Первый', '{}', '{}', 1000) AS r`,
+    `SELECT comment_create($1, $2, '1@1', NULL, 0, 0, 0, 0, 'Первый', 'Первый', false, '{}', '{}', 1000, 10000, 1000) AS r`,
     [f.id, owner.id],
   );
   const thread = c.rows[0].r.thread;

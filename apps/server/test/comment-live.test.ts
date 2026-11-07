@@ -137,6 +137,9 @@ test('снятый доступ: событие не уходит и до све
 });
 
 test('файл открыт — письма о комментарии нет; закрыт — есть', async () => {
+  // Оба открывали файл раньше: письма идут только таким (L1).
+  for (const p of [viewer, editor])
+    await s.pool.query(`INSERT INTO file_recent (user_id, file_id, opened_at) VALUES ($1, $2, now() - interval '1 hour')`, [p.id, file]);
   const v = await join(viewer);
   await write(await s.call(owner, 'POST', base(file), { pin, body: `@[${viewer.id}] @[${editor.id}]` }));
   const recipients = async () => (await s.pool.query<{ r: string }>('SELECT recipient_id AS r FROM mail_outbox')).rows.map((x) => x.r);
@@ -277,19 +280,19 @@ test('медленный читатель: события пропускаютс
   await until(() => frames().some((f) => f.t === 'role'));
   raw.pause();
   const fast = await join(editor);
-  // Крупные события (первый комментарий и ответ — по 4000 четырёхбайтных знаков, ~32 КБ на событие): буфер ядра ОС
-  // заполняется, дальше копит сервер — если не пропускает.
+  // Крупные события (новые обсуждения по 4000 четырёхбайтных знаков, ~17 КБ на событие; ответы в одно обсуждение упёрлись бы
+  // в `THREAD_BYTES_MAX`): буфер ядра ОС заполняется, дальше копит сервер — если не пропускает.
   const big = '😀'.repeat(4000);
   const t = await write(await s.call(owner, 'POST', base(file), { pin, body: big }));
   const skipped0 = s.hub.commentSkipped;
   let peak = 0;
   let last = t;
   for (let i = 0; i < 400 && s.hub.commentSkipped - skipped0 < 20; i++) {
-    last = await write(await s.call(owner, 'POST', `${base(file)}/${t.thread.id}/comments`, { body: big }));
+    last = await write(await s.call(owner, 'POST', base(file), { pin, body: big }));
     peak = Math.max(peak, s.hub.bufferedBytes());
   }
   for (let i = 0; i < 20; i++) {
-    last = await write(await s.call(owner, 'POST', `${base(file)}/${t.thread.id}/comments`, { body: big }));
+    last = await write(await s.call(owner, 'POST', base(file), { pin, body: big }));
     peak = Math.max(peak, s.hub.bufferedBytes());
   }
   await fast.wait('comment', (f) => f.event.seq === last.seq);
@@ -401,10 +404,9 @@ test('медленный читатель, у которого сняли дос
   raw.pause();
   const fast = await join(editor);
   const big = '😀'.repeat(4000);
-  const t = await write(await s.call(owner, 'POST', base(file), { pin, body: big }));
+  await write(await s.call(owner, 'POST', base(file), { pin, body: big }));
   const skipped0 = s.hub.commentSkipped;
-  while (s.hub.commentSkipped === skipped0)
-    await write(await s.call(owner, 'POST', `${base(file)}/${t.thread.id}/comments`, { body: big }));
+  while (s.hub.commentSkipped === skipped0) await write(await s.call(owner, 'POST', base(file), { pin, body: big }));
   // Доступ сняли мимо маршрутов; следующий проход видит это и забывает пропуск.
   await s.pool.query('DELETE FROM file_access WHERE file_id = $1 AND user_id = $2', [file, viewer.id]);
   const last = await write(await s.call(owner, 'POST', base(file), { pin, body: 'после снятия' }));

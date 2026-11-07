@@ -3,7 +3,9 @@ import {
   COMMENT_BODY_MAX,
   COMMENT_EVENT_MAX_BYTES,
   COMMENT_MENTIONS_MAX,
+  COMMENT_PREVIEW_MAX,
   commentLength,
+  commentPreview,
   decodeCommentEvent,
   encodeCommentEvent,
   mentionIds,
@@ -22,6 +24,7 @@ import {
   THREAD_PARTICIPANTS_MAX,
   type CommentDto,
   type CommentEvent,
+  type CommentHeadDto,
   type PinDto,
   type ThreadDto,
 } from '../src/comments';
@@ -41,6 +44,12 @@ const comment = (over: Partial<CommentDto> = {}): CommentDto => ({
   mentions: { [U]: 'Анна' },
   ...over,
 });
+/** Первый комментарий в списке и событии: начало текста. */
+const head = (c: CommentDto = comment()): CommentHeadDto => {
+  const { text, more } = commentPreview(c.body);
+  const mentions = Object.fromEntries(Object.entries(c.mentions).filter(([id]) => text.includes(`@[${id}]`)));
+  return { id: c.id, author: c.author, body: text, more, createdAt: c.createdAt, editedAt: c.editedAt, mentions };
+};
 const thread = (over: Partial<ThreadDto> = {}): ThreadDto => ({
   id: T,
   pin,
@@ -49,7 +58,7 @@ const thread = (over: Partial<ThreadDto> = {}): ThreadDto => ({
   resolvedAt: null,
   resolvedBy: null,
   seq: 7,
-  first: comment(),
+  first: head(),
   replies: 0,
   lastAt: 1_700_000_000_000,
   participants: [U],
@@ -80,6 +89,42 @@ test('текст: только текст — переводы строк, уп�
   // Нормальный текст не меняется при повторе: сервер и клиент считают одно.
   const once = normalizeCommentBody(' x\r\ny\u202e ')!;
   expect(normalizeCommentBody(once)).toBe(once);
+});
+
+test('L4: невидимые знаки — как у имён, ZWJ — только внутри эмодзи, видимый знак обязателен, комбинирующих — не больше 8', () => {
+  // Нулевой ширины, соединители слов, заполнители хангыля, BOM, мягкий перенос — прочь.
+  expect(normalizeCommentBody('a​b‌c⁠d⁣e﻿fㅤgᅟh­i͏j')).toBe('abcdefghij');
+  // ZWJ внутри эмодзи держит его целым (👩‍💻, 🏳️‍🌈, 👋🏽‍...) — остаётся; между буквами и на краях — нет.
+  for (const e of ['👩‍💻', '🏳️‍🌈', '👨🏽‍🚀']) expect(normalizeCommentBody(`x ${e} y`)).toBe(`x ${e} y`);
+  expect(normalizeCommentBody('a‍b 😀‍ ‍😀 😀‍‍😀')).toBe('ab 😀 😀 😀😀');
+  // Только невидимые — пусто на вид: не комментарий.
+  for (const bad of ['​‌‍', 'ㅤ', '⠀ ⠀', '́́', '‍😀'.slice(0, 1)]) expect(normalizeCommentBody(bad), JSON.stringify(bad)).toBeNull();
+  // Комбинирующих подряд — не больше 8: «залго» не наползает на соседние строки.
+  expect(normalizeCommentBody('a' + '́'.repeat(50) + 'b')).toBe('a' + '́'.repeat(8) + 'b');
+  expect(normalizeCommentBody('ё̈̈')).toBe('ё̈̈');
+  // Повтор ничего не меняет: сервер и поле ввода считают одно.
+  const once = normalizeCommentBody('x‍‍😀' + '́'.repeat(20) + '​')!;
+  expect(normalizeCommentBody(once)).toBe(once);
+});
+
+test('H1: начало текста — не длиннее предела, упоминание на краю не режется, очистка его не меняет', () => {
+  expect(commentPreview('коротко')).toEqual({ text: 'коротко', more: false });
+  const exact = 'я'.repeat(COMMENT_PREVIEW_MAX);
+  expect(commentPreview(exact)).toEqual({ text: exact, more: false });
+  expect(commentPreview(exact + 'я')).toEqual({ text: exact, more: true });
+  // Четырёхбайтные — по кодовым точкам, а не UTF-16.
+  expect(commentLength(commentPreview('😀'.repeat(4000)).text)).toBe(COMMENT_PREVIEW_MAX);
+  // Упоминание на краю — целиком прочь.
+  const id = 'u'.repeat(32);
+  const cut = 'а'.repeat(COMMENT_PREVIEW_MAX - 10) + ` @[${id}] хвост`;
+  expect(commentPreview(cut)).toEqual({ text: 'а'.repeat(COMMENT_PREVIEW_MAX - 10), more: true });
+  // Эмодзи на краю, разрезанный после соединителя: висящего ZWJ нет.
+  const zwj = 'а'.repeat(COMMENT_PREVIEW_MAX - 2) + '👩‍💻 и дальше';
+  expect(commentPreview(zwj).text).toBe('а'.repeat(COMMENT_PREVIEW_MAX - 2) + '👩');
+  for (const body of [cut, zwj, '😀'.repeat(4000), 'a' + '́'.repeat(8) + 'b'.repeat(400)]) {
+    const t = commentPreview(normalizeCommentBody(body)!).text;
+    expect(normalizeCommentBody(t)).toBe(t);
+  }
 });
 
 test('упоминания: без повторов, по порядку, только вид `@[id]`', () => {
@@ -148,7 +193,10 @@ test('событие туда и обратно; каждое поле пров�
     { ...good, deleted: 'x' },
     { ...good, thread: { ...thread(), unread: true } },
     { ...good, thread: thread({ participants: Array(THREAD_PARTICIPANTS_MAX + 1).fill(U) }) },
-    { ...good, thread: thread({ first: comment({ thread: C }) }) },
+    { ...good, thread: thread({ first: comment() as never }) },
+    { ...good, thread: thread({ first: { ...head(), body: 'а'.repeat(COMMENT_PREVIEW_MAX + 1) } }) },
+    { ...good, thread: thread({ first: { ...head(), body: 'x\u200b' } }) },
+    { ...good, thread: thread({ first: { ...head(), more: 1 as never } }) },
     { ...good, thread: thread({ pin: { ...pin, wx: Infinity } }) },
     { ...good, comment: comment({ body: '<b>\u202e</b>' }) },
     { ...good, comment: comment({ body: ' x' }) },
@@ -181,7 +229,7 @@ test('id `__proto__` в упоминаниях — своё поле, а не п
   expect(Object.hasOwn(m, '__proto__')).toBe(true);
 });
 
-test('худшее событие помещается в кадр: два предельных текста, 20 упоминаний с предельными именами, 50 участников', () => {
+test('худшее событие помещается в кадр: предельный текст и начало первого, 20 упоминаний с предельными именами, 50 участников', () => {
   const name = '𝔄'.repeat(MAX_NAME_CHARS);
   const ids = Array.from({ length: COMMENT_MENTIONS_MAX }, (_, i) => `${'u'.repeat(60)}${String(i).padStart(4, '0')}`);
   const mentions = Object.fromEntries(ids.map((id) => [id, name]));
@@ -201,7 +249,7 @@ test('худшее событие помещается в кадр: два пр�
       author,
       resolvedBy: author,
       resolvedAt: 1,
-      first: big,
+      first: head(big),
       participants: Array.from({ length: THREAD_PARTICIPANTS_MAX }, () => ids[0]),
     }),
     comment: { ...big, id: C },

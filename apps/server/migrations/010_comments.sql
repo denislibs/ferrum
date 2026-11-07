@@ -8,7 +8,8 @@
 -- оператора, то есть до ожидания блокировки, и ответ на ответ мог бы не видеть одновременного соседа с меньшим номером. В
 -- функции каждый оператор после блокировки видит всё зафиксированное до неё. Для сервера это по-прежнему один запрос.
 -- Роль функция сверяет тоже после блокировки: доступ, снятый, пока вызов ждал соседа, запись не пропускает.
--- Отказ внутри функции (нет обсуждения, нет прав, предел) — исключение с кодом `CM404`/`CM403`/`CM409`: номер не тратится.
+-- Отказ внутри функции (нет обсуждения, нет прав, предел) — исключение с кодом `CM404`/`CM403`/`CM409`/`CMF09`/`CMU09`: номер
+-- не тратится.
 
 CREATE FUNCTION epoch_ms(t timestamptz) RETURNS bigint
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$ SELECT floor(extract(epoch FROM t) * 1000)::bigint $$;
@@ -31,6 +32,10 @@ CREATE TABLE comment_thread (
   wy double precision NOT NULL,
   -- Первый комментарий: его удаление удаляет обсуждение.
   first_id uuid NOT NULL,
+  -- Начало его текста для списка и события (`commentPreview` протокола, считает сервер при записи) и «текст длиннее»: список
+  -- не несёт текстов целиком.
+  preview text NOT NULL,
+  preview_more boolean NOT NULL,
   created_by text REFERENCES "user" ON DELETE SET NULL,
   created_at timestamptz NOT NULL,
   resolved_at timestamptz,
@@ -40,12 +45,16 @@ CREATE TABLE comment_thread (
   -- Сводка для списка (`comment_thread_refresh`, под блокировкой изменения): иначе каждая строка списка собирала бы её из
   -- комментариев, и список 1000 обсуждений стоил бы в разы дороже.
   replies integer NOT NULL DEFAULT 0,
+  -- Байт текста всех комментариев: предел обсуждения (`THREAD_BYTES_MAX`).
+  bytes integer NOT NULL DEFAULT 0,
   last_at timestamptz NOT NULL DEFAULT now(),
   participants text[] NOT NULL DEFAULT '{}'
 );
 -- Список `?after=` по номеру; живые — для первой загрузки без надгробий.
 CREATE UNIQUE INDEX comment_thread_seq_idx ON comment_thread (file_id, seq);
 CREATE INDEX comment_thread_live_idx ON comment_thread (file_id, seq) WHERE deleted_at IS NULL;
+-- Предел обсуждений человека в файле (`comment_create`).
+CREATE INDEX comment_thread_author_live_idx ON comment_thread (file_id, created_by) WHERE deleted_at IS NULL;
 -- Удаление человека обнуляет ссылки: без индексов — полный просмотр таблиц на каждое удаление.
 CREATE INDEX comment_thread_created_by_idx ON comment_thread (created_by);
 CREATE INDEX comment_thread_resolved_by_idx ON comment_thread (resolved_by);
@@ -128,13 +137,14 @@ LANGUAGE sql STABLE AS $$
                           WHERE m.comment_id = c.id), '{}'::jsonb))
 $$;
 
--- Сводка обсуждения заново: число ответов, время последнего комментария и участники — авторы и упомянутые, по первому
+-- Сводка обсуждения заново: число ответов, байт текста, время последнего комментария и участники — авторы и упомянутые, по первому
 -- появлению (автор комментария раньше упомянутых в нём, упомянутые одним комментарием — по id), не больше 50
 -- (`THREAD_PARTICIPANTS_MAX`). Зовут функции изменения после своих записей.
 CREATE FUNCTION comment_thread_refresh(p_thread uuid) RETURNS void
 LANGUAGE sql AS $$
   UPDATE comment_thread t SET
     replies = GREATEST(a.n - 1, 0),
+    bytes = a.bytes,
     last_at = COALESCE(a.last, t.created_at),
     participants = COALESCE((
       SELECT array_agg(p.u ORDER BY p.n) FROM (
@@ -144,7 +154,8 @@ LANGUAGE sql AS $$
           SELECT m.user_id, c.created_at, 1 FROM comment c JOIN comment_mention m ON m.comment_id = c.id WHERE c.thread_id = p_thread
         ) x GROUP BY x.u ORDER BY n LIMIT 50
       ) p), '{}')
-  FROM (SELECT count(*) AS n, max(created_at) AS last FROM comment WHERE thread_id = p_thread) a
+  FROM (SELECT count(*) AS n, COALESCE(sum(octet_length(body)), 0) AS bytes, max(created_at) AS last
+        FROM comment WHERE thread_id = p_thread) a
   WHERE t.id = p_thread;
 $$;
 
@@ -193,7 +204,13 @@ LANGUAGE sql STABLE AS $$
     'resolvedAt', epoch_ms(t.resolved_at),
     'resolvedBy', CASE WHEN t.resolved_at IS NULL THEN NULL ELSE comment_author(t.resolved_by) END,
     'seq', t.seq,
-    'first', (SELECT comment_json(c) FROM comment c WHERE c.id = t.first_id),
+    -- Первый — началом текста (`CommentHeadDto`), с именами только тех упомянутых, кто в этом начале.
+    'first', (SELECT jsonb_build_object(
+                'id', c.id, 'author', comment_author(c.author_id), 'body', t.preview, 'more', t.preview_more,
+                'createdAt', epoch_ms(c.created_at), 'editedAt', epoch_ms(c.edited_at),
+                'mentions', COALESCE((SELECT jsonb_object_agg(u.id, u.name) FROM comment_mention m JOIN "user" u ON u.id = m.user_id
+                                      WHERE m.comment_id = c.id AND strpos(t.preview, '@[' || u.id || ']') > 0), '{}'::jsonb))
+              FROM comment c WHERE c.id = t.first_id),
     'replies', t.replies,
     'lastAt', epoch_ms(t.last_at),
     'participants', to_jsonb(t.participants))
@@ -278,9 +295,12 @@ LANGUAGE sql AS $$
     extra = o.extra + CASE WHEN cardinality(o.comment_ids) < 20 THEN 0 ELSE 1 END;
 $$;
 
+-- Пределы (`p_file_max`, `p_user_max`) — живые обсуждения файла и человека в нём, под блокировкой номера: два одновременных
+-- создания не проходят оба сверх предела.
 CREATE FUNCTION comment_create(
   p_file uuid, p_user text, p_page text, p_node text, p_x float8, p_y float8, p_wx float8, p_wy float8,
-  p_body text, p_mentions text[], p_open text[], p_delay_ms integer
+  p_body text, p_preview text, p_more boolean, p_mentions text[], p_open text[], p_delay_ms integer,
+  p_file_max integer, p_user_max integer
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -294,10 +314,19 @@ BEGIN
   PERFORM 1 FROM file WHERE id = p_file FOR KEY SHARE;
   v_seq := comment_next_seq(p_file);
   PERFORM comment_rank(p_file, p_user);
+  IF (SELECT count(*) FROM (SELECT 1 FROM comment_thread WHERE file_id = p_file AND deleted_at IS NULL LIMIT p_file_max) x)
+     >= p_file_max THEN
+    RAISE EXCEPTION 'в файле слишком много обсуждений' USING ERRCODE = 'CMF09';
+  END IF;
+  IF (SELECT count(*) FROM (SELECT 1 FROM comment_thread
+                            WHERE file_id = p_file AND created_by = p_user AND deleted_at IS NULL LIMIT p_user_max) x)
+     >= p_user_max THEN
+    RAISE EXCEPTION 'слишком много своих обсуждений в файле' USING ERRCODE = 'CMU09';
+  END IF;
   -- После блокировки: время комментариев файла растёт в порядке номеров, прочтение по времени не пропустит соседа.
   v_at := clock_timestamp();
-  INSERT INTO comment_thread (id, file_id, page_id, node_id, x, y, wx, wy, first_id, created_by, created_at, seq)
-  VALUES (v_thread, p_file, p_page, p_node, p_x, p_y, p_wx, p_wy, v_comment, p_user, v_at, v_seq);
+  INSERT INTO comment_thread (id, file_id, page_id, node_id, x, y, wx, wy, first_id, preview, preview_more, created_by, created_at, seq)
+  VALUES (v_thread, p_file, p_page, p_node, p_x, p_y, p_wx, p_wy, v_comment, p_preview, p_more, p_user, v_at, v_seq);
   INSERT INTO comment (id, thread_id, author_id, body, created_at) VALUES (v_comment, v_thread, p_user, p_body, v_at);
   PERFORM comment_mentions(p_file, v_comment, p_mentions);
   PERFORM comment_thread_refresh(v_thread);
@@ -308,7 +337,8 @@ END
 $$;
 
 CREATE FUNCTION comment_reply(
-  p_file uuid, p_user text, p_thread uuid, p_body text, p_mentions text[], p_open text[], p_delay_ms integer, p_max integer
+  p_file uuid, p_user text, p_thread uuid, p_body text, p_mentions text[], p_open text[], p_delay_ms integer, p_max integer,
+  p_max_bytes integer
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -322,7 +352,8 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'нет обсуждения' USING ERRCODE = 'CM404';
   END IF;
-  IF (SELECT count(*) FROM comment WHERE thread_id = p_thread) >= p_max THEN
+  IF (SELECT count(*) FROM comment WHERE thread_id = p_thread) >= p_max
+     OR (SELECT bytes FROM comment_thread WHERE id = p_thread) + octet_length(p_body) > p_max_bytes THEN
     RAISE EXCEPTION 'обсуждение заполнено' USING ERRCODE = 'CM409';
   END IF;
   v_at := clock_timestamp();
@@ -337,16 +368,21 @@ END
 $$;
 
 -- Правка: только свой комментарий **(поведение, как в Figma: без срока)**. Новые упоминания — с проверкой доступа, писем
--- правка не шлёт.
-CREATE FUNCTION comment_edit(p_file uuid, p_user text, p_thread uuid, p_comment uuid, p_body text, p_mentions text[]) RETURNS jsonb
+-- правка не шлёт. Текст обсуждения не растёт сверх `p_max_bytes`; начало текста — у первого комментария.
+CREATE FUNCTION comment_edit(
+  p_file uuid, p_user text, p_thread uuid, p_comment uuid, p_body text, p_preview text, p_more boolean, p_mentions text[],
+  p_max_bytes integer
+) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
   v_seq bigint;
   v_author text;
+  v_old integer;
+  v_bytes integer;
 BEGIN
   v_seq := comment_next_seq(p_file);
   PERFORM comment_rank(p_file, p_user);
-  SELECT c.author_id INTO v_author FROM comment c JOIN comment_thread t ON t.id = c.thread_id
+  SELECT c.author_id, octet_length(c.body), t.bytes INTO v_author, v_old, v_bytes FROM comment c JOIN comment_thread t ON t.id = c.thread_id
   WHERE c.id = p_comment AND c.thread_id = p_thread AND t.file_id = p_file AND t.deleted_at IS NULL;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'нет комментария' USING ERRCODE = 'CM404';
@@ -354,9 +390,15 @@ BEGIN
   IF v_author IS DISTINCT FROM p_user THEN
     RAISE EXCEPTION 'чужой комментарий' USING ERRCODE = 'CM403';
   END IF;
+  IF v_bytes - v_old + octet_length(p_body) > p_max_bytes THEN
+    RAISE EXCEPTION 'обсуждение заполнено' USING ERRCODE = 'CM409';
+  END IF;
   UPDATE comment SET body = p_body, edited_at = clock_timestamp() WHERE id = p_comment;
   PERFORM comment_mentions(p_file, p_comment, p_mentions);
-  UPDATE comment_thread SET seq = v_seq WHERE id = p_thread;
+  UPDATE comment_thread SET seq = v_seq,
+    preview = CASE WHEN first_id = p_comment THEN p_preview ELSE preview END,
+    preview_more = CASE WHEN first_id = p_comment THEN p_more ELSE preview_more END
+  WHERE id = p_thread;
   PERFORM comment_thread_refresh(p_thread);
   RETURN comment_result(p_thread, p_user, p_comment, false, NULL);
 END

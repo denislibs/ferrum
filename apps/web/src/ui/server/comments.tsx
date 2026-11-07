@@ -36,14 +36,28 @@ export const PANEL_ROW = 76;
 /** Подсказка упоминаний ждёт паузы в наборе. */
 const MENTION_DEBOUNCE_MS = 150;
 
-const failText = (f: string) => apiFailureText(f as ApiFailure);
+/** Отказ записи комментария — понятным текстом: пределы обсуждения, файла и своих обсуждений — свои. */
+const failText = (f: string) => {
+  switch (f) {
+    case 'THREAD_FULL':
+      return 'Обсуждение заполнено: слишком много ответов или текста';
+    case 'FILE_FULL':
+      return 'В файле слишком много обсуждений. Удалите или закройте старые';
+    case 'AUTHOR_FULL':
+      return 'У вас слишком много обсуждений в этом файле. Удалите старые';
+    default:
+      return apiFailureText(f as ApiFailure);
+  }
+};
 
-function Body(props: { comment: CommentDto }) {
+/** Текст комментария; `more` — это начало (панель), дальше — многоточие. */
+function Body(props: { comment: Pick<CommentDto, 'body' | 'mentions'> & { more?: boolean } }) {
   return (
     <p class="fe-comment__body">
       <For each={splitCommentBody(props.comment.body, props.comment.mentions)}>
         {(part) => ('mention' in part ? <span class="fe-comment__mention">@{mentionName(part.name)}</span> : <>{part.text}</>)}
       </For>
+      {props.comment.more ? '…' : ''}
     </p>
   );
 }
@@ -227,6 +241,8 @@ export function CommentsUi(props: CommentsProps) {
   const [size, setSize] = createSignal({ width: 320, height: 0 });
   const [now, setNow] = createSignal(Date.now());
   let link = props.link;
+  /** Идёт список заново пачками: ссылка ищется, когда придёт последняя. */
+  let resetting = false;
   let popover: HTMLDivElement | undefined;
   let panel: HTMLDivElement | undefined;
   /** Щелчок по холсту закрыл окно: место нового комментария из того же щелчка не ставится (как в Figma). Снимается
@@ -278,6 +294,10 @@ export function CommentsUi(props: CommentsProps) {
   const onMessage = (m: CommentsToMain) => {
     if (m.t === 'me') setMe({ user: m.user, role: m.role });
     else if (m.t === 'threads') {
+      // Список заново приходит пачками: загружен он и ссылка ищется в нём — по последней (`more: false`).
+      if (m.reset) resetting = true;
+      const done = resetting && !m.more;
+      if (!m.more) resetting = false;
       batch(() => {
         if (m.reset) {
           const all: Record<string, ThreadView> = {};
@@ -287,10 +307,10 @@ export function CommentsUi(props: CommentsProps) {
           for (const t of m.upserts) setThreads(t.id, reconcile(t));
           for (const id of m.removed) setThreads(id, undefined!);
         }
-        setLoaded(true);
+        if (!m.more) setLoaded(true);
       });
       // Ссылка на обсуждение (`?comment=`): после первого списка — страница, камера, окно.
-      if (m.reset && link) {
+      if (done && link) {
         const id = link;
         link = undefined;
         const t = threads[id];
@@ -391,7 +411,7 @@ export function CommentsUi(props: CommentsProps) {
 
   const write = async (req: Parameters<CommentsProps['request']>[0]): Promise<boolean> => {
     const r = await props.request(req);
-    if (!r.ok) props.toast(r.failure === 'THREAD_FULL' ? 'В обсуждении слишком много ответов' : failText(r.failure));
+    if (!r.ok) props.toast(failText(r.failure));
     return r.ok;
   };
 

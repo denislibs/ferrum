@@ -48,8 +48,11 @@ export const LIMITS = {
    * `read` (1200 в минуту) дал бы одному человеку занять ядро базы. Окно короткое: минутный запас не тратится одним
    * всплеском в первые секунды. */
   commentList: { max: 20, windowSeconds: 10 },
-  /** Обсуждение целиком: до 500 комментариев, ответ до ~8 МБ JSON из базы — свой предел, как у списка, а не общий `read`. */
+  /** Обсуждение целиком: до 500 комментариев и `THREAD_BYTES_MAX` текста — свой предел, как у списка, а не общий `read`. */
   commentThread: { max: 30, windowSeconds: 10 },
+  /** Правка комментария, перенос метки, закрытие и открытие: каждое — событие всем соединениям файла с обсуждением внутри,
+   * поэтому как у новых комментариев, а не общий `write` (300 в минуту правок 16-КБ текста — ×50 рассылки). */
+  commentEdit: { max: 60, windowSeconds: 60 },
 } as const;
 export type LimitName = keyof typeof LIMITS;
 export type Limits = Record<LimitName, { max: number; windowSeconds: number }>;
@@ -60,6 +63,10 @@ export type Limits = Record<LimitName, { max: number; windowSeconds: number }>;
  * 429 `BUSY`. Потоковые маршруты сюда не входят: у загрузок свои места (`uploadGate`). */
 export const IN_FLIGHT = { running: 4, waiting: 200 };
 export type InFlight = typeof IN_FLIGHT;
+/** Тяжёлые чтения (`Route.heavy`: список обсуждений, обсуждение целиком) всех людей процесса разом: места на человека
+ * (`IN_FLIGHT`) не спасают пул от десятка людей, каждый из которых в своём пределе. Сверх `running` запрос ждёт, не держа
+ * соединения базы; сверх `waiting` — 429 `BUSY`. Остальные маршруты всегда находят свободные соединения пула. */
+export const HEAVY_IN_FLIGHT: InFlight = { running: 3, waiting: 500 };
 
 export interface ApiDeps {
   pool: Pool;
@@ -92,6 +99,8 @@ export interface ApiDeps {
   commentMailDelayMs?: number;
   /** Места запросов в работе; по умолчанию — свои, по `IN_FLIGHT`. Тесты дают свои и смотрят в них. */
   slots?: UserSlots;
+  /** Места тяжёлых чтений на процесс; по умолчанию — свои, по `HEAVY_IN_FLIGHT`. */
+  heavySlots?: UserSlots;
 }
 
 export interface ApiUser {
@@ -133,6 +142,8 @@ export interface Route {
   stream?: boolean;
   /** Удачная запись не меняет доступа к файлам (комментарии, настройки): открытые соединения роль не сверяют. */
   keepsAccess?: boolean;
+  /** Тяжёлое чтение: обработчик ждёт места в общем на процесс семафоре (`HEAVY_IN_FLIGHT`). */
+  heavy?: boolean;
   handle(ctx: Ctx): Promise<Response>;
 }
 
@@ -145,6 +156,11 @@ export const busy = (): Response => apiError(429, 'BUSY', { 'Retry-After': '5' }
 
 export function ok(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+}
+
+/** Ответ — готовый текст JSON (собран базой): без разбора и сборки заново. */
+export function okJson(text: string, status = 200): Response {
+  return new Response(text, { status, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 }
 
 /** Разбирает JSON не больше `max` байт; иначе и при мусоре — `null`, разбор протокола ответит 400. */
@@ -264,11 +280,15 @@ function withinDeadline<T>(work: Promise<T>, ms: number, path: string): Promise<
   return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
 
-/** Место запроса в работе: `handle` освобождает его в конце, как бы запрос ни кончился. */
+/** Место запроса в работе: `handle` освобождает его в конце, как бы запрос ни кончился. `heavy` — место тяжёлого чтения. */
 interface Job {
   done: boolean;
   release: () => void;
+  heavy: () => void;
 }
+
+/** Ключ общей очереди тяжёлых чтений в `UserSlots`. */
+const HEAVY_KEY = '';
 
 export function apiHandler(routes: Route[], deps: ApiDeps) {
   const compiled: Compiled[] = routes.map((route) => ({ route, parts: route.path.split('/').filter(Boolean) }));
@@ -276,6 +296,7 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
   const limits: Limits = { ...LIMITS, ...deps.limits };
   const deadline = deps.deadlineMs ?? API_DEADLINE_MS;
   const slots = deps.slots ?? new UserSlots(IN_FLIGHT);
+  const heavySlots = deps.heavySlots ?? new UserSlots(HEAVY_IN_FLIGHT);
 
   /** Всё, что до обработчика: порядок важен, чужой запрос не тратит ни базу, ни счётчик другого. Место в работе (`job`)
    * берётся после предела частоты и до первого запроса к базе; освобождает его `handle`. */
@@ -331,6 +352,14 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
       ctx.teamRole = rows[0].role;
       ctx.teamId = rows[0].team_id;
     }
+    if (route.heavy) {
+      // После проверки прав: чужой запрос не занимает общих мест.
+      if (job.done) refuse(503, 'UNAVAILABLE');
+      const slot = heavySlots.take(HEAVY_KEY);
+      if (!slot) throw new Refused(busy());
+      job.heavy = slot.release;
+      await slot.ready;
+    }
     return ctx;
   }
 
@@ -340,7 +369,7 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
     for (const c of compiled) {
       const params = match(c, req.method, parts);
       if (!params) continue;
-      const job: Job = { done: false, release: () => {} };
+      const job: Job = { done: false, release: () => {}, heavy: () => {} };
       try {
         const ctx = await withinDeadline(prepare(c.route, req, url, params, job), deadline, url.pathname);
         const res = await (c.route.stream ? c.route.handle(ctx) : withinDeadline(c.route.handle(ctx), deadline, url.pathname));
@@ -353,6 +382,7 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
       } finally {
         // И по сроку: запрос к базе ограничен своими сроками пула (меньше срока API), место дольше не держится.
         job.done = true;
+        job.heavy();
         job.release();
       }
     }

@@ -2,8 +2,8 @@
 // свой `fetch` с теми же видами ответов, что у настоящего (ответы проходят строгий разбор протокола), часы ручные.
 
 import { expect, test } from '@playwright/test';
-import type { CommentDto, CommentEvent, ThreadDto, ThreadView } from '@ferrum/protocol';
-import { CommentStore, initialsOf, type CommentsCoreCommand, type CommentsToMain } from '../src/core/comments-store';
+import type { CommentDto, CommentEvent, CommentHeadDto, ThreadDto, ThreadView } from '@ferrum/protocol';
+import { COMMENTS_POST_BATCH, CommentStore, initialsOf, type CommentsCoreCommand, type CommentsToMain } from '../src/core/comments-store';
 
 const ME = 'me';
 const OTHER = 'other';
@@ -21,8 +21,13 @@ function comment(thread: number, n: number, author = OTHER, body = `текст $
   };
 }
 
+/** Первый комментарий в списке — началом текста. */
+function head(c: CommentDto): CommentHeadDto {
+  return { id: c.id, author: c.author, body: c.body, more: false, createdAt: c.createdAt, editedAt: c.editedAt, mentions: c.mentions };
+}
+
 function thread(n: number, seq: number, extra: Partial<ThreadView> = {}): ThreadView {
-  const first = comment(n, n * 100, extra.author?.id ?? OTHER);
+  const first = head(comment(n, n * 100, extra.author?.id ?? OTHER));
   return {
     id: uuid(n),
     pin: { page: '1@1', node: null, x: n, y: n, wx: n, wy: n },
@@ -458,4 +463,35 @@ test('окно не гоняет запросы: сервер, у которог
   expect(s.calls.filter((c) => c.path === `/api/files/f/comments/${uuid(1)}`)).toHaveLength(2);
   const d = s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>;
   expect(d.view?.seq).toBe(5);
+});
+
+test('H1: первый список панели — пачками по 500: `reset` у первой, `more` у всех, кроме последней', async () => {
+  const s = stand();
+  const n = COMMENTS_POST_BATCH * 2 + 7;
+  const all = Array.from({ length: n }, (_, i) => thread(i + 1, i + 1));
+  s.list(0, { seq: COMMENTS_POST_BATCH, threads: all.slice(0, COMMENTS_POST_BATCH), more: true });
+  s.list(COMMENTS_POST_BATCH, {
+    seq: COMMENTS_POST_BATCH * 2,
+    threads: all.slice(COMMENTS_POST_BATCH, COMMENTS_POST_BATCH * 2),
+    more: true,
+  });
+  s.list(COMMENTS_POST_BATCH * 2, { seq: n, threads: all.slice(COMMENTS_POST_BATCH * 2) });
+  s.store.connected('editor');
+  await s.settle();
+  s.clock.run();
+  const out = s.main.filter((m) => m.t === 'threads') as Extract<CommentsToMain, { t: 'threads' }>[];
+  expect(out.map((m) => [m.reset, m.upserts.length, m.more])).toEqual([
+    [true, COMMENTS_POST_BATCH, true],
+    [false, COMMENTS_POST_BATCH, true],
+    [false, 7, false],
+  ]);
+  expect(new Set(out.flatMap((m) => m.upserts.map((t) => t.id))).size).toBe(n);
+  // Обычные изменения — как прежде, одним сообщением.
+  s.store.event(ev(n + 1, thread(1, 1), 'edit'));
+  s.clock.run();
+  expect(s.main.filter((m) => m.t === 'threads').at(-1)).toMatchObject({
+    reset: false,
+    more: false,
+    upserts: [expect.objectContaining({ seq: n + 1 })],
+  });
 });

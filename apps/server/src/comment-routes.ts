@@ -3,9 +3,16 @@
 // и читатель тоже (раздел 10.3). Каждый обработчик — один запрос к базе: чтение — один `SELECT`, изменение — одна функция
 // базы (`010_comments.sql`), которая сама сверяет роль, поднимает номер файла и ставит письма в очередь. id из адреса и тела
 // не доверяются: всякий запрос ограничен `file_id` из адреса, чужое обсуждение неотличимо от несуществующего.
+//
+// Объём ограничен: обсуждений в файле и у человека в нём — пределы протокола, текст обсуждения — `THREAD_BYTES_MAX`, список —
+// с началом первого текста, а не целиком. Список и обсуждение — тяжёлые чтения (`heavy`): общий на процесс семафор, JSON
+// отдаётся как его собрала база, без разбора и сборки заново.
 
 import {
   COMMENT_PAGE_MAX,
+  COMMENT_THREADS_MAX,
+  COMMENT_THREADS_PER_USER_MAX,
+  commentPreview,
   MENTION_SUGGEST_MAX,
   mentionIds,
   parseCommentBody,
@@ -13,17 +20,16 @@ import {
   parseNewThread,
   parsePrefs,
   parseThreadPatch,
+  THREAD_BYTES_MAX,
   THREAD_COMMENTS_MAX,
   type CommentAction,
   type CommentDto,
   type CommentEvent,
-  type CommentListDto,
   type MentionCandidate,
-  type ThreadDetailDto,
   type ThreadDto,
   type ThreadView,
 } from '@ferrum/protocol';
-import { apiError, ok, readJson, type ApiDeps, type Ctx, type Route } from './api';
+import { apiError, ok, okJson, readJson, type ApiDeps, type Ctx, type Route } from './api';
 
 /** Группировка писем о комментариях: первое ждёт столько, следующие в это окно сливаются в одно письмо (раздел 10.4). */
 export const COMMENT_MAIL_DELAY_MS = 5 * 60 * 1000;
@@ -47,6 +53,8 @@ const REFUSALS: Record<string, () => Response> = {
   '23503': () => apiError(404, 'NOT_FOUND'),
   CM403: () => apiError(403, 'FORBIDDEN'),
   CM409: () => apiError(409, 'THREAD_FULL'),
+  CMF09: () => apiError(409, 'FILE_FULL'),
+  CMU09: () => apiError(409, 'AUTHOR_FULL'),
 };
 
 function wholeParam(v: string | null, fallback: number): number | null {
@@ -95,6 +103,7 @@ export function commentRoutes(deps: ApiDeps): Route[] {
       path: comments(''),
       access: { kind: 'file', min: 'viewer' },
       limit: 'commentList',
+      heavy: true,
       keepsAccess: true,
       handle: async (ctx) => {
         const after = wholeParam(ctx.url.searchParams.get('after'), 0);
@@ -102,12 +111,13 @@ export function commentRoutes(deps: ApiDeps): Route[] {
         if (after === null || limit === null || limit === 0) return apiError(400, 'BAD_REQUEST');
         const count = Math.min(limit, COMMENT_PAGE_MAX);
         // Один снимок: голова файла и страница согласованы. Первая загрузка (`after=0`) — без надгробий.
-        const { rows } = await pool.query<{ id: string | null; seq: string | null; view: ThreadView | null; head: string }>(
+        // Обсуждение — текстом JSON из базы: страница не разбирается и не собирается заново (`CommentListDto`).
+        const { rows } = await pool.query<{ id: string | null; seq: string | null; view: string | null; head: string }>(
           `WITH h AS (SELECT COALESCE((SELECT seq FROM comment_file WHERE file_id = $1), 0) AS head)
            SELECT h.head, p.id, p.seq, p.view FROM h LEFT JOIN LATERAL (
              SELECT t.id, t.seq,
                     CASE WHEN t.deleted_at IS NULL
-                      THEN comment_thread_json(t) || jsonb_build_object('unread', comment_unread(t.id, $2)) END AS view
+                      THEN (comment_thread_json(t) || jsonb_build_object('unread', comment_unread(t.id, $2)))::text END AS view
              FROM comment_thread t
              WHERE t.file_id = $1 AND t.seq > $3 AND ($3 > 0 OR t.deleted_at IS NULL)
              ORDER BY t.seq LIMIT $4) p ON true
@@ -118,13 +128,10 @@ export function commentRoutes(deps: ApiDeps): Route[] {
         const found = rows.filter((r) => r.id !== null);
         const more = found.length > count;
         const page = found.slice(0, count);
-        const body: CommentListDto = {
-          seq: Number(more ? page[page.length - 1].seq : rows[0].head),
-          threads: page.flatMap((r) => (r.view ? [r.view] : [])),
-          removed: page.flatMap((r) => (r.view ? [] : [r.id!])),
-          more,
-        };
-        return ok(body);
+        const seq = Number(more ? page[page.length - 1].seq : rows[0].head);
+        const threads = page.flatMap((r) => (r.view ? [r.view] : []));
+        const removed = page.flatMap((r) => (r.view ? [] : [r.id!]));
+        return okJson(`{"seq":${seq},"threads":[${threads.join(',')}],"removed":${JSON.stringify(removed)},"more":${more}}`);
       },
     },
     {
@@ -138,7 +145,8 @@ export function commentRoutes(deps: ApiDeps): Route[] {
         if (!body) return apiError(400, 'BAD_REQUEST');
         const { pin } = body;
         const file = ctx.params.id;
-        return change(ctx, 'create', 201, 'comment_create($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)', [
+        const preview = commentPreview(body.body);
+        return change(ctx, 'create', 201, 'comment_create($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)', [
           file,
           ctx.user.id,
           pin.page,
@@ -148,9 +156,13 @@ export function commentRoutes(deps: ApiDeps): Route[] {
           pin.wx,
           pin.wy,
           body.body,
+          preview.text,
+          preview.more,
           mentionIds(body.body),
           openUsers(file),
           delay,
+          COMMENT_THREADS_MAX,
+          COMMENT_THREADS_PER_USER_MAX,
         ]);
       },
     },
@@ -159,24 +171,27 @@ export function commentRoutes(deps: ApiDeps): Route[] {
       path: comments('/:threadId'),
       access: { kind: 'file', min: 'viewer' },
       limit: 'commentThread',
+      heavy: true,
       keepsAccess: true,
       handle: async (ctx) => {
-        // Обсуждение другого файла через этот адрес — как несуществующее: условие на `file_id` из адреса.
-        const { rows } = await pool.query<ThreadDetailDto>(
-          `SELECT comment_thread_json(t) || jsonb_build_object('unread', comment_unread(t.id, $2)) AS thread,
-                  (SELECT COALESCE(jsonb_agg(comment_json(c) ORDER BY c.id <> t.first_id, c.created_at, c.id), '[]'::jsonb)
-                   FROM comment c WHERE c.thread_id = t.id) AS comments
+        // Обсуждение другого файла через этот адрес — как несуществующее: условие на `file_id` из адреса. Целиком, одним
+        // ответом (`ThreadDetailDto`): объём держит `THREAD_BYTES_MAX`. JSON — текстом из базы.
+        const { rows } = await pool.query<{ body: string }>(
+          `SELECT jsonb_build_object(
+                    'thread', comment_thread_json(t) || jsonb_build_object('unread', comment_unread(t.id, $2)),
+                    'comments', (SELECT COALESCE(jsonb_agg(comment_json(c) ORDER BY c.id <> t.first_id, c.created_at, c.id), '[]'::jsonb)
+                                 FROM comment c WHERE c.thread_id = t.id))::text AS body
            FROM comment_thread t WHERE t.id = $3 AND t.file_id = $1 AND t.deleted_at IS NULL`,
           [ctx.params.id, ctx.user.id, ctx.params.threadId],
         );
-        return rows[0] ? ok(rows[0]) : apiError(404, 'NOT_FOUND');
+        return rows[0] ? okJson(rows[0].body) : apiError(404, 'NOT_FOUND');
       },
     },
     {
       method: 'PATCH',
       path: comments('/:threadId'),
       access: { kind: 'file', min: 'viewer' },
-      limit: 'write',
+      limit: 'commentEdit',
       keepsAccess: true,
       handle: async (ctx) => {
         const body = parseThreadPatch(await readJson(ctx.req));
@@ -213,7 +228,7 @@ export function commentRoutes(deps: ApiDeps): Route[] {
         const body = parseCommentBody(await readJson(ctx.req, COMMENT_JSON_BYTES));
         if (!body) return apiError(400, 'BAD_REQUEST');
         const file = ctx.params.id;
-        return change(ctx, 'reply', 201, 'comment_reply($1, $2, $3, $4, $5, $6, $7, $8)', [
+        return change(ctx, 'reply', 201, 'comment_reply($1, $2, $3, $4, $5, $6, $7, $8, $9)', [
           file,
           ctx.user.id,
           ctx.params.threadId,
@@ -222,6 +237,7 @@ export function commentRoutes(deps: ApiDeps): Route[] {
           openUsers(file),
           delay,
           THREAD_COMMENTS_MAX,
+          THREAD_BYTES_MAX,
         ]);
       },
     },
@@ -229,18 +245,22 @@ export function commentRoutes(deps: ApiDeps): Route[] {
       method: 'PATCH',
       path: comments('/:threadId/comments/:commentId'),
       access: { kind: 'file', min: 'viewer' },
-      limit: 'write',
+      limit: 'commentEdit',
       keepsAccess: true,
       handle: async (ctx) => {
         const body = parseCommentBody(await readJson(ctx.req, COMMENT_JSON_BYTES));
         if (!body) return apiError(400, 'BAD_REQUEST');
-        return change(ctx, 'edit', 200, 'comment_edit($1, $2, $3, $4, $5, $6)', [
+        const preview = commentPreview(body.body);
+        return change(ctx, 'edit', 200, 'comment_edit($1, $2, $3, $4, $5, $6, $7, $8, $9)', [
           ctx.params.id,
           ctx.user.id,
           ctx.params.threadId,
           ctx.params.commentId,
           body.body,
+          preview.text,
+          preview.more,
           mentionIds(body.body),
+          THREAD_BYTES_MAX,
         ]);
       },
     },
