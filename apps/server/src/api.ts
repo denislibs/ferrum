@@ -11,13 +11,13 @@ import {
   isUuid,
   type ApiErrorBody,
   type ApiErrorCode,
+  type CommentEvent,
   type FileRole,
 } from '@ferrum/protocol';
 import type { Pool } from 'pg';
 import type { Auth } from './auth';
 import { originAllowed } from './auth-routes';
 import type { BlobStore, UploadPace } from './blob-store';
-import type { CommentEvent } from '@ferrum/protocol';
 import type { Mailer } from './mail';
 import { valkeyStorage } from './secondary-storage';
 
@@ -47,6 +47,8 @@ export const LIMITS = {
   /** Список обсуждений файла: первая загрузка — 1000 обсуждений за две страницы по ~50 мс базы, догоняние — дёшево. Общий
    * `read` (1200 в минуту) дал бы одному человеку занять ядро базы. */
   commentList: { max: 120, windowSeconds: 60 },
+  /** Обсуждение целиком: до 500 комментариев, ответ до ~8 МБ JSON из базы — свой предел, как у списка, а не общий `read`. */
+  commentThread: { max: 30, windowSeconds: 10 },
 } as const;
 export type LimitName = keyof typeof LIMITS;
 export type Limits = Record<LimitName, { max: number; windowSeconds: number }>;

@@ -559,3 +559,158 @@ test('запись комментариев и настроек не сверя�
     all.mockRestore();
   }
 });
+
+/** Номер файла занят чужой транзакцией: изменения файла ждут её. `blocked(n)` — дождаться, что ждут n запросов. */
+async function holdSeq(file: string) {
+  const holder = await s.pool.connect();
+  await holder.query('BEGIN');
+  await holder.query('SELECT comment_next_seq($1)', [file]);
+  const blocked = async (n: number) => {
+    // Условие, а не время: запросы стоят в очереди блокировок базы.
+    while ((await rows('SELECT count(*)::int AS n FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0'))[0].n < n)
+      await Bun.sleep(5);
+  };
+  const release = async () => {
+    await holder.query('ROLLBACK');
+    holder.release();
+  };
+  return { blocked, release };
+}
+
+test('роль сверяется после блокировки номера: доступ сняли, пока изменение ждало соседа, — записи нет', async () => {
+  const { file, other } = await world();
+  const v = await create(viewer, file, 'Читатель');
+  const r = await reply(viewer, file, v.thread.id, 'Ответ');
+  const before = await rows('SELECT seq FROM comment_file');
+  const thread = `${base(file)}/${v.thread.id}`;
+  const actions: [string, string, unknown?][] = [
+    ['POST', base(file), { pin, body: 'новое' }],
+    ['POST', `${thread}/comments`, { body: 'ещё' }],
+    ['PATCH', `${thread}/comments/${r.comment!.id}`, { body: 'правка' }],
+    ['DELETE', `${thread}/comments/${r.comment!.id}`],
+    ['PATCH', thread, { resolved: true }],
+    ['PATCH', thread, { pin: { ...pin, x: 99 } }],
+  ];
+  for (const [method, path, body] of actions) {
+    const seq = await holdSeq(file);
+    // Маршрут проверил роль и ждёт номер файла; доступ снимают и фиксируют, пока он ждёт.
+    const res = s.call(viewer, method, path, body);
+    await seq.blocked(1);
+    await s.pool.query('DELETE FROM file_access WHERE file_id = $1 AND user_id = $2', [file, viewer.id]);
+    await seq.release();
+    expect((await res).status, `${method} ${path}`).toBe(404);
+    await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [file, viewer.id]);
+  }
+  expect(await rows('SELECT seq FROM comment_file')).toEqual(before);
+  const d = await detail(viewer, file, v.thread.id);
+  expect([d.thread.resolvedAt, d.thread.pin, d.comments.map((c) => c.body)]).toEqual([null, pin, ['Читатель', 'Ответ']]);
+  // Файл удалили, пока изменение ждало: как несуществующий, а не сбой сервера.
+  const seq = await holdSeq(file);
+  const gone = s.pool.query('DELETE FROM file WHERE id = $1', [file]);
+  await seq.blocked(1);
+  const res = s.call(owner, 'POST', base(file), { pin, body: 'поздно' });
+  await seq.blocked(2);
+  await seq.release();
+  await gone;
+  expect((await res).status).toBe(404);
+  // Наоборот: новое обсуждение уже ждёт номер, файл удаляют — сначала обсуждение, потом удаление, без взаимной блокировки
+  // (обсуждение берёт строку файла раньше номера, как и удаление файла).
+  await create(owner, other, 'есть');
+  const busy = await holdSeq(other);
+  const first = s.call(owner, 'POST', base(other), { pin, body: 'успею' });
+  await busy.blocked(1);
+  const removal = s.pool.query('DELETE FROM file WHERE id = $1', [other]);
+  await busy.blocked(2);
+  await busy.release();
+  expect((await first).status).toBe(201);
+  expect((await removal).rowCount).toBe(1);
+});
+
+test('удаление человека — новый номер обсуждениям, где он был: догоняющий по `?after=` видит автора без имени и участников', async () => {
+  const { file, other } = await world();
+  const gone = await s.signIn(`c-gone-${crypto.randomUUID()}@example.com`, 'Уходящий');
+  for (const f of [file, other])
+    await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'editor')`, [f, gone.id]);
+  const authored = await create(gone, file, 'Моё');
+  const mentioned = await create(owner, file, `@[${gone.id}] посмотри`);
+  const replied = await create(owner, other, 'Там');
+  await reply(gone, other, replied.thread.id, 'Ответ');
+  // Только закрыл: не участник.
+  const closed = await create(owner, file, 'Закрою');
+  await write(await s.call(gone, 'PATCH', `${base(file)}/${closed.thread.id}`, { resolved: true }), 200);
+  const untouched = await create(owner, file, 'Без него');
+  const known = { [file]: (await list(owner, file)).seq, [other]: (await list(owner, other)).seq };
+  await s.pool.query('DELETE FROM "user" WHERE id = $1', [gone.id]);
+  const a = await list(owner, file, `?after=${known[file]}`);
+  expect(a.threads.map((t) => t.id).sort()).toEqual([authored.thread.id, mentioned.thread.id, closed.thread.id].sort());
+  expect(a.seq).toBe(known[file] + 3);
+  const byId = new Map(a.threads.map((t) => [t.id, t]));
+  expect(byId.get(authored.thread.id)!.author).toEqual({ id: null, name: '' });
+  expect(byId.get(authored.thread.id)!.participants).toEqual([]);
+  expect(byId.get(mentioned.thread.id)!.participants).toEqual([owner.id]);
+  expect(byId.get(mentioned.thread.id)!.first.mentions).toEqual({});
+  expect(byId.get(closed.thread.id)!.resolvedBy).toEqual({ id: null, name: '' });
+  const b = await list(owner, other, `?after=${known[other]}`);
+  expect([b.seq, b.threads.map((t) => [t.id, t.participants])]).toEqual([known[other] + 1, [[replied.thread.id, [owner.id]]]]);
+  // Обсуждение без него номера не получило.
+  expect((await list(owner, file)).threads.find((t) => t.id === untouched.thread.id)!.seq).toBe(untouched.seq);
+});
+
+test('удаление первого комментария владельцем файла удаляет чужое обсуждение для всех', async () => {
+  const { file } = await world();
+  const a = await create(viewer, file, 'Читатель');
+  await reply(editor, file, a.thread.id, 'Ответ');
+  const known = (await list(editor, file)).seq;
+  // Редактор чужое обсуждение не удаляет, владелец — удаляет.
+  expect((await s.call(editor, 'DELETE', `${base(file)}/${a.thread.id}/comments/${a.thread.first.id}`)).status).toBe(403);
+  const gone = await write(await s.call(owner, 'DELETE', `${base(file)}/${a.thread.id}/comments/${a.thread.first.id}`), 200);
+  expect([gone.removed, gone.seq]).toEqual([true, known + 1]);
+  expect(await list(viewer, file, `?after=${known}`)).toEqual({ seq: known + 1, threads: [], removed: [a.thread.id], more: false });
+  expect((await list(viewer, file)).threads).toEqual([]);
+  expect((await s.call(viewer, 'GET', `${base(file)}/${a.thread.id}`)).status).toBe(404);
+  expect(await rows('SELECT count(*)::int AS n FROM comment WHERE thread_id = $1', [a.thread.id])).toEqual([{ n: 0 }]);
+});
+
+test('страницы `?after=`: больше 500 надгробий и смесь с живыми — не больше 500 на страницу, номер страницы — последней строки', async () => {
+  const { file } = await world();
+  const known = (await create(owner, file, 'начало')).seq;
+  // 600 надгробий, потом 300 живых вперемешку с 300 надгробиями.
+  await s.pool.query(
+    `INSERT INTO comment_thread (id, file_id, page_id, x, y, wx, wy, first_id, created_by, created_at, seq, deleted_at)
+     SELECT gen_random_uuid(), $1, '1@1', 0, 0, 0, 0, gen_random_uuid(), $2, now(), 1000 + i,
+            CASE WHEN i <= 600 OR i % 2 = 0 THEN now() END
+     FROM generate_series(1, 1200) i`,
+    [file, owner.id],
+  );
+  await s.pool.query(
+    `INSERT INTO comment (id, thread_id, author_id, body, created_at) SELECT first_id, id, created_by, 'x', created_at FROM comment_thread
+     WHERE file_id = $1 AND seq > 1000 AND deleted_at IS NULL`,
+    [file],
+  );
+  await s.pool.query('UPDATE comment_file SET seq = 2200 WHERE file_id = $1', [file]);
+  const pages: CommentListDto[] = [];
+  for (let after = known, more = true; more;) {
+    const p = await list(viewer, file, `?after=${after}`);
+    pages.push(p);
+    after = p.seq;
+    more = p.more;
+  }
+  expect(pages.map((p) => [p.threads.length, p.removed.length, p.more, p.seq])).toEqual([
+    [0, 500, true, 1500],
+    [200, 300, true, 2000],
+    [100, 100, false, 2200],
+  ]);
+  // Первая загрузка — без надгробий: только живые.
+  const first = await list(viewer, file);
+  expect([first.threads.length, first.removed.length, first.more]).toEqual([301, 0, false]);
+});
+
+test('предел обсуждения целиком — свой, 30 за 10 с, а не общий `read`', async () => {
+  const { file } = await world();
+  const t = await create(editor, file);
+  for (let i = 0; i < 30; i++) expect((await s.call(editor, 'GET', `${base(file)}/${t.thread.id}`)).status, `обсуждение ${i}`).toBe(200);
+  expect((await s.call(editor, 'GET', `${base(file)}/${t.thread.id}`)).status).toBe(429);
+  // Общий `read` (1200 в минуту) пропустил бы и 31-й; другие маршруты и другие люди не задеты.
+  expect((await s.call(editor, 'GET', `/api/files/${file}/mentions`)).status).toBe(200);
+  expect((await s.call(viewer, 'GET', `${base(file)}/${t.thread.id}`)).status).toBe(200);
+});

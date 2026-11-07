@@ -40,9 +40,11 @@ interface Changed {
   deleted: string | null;
 }
 
-/** Ошибки функций базы: отказ без записи, номер не потрачен. */
+/** Ошибки функций базы: отказ без записи, номер не потрачен. `23503` — файл или человек удалены, пока вызов ждал
+ * блокировку номера: ушедшее — как несуществующее. */
 const REFUSALS: Record<string, () => Response> = {
   CM404: () => apiError(404, 'NOT_FOUND'),
+  '23503': () => apiError(404, 'NOT_FOUND'),
   CM403: () => apiError(403, 'FORBIDDEN'),
   CM409: () => apiError(409, 'THREAD_FULL'),
 };
@@ -156,7 +158,7 @@ export function commentRoutes(deps: ApiDeps): Route[] {
       method: 'GET',
       path: comments('/:threadId'),
       access: { kind: 'file', min: 'viewer' },
-      limit: 'read',
+      limit: 'commentThread',
       keepsAccess: true,
       handle: async (ctx) => {
         // Обсуждение другого файла через этот адрес — как несуществующее: условие на `file_id` из адреса.

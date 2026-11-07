@@ -176,7 +176,10 @@ async function timed(n: number, work: () => Promise<void>): Promise<{ p50: numbe
 const unlimited = { max: 1_000_000, windowSeconds: 60 };
 
 if (mode === 'big') {
-  const s = await apiStand({ commentMail: false, limits: { comment: unlimited, read: unlimited, write: unlimited } });
+  const s = await apiStand({
+    commentMail: false,
+    limits: { comment: unlimited, read: unlimited, write: unlimited, commentThread: unlimited },
+  });
   const people: Person[] = [];
   for (let i = 0; i < 5; i++) people.push(await s.signIn(`load-${i}-${Date.now()}@example.com`, `Человек ${i}`));
   const file = (await s.newFile(people[0])).id;
