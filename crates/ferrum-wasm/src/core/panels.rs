@@ -772,6 +772,13 @@ impl Core {
             | Command::Presence { .. }
             | Command::PresenceReset
             | Command::Follow { .. }
+            | Command::CommentsAvailable { .. }
+            | Command::CommentPins { .. }
+            | Command::CommentPinsRemove { .. }
+            | Command::CommentOpen { .. }
+            | Command::CommentDraft { .. }
+            | Command::CommentFocus { .. }
+            | Command::CommentShowResolved { .. }
             | Command::TextEditStart { .. }
             | Command::TextEditEnd
             | Command::TextInput { .. }

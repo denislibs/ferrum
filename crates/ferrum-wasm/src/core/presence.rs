@@ -61,7 +61,8 @@ impl PresenceOut {
 
 /// Команды, которые сцену не правят и чужое превью снимать не должны: присутствие, синхронизация,
 /// чтение пикселей, выбор контекстного меню (цель — по тому, что видно, как у нажатия; меняется
-/// только выделение). Остальные идут с `presence_hold`: правка не прочтёт чужое превью.
+/// только выделение), комментарии (метки — оверлей, не сцена; переход к обсуждению меняет только
+/// страницу и камеру). Остальные идут с `presence_hold`: правка не прочтёт чужое превью.
 pub(crate) fn holds(cmd: &Command) -> bool {
     !matches!(
         cmd,
@@ -79,6 +80,13 @@ pub(crate) fn holds(cmd: &Command) -> bool {
             | Command::ReadMeasurements
             | Command::ReadPresence
             | Command::ContextMenu { .. }
+            | Command::CommentsAvailable { .. }
+            | Command::CommentPins { .. }
+            | Command::CommentPinsRemove { .. }
+            | Command::CommentOpen { .. }
+            | Command::CommentDraft { .. }
+            | Command::CommentFocus { .. }
+            | Command::CommentShowResolved { .. }
     )
 }
 

@@ -19,6 +19,7 @@ kurbo.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 tsify.workspace = true
+unicode-segmentation.workspace = true
 wasm-bindgen.workspace = true
 
 # Браузерная часть (модуль `web`): только для wasm32, нативные тесты её не собирают.

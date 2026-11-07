@@ -226,6 +226,44 @@ fn commands() -> Vec<Command> {
             bytes: bytes(&[1]),
         },
         Command::Thumbnail,
+        Command::CommentsAvailable { on: true },
+        Command::CommentPins {
+            pins: vec![CommentPinDto {
+                id: "t1".into(),
+                page: "0@1".into(),
+                node: Some("2@1".into()),
+                x: 1.0,
+                y: 2.0,
+                wx: 3.0,
+                wy: 4.0,
+                initials: "АБ".into(),
+                color: 0x0d74ce,
+                replies: 3,
+                unread: true,
+                resolved: false,
+                movable: true,
+            }],
+            replace: false,
+        },
+        Command::CommentPinsRemove {
+            ids: vec!["t1".into()],
+        },
+        Command::CommentOpen { id: None },
+        Command::CommentDraft {
+            draft: Some(CommentDraftDto {
+                page: "0@1".into(),
+                node: None,
+                x: 1.0,
+                y: 2.0,
+                wx: 1.0,
+                wy: 2.0,
+            }),
+        },
+        Command::CommentFocus { id: "t1".into() },
+        Command::CommentShowResolved { on: true },
+        Command::SetTool {
+            tool: Tool::Comment,
+        },
     ]
 }
 
@@ -483,6 +521,40 @@ fn events() -> Vec<CoreEvent> {
         CoreEvent::Thumbnail {
             bytes: Some(bytes(&[1])),
             keep: false,
+        },
+        CoreEvent::CommentPlace {
+            page: "0@1".into(),
+            node: Some("2@1".into()),
+            x: 1.0,
+            y: 2.0,
+            wx: 3.0,
+            wy: 4.0,
+            sx: 5.0,
+            sy: 6.0,
+        },
+        CoreEvent::CommentOpened {
+            id: "t1".into(),
+            sx: 1.0,
+            sy: 2.0,
+        },
+        CoreEvent::CommentMoved {
+            id: "t1".into(),
+            page: "0@1".into(),
+            node: None,
+            x: 1.0,
+            y: 2.0,
+            wx: 1.0,
+            wy: 2.0,
+        },
+        CoreEvent::CommentAnchor {
+            sx: 1.0,
+            sy: 2.0,
+            visible: false,
+        },
+        CoreEvent::CommentsState {
+            mode: true,
+            visible: true,
+            available: true,
         },
     ]
 }

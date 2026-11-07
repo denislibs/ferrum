@@ -461,6 +461,49 @@ pub const PRESENCE_PEERS_MAX: usize = 1024;
 /// Узлов в одной части выделения: 2 КБ кадра — не больше байта на узел и заголовка.
 pub const PRESENCE_PART_IDS_MAX: usize = 2048;
 
+/// Комментарии (спека подсистемы 4, раздел 10): меток в одной команде и у ядра всего не больше —
+/// лишние не принимаются; идентификатор обсуждения — не длиннее; инициалы — не больше графем.
+pub const COMMENT_PINS_MAX: usize = ferrum_editor::COMMENT_PINS_MAX;
+pub const COMMENT_ID_MAX_BYTES: usize = 64;
+pub const COMMENT_INITIALS_MAX: usize = 3;
+
+/// Метка обсуждения от интерфейса: страница и узел (`counter@peer`, без узла — мир), точка в
+/// координатах узла (`x`, `y`) и последняя мировая (`wx`, `wy`), инициалы и цвет автора
+/// `0xRRGGBB`, ответов, не прочитано, закрыто, можно ли тащить.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentPinDto {
+    pub id: String,
+    pub page: String,
+    #[serde(default)]
+    #[tsify(optional)]
+    pub node: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub wx: f64,
+    pub wy: f64,
+    pub initials: String,
+    pub color: u32,
+    pub replies: u32,
+    pub unread: bool,
+    pub resolved: bool,
+    pub movable: bool,
+}
+
+/// Метка нового комментария, пока его пишут: где она (как у `CommentPinDto`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentDraftDto {
+    pub page: String,
+    #[serde(default)]
+    #[tsify(optional)]
+    pub node: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub wx: f64,
+    pub wy: f64,
+}
+
 /// Выделение участника: версия, сколько узлов, частей и общая рамка.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -724,6 +767,40 @@ pub enum Command {
         #[serde(default)]
         #[tsify(type = "number | undefined")]
         participant: Option<u32>,
+    },
+    /// Комментарии есть (файл на сервере, роль пришла) или нет: без них режима «Комментарий»,
+    /// Shift+C и меток нет. Отдельная сборка его не шлёт.
+    CommentsAvailable {
+        on: bool,
+    },
+    /// Метки обсуждений: `replace` — весь набор, иначе добавить и заменить по `id`.
+    CommentPins {
+        pins: Vec<CommentPinDto>,
+        replace: bool,
+    },
+    CommentPinsRemove {
+        ids: Vec<String>,
+    },
+    /// Открытое обсуждение (его метка выделена, `CommentAnchor` следует за ней); без `id` — нет.
+    CommentOpen {
+        #[serde(default)]
+        #[tsify(optional)]
+        id: Option<String>,
+    },
+    /// Метка нового комментария, пока его пишут; без `draft` — нет.
+    CommentDraft {
+        #[serde(default)]
+        #[tsify(optional)]
+        draft: Option<CommentDraftDto>,
+    },
+    /// Перейти к обсуждению: страница метки, камера по центру метки, затем `CommentOpened`.
+    /// Метки или страницы ещё нет — переход, когда они придут.
+    CommentFocus {
+        id: String,
+    },
+    /// Показывать закрытые обсуждения.
+    CommentShowResolved {
+        on: bool,
     },
     /// Отдать журналу правки с прошлой пачки: ответ — `Journal` (и без правок).
     FlushJournal,
@@ -1346,6 +1423,49 @@ pub enum CoreEvent {
     Following {
         #[tsify(type = "number | undefined")]
         participant: Option<u32>,
+    },
+    /// Щелчок по холсту в режиме «Комментарий»: место нового (страница, узел или мир, точка в
+    /// его координатах и мировая) и экранная точка щелчка `sx`, `sy` (CSS-пиксели холста).
+    CommentPlace {
+        page: String,
+        #[tsify(type = "string | undefined")]
+        node: Option<String>,
+        x: f64,
+        y: f64,
+        wx: f64,
+        wy: f64,
+        sx: f64,
+        sy: f64,
+    },
+    /// Обсуждение открыто щелчком по метке или `CommentFocus`: окно — у экранной точки метки.
+    CommentOpened {
+        id: String,
+        sx: f64,
+        sy: f64,
+    },
+    /// Метку перетащили (только `movable`): новое место — на сервер.
+    CommentMoved {
+        id: String,
+        page: String,
+        #[tsify(type = "string | undefined")]
+        node: Option<String>,
+        x: f64,
+        y: f64,
+        wx: f64,
+        wy: f64,
+    },
+    /// Экранная точка открытой метки (или черновика) сменилась; `visible` — на этой странице и
+    /// в пределах холста. Только при изменении.
+    CommentAnchor {
+        sx: f64,
+        sy: f64,
+        visible: bool,
+    },
+    /// Режим «Комментарий», видны ли метки (Shift+C), есть ли комментарии: при изменении.
+    CommentsState {
+        mode: bool,
+        visible: bool,
+        available: bool,
     },
     /// Перед `Opened`: поверх файла применены пачки журнала — правки, которые не
     /// успели попасть в файл (документ изменён).
