@@ -3,7 +3,7 @@
 
 import { isUuid, MAX_CONTENT_BYTES } from '@ferrum/protocol';
 import type { Pool } from 'pg';
-import { apiHandler, type ApiDeps, type Ctx, type Limits, type Route } from './api';
+import { apiHandler, type ApiDeps, type Ctx, type Limits, type Route, type UserSlots } from './api';
 import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
 import type { BlobStore, UploadPace } from './blob-store';
@@ -36,6 +36,8 @@ export interface AppDeps {
   secret: string;
   /** Тесты сокращают пределы и сроки API. */
   limits?: Partial<Limits>;
+  /** Места запросов людей в работе: тесты дают свои. */
+  slots?: UserSlots;
   /** Группировка писем о комментариях: тесты сокращают. */
   commentMailDelayMs?: number;
   /** Отправка писем о комментариях; `false` — без неё (тесты гоняют свою с поддельной почтой). */

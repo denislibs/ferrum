@@ -16,6 +16,7 @@ import {
   type ThreadDetailDto,
 } from '@ferrum/protocol';
 import { afterAll, beforeEach, expect, spyOn, test } from 'bun:test';
+import { UserSlots } from '../src/api';
 import { apiStand, type Person } from './api-stand';
 
 const s = await apiStand();
@@ -345,8 +346,8 @@ test('предел комментариев — 60 в минуту на чело
   // Другой человек не задет; правка — в своём пределе.
   expect((await s.call(viewer, 'POST', base(file), { pin, body: 'я' })).status).toBe(201);
   expect((await s.call(editor, 'PATCH', `${base(file)}/${t.thread.id}/comments/${t.comment!.id}`, { body: 'правка' })).status).toBe(200);
-  // Список — свой предел, 120 в минуту на человека: первая загрузка дорогая, догоняние дешёвое.
-  for (let i = 0; i < 120; i++) expect((await s.call(i % 2 ? second : editor, 'GET', base(file))).status).toBe(200);
+  // Список — свой предел, 20 за 10 с на человека, общий для сеансов: первая загрузка дорогая, догоняние дешёвое.
+  for (let i = 0; i < 20; i++) expect((await s.call(i % 2 ? second : editor, 'GET', base(file))).status).toBe(200);
   expect((await s.call(editor, 'GET', base(file))).status).toBe(429);
   expect((await s.call(editor, 'GET', `${base(file)}/${t.thread.id}`)).status).toBe(200);
 });
@@ -705,12 +706,61 @@ test('страницы `?after=`: больше 500 надгробий и сме�
   expect([first.threads.length, first.removed.length, first.more]).toEqual([301, 0, false]);
 });
 
-test('предел обсуждения целиком — свой, 30 за 10 с, а не общий `read`', async () => {
+test('пределы чтения комментариев — короткие окна: список 20 за 10 с, обсуждение целиком 30 за 10 с, каждый свой', async () => {
   const { file } = await world();
   const t = await create(editor, file);
   for (let i = 0; i < 30; i++) expect((await s.call(editor, 'GET', `${base(file)}/${t.thread.id}`)).status, `обсуждение ${i}`).toBe(200);
   expect((await s.call(editor, 'GET', `${base(file)}/${t.thread.id}`)).status).toBe(429);
   // Общий `read` (1200 в минуту) пропустил бы и 31-й; другие маршруты и другие люди не задеты.
   expect((await s.call(editor, 'GET', `/api/files/${file}/mentions`)).status).toBe(200);
+  for (let i = 0; i < 20; i++) expect((await s.call(editor, 'GET', base(file))).status, `список ${i}`).toBe(200);
+  const res = await s.call(editor, 'GET', base(file));
+  expect(res.status).toBe(429);
+  expect(Number(res.headers.get('retry-after'))).toBeLessThanOrEqual(10);
   expect((await s.call(viewer, 'GET', `${base(file)}/${t.thread.id}`)).status).toBe(200);
+});
+
+test('один человек не занимает пул базы: в работе — не больше своих мест, лишние ждут без соединения, сверх очереди — 429 BUSY', async () => {
+  const slots = new UserSlots({ running: 2, waiting: 10 });
+  const tight = await apiStand({ slots, commentMail: false }, true);
+  try {
+    const { file } = await world();
+    const t = await create(editor, file);
+    const seq = await holdSeq(file);
+    // Двенадцать ответов разом: два — в базе (ждут номер файла), десять — в очереди мест, без соединения базы.
+    const replies = Array.from({ length: 12 }, (_, i) =>
+      tight.call(editor, 'POST', `${base(file)}/${t.thread.id}/comments`, { body: `${i}` }),
+    );
+    await seq.blocked(2);
+    while (slots.count(editor.id).waiting < 10) await Bun.sleep(1);
+    expect(slots.count(editor.id)).toEqual({ running: 2, waiting: 10 });
+    // Очередь полна — сразу 429 `BUSY`, без базы.
+    const over = await tight.call(editor, 'GET', base(file));
+    expect([over.status, await over.json()]).toEqual([429, { error: 'BUSY' }]);
+    // Другой человек пулом не обделён: отвечает сразу, пока ответы первого ещё ждут.
+    expect((await tight.call(viewer, 'GET', base(file))).status).toBe(200);
+    expect(await rows('SELECT count(*)::int AS n FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0')).toEqual([{ n: 2 }]);
+    await seq.release();
+    expect((await Promise.all(replies)).map((r) => r.status)).toEqual(Array(12).fill(201));
+    expect(slots.count(editor.id)).toEqual({ running: 0, waiting: 0 });
+  } finally {
+    await tight.stop();
+  }
+});
+
+test('места в работе: ушедший из очереди (срок вышел) места не занимает, освобождённое переходит следующему', async () => {
+  const slots = new UserSlots({ running: 1, waiting: 2 });
+  const a = slots.take('u')!;
+  await a.ready;
+  const b = slots.take('u')!;
+  const c = slots.take('u')!;
+  expect(slots.take('u')).toBeNull();
+  b.release();
+  expect(slots.count('u')).toEqual({ running: 1, waiting: 1 });
+  a.release();
+  await c.ready;
+  expect(slots.count('u')).toEqual({ running: 1, waiting: 0 });
+  c.release();
+  c.release();
+  expect(slots.count('u')).toEqual({ running: 0, waiting: 0 });
 });

@@ -45,13 +45,21 @@ export const LIMITS = {
   /** Новые комментарии и ответы (спека, раздел 10.4): на человека, общий для всех его вкладок и сеансов. */
   comment: { max: 60, windowSeconds: 60 },
   /** Список обсуждений файла: первая загрузка — 1000 обсуждений за две страницы по ~50 мс базы, догоняние — дёшево. Общий
-   * `read` (1200 в минуту) дал бы одному человеку занять ядро базы. */
-  commentList: { max: 120, windowSeconds: 60 },
+   * `read` (1200 в минуту) дал бы одному человеку занять ядро базы. Окно короткое: минутный запас не тратится одним
+   * всплеском в первые секунды. */
+  commentList: { max: 20, windowSeconds: 10 },
   /** Обсуждение целиком: до 500 комментариев, ответ до ~8 МБ JSON из базы — свой предел, как у списка, а не общий `read`. */
   commentThread: { max: 30, windowSeconds: 10 },
 } as const;
 export type LimitName = keyof typeof LIMITS;
 export type Limits = Record<LimitName, { max: number; windowSeconds: number }>;
+
+/** Запросы одного человека в работе (на процесс): пул Postgres общий на всех (10 соединений), и пределы частоты его не
+ * защищают — минутный запас тратится разом, двадцатью запросами одновременно. Сверх `running` запрос ждёт своей очереди,
+ * не держа соединения базы (экран файлов просит превью окна разом, отказ оставил бы их пустыми); сверх `waiting` —
+ * 429 `BUSY`. Потоковые маршруты сюда не входят: у загрузок свои места (`uploadGate`). */
+export const IN_FLIGHT = { running: 4, waiting: 200 };
+export type InFlight = typeof IN_FLIGHT;
 
 export interface ApiDeps {
   pool: Pool;
@@ -82,6 +90,8 @@ export interface ApiDeps {
   comments?: { event(file: string, ev: CommentEvent): void; openUsers(file: string): string[] };
   /** Группировка писем о комментариях; по умолчанию — `COMMENT_MAIL_DELAY_MS`. */
   commentMailDelayMs?: number;
+  /** Места запросов в работе; по умолчанию — свои, по `IN_FLIGHT`. Тесты дают свои и смотрят в них. */
+  slots?: UserSlots;
 }
 
 export interface ApiUser {
@@ -194,6 +204,54 @@ function refuse(status: number, code: ApiErrorCode): never {
   throw new Refused(apiError(status, code));
 }
 
+/** Места запросов людей в работе (`IN_FLIGHT`): очередь на человека, освобождённое место переходит следующему в ней. */
+export class UserSlots {
+  private readonly users = new Map<string, { running: number; waiting: (() => void)[] }>();
+  constructor(private readonly max: InFlight) {}
+
+  /** Место человеку: `ready` — можно работать, `release` — освободить (и уйти из очереди, если ещё ждёт). Очередь полна —
+   * `null`. */
+  take(user: string): { ready: Promise<void>; release: () => void } | null {
+    let u = this.users.get(user);
+    if (!u) this.users.set(user, (u = { running: 0, waiting: [] }));
+    const slot = u;
+    let state: 'waiting' | 'running' | 'done' = 'waiting';
+    const release = () => {
+      if (state === 'waiting') {
+        const i = slot.waiting.indexOf(start);
+        if (i >= 0) slot.waiting.splice(i, 1);
+      } else if (state === 'running') {
+        const next = slot.waiting.shift();
+        if (next) next();
+        else slot.running--;
+      }
+      state = 'done';
+      if (slot.running === 0 && slot.waiting.length === 0 && this.users.get(user) === slot) this.users.delete(user);
+    };
+    const { promise: ready, resolve } = Promise.withResolvers<void>();
+    // Место переходит от освободившего: счётчик `running` не меняется.
+    const start = () => {
+      state = 'running';
+      resolve();
+    };
+    if (slot.running < this.max.running) {
+      slot.running++;
+      start();
+    } else if (slot.waiting.length < this.max.waiting) slot.waiting.push(start);
+    else {
+      release();
+      return null;
+    }
+    return { ready, release };
+  }
+
+  /** Сколько запросов человека в работе и в очереди: тесты. */
+  count(user: string): { running: number; waiting: number } {
+    const u = this.users.get(user);
+    return { running: u?.running ?? 0, waiting: u?.waiting.length ?? 0 };
+  }
+}
+
 /** Запрос не должен висеть без ответа: работа не отменяется, но человек видит честный 503. */
 function withinDeadline<T>(work: Promise<T>, ms: number, path: string): Promise<T> {
   let timer: Timer;
@@ -206,14 +264,22 @@ function withinDeadline<T>(work: Promise<T>, ms: number, path: string): Promise<
   return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
 
+/** Место запроса в работе: `handle` освобождает его в конце, как бы запрос ни кончился. */
+interface Job {
+  done: boolean;
+  release: () => void;
+}
+
 export function apiHandler(routes: Route[], deps: ApiDeps) {
   const compiled: Compiled[] = routes.map((route) => ({ route, parts: route.path.split('/').filter(Boolean) }));
   const storage = valkeyStorage(deps.valkey);
   const limits: Limits = { ...LIMITS, ...deps.limits };
   const deadline = deps.deadlineMs ?? API_DEADLINE_MS;
+  const slots = deps.slots ?? new UserSlots(IN_FLIGHT);
 
-  /** Всё, что до обработчика: порядок важен, чужой запрос не тратит ни базу, ни счётчик другого. */
-  async function prepare(route: Route, req: Request, url: URL, params: Record<string, string>): Promise<Ctx> {
+  /** Всё, что до обработчика: порядок важен, чужой запрос не тратит ни базу, ни счётчик другого. Место в работе (`job`)
+   * берётся после предела частоты и до первого запроса к базе; освобождает его `handle`. */
+  async function prepare(route: Route, req: Request, url: URL, params: Record<string, string>, job: Job): Promise<Ctx> {
     if (req.method !== 'GET' && req.method !== 'HEAD' && !originAllowed(req, deps.publicUrl)) refuse(403, 'BAD_ORIGIN');
     const session = await deps.auth.api.getSession({ headers: req.headers, query: { disableRefresh: true } });
     if (!session) refuse(401, 'UNAUTHORIZED');
@@ -228,6 +294,14 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
       // Сколько ждать, знает только счётчик: клиент не гадает и не долбит сервер.
       const left = await deps.valkey.ttl(counter);
       throw new Refused(apiError(429, 'TOO_MANY_REQUESTS', { 'Retry-After': String(left > 0 ? left : limit.windowSeconds) }));
+    }
+    if (!route.stream) {
+      // Срок запроса вышел раньше: место не берётся — освободить его было бы уже некому.
+      if (job.done) refuse(503, 'UNAVAILABLE');
+      const slot = slots.take(user.id);
+      if (!slot) throw new Refused(busy());
+      job.release = slot.release;
+      await slot.ready;
     }
     const ctx: Ctx = { req, url, params, user, role: 'viewer', teamRole: 'member', teamId: '' };
     const access = route.access;
@@ -266,8 +340,9 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
     for (const c of compiled) {
       const params = match(c, req.method, parts);
       if (!params) continue;
+      const job: Job = { done: false, release: () => {} };
       try {
-        const ctx = await withinDeadline(prepare(c.route, req, url, params), deadline, url.pathname);
+        const ctx = await withinDeadline(prepare(c.route, req, url, params, job), deadline, url.pathname);
         const res = await (c.route.stream ? c.route.handle(ctx) : withinDeadline(c.route.handle(ctx), deadline, url.pathname));
         if (req.method !== 'GET' && req.method !== 'HEAD' && res.ok) deps.afterWrite?.(c.route, ctx);
         return res;
@@ -275,6 +350,10 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
         if (e instanceof Refused) return e.response;
         console.error('Сбой маршрута API', c.route.method, c.route.path, e instanceof Error ? e.message : e);
         return apiError(503, 'UNAVAILABLE');
+      } finally {
+        // И по сроку: запрос к базе ограничен своими сроками пула (меньше срока API), место дольше не держится.
+        job.done = true;
+        job.release();
       }
     }
     return apiError(404, 'NOT_FOUND');

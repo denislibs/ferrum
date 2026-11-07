@@ -1197,6 +1197,13 @@ export class SyncHub {
     return n;
   }
 
+  /** Самый большой буфер одного сокета: проба медленного читателя (сумма по всем смешала бы его с обычной рассылкой). */
+  bufferedMax(): number {
+    let n = 0;
+    for (const set of this.conns.values()) for (const d of set) n = Math.max(n, d.ws?.getBufferedAmount() ?? 0);
+    return n;
+  }
+
   /** Сколько пиров хранят векторы подписок: тесты памяти на подписку. */
   versionEntries(): number {
     let n = 0;
