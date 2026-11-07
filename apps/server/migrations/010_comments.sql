@@ -269,7 +269,9 @@ LANGUAGE sql AS $$
 $$;
 
 -- Письма о комментарии (раздел 10.4): упомянутые с доступом и, у ответа, участники обсуждения — кроме автора, тех, у кого
--- файл открыт сейчас (`p_open`, соединения сервера), выключивших письма и потерявших доступ. Строка на получателя и файл
+-- файл открыт сейчас (`p_open`, соединения сервера), выключивших письма, потерявших доступ и ни разу не открывавших файл
+-- (`file_recent`): иначе приглашение любого адреса и упоминание слали бы от Ferrum письма с чужим текстом тому, кто в файл
+-- не приходил **(поведение)**. Строка на получателя и файл
 -- одна: новое сливается в ждущую, не больше 20 id и счётчик сверху; ждущих строк у человека — не больше 50 (ещё файл
 -- сверх этого — без письма). Срок — от первого: группировка за `p_delay_ms`.
 CREATE FUNCTION comment_enqueue(p_file uuid, p_thread uuid, p_comment uuid, p_author text, p_reply boolean, p_open text[], p_delay_ms integer)
@@ -288,6 +290,7 @@ LANGUAGE sql AS $$
     AND r.u <> ALL (p_open)
     AND COALESCE((SELECT comment_mail FROM user_pref WHERE user_id = r.u), true)
     AND COALESCE(file_role_rank(p_file, r.u), 0) >= 1
+    AND EXISTS (SELECT 1 FROM file_recent fr WHERE fr.user_id = r.u AND fr.file_id = p_file)
     AND (EXISTS (SELECT 1 FROM mail_outbox q WHERE q.recipient_id = r.u AND q.file_id = p_file AND q.state = 'pending')
          OR (SELECT count(*) FROM mail_outbox q WHERE q.recipient_id = r.u AND q.state = 'pending') < 50)
   ON CONFLICT (recipient_id, file_id) WHERE state = 'pending' DO UPDATE SET

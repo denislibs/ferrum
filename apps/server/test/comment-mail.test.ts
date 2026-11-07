@@ -419,6 +419,22 @@ test('сбой базы до SMTP: строка — обратно в очере
   expect(w.counts.uncertain).toBe(0);
 });
 
+test('L1: письма — только тем, кто хоть раз открывал файл; приглашённый, не приходивший, письма не получает', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail);
+  const guest = await s.signIn(`m-guest-${crypto.randomUUID()}@example.com`, 'Гость');
+  await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [file, guest.id]);
+  // Без `openedAll`: гость файл не открывал.
+  await write(await s.call(owner, 'POST', base(file), { pin, body: `@[${guest.id}] срочно: https://evil.example/login` }));
+  expect(await s.pool.query('SELECT 1 FROM mail_outbox')).toMatchObject({ rowCount: 0 });
+  // Открыл файл сам — дальше письма как всем.
+  expect((await s.call(guest, 'POST', `/api/files/${file}/touch`)).status).toBeLessThan(300);
+  await write(await s.call(owner, 'POST', base(file), { pin, body: `@[${guest.id}] теперь` }));
+  await s.pool.query(`UPDATE mail_outbox SET due_at = now() - interval '1 second', first_at = now() + interval '1 second'`);
+  await w.tick();
+  expect(mail.delivered.map((m) => m.to)).toEqual([guest.email]);
+});
+
 test('база недоступна при запуске: таймер всё равно идёт, проход сам доделывает запуск и шлёт', async () => {
   const mail = new FakeMail();
   await create(owner, `@[${viewer.id}] потом`);

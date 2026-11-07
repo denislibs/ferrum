@@ -396,7 +396,7 @@ test('предел обсуждения: ответ сверх — 409 THREAD_FU
   expect([page.threads.length, page.more]).toEqual([COMMENT_PAGE_MAX, true]);
 });
 
-test('подсказка упоминаний: люди с доступом без себя; адрес — только участнику файла; поиск — буквы, а не шаблон', async () => {
+test('подсказка упоминаний: люди с доступом без себя; поиск — буквы, а не шаблон; ссылку выключили — пришедшего нет', async () => {
   const { file } = await world();
   const people = async (who: Person, q = '') => {
     const res = await s.call(who, 'GET', `/api/files/${file}/mentions?q=${encodeURIComponent(q)}`);
@@ -406,13 +406,7 @@ test('подсказка упоминаний: люди с доступом бе
   const names = (p: { name: string }[]) => p.map((x) => x.name).sort();
   expect(names(await people(owner))).toEqual(['Вера', 'Лев', 'Мария', 'Эдуард']);
   expect(names(await people(viewer))).toEqual(['Лев', 'Мария', 'Ольга', 'Эдуард']);
-  expect((await people(editor)).find((p) => p.name === 'Вера')?.email).toBe(viewer.email);
-  // Пришедший по ссылке видит имена, адресов — нет, и по адресу не ищет.
-  const viaLink = await people(linked);
-  expect(names(viaLink)).toEqual(['Вера', 'Мария', 'Ольга', 'Эдуард']);
-  expect(viaLink.every((p) => p.email === null)).toBe(true);
-  expect(await people(linked, 'c-viewer')).toEqual([]);
-  expect(names(await people(editor, 'c-viewer'))).toEqual(['Вера']);
+  expect(names(await people(linked))).toEqual(['Вера', 'Мария', 'Ольга', 'Эдуард']);
   expect(names(await people(editor, 'ве'))).toEqual(['Вера']);
   // `%` и `_` — буквы.
   expect(await people(owner, '%')).toEqual([]);
@@ -425,8 +419,54 @@ test('подсказка упоминаний: люди с доступом бе
   for (let i = 0; i < 9; i++) {
     const p = await s.signIn(`c-crowd-${i}@example.com`, `Толпа ${i}`);
     await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [file, p.id]);
+    await opened(p, file);
   }
   expect(await people(owner, 'Толпа')).toHaveLength(8);
+});
+
+test('M2: адреса в подсказке — только тем, кто видит «Поделиться», и только у людей оттуда; адреса гостя по ссылке нет ни у кого', async () => {
+  const { file } = await world();
+  const people = async (who: Person, q = '') => {
+    const res = await s.call(who, 'GET', `/api/files/${file}/mentions?q=${encodeURIComponent(q)}`);
+    expect(res.status).toBe(200);
+    return parseMentionList(await res.json())!.people;
+  };
+  const emails = async (who: Person) =>
+    Object.fromEntries((await people(who)).map((p) => [p.name, p.email]).sort(([a], [b]) => String(a).localeCompare(String(b))));
+  // Владелец, прямой редактор и участник команды видят «Поделиться»: адреса прямых и команды — да, гостя по ссылке — нет.
+  expect(await emails(owner)).toEqual({ Вера: viewer.email, Лев: null, Мария: member.email, Эдуард: editor.email });
+  expect(await emails(editor)).toEqual({ Вера: viewer.email, Лев: null, Мария: member.email, Ольга: owner.email });
+  expect(await emails(member)).toEqual({ Вера: viewer.email, Лев: null, Ольга: owner.email, Эдуард: editor.email });
+  // Прямой читатель и пришедший по ссылке — без адресов.
+  for (const who of [viewer, linked]) expect(Object.values(await emails(who)).every((e) => e === null)).toBe(true);
+  // Поиск по адресу — так же: читатель не находит, редактор находит, гостя по адресу не находит никто.
+  expect(await people(viewer, 'c-editor')).toEqual([]);
+  expect(await people(viewer, 'example.com')).toEqual([]);
+  expect(await people(linked, 'c-viewer')).toEqual([]);
+  expect((await people(editor, 'c-viewer')).map((p) => p.name)).toEqual(['Вера']);
+  for (const who of [owner, editor, member]) expect(await people(who, 'c-linked')).toEqual([]);
+});
+
+test('M3: приглашённый, ещё не открывавший файл, в подсказке не предлагается — существующий и несуществующий адреса неотличимы', async () => {
+  const { file } = await world();
+  const ceo = await s.signIn('ceo@corp.example', 'Иван Секретов');
+  // Владелец приглашает существующий адрес (сразу `file_access`) и несуществующий (`file_invite`).
+  for (const email of ['ceo@corp.example', 'nobody@corp.example'])
+    expect((await s.call(owner, 'POST', `/api/files/${file}/share/invite`, { email, role: 'viewer' })).status).toBe(200);
+  expect(await rows('SELECT role FROM file_access WHERE file_id = $1 AND user_id = $2', [file, ceo.id])).toEqual([{ role: 'viewer' }]);
+  const people = async (q: string) =>
+    (await (await s.call(owner, 'GET', `/api/files/${file}/mentions?q=${encodeURIComponent(q)}`)).json()) as unknown;
+  for (const q of ['corp.example', 'ceo', 'nobody', 'Иван', '']) {
+    const got = (await people(q)) as { people: { id: string }[] };
+    expect(
+      got.people.some((p) => p.id === ceo.id),
+      q,
+    ).toBe(false);
+  }
+  expect(await people('corp.example')).toEqual({ people: [] });
+  // Открыл файл сам — теперь его можно упомянуть.
+  expect((await s.call(ceo, 'POST', `/api/files/${file}/touch`)).status).toBeLessThan(300);
+  expect(await people('corp.example')).toEqual({ people: [{ id: ceo.id, name: 'Иван Секретов', email: 'ceo@corp.example' }] });
 });
 
 test('функции изменения сверяют роль сами: снятый доступ не пишет, даже минуя маршрут', async () => {

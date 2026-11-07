@@ -298,8 +298,11 @@ export function commentRoutes(deps: ApiDeps): Route[] {
       },
     },
     {
-      // Кого можно упомянуть: люди с доступом к файлу (прямой, через команду, по включённой ссылке), кроме себя.
-      // **(поведение)** Адрес виден и ищется только участнику файла: опубликованная ссылка адресов не раздаёт, как `GET share`.
+      // Кого можно упомянуть: люди с доступом к файлу (прямой, через команду, по включённой ссылке), кроме себя. Приглашённый
+      // напрямую — только если уже открывал файл: правило «Поделиться» (`shareOf`), иначе приглашение любого адреса выдавало
+      // бы, есть ли у него учётная запись, имя и id.
+      // **(поведение)** Адрес виден и ищется только тому, кто видит «Поделиться» (прямой редактор, владелец, команда), и только
+      // у людей оттуда же (`file_access` и команда): адрес гостя по ссылке не виден никому, как и в «Поделиться».
       method: 'GET',
       path: '/api/files/:id/mentions',
       access: { kind: 'file', min: 'viewer' },
@@ -309,17 +312,19 @@ export function commentRoutes(deps: ApiDeps): Route[] {
         const q = parseMentionQuery(ctx.url.searchParams.get('q'));
         if (q === null) return apiError(400, 'BAD_REQUEST');
         const { rows } = await pool.query<MentionCandidate>(
-          `WITH me AS (SELECT file_member_rank($1, $2) >= 1 AS member),
-                people AS (
-                  SELECT user_id FROM file_access WHERE file_id = $1
-                  UNION SELECT m.user_id FROM file f JOIN project p ON p.id = f.project_id JOIN team_member m ON m.team_id = p.team_id
+          `WITH me AS (SELECT file_member_rank($1, $2) >= 2 AS editor),
+                found AS (
+                  SELECT a.user_id, true AS listed FROM file_access a
+                  WHERE a.file_id = $1 AND EXISTS (SELECT 1 FROM file_recent r WHERE r.file_id = a.file_id AND r.user_id = a.user_id)
+                  UNION ALL SELECT m.user_id, true FROM file f JOIN project p ON p.id = f.project_id JOIN team_member m ON m.team_id = p.team_id
                         WHERE f.id = $1
-                  UNION SELECT lu.user_id FROM file_link_user lu JOIN share_link l ON l.file_id = lu.file_id AND l.enabled
-                        WHERE lu.file_id = $1)
-           SELECT u.id, u.name, CASE WHEN me.member THEN u.email END AS email
+                  UNION ALL SELECT lu.user_id, false FROM file_link_user lu JOIN share_link l ON l.file_id = lu.file_id AND l.enabled
+                        WHERE lu.file_id = $1),
+                people AS (SELECT user_id, bool_or(listed) AS listed FROM found GROUP BY user_id)
+           SELECT u.id, u.name, CASE WHEN me.editor AND p.listed THEN u.email END AS email
            FROM people p JOIN "user" u ON u.id = p.user_id, me
            WHERE u.id <> $2 AND file_role_rank($1, u.id) >= 1
-             AND ($3 = '' OR u.name ILIKE '%' || $4 || '%' OR (me.member AND u.email ILIKE '%' || $4 || '%'))
+             AND ($3 = '' OR u.name ILIKE '%' || $4 || '%' OR (me.editor AND p.listed AND u.email ILIKE '%' || $4 || '%'))
            ORDER BY u.name ILIKE $4 || '%' DESC, lower(u.name), u.id
            LIMIT $5`,
           [ctx.params.id, ctx.user.id, q, likeEscape(q), MENTION_SUGGEST_MAX],
