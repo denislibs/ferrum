@@ -366,7 +366,8 @@ impl Editor {
     }
 
     /// Можно ли взяться за направляющую в этой точке, а не отдать её инструменту:
-    /// только «Перемещение» без модификаторов, без правок, не над ручками рамки.
+    /// только «Перемещение» без модификаторов, без правок, не над ручками рамки и не под меткой
+    /// комментария.
     fn grabbable_guide(&self, e: &PointerEvent) -> Option<PlacedGuide> {
         let m = e.modifiers;
         if self.tool.kind() != ToolKind::Move
@@ -383,6 +384,10 @@ impl Editor {
                 Cursor::Resize { .. } | Cursor::Rotate { .. }
             )
         {
+            return None;
+        }
+        // Метка над направляющей: нажатие, наведение и курсор — её.
+        if self.pin_catches(e.point) {
             return None;
         }
         let g = self.guide_at(e.point)?;

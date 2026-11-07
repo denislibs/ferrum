@@ -864,3 +864,49 @@ fn drag_started_on_cluster_does_not_zoom_in() {
     h.drag((at.x, at.y), (at.x + 1.0, at.y), none());
     assert!(h.ed.camera().zoom() >= cam.zoom() * 2.0);
 }
+
+/// Метка над направляющей страницы у «Перемещения»: нажатие, наведение и курсор — метки
+/// (метки рисуются над направляющими); направляющая рядом с меткой берётся как обычно.
+#[test]
+fn pin_on_a_page_guide_wins_over_the_guide() {
+    let mut h = available();
+    h.ed.set_view(Some(true), Some(true));
+    let page = h.ed.page();
+    let guide = ferrum_doc::Guide::new(ferrum_doc::GuideAxis::X, 300.0);
+    h.ed.set_guides(
+        ferrum_doc::GuideOwner::Page(page),
+        vec![guide],
+        Phase::Commit,
+    )
+    .unwrap();
+    // Капля x 290..318, y 372..400 — поверх линии x = 300.
+    let p = world_pin(&h, "mine", 290.0, 400.0, true);
+    h.ed.set_comment_pins(vec![p], true);
+    h.ed.take_events();
+    let steps = h.ed.step_count();
+    h.hover(300.0, 600.0);
+    assert!(
+        matches!(h.ed.cursor(), Cursor::Resize { .. }),
+        "мимо метки линия берётся"
+    );
+    h.hover(300.0, 390.0);
+    assert_eq!(h.ed.cursor(), Cursor::Default, "над меткой — её стрелка");
+    // Щелчок открывает метку, линия на месте.
+    h.click(300.0, 390.0, none());
+    assert_eq!(h.ed.comment_open(), Some("mine"));
+    assert!(h
+        .ed
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, EditorEvent::CommentOpened { .. })));
+    // Протяжка двигает метку, а не линию.
+    h.drag((300.0, 390.0), (400.0, 450.0), none());
+    assert!(h
+        .ed
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, EditorEvent::CommentMoved { .. })));
+    assert_eq!(h.ed.document().page_guides(page), [guide]);
+    assert_eq!(h.ed.step_count(), steps);
+    assert_eq!(pins_on_screen(&h), vec![Point::new(390.0, 460.0)]);
+}
