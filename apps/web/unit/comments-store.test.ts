@@ -465,6 +465,40 @@ test('окно не гоняет запросы: сервер, у которог
   expect(d.view?.seq).toBe(5);
 });
 
+test('I1: ответ своей записи раньше события соседа — чужой комментарий всё равно попадает в окно и прочитывается', async () => {
+  const s = stand();
+  s.list(0, { seq: 1, threads: [thread(1, 1)] });
+  s.store.connected('editor');
+  await s.settle();
+  s.routes.push((c) =>
+    c.path === `/api/files/f/comments/${uuid(1)}` && c.method === 'GET'
+      ? { status: 200, body: { thread: thread(1, 1), comments: [comment(1, 100)] } }
+      : null,
+  );
+  s.routes.push((c) => (c.path.endsWith('/read') ? { status: 200, body: { ok: true } } : null));
+  await s.store.request(1, { k: 'open', thread: uuid(1) });
+  // Сосед ответил (номер 2), я ответил (номер 3); ответ REST моей записи пришёл раньше события соседа. Сервер считает
+  // обсуждение непрочитанным для меня: чужой ответ новее моего прочтения.
+  const theirs = comment(1, 101, OTHER, 'ответ соседа');
+  const mine = comment(1, 102, ME, 'мой ответ');
+  s.routes.unshift((c) =>
+    c.method === 'POST' && c.path === `/api/files/f/comments/${uuid(1)}/comments`
+      ? { status: 201, body: { seq: 3, thread: { ...thread(1, 3, { replies: 2 }), unread: true }, comment: mine, removed: false } }
+      : null,
+  );
+  await s.store.request(2, { k: 'reply', thread: uuid(1), body: 'мой ответ' });
+  const reads = s.calls.filter((c) => c.path.endsWith('/read')).length;
+  s.store.event(ev(2, thread(1, 2, { replies: 1 }), 'reply', OTHER, theirs));
+  s.store.event(ev(3, thread(1, 3, { replies: 2 }), 'reply', ME, mine));
+  await s.settle();
+  const d = s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>;
+  expect(d.comments.map((c) => c.id).sort()).toEqual([comment(1, 100).id, theirs.id, mine.id].sort());
+  // Прочтение ушло на сервер, обсуждение не «новое».
+  expect(s.calls.filter((c) => c.path.endsWith('/read')).length).toBe(reads + 1);
+  expect(s.store.thread(uuid(1))?.unread).toBe(false);
+  expect(s.store.thread(uuid(1))?.seq).toBe(3);
+});
+
 test('H1: первый список панели — пачками по 500: `reset` у первой, `more` у всех, кроме последней', async () => {
   const s = stand();
   const n = COMMENTS_POST_BATCH * 2 + 7;

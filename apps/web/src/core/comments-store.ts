@@ -4,7 +4,9 @@
 //
 // Порядок. Событие с `seq = известный + 1` применяется; `seq ≤ известного` — уже учтено (пришло списком); дыра или `gap` —
 // догоняние `GET ?after=известный` страницами. Пока идёт догоняние, события ждут и потом применяются по тому же правилу.
-// Ответ своего изменения меняет обсуждение, но не `known`: его событие придёт и будет пропущено по `seq` обсуждения.
+// Ответ своего изменения меняет обсуждение, но не `known`: его событие придёт и будет пропущено по `seq` обсуждения. Окно —
+// не по `seq` обсуждения: событие соседа с меньшим номером, пришедшее после ответа своей записи, обсуждение уже не меняет, но
+// его комментарий в окно попадает (слияние по id повторы не боится).
 
 import {
   COMMENT_PAGE_MAX,
@@ -183,13 +185,15 @@ export class CommentStore {
       return;
     }
     const was = this.threads.get(ev.thread.id);
-    if (was && was.seq >= ev.thread.seq) return;
     const fresh = ev.action === 'create' || ev.action === 'reply';
-    // Непрочитано — для чужого нового комментария в обсуждении, которое не открыто; своё всегда прочитано.
-    let unread = was?.unread ?? false;
-    if (ev.by === this.env.user) unread = fresh ? false : unread;
-    else if (fresh) unread = this.open !== ev.thread.id;
-    this.upsert({ ...ev.thread, unread });
+    // Обсуждение уже новее (ответ своей записи пришёл раньше события соседа): оно не меняется, а окно — да, ниже.
+    if (!was || was.seq < ev.thread.seq) {
+      // Непрочитано — для чужого нового комментария в обсуждении, которое не открыто; своё всегда прочитано.
+      let unread = was?.unread ?? false;
+      if (ev.by === this.env.user) unread = fresh ? false : unread;
+      else if (fresh) unread = this.open !== ev.thread.id;
+      this.upsert({ ...ev.thread, unread });
+    }
     if (this.detail?.thread === ev.thread.id) {
       if (ev.deleted) this.detail.comments = this.detail.comments.filter((c) => c.id !== ev.deleted);
       if (ev.comment) {
