@@ -585,3 +585,38 @@ fn core_rejects_what_the_editor_would_accept() {
     });
     assert_eq!(c.editor().comment_open(), Some("late"));
 }
+
+/// Файл больше чем с 10 000 обсуждений: список с сервера длиннее предела — видны первые
+/// `COMMENT_PINS_MAX` меток, ошибки нет, ядро работает дальше.
+#[test]
+fn over_limit_pin_list_from_the_wire_shows_the_first_pins() {
+    let mut c = core();
+    available(&mut c);
+    let mut pins: Vec<_> = (0..COMMENT_PINS_MAX + 5)
+        .map(|i| serde_json::to_value(pin(&c, &format!("t{i}"), 0.0, 0.0)).unwrap())
+        .collect();
+    pins.push(json!("хвост не разбирается"));
+    let cmd: Command = serde_json::from_value(json!({
+        "type": "commentPins", "pins": pins, "replace": true
+    }))
+    .unwrap();
+    c.take_events();
+    c.command(cmd);
+    assert_eq!(c.editor().comment_pin_count(), COMMENT_PINS_MAX);
+    assert!(c.editor().comment_pin("t0").is_some());
+    assert!(c
+        .editor()
+        .comment_pin(&format!("t{}", COMMENT_PINS_MAX))
+        .is_none());
+    assert!(!c
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::Error { .. })));
+    c.command(Command::CommentOpen {
+        id: Some("t0".into()),
+    });
+    assert_eq!(c.editor().comment_open(), Some("t0"));
+    let ids = json!({ "type": "commentPinsRemove", "ids": ["t0", "t1"] });
+    c.command(serde_json::from_value(ids).unwrap());
+    assert_eq!(c.editor().comment_pin_count(), COMMENT_PINS_MAX - 2);
+}

@@ -97,21 +97,24 @@ impl WasmSurface {
 }
 
 /// Команда из JS-объекта. Неверная форма — текст ошибки, не паника. Список длиннее предела
-/// (`command_list_limit`) отвергается до разбора: массив не обходится.
+/// (`command_list_limit`) режется до предела до разбора — в мелкой копии команды, хвост массива
+/// не обходится; разбор берёт первые элементы.
 pub fn parse_command(cmd: JsValue) -> Result<Command, String> {
     let kind = js_sys::Reflect::get(&cmd, &JsValue::from_str("type"))
         .ok()
         .and_then(|t| t.as_string());
+    let mut cmd = cmd;
     if let Some((field, max)) = kind.as_deref().and_then(command_list_limit) {
-        let list = js_sys::Reflect::get(&cmd, &JsValue::from_str(field)).ok();
-        let len = list
-            .as_ref()
-            .and_then(|l| l.dyn_ref::<js_sys::Array>())
-            .map_or(0, |a| a.length() as usize);
-        if len > max {
-            return Err(format!(
-                "Неверная команда: в «{field}» {len} элементов, больше {max}"
-            ));
+        let key = JsValue::from_str(field);
+        let long = js_sys::Reflect::get(&cmd, &key)
+            .ok()
+            .and_then(|l| l.dyn_into::<js_sys::Array>().ok())
+            .filter(|a| a.length() as usize > max);
+        if let (Some(list), Some(obj)) = (long, cmd.dyn_ref::<js_sys::Object>()) {
+            let copy = js_sys::Object::assign(&js_sys::Object::new(), obj);
+            js_sys::Reflect::set(&copy, &key, &list.slice(0, max as u32))
+                .map_err(|_| "Неверная команда: список не укоротить".to_string())?;
+            cmd = copy.into();
         }
     }
     serde_wasm_bindgen::from_value::<Command>(cmd).map_err(|e| format!("Неверная команда: {e}"))

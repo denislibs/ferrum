@@ -462,14 +462,15 @@ pub const PRESENCE_PEERS_MAX: usize = 1024;
 pub const PRESENCE_PART_IDS_MAX: usize = 2048;
 
 /// Комментарии (спека подсистемы 4, раздел 10): меток и идентификаторов в одной команде не
-/// больше — длиннее список отвергается до разбора элементов (`command_list_limit`,
-/// `bounded_list`), у ядра всего меток не больше — лишние не принимаются; идентификатор
+/// больше — у длиннее списка разбираются первые `COMMENT_PINS_MAX`, хвост не разбирается
+/// (`command_list_limit`, `bounded_list`): в файле больше 10 000 обсуждений видны первые 10 000,
+/// а не ни одного; у ядра всего меток не больше — лишние не принимаются; идентификатор
 /// обсуждения — не длиннее; инициалы — не больше графем.
 pub const COMMENT_PINS_MAX: usize = ferrum_editor::COMMENT_PINS_MAX;
 
 /// Список команды с пределом длины: по `type` команды — поле и предел. Мост (`web::parse_command`)
-/// смотрит длину массива JS до разбора: длинный не обходится вовсе; разбор сам отвергает
-/// длинный список раньше его элементов (`bounded_list`).
+/// режет массив JS до предела до разбора: хвост не обходится вовсе; разбор сам берёт не больше
+/// предела и хвост пропускает, не разбирая элементов (`bounded_list`).
 pub fn command_list_limit(kind: &str) -> Option<(&'static str, usize)> {
     match kind {
         "commentPins" => Some(("pins", COMMENT_PINS_MAX)),
@@ -478,14 +479,14 @@ pub fn command_list_limit(kind: &str) -> Option<(&'static str, usize)> {
     }
 }
 
-/// Разбор списка не длиннее `max`: длиннее — ошибка по объявленной длине до разбора элементов,
-/// без неё — на `max + 1`-м элементе (он и дальнейшие не разбираются).
+/// Первые `max` элементов списка **(поведение)**: хвост пропускается (`IgnoredAny`) — не
+/// разбирается в значения и не ошибка, как `take(COMMENT_PINS_MAX)` у ядра.
 fn bounded_list<'de, D, T>(d: D, max: usize) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
+    use serde::de::{IgnoredAny, SeqAccess, Visitor};
     use std::marker::PhantomData;
 
     struct Bounded<T>(usize, PhantomData<T>);
@@ -494,13 +495,10 @@ where
         type Value = Vec<T>;
 
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "список не длиннее {}", self.0)
+            write!(f, "список (берутся первые {})", self.0)
         }
 
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
-            if let Some(n) = seq.size_hint().filter(|n| *n > self.0) {
-                return Err(A::Error::invalid_length(n, &self));
-            }
             let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.0));
             while out.len() < self.0 {
                 match seq.next_element()? {
@@ -508,9 +506,7 @@ where
                     None => return Ok(out),
                 }
             }
-            if seq.next_element::<IgnoredAny>()?.is_some() {
-                return Err(A::Error::invalid_length(self.0 + 1, &self));
-            }
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
             Ok(out)
         }
     }
@@ -1712,15 +1708,12 @@ pub enum CoreEvent {
 mod bounded_tests {
     use super::*;
 
-    /// Поток JSON длины не объявляет: отказ на `max + 1`-м элементе, сам он не разбирается
-    /// (неверная форма не важна — ошибка о длине).
+    /// Поток JSON длины не объявляет: берутся первые `max`, хвост пропускается не разбираясь
+    /// (элемент неверной формы в нём — не ошибка).
     #[test]
-    fn bounded_list_stops_at_limit_without_declared_length() {
-        let mut d = serde_json::Deserializer::from_str(r#"["a", "b", {"не": "строка"}]"#);
-        let err = bounded_list::<_, String>(&mut d, 2)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("invalid length"), "{err}");
+    fn bounded_list_keeps_first_max_and_skips_the_tail() {
+        let mut d = serde_json::Deserializer::from_str(r#"["a", "b", {"не": "строка"}, 5]"#);
+        assert_eq!(bounded_list::<_, String>(&mut d, 2).unwrap(), ["a", "b"]);
         let mut d = serde_json::Deserializer::from_str(r#"["a", "b"]"#);
         assert_eq!(bounded_list::<_, String>(&mut d, 2).unwrap(), ["a", "b"]);
     }
