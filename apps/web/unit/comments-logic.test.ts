@@ -86,6 +86,14 @@ test('длина — в кодовых точках, как у сервера: 4
   expect(bodyState('   ').ok).toBe(false);
 });
 
+test('m-1: поле ввода считает «пусто» как сервер: одни невидимые знаки не включают «Отправить», длина — после очистки', () => {
+  for (const bad of ['\u200b\u200c\u200d', '\u3164', '\u2800 \u2800', '\u0301\u0301', '\u202e\u2066'])
+    expect(bodyState(bad).ok, JSON.stringify(bad)).toBe(false);
+  expect(bodyState('\u200b\u200c\u3164')).toEqual({ ok: false, length: 0, over: false });
+  expect(bodyState('a' + '\u200b'.repeat(COMMENT_BODY_MAX))).toEqual({ ok: true, length: 1, over: false });
+  expect(bodyState('👩\u200d💻')).toEqual({ ok: true, length: 3, over: false });
+});
+
 test('подпись автора: удалённый и без имени', () => {
   expect(authorName({ id: null, name: 'x' })).toBe('Удалённый пользователь');
   expect(authorName({ id: 'a', name: ' ' })).toBe('Участник');

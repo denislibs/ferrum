@@ -1,7 +1,15 @@
 // Чистая логика панели и окна комментариев (спека подсистемы 4, раздел 10.3): фильтры и порядок панели, окно виртуального
 // списка, упоминания в поле ввода. Без DOM: модульные тесты проверяют её отдельно.
 
-import { commentLength, COMMENT_BODY_MAX, MENTION_QUERY_MAX, type CommentAuthor, type ThreadView } from '@ferrum/protocol';
+import {
+  cleanCommentText,
+  commentLength,
+  COMMENT_BODY_MAX,
+  MENTION_QUERY_MAX,
+  normalizeCommentBody,
+  type CommentAuthor,
+  type ThreadView,
+} from '@ferrum/protocol';
 
 export interface PanelFilter {
   /** `page` — только текущая страница. */
@@ -129,10 +137,11 @@ export function editableBody(body: string, names: Record<string, string>): { tex
   return { text, picked };
 }
 
-/** Можно ли отправить: не пусто и не длиннее предела — та же длина в кодовых точках, что считает сервер. */
+/** Можно ли отправить — та же функция, что у сервера (`normalizeCommentBody`): текст из одних невидимых знаков пуст, длина —
+ * в кодовых точках после той же очистки. */
 export function bodyState(stored: string): { ok: boolean; length: number; over: boolean } {
-  const length = commentLength(stored.trim());
-  return { ok: length > 0 && length <= COMMENT_BODY_MAX, length, over: length > COMMENT_BODY_MAX };
+  const length = commentLength(cleanCommentText(stored));
+  return { ok: normalizeCommentBody(stored) !== null, length, over: length > COMMENT_BODY_MAX };
 }
 
 /** Время для панели и окна: «только что», минуты, часы, иначе дата. */

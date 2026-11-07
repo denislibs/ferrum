@@ -6,7 +6,8 @@
 // догоняние `GET ?after=известный` страницами. Пока идёт догоняние, события ждут и потом применяются по тому же правилу.
 // Ответ своего изменения меняет обсуждение, но не `known`: его событие придёт и будет пропущено по `seq` обсуждения. Окно —
 // не по `seq` обсуждения: событие соседа с меньшим номером, пришедшее после ответа своей записи, обсуждение уже не меняет, но
-// его комментарий в окно попадает (слияние по id повторы не боится).
+// его комментарий в окно попадает — по месту в порядке создания. Версия комментария в окне помнит номер изменения, с которым
+// пришла: более старое событие её не откатывает и удалённый не возвращает.
 
 import {
   COMMENT_PAGE_MAX,
@@ -19,6 +20,7 @@ import {
   type CommentAuthor,
   type CommentDto,
   type CommentEvent,
+  type CommentWriteDto,
   type FileRole,
   type MentionCandidate,
   type PinDto,
@@ -130,7 +132,9 @@ export class CommentStore {
   private readonly waiting: CommentEvent[] = [];
   private role: FileRole | null = null;
   private open: string | null = null;
-  private detail: { thread: string; comments: CommentDto[] } | null = null;
+  /** Открытое обсуждение: `base` — номер, с которым оно загружено (всё до него в нём учтено), `seen` — номер последнего
+   * изменения каждого комментария после загрузки (и удаления). */
+  private detail: { thread: string; comments: CommentDto[]; base: number; seen: Map<string, number> } | null = null;
   /** Изменения для панели, ждущие отправки. */
   private upserts = new Map<string, ThreadView>();
   private removedOut = new Set<string>();
@@ -195,13 +199,7 @@ export class CommentStore {
       this.upsert({ ...ev.thread, unread });
     }
     if (this.detail?.thread === ev.thread.id) {
-      if (ev.deleted) this.detail.comments = this.detail.comments.filter((c) => c.id !== ev.deleted);
-      if (ev.comment) {
-        const list = this.detail.comments;
-        const at = list.findIndex((c) => c.id === ev.comment!.id);
-        if (at >= 0) list[at] = ev.comment;
-        else list.push(ev.comment);
-      }
+      this.mergeDetail(ev.seq, ev.comment, ev.deleted);
       this.postDetail();
       // Открытое обсуждение читается сразу: на других вкладках и после перезагрузки оно не «новое».
       if (fresh && ev.by !== this.env.user) void this.markRead(ev.thread.id);
@@ -372,10 +370,7 @@ export class CommentStore {
       const was = this.threads.get(w.thread.id);
       if (!was || was.seq < w.thread.seq) this.upsert(w.thread);
       if (this.detail?.thread === w.thread.id && w.comment) {
-        const list = this.detail.comments;
-        const at = list.findIndex((c) => c.id === w.comment!.id);
-        if (at >= 0) list[at] = w.comment;
-        else list.push(w.comment);
+        this.mergeDetail(w.seq, w.comment, null);
         this.postDetail();
       }
     }
@@ -400,7 +395,7 @@ export class CommentStore {
       case 'delete': {
         const r = await this.write(`/comments/${req.thread}/comments/${req.comment}`, 'DELETE');
         if (r.ok && this.detail?.thread === req.thread) {
-          this.detail.comments = this.detail.comments.filter((c) => c.id !== req.comment);
+          this.mergeDetail((r.value as CommentWriteDto).seq, null, req.comment);
           if (this.threads.has(req.thread)) this.postDetail();
         }
         return r;
@@ -439,13 +434,37 @@ export class CommentStore {
     // Пока шёл запрос, пришёл ответ или правка (окна ещё не было — событие его не тронуло): ответ сервера устарел, ещё раз.
     // Не больше одного раза за открытие: сервер, у которого список и обсуждение расходятся, не заставит гонять запросы.
     if (was && was.seq > d.thread.seq && !retried) return this.loadDetail(thread, true);
-    this.detail = { thread, comments: d.comments };
+    this.detail = { thread, comments: d.comments, base: d.thread.seq, seen: new Map() };
     // Список мог ещё не дойти (ссылка на обсуждение): обсуждение из ответа, прочитанное.
     if (!was || was.seq <= d.thread.seq) this.upsert({ ...d.thread, unread: false });
     else if (was.unread) this.upsert({ ...was, unread: false });
     this.postDetail();
     if (d.thread.unread || was?.unread) void this.markRead(thread);
     return { ok: true, value: d.thread };
+  }
+
+  /** Изменение `seq` в открытом окне. Не новее загруженного или известной версии комментария — пропускается: событие, пришедшее
+   * после ответа своей записи, не откатывает правку и не возвращает удалённый. Новый комментарий встаёт в порядке сервера:
+   * первый — первым, остальные по времени создания и id (чужой более ранний ответ — выше своего). */
+  private mergeDetail(seq: number, comment: CommentDto | null, deleted: string | null): void {
+    const d = this.detail;
+    if (!d) return;
+    if (deleted) {
+      d.seen.set(deleted, Math.max(seq, d.seen.get(deleted) ?? 0));
+      d.comments = d.comments.filter((c) => c.id !== deleted);
+    }
+    if (!comment || seq <= d.base || seq <= (d.seen.get(comment.id) ?? 0)) return;
+    d.seen.set(comment.id, seq);
+    const first = this.threads.get(d.thread)?.first.id;
+    const key = (c: CommentDto): [number, number, string] => [c.id === first ? 0 : 1, c.createdAt, c.id];
+    const before = (a: CommentDto, b: CommentDto): boolean => {
+      const [x, y] = [key(a), key(b)];
+      return x[0] !== y[0] ? x[0] < y[0] : x[1] !== y[1] ? x[1] < y[1] : x[2] < y[2];
+    };
+    const list = d.comments.filter((c) => c.id !== comment.id);
+    const at = list.findIndex((c) => before(comment, c));
+    list.splice(at < 0 ? list.length : at, 0, comment);
+    d.comments = list;
   }
 
   private postDetail(): void {

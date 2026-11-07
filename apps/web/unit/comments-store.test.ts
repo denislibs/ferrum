@@ -492,11 +492,51 @@ test('I1: ответ своей записи раньше события сос�
   s.store.event(ev(3, thread(1, 3, { replies: 2 }), 'reply', ME, mine));
   await s.settle();
   const d = s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>;
-  expect(d.comments.map((c) => c.id).sort()).toEqual([comment(1, 100).id, theirs.id, mine.id].sort());
+  // Порядок — как у сервера, по времени создания (m-3): ответ соседа, написанный раньше, — выше моего.
+  expect(d.comments.map((c) => c.id)).toEqual([comment(1, 100).id, theirs.id, mine.id]);
   // Прочтение ушло на сервер, обсуждение не «новое».
   expect(s.calls.filter((c) => c.path.endsWith('/read')).length).toBe(reads + 1);
   expect(s.store.thread(uuid(1))?.unread).toBe(false);
   expect(s.store.thread(uuid(1))?.seq).toBe(3);
+});
+
+test('m-4: устаревшее событие не откатывает комментарий в окне и не возвращает удалённый', async () => {
+  const s = stand();
+  const mine = comment(1, 101, ME, 'v0');
+  const gone = comment(1, 102, ME, 'удалю');
+  s.list(0, { seq: 2, threads: [thread(1, 2, { replies: 2 })] });
+  s.store.connected('editor');
+  await s.settle();
+  s.routes.push((c) =>
+    c.path === `/api/files/f/comments/${uuid(1)}` && c.method === 'GET'
+      ? { status: 200, body: { thread: thread(1, 2, { replies: 2 }), comments: [comment(1, 100), mine, gone] } }
+      : null,
+  );
+  await s.store.request(1, { k: 'open', thread: uuid(1) });
+  // Правка (номер 5) и удаление (номер 6) — ответы своих записей раньше событий; события 3 и 4 — более старые правки этих же
+  // комментариев (из другой вкладки).
+  const v2 = { ...mine, body: 'v2', editedAt: 5 };
+  s.routes.unshift((c) =>
+    c.method === 'PATCH' && c.path.endsWith(`/comments/${mine.id}`)
+      ? { status: 200, body: { seq: 5, thread: thread(1, 5, { replies: 2 }), comment: v2, removed: false } }
+      : null,
+  );
+  s.routes.unshift((c) =>
+    c.method === 'DELETE' && c.path.endsWith(`/comments/${gone.id}`)
+      ? { status: 200, body: { seq: 6, thread: thread(1, 6, { replies: 1 }), comment: null, removed: false } }
+      : null,
+  );
+  await s.store.request(2, { k: 'edit', thread: uuid(1), comment: mine.id, body: 'v2' });
+  await s.store.request(3, { k: 'delete', thread: uuid(1), comment: gone.id });
+  const shown = () => (s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>).comments;
+  expect(shown().map((c) => c.body)).toEqual(['текст 100', 'v2']);
+  s.store.event(ev(3, thread(1, 3, { replies: 2 }), 'edit', ME, { ...gone, body: 'старое', editedAt: 3 }));
+  expect(shown().map((c) => c.body)).toEqual(['текст 100', 'v2']);
+  s.store.event(ev(4, thread(1, 4, { replies: 2 }), 'edit', ME, { ...mine, body: 'v1', editedAt: 4 }));
+  expect(shown().map((c) => c.body)).toEqual(['текст 100', 'v2']);
+  s.store.event(ev(5, thread(1, 5, { replies: 2 }), 'edit', ME, v2));
+  s.store.event({ ...(ev(6, thread(1, 6, { replies: 1 }), 'edit', ME) as Extract<CommentEvent, { kind: 'thread' }>), deleted: gone.id });
+  expect(shown().map((c) => c.body)).toEqual(['текст 100', 'v2']);
 });
 
 test('H1: первый список панели — пачками по 500: `reset` у первой, `more` у всех, кроме последней', async () => {

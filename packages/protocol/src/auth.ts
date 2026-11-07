@@ -31,11 +31,12 @@ const CONTROL_RE = /[\u0000-\u001f\u007f]/;
  * переворачивают или маскируют соседний текст — имя с ними можно выдать за чужое или сделать пустым на вид. U+034F —
  * комбинирующий, поэтому вне класса. Соединитель нулевой ширины (ZWJ, U+200D) — отдельно: текст комментария оставляет его
  * внутри эмодзи (`normalizeCommentBody`), имя — нигде. */
-export const INVISIBLE_BUT_ZWJ_RE = /[\p{Bidi_Control}­ᅟᅠ឴឵᠎​‌‎‏⁠-⁤⠀ㅤ﻿ﾠ]|͏/gu;
+export const INVISIBLE_BUT_ZWJ_RE =
+  /[\p{Bidi_Control}\u00ad\u115f\u1160\u17b4\u17b5\u180e\u200b\u200c\u200e\u200f\u2060-\u2064\u2800\u3164\ufeff\uffa0]|\u034f/gu;
 
 /** Имя без невидимых символов (имя в профиле и подпись курсора у других). */
 export function stripInvisible(s: string): string {
-  return s.replace(INVISIBLE_BUT_ZWJ_RE, '').replace(/‍/g, '');
+  return s.replace(INVISIBLE_BUT_ZWJ_RE, '').replace(/\u200d/g, '');
 }
 
 /** Все коды ошибок: клиент сверяет ответ с этим списком, поэтому новый код добавляется только здесь.

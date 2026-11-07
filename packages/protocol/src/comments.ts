@@ -43,7 +43,7 @@ const MENTION_RE = /@\[([A-Za-z0-9_-]{1,64})\]/g;
 /** Управляющие C0 (кроме перевода строки и табуляции), DEL и C1. */
 // eslint-disable-next-line no-control-regex
 const CONTROLS_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
-/** Соединитель нулевой ширины не внутри эмодзи (👩‍💻 держится им, а сам по себе он невидим). */
+/** Соединитель нулевой ширины не внутри эмодзи (👩 U+200D 💻 держится им, а сам по себе он невидим). */
 const LOOSE_ZWJ_RE = /(?<!\p{Extended_Pictographic}(?:\u{fe0f}|\p{Emoji_Modifier})?)\u200d|\u200d(?!\p{Extended_Pictographic})/gu;
 /** Комбинирующих знаков подряд (на одну графему) — не больше 8: сверх них строка «наползает» на соседние в окне и панели. */
 const MARKS_RE = /(\p{M}{8})\p{M}+/gu;
@@ -62,7 +62,7 @@ export function commentLength(s: string): number {
 /** Очистка текста без проверок: переводы строк — `\n`, управляющие, знаки направления и невидимые (тот же класс, что у имён,
  * `auth.ts`; ZWJ — только вне эмодзи) убираются, комбинирующих знаков подряд — не больше 8, одиночные суррогаты заменяются,
  * края обрезаются. Повторная очистка ничего не меняет. */
-function cleanCommentText(s: string): string {
+export function cleanCommentText(s: string): string {
   return s
     .toWellFormed()
     .replace(/\r\n?/g, '\n')

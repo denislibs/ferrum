@@ -93,17 +93,18 @@ test('текст: только текст — переводы строк, уп�
 
 test('L4: невидимые знаки — как у имён, ZWJ — только внутри эмодзи, видимый знак обязателен, комбинирующих — не больше 8', () => {
   // Нулевой ширины, соединители слов, заполнители хангыля, BOM, мягкий перенос — прочь.
-  expect(normalizeCommentBody('a​b‌c⁠d⁣e﻿fㅤgᅟh­i͏j')).toBe('abcdefghij');
-  // ZWJ внутри эмодзи держит его целым (👩‍💻, 🏳️‍🌈, 👋🏽‍...) — остаётся; между буквами и на краях — нет.
-  for (const e of ['👩‍💻', '🏳️‍🌈', '👨🏽‍🚀']) expect(normalizeCommentBody(`x ${e} y`)).toBe(`x ${e} y`);
-  expect(normalizeCommentBody('a‍b 😀‍ ‍😀 😀‍‍😀')).toBe('ab 😀 😀 😀😀');
+  expect(normalizeCommentBody('a\u200bb\u200cc\u2060d\u2063e\ufefff\u3164g\u115fh\u00adi\u034fj')).toBe('abcdefghij');
+  // ZWJ внутри эмодзи держит его целым (👩 U+200D 💻, 🏳 U+FE0F U+200D 🌈, 👋🏽 U+200D …) — остаётся; между буквами и на краях — нет.
+  for (const e of ['👩\u200d💻', '🏳\ufe0f\u200d🌈', '👨🏽\u200d🚀']) expect(normalizeCommentBody(`x ${e} y`)).toBe(`x ${e} y`);
+  expect(normalizeCommentBody('a\u200db 😀\u200d \u200d😀 😀\u200d\u200d😀')).toBe('ab 😀 😀 😀😀');
   // Только невидимые — пусто на вид: не комментарий.
-  for (const bad of ['​‌‍', 'ㅤ', '⠀ ⠀', '́́', '‍😀'.slice(0, 1)]) expect(normalizeCommentBody(bad), JSON.stringify(bad)).toBeNull();
+  for (const bad of ['\u200b\u200c\u200d', '\u3164', '\u2800 \u2800', '\u0301\u0301', '\u200d😀'.slice(0, 1)])
+    expect(normalizeCommentBody(bad), JSON.stringify(bad)).toBeNull();
   // Комбинирующих подряд — не больше 8: «залго» не наползает на соседние строки.
-  expect(normalizeCommentBody('a' + '́'.repeat(50) + 'b')).toBe('a' + '́'.repeat(8) + 'b');
-  expect(normalizeCommentBody('ё̈̈')).toBe('ё̈̈');
+  expect(normalizeCommentBody('a' + '\u0301'.repeat(50) + 'b')).toBe('a' + '\u0301'.repeat(8) + 'b');
+  expect(normalizeCommentBody('ё\u0308\u0308')).toBe('ё\u0308\u0308');
   // Повтор ничего не меняет: сервер и поле ввода считают одно.
-  const once = normalizeCommentBody('x‍‍😀' + '́'.repeat(20) + '​')!;
+  const once = normalizeCommentBody('x\u200d\u200d😀' + '\u0301'.repeat(20) + '\u200b')!;
   expect(normalizeCommentBody(once)).toBe(once);
 });
 
@@ -119,9 +120,9 @@ test('H1: начало текста — не длиннее предела, уп
   const cut = 'а'.repeat(COMMENT_PREVIEW_MAX - 10) + ` @[${id}] хвост`;
   expect(commentPreview(cut)).toEqual({ text: 'а'.repeat(COMMENT_PREVIEW_MAX - 10), more: true });
   // Эмодзи на краю, разрезанный после соединителя: висящего ZWJ нет.
-  const zwj = 'а'.repeat(COMMENT_PREVIEW_MAX - 2) + '👩‍💻 и дальше';
+  const zwj = 'а'.repeat(COMMENT_PREVIEW_MAX - 2) + '👩\u200d💻 и дальше';
   expect(commentPreview(zwj).text).toBe('а'.repeat(COMMENT_PREVIEW_MAX - 2) + '👩');
-  for (const body of [cut, zwj, '😀'.repeat(4000), 'a' + '́'.repeat(8) + 'b'.repeat(400)]) {
+  for (const body of [cut, zwj, '😀'.repeat(4000), 'a' + '\u0301'.repeat(8) + 'b'.repeat(400)]) {
     const t = commentPreview(normalizeCommentBody(body)!).text;
     expect(normalizeCommentBody(t)).toBe(t);
   }
