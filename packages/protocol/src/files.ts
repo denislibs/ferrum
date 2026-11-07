@@ -31,6 +31,8 @@ export const API_ERROR_CODES = [
   /** «Скачать копию»: журнал документа, который видят люди, в файл не входит (больше предела сервера, сбой сжатия). Файл
    * был бы неполной копией; правки целы на сервере. */
   'INCOMPLETE',
+  /** В обсуждении уже `THREAD_COMMENTS_MAX` комментариев: ответ не принят. */
+  'THREAD_FULL',
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 export interface ApiErrorBody {

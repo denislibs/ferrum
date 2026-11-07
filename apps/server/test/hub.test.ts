@@ -124,6 +124,11 @@ test('кадры: первым hello, мусор и текст закрываю�
   old.hello(999);
   await old.wait('please-reload');
   expect((await old.waitClosed()).code).toBe(SYNC_CLOSE.RELOAD);
+  // Вкладка прошлой сборки (протокол без кадра `comment`) тоже: кадра комментария она не разобрала бы.
+  const stale = (await Client.open(s, owner, file))!;
+  stale.hello(SYNC_PROTOCOL - 1);
+  await stale.wait('please-reload');
+  expect((await stale.waitClosed()).code).toBe(SYNC_CLOSE.RELOAD);
 
   const huge = await connect(owner);
   huge.send(new Uint8Array(17 * 1024 * 1024));
