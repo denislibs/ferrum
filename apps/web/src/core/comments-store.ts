@@ -404,7 +404,7 @@ export class CommentStore {
     }
   }
 
-  private async loadDetail(thread: string): Promise<CommentResult> {
+  private async loadDetail(thread: string, retried = false): Promise<CommentResult> {
     const res = await this.env.fetch(`${this.env.base}/comments/${thread}`);
     const data = await json(res);
     if (this.open !== thread) return { ok: true };
@@ -417,7 +417,8 @@ export class CommentStore {
     if (!d) return { ok: false, failure: 'NETWORK' };
     const was = this.threads.get(thread);
     // Пока шёл запрос, пришёл ответ или правка (окна ещё не было — событие его не тронуло): ответ сервера устарел, ещё раз.
-    if (was && was.seq > d.thread.seq) return this.loadDetail(thread);
+    // Не больше одного раза за открытие: сервер, у которого список и обсуждение расходятся, не заставит гонять запросы.
+    if (was && was.seq > d.thread.seq && !retried) return this.loadDetail(thread, true);
     this.detail = { thread, comments: d.comments };
     // Список мог ещё не дойти (ссылка на обсуждение): обсуждение из ответа, прочитанное.
     if (!was || was.seq <= d.thread.seq) this.upsert({ ...d.thread, unread: false });

@@ -6,6 +6,7 @@ import {
   authorName,
   bodyState,
   DEFAULT_FILTER,
+  addPicked,
   editableBody,
   insertMention,
   listWindow,
@@ -112,4 +113,18 @@ test('окно у метки: справа сверху от неё и цели�
   expect(popoverPlace({ x: -50, y: 0 }, box, size)).toEqual({ left: 108, top: 48 });
   // Холст меньше окна — прижато к левому верхнему краю (длинное прокручивается внутри).
   expect(popoverPlace({ x: 100, y: 100 }, { left: 0, top: 0, width: 200, height: 150 }, size)).toEqual({ left: 8, top: 8 });
+});
+
+test('двое без имени: у каждого своё `@[id]` при отправке и после правки', () => {
+  const names = { a1: '', b2: '' };
+  const e = editableBody('@[a1] и @[b2], ещё раз @[a1]', names);
+  expect(e.text).toBe('@Участник и @Участник, ещё раз @Участник');
+  expect(storedBody(e.text, e.picked)).toBe('@[a1] и @[b2], ещё раз @[a1]');
+  // Выбор в поле: второй вставлен в середину — встаёт по порядку текста.
+  let picked = addPicked([], '@ ', 0, { id: 'a1', name: 'Участник' });
+  let text = '@Участник  и @';
+  picked = addPicked(picked, text, text.length - 1, { id: 'b2', name: 'Участник' });
+  text = '@Участник  и @Участник ';
+  picked = addPicked(picked, text, 10, { id: 'c3', name: 'Участник' });
+  expect(storedBody('@Участник @Участник и @Участник ', picked)).toBe('@[a1] @[c3] и @[b2] ');
 });

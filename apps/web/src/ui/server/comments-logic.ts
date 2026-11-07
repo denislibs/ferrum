@@ -65,14 +65,49 @@ export function insertMention(text: string, start: number, caret: number, name: 
   return { text: text.slice(0, start) + label + text.slice(caret), caret: start + label.length };
 }
 
+/** Выбранный человек запоминается вместе с текстом: на место `start` вставлено `@name`. Одинаковые имена (например, у двоих нет
+ * имени — «Участник») различает только порядок: запись встаёт после стольких записей с этим именем, сколько `@name` в тексте
+ * до `start`; один и тот же человек, упомянутый дважды, — две записи. */
+export function addPicked(
+  picked: { id: string; name: string }[],
+  text: string,
+  start: number,
+  p: { id: string; name: string },
+): { id: string; name: string }[] {
+  const label = `@${p.name}`;
+  let before = 0;
+  for (let i = text.indexOf(label); i !== -1 && i < start; i = text.indexOf(label, i + 1)) before++;
+  const out = [...picked];
+  let seen = 0;
+  let at = out.length;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].name !== p.name) continue;
+    if (seen === before) {
+      at = i;
+      break;
+    }
+    seen++;
+  }
+  out.splice(at, 0, p);
+  return out;
+}
+
 /** Текст для сервера: `@Имя` выбранных людей — `@[userId]`; остальное как есть. Длинные имена первыми: «Анна Мария» не станет
- * «Анна» с хвостом. Имя, которое человек стёр или изменил, остаётся текстом. */
+ * «Анна» с хвостом. Имя, которое человек стёр или изменил, остаётся текстом. Люди с одинаковым именем — по порядку в тексте. */
 export function storedBody(text: string, picked: { id: string; name: string }[]): string {
   const sorted = [...picked].sort((a, b) => b.name.length - a.name.length);
+  const used = new Map<string, number>();
   let out = '';
   let i = 0;
   while (i < text.length) {
-    const hit = text[i] === '@' ? sorted.find((p) => text.startsWith(`@${p.name}`, i)) : undefined;
+    const named = text[i] === '@' ? sorted.filter((p) => text.startsWith(`@${p.name}`, i)) : [];
+    let hit: { id: string; name: string } | undefined;
+    if (named.length > 0) {
+      const same = named.filter((p) => p.name === named[0].name);
+      const n = used.get(named[0].name) ?? 0;
+      used.set(named[0].name, n + 1);
+      hit = same[Math.min(n, same.length - 1)];
+    }
     if (hit) {
       out += `@[${hit.id}]`;
       i += hit.name.length + 1;
@@ -81,14 +116,14 @@ export function storedBody(text: string, picked: { id: string; name: string }[])
   return out;
 }
 
-/** Поле правки своего комментария: `@[id]` — обратно в `@Имя` и выбранные. */
+/** Поле правки своего комментария: `@[id]` — обратно в `@Имя` и выбранные (по записи на каждое упоминание, в порядке текста). */
 export function editableBody(body: string, names: Record<string, string>): { text: string; picked: { id: string; name: string }[] } {
   const picked: { id: string; name: string }[] = [];
   const text = body.replace(/@\[([A-Za-z0-9_-]{1,64})\]/g, (all, id: string) => {
     // Не из списка упомянутых — остаётся `@[id]`: при сохранении это то же упоминание. Без имени — «Участник», как при вставке.
     if (!Object.hasOwn(names, id)) return all;
     const name = mentionName(names[id]);
-    if (!picked.some((p) => p.id === id)) picked.push({ id, name });
+    picked.push({ id, name });
     return `@${name}`;
   });
   return { text, picked };

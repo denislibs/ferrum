@@ -441,3 +441,21 @@ test('T9-M4: событие с удалённым и новым коммента
   const d = s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>;
   expect(d.comments.map((c) => c.id)).toEqual([comment(1, 100).id, added.id]);
 });
+
+test('окно не гоняет запросы: сервер, у которого список опережает обсуждение, даёт не больше одного повтора', async () => {
+  const s = stand();
+  s.list(0, { seq: 5, threads: [thread(1, 5)] });
+  s.store.connected('editor');
+  await s.settle();
+  // Обсуждение всегда отвечает номером 1 — меньше известного 5; после третьего запроса — отказ, чтобы без предела тест не завис.
+  let n = 0;
+  s.routes.push((c) =>
+    c.path === `/api/files/f/comments/${uuid(1)}` && ++n <= 2
+      ? { status: 200, body: { thread: thread(1, 1), comments: [comment(1, 100)] } }
+      : null,
+  );
+  await s.store.request(1, { k: 'open', thread: uuid(1) });
+  expect(s.calls.filter((c) => c.path === `/api/files/f/comments/${uuid(1)}`)).toHaveLength(2);
+  const d = s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>;
+  expect(d.view?.seq).toBe(5);
+});

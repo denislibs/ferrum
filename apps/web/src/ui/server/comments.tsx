@@ -15,6 +15,7 @@ import { apiFailureText, type ApiFailure } from './server-api';
 // Стили комментариев — отсюда, а не из `main.tsx`: в автономную сборку этот файл не попадает, и стили с ним.
 import '../styles/comments.css';
 import {
+  addPicked,
   authorName,
   bodyState,
   DEFAULT_FILTER,
@@ -96,7 +97,7 @@ function Composer(props: ComposerProps) {
     if (!at) return;
     const name = p.name.trim() || 'Участник';
     const next = insertMention(field.value, at.start, field.selectionStart, name);
-    if (!picked.some((x) => x.id === p.id)) picked.push({ id: p.id, name });
+    picked = addPicked(picked, field.value, at.start, { id: p.id, name });
     setText(next.text);
     field.value = next.text;
     field.setSelectionRange(next.caret, next.caret);
