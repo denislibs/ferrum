@@ -258,6 +258,10 @@ impl Ctx<'_> {
             "правка документа при открытом пути пера: нет Editor::begin_doc_edit"
         );
         self.scene.clear_preview();
+        debug_assert!(
+            !self.scene.has_remote_preview(),
+            "чужое превью попало бы в документ"
+        );
         let scene: &Scene = self.scene;
         let result = self
             .doc
@@ -318,6 +322,10 @@ pub(crate) fn sync(doc: &mut Document, page: PageId, scene: &mut Scene, out: &mu
 pub trait Tool {
     fn kind(&self) -> ToolKind;
     fn pointer_down(&mut self, cx: &mut Ctx, e: &PointerEvent);
+    /// Сразу после `pointer_down`: нажатие выбрало цель по тому, что видно (со слоем чужого
+    /// превью), а теперь слоя нет — опоры жеста, которые попадут в документ (мировая матрица
+    /// родителя, привязки), берутся заново по документу.
+    fn rebase(&mut self, _cx: &mut Ctx) {}
     fn pointer_move(&mut self, cx: &mut Ctx, e: &PointerEvent);
     fn pointer_up(&mut self, cx: &mut Ctx, e: &PointerEvent) -> Flow;
     /// Модификаторы изменились во время жеста (нажали или отпустили Shift, Alt).
@@ -333,4 +341,8 @@ pub trait Tool {
     }
     fn cursor(&self) -> Cursor;
     fn overlay(&self) -> ToolOverlay;
+    /// Идущий жест для других участников (живое превью): перенос, ресайз, поворот выделения.
+    fn gesture(&self) -> Option<crate::presence::Gesture> {
+        None
+    }
 }

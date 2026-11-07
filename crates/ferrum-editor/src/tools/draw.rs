@@ -226,6 +226,15 @@ impl DrawTool {
     }
 }
 
+/// Опоры фигуры в родителе `parent`: его мировая матрица и привязки к соседям.
+fn bases(cx: &Ctx, parent: Option<NodeId>) -> (Affine, Snapper) {
+    let parent_world = parent
+        .and_then(|p| cx.scene.node(p))
+        .map_or(Affine::IDENTITY, |n| n.world);
+    let snapper = Snapper::for_parent(cx.scene, parent, &[]).with_guides(cx.snap_guides());
+    (parent_world, snapper)
+}
+
 impl Tool for DrawTool {
     fn kind(&self) -> ToolKind {
         match self.shape {
@@ -245,17 +254,26 @@ impl Tool for DrawTool {
             world = Point::new(world.x.round(), world.y.round());
         }
         let parent = drop_frame_at(cx.scene, world, cx.tolerance(), &HashSet::new());
-        let parent_world = parent
-            .and_then(|p| cx.scene.node(p))
-            .map_or(Affine::IDENTITY, |n| n.world);
+        let (parent_world, snapper) = bases(cx, parent);
         *cx.hover = None;
         self.state = State::Pressed(Start {
             screen: e.point,
             world,
             parent,
             parent_world,
-            snapper: Snapper::for_parent(cx.scene, parent, &[]).with_guides(cx.snap_guides()),
+            snapper,
         });
+    }
+
+    /// **(поведение)** Слоя чужого превью нет: родитель выбирается заново по документу в той же
+    /// точке мира. Фигура встаёт там, где её рисуют, и видна и во время рисования, и после
+    /// отпускания участника: фрейм, который он тянет, режет содержимое, и фигура в его осях по
+    /// документу оказалась бы невидимой (финальное ревью, Important 2).
+    fn rebase(&mut self, cx: &mut Ctx) {
+        if let State::Pressed(start) = &mut self.state {
+            start.parent = drop_frame_at(cx.scene, start.world, cx.tolerance(), &HashSet::new());
+            (start.parent_world, start.snapper) = bases(cx, start.parent);
+        }
     }
 
     fn pointer_move(&mut self, cx: &mut Ctx, e: &PointerEvent) {

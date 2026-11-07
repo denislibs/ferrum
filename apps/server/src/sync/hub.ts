@@ -6,7 +6,7 @@ import {
   encodeServerFrame,
   encodeVersion,
   MAX_SYNC_FRAME_BYTES,
-  parseClientFrame,
+  readClientFrame,
   RANK_ROLE,
   ROLE_RANK,
   snapshotPath,
@@ -25,6 +25,7 @@ import { authorizeUpgrade, type UpgradeSession } from '../auth-routes';
 import type { BlobStore } from '../blob-store';
 import { inTransaction } from '../db';
 import { findDocSection } from './container-read';
+import { PresenceHub, type PresenceLimits } from './presence';
 import { UpdateLog, type Item, type LogLimits } from './update-log';
 import { Validator } from './validator';
 
@@ -48,6 +49,8 @@ export interface ConnData {
   strikes: number;
   helloTimer: Timer | null;
   lagSince: number;
+  /** Имя человека для присутствия: из базы при `hello`, не из кадров клиента. */
+  name: string;
 }
 
 interface DocSub {
@@ -105,6 +108,7 @@ export interface SyncLimits {
   /** Записей журнала за один запрос догоняния. */
   pumpRows: number;
   log: Partial<LogLimits>;
+  presence: Partial<PresenceLimits>;
 }
 
 /** Схема документа этой сборки: `SCHEMA_VERSION` ядра (`crates/ferrum-doc/src/document.rs`), сервер и клиент выходят
@@ -142,6 +146,7 @@ export const SYNC_LIMITS: SyncLimits = {
   knownSchema: SERVER_SCHEMA,
   pumpRows: 512,
   log: {},
+  presence: {},
 };
 
 /** Столько байт записей журнала за один запрос догоняния. */
@@ -210,6 +215,8 @@ const toMap = (o: Record<string, number>): VersionMap => new Map(Object.entries(
 export class SyncHub {
   readonly validator: Validator;
   readonly log: UpdateLog;
+  /** Присутствие участников (спека, раздел 9): своё у каждого файла, по соединениям с подтверждённой ролью. */
+  readonly presence: PresenceHub;
   private readonly limits: SyncLimits;
   private readonly conns = new Map<string, Set<ConnData>>();
   private readonly users = new Map<string, UserState>();
@@ -242,6 +249,7 @@ export class SyncHub {
     this.limits = { ...SYNC_LIMITS, ...limits };
     this.validator = new Validator(pool, blobs);
     this.log = new UpdateLog(pool, this.limits.log);
+    this.presence = new PresenceHub(this.limits.presence);
     this.log.onCommitted = (items, states) => {
       for (const { item, seq } of items) this.broadcast(item, seq);
       for (const s of states) this.onLog(s.file, s.doc, s.logCount, s.logBytes);
@@ -309,6 +317,7 @@ export class SyncHub {
       strikes: 0,
       helloTimer: null,
       lagSince: 0,
+      name: '',
     };
     if (!server.upgrade(req, { data })) return new Response(null, { status: 400 });
     return undefined;
@@ -408,6 +417,8 @@ export class SyncHub {
     this.total--;
     const u = this.users.get(d.user);
     if (u) u.conns--;
+    // Ушёл — пропадает у других сразу, а не через 30 с (спека, раздел 9).
+    this.presence.leave(d);
     const set = this.conns.get(d.file);
     set?.delete(d);
     if (set?.size === 0) {
@@ -457,7 +468,7 @@ export class SyncHub {
       return;
     }
     const at = performance.now();
-    const frame = parseClientFrame(message);
+    const frame = readClientFrame(message);
     if (!frame) {
       ws.close(SYNC_CLOSE.BAD_FRAME, 'frame');
       return;
@@ -473,6 +484,16 @@ export class SyncHub {
     if (frame.t === 'hello') {
       // Один раз на соединение, а открытия ограничены: пауза на `hello` оставила бы соединение без него навсегда.
       this.hello(d, frame.protocol, frame.schema);
+      return;
+    }
+    // Присутствие — мимо бакетов правок: его пределы свои, лишнее молча отбрасывается, а пауза правок от курсора была бы
+    // ложной. Кадр подписывает соединение: кто, имя и цвет — с сервера. Тело разбирает `PresenceHub` после своих пределов.
+    if (frame.t === 'presence') {
+      this.presence.state(d, d.name, frame.body);
+      return;
+    }
+    if (frame.t === 'presence-part') {
+      this.presence.part(d, frame.body);
       return;
     }
     const u = this.user(d.user);
@@ -509,9 +530,6 @@ export class SyncHub {
           }),
         );
         break;
-      case 'ephemeral':
-        // Присутствие — этап 4: кадр известен, сервер его пока не рассылает.
-        break;
     }
   }
 
@@ -528,11 +546,13 @@ export class SyncHub {
     // Схему поднимает только тот, кто может писать, и не выше известной этой сборке; без изменения строка не трогается.
     this.track(
       this.pool
-        .query<{ version: string; member: number; rank: number | null }>(
+        .query<{ version: string; member: number; rank: number | null; name: string | null }>(
           `WITH f AS (SELECT id, version, file_role_rank(id, $2) AS rank, file_member_rank(id, $2) AS member FROM file WHERE id = $1),
                 up AS (UPDATE file SET schema_version = $3 FROM f
                        WHERE file.id = f.id AND f.rank >= $4 AND file.schema_version < $3 RETURNING 1)
-           SELECT version, member, rank FROM f`,
+           SELECT version, member, rank,
+                  (SELECT name FROM "user" WHERE id = $2) AS name
+           FROM f`,
           [d.file, d.user, Math.min(schema, this.limits.knownSchema), ROLE_RANK.editor],
         )
         .then(({ rows }) => {
@@ -544,7 +564,10 @@ export class SyncHub {
             return;
           }
           d.role = role;
+          d.name = rows[0].name ?? '';
           this.send(d, { t: 'role', role, canShare: rows[0].member >= ROLE_RANK.editor, version: Number(rows[0].version) });
+          // Присутствие файла — только после роли, подтверждённой этим запросом: снятый доступ его не увидит.
+          this.presence.admit(d);
         })
         .catch((e: unknown) => {
           if (d.closed) return;
@@ -668,7 +691,7 @@ export class SyncHub {
 
   private async subscribe(d: ConnData, doc: string, frame: Uint8Array): Promise<void> {
     // Вектор не разбирается в `Map` до ответа базы: разобранный он в восемь раз больше кадра и жил бы через `await`. Байты
-    // кадра — своя копия: буфер сокета живёт только на время обработчика. Разбор уже проверен `parseClientFrame`.
+    // кадра — своя копия: буфер сокета живёт только на время обработчика. Разбор уже проверен `readClientFrame`.
     const raw = frame.slice();
     const old = d.docs.get(doc);
     if (!old && d.docs.size >= this.limits.subscribesPerConnection) {
@@ -904,6 +927,8 @@ export class SyncHub {
         if (role !== d.role) {
           d.role = role;
           this.send(d, { t: 'role', role, canShare: (r.member ?? 0) >= ROLE_RANK.editor, version: Number(r.version ?? 0) });
+          // Понижение посреди жеста: превью у других снимается сразу.
+          this.presence.roleChanged(d);
         }
       }
     }
@@ -1004,6 +1029,7 @@ export class SyncHub {
   async stop(): Promise<void> {
     this.stopped = true;
     for (const t of this.timers) clearInterval(t);
+    this.presence.stop();
     await this.log.stop();
     for (const set of this.conns.values()) for (const d of set) d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'restart');
     // Обработчики, начатые до закрытия, дописывают своё раньше, чем пул закроется.

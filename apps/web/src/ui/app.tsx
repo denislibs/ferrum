@@ -5,6 +5,7 @@
 // уход к экрану файлов или другому файлу сначала сохраняет текущий (`onLeave`).
 
 import { createEffect, createMemo, createSignal, ErrorBoundary, onCleanup, onMount, Show, untrack } from 'solid-js';
+import { reconcile } from 'solid-js/store';
 import { detectPlatform } from '../core/core';
 import { NEW_FILE_TAKEN } from '../core/file-list';
 import { MAX_JOURNAL_ENTRIES, MAX_OPEN_BYTES } from '../core/limits';
@@ -478,6 +479,7 @@ export function App(props: AppProps) {
               ed.send({ type: 'setViewOnly', on: true });
               store.toast('Вышла новая версия Ferrum — обновите страницу, правки сохранятся');
             },
+            participants: (list) => store.setState('participants', reconcile(list, { key: 'id' })),
           });
         };
         saver = createSaver(ed, props.files, id, version, stored, {
@@ -847,7 +849,7 @@ export function App(props: AppProps) {
           '--right-w': rightCollapsed() ? 'var(--panel-rail)' : `${right()}px`,
         }}
       >
-        <main class="fe-stage">
+        <main class="fe-stage" classList={{ 'fe-following': store.state.following !== null }}>
           <canvas
             ref={canvas}
             class="fe-canvas"
@@ -979,7 +981,7 @@ export function App(props: AppProps) {
                   <PanelToggle side="right" collapsed={rightCollapsed()} onToggle={setRightCollapsed} />
                 </div>
                 <Show when={!rightCollapsed()}>
-                  <DesignHeader file={props.file} />
+                  <DesignHeader file={props.file} self={props.files.user} />
                   <PropertiesPanel theme={theme()} />
                   <ResizeEdge side="right" width={right()} onWidth={setRight} />
                 </Show>

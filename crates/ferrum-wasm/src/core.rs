@@ -11,6 +11,7 @@
 
 mod fonts;
 mod panels;
+pub mod presence;
 mod sync;
 mod text;
 
@@ -102,6 +103,8 @@ pub struct Core {
     modified_sent: Option<bool>,
     /// Синхронизация с сервером: не включена у локальных файлов.
     sync: sync::SyncCore,
+    /// Своё присутствие для других участников: что и когда сказано.
+    presence: presence::PresenceOut,
     /// Ревизия правок: растёт с каждой правкой и заменой документа. Снимок несёт её,
     /// а `MarkSaved` снимает `modified`, только если с тех пор она не сменилась.
     revision: u64,
@@ -207,6 +210,8 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::ApplyRemote { .. }
             | Command::AddRemoteImage { .. }
             | Command::Thumbnail
+            | Command::Presence { .. }
+            | Command::PresenceReset
             | Command::Demo { .. }
             | Command::DemoText { .. }
             | Command::FlushJournal
@@ -215,6 +220,7 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements
+            | Command::ReadPresence
             | Command::SetTheme { .. }
             | Command::LayersWindow { .. }
             | Command::ExpandLayer { .. }
@@ -286,6 +292,7 @@ impl Core {
             revision: 0,
             journal_batch: 0,
             sync: sync::SyncCore::default(),
+            presence: Default::default(),
             fonts,
             font_state: fonts::FontState::default(),
             text_state: text::TextState::default(),
@@ -352,6 +359,10 @@ impl Core {
         }
         self.images = DocImages::default();
         self.sync = sync::SyncCore::default();
+        // Своё присутствие — с нуля: версия выделения и счётчики сцены нового редактора
+        // начинаются заново и могли бы совпасть с прошлым файлом. Номер версии для других
+        // растёт дальше.
+        self.presence.restart();
         self.selection = None;
         self.layers.reset();
         self.selected.clear();
@@ -718,6 +729,8 @@ impl Core {
     fn run_input(&mut self, input: Input) {
         self.editor.take_text_pending();
         let retry = input.clone();
+        // Своё действие под чужим превью: слой снимает сам редактор перед записью (нажатие
+        // инструмента, команда клавиши, вход в правку); ядро сцену до него не читает.
         self.editor.handle(input);
         if self.editor.take_text_pending() {
             self.wait(fonts::Waiting::Input(retry));
@@ -727,7 +740,7 @@ impl Core {
     /// Ждавшее шрифтов — по порядку, когда они пришли.
     fn run_waiting(&mut self, item: fonts::Waiting) {
         match item {
-            fonts::Waiting::Command(cmd) => self.run_command(cmd),
+            fonts::Waiting::Command(cmd) => self.run_command_held(cmd),
             fonts::Waiting::Input(input) => self.run_input(input),
         }
         self.drain_editor();
@@ -758,9 +771,23 @@ impl Core {
         if self.fonts_awaited() && waits_behind_fonts(&cmd) {
             self.wait(fonts::Waiting::Command(cmd));
         } else {
-            self.run_command(cmd);
+            self.run_command_held(cmd);
         }
         self.drain_editor();
+    }
+
+    /// Команда сразу или после ожидания шрифтов: она может читать сцену (правка, экспорт) и
+    /// править документ по ней, поэтому чужого превью в сцене нет, пока она идёт (спека
+    /// подсистемы 4, раздел 9).
+    fn run_command_held(&mut self, cmd: Command) {
+        let hold = presence::holds(&cmd);
+        if hold {
+            self.editor.presence_hold();
+        }
+        self.run_command(cmd);
+        if hold {
+            self.editor.presence_release();
+        }
     }
 
     fn run_command(&mut self, cmd: Command) {
@@ -790,6 +817,9 @@ impl Core {
                 self.add_remote_image(&hash, bytes.into_vec())
             }
             Command::Thumbnail => self.push_thumbnail(),
+            Command::Presence { items } => self.presence_items(items),
+            Command::PresenceReset => self.presence_reset(),
+            Command::Follow { participant } => self.editor.follow(participant),
             Command::FlushJournal => {
                 self.settle_waiting_fonts();
                 self.flush_journal(true);
@@ -875,6 +905,7 @@ impl Core {
                 self.pixels = Some(reference);
                 self.dirty = true;
             }
+            Command::ReadPresence => self.read_presence(),
             Command::ReadMeasurements => {
                 use ferrum_render::MeasureKind;
                 let all = self.editor.overlay().measurements;
@@ -997,6 +1028,9 @@ impl Core {
                 }),
                 EditorEvent::CommandStates(changed) => self.push_command_states(changed),
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
+                EditorEvent::Following(participant) => {
+                    self.events.push(CoreEvent::Following { participant })
+                }
             }
         }
         if let Some(ids) = selection {

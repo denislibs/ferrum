@@ -142,6 +142,24 @@ pub enum EditorEvent {
     CommandStates(Vec<(CommandId, CommandState)>),
     /// Сообщение об ошибке для пользователя.
     Error(String),
+    /// Следование за участником началось (номер) или кончилось (`None`): действием на
+    /// холсте, уходом участника, сменой страницы.
+    Following(Option<u32>),
+}
+
+/// Клавиша-модификатор: её нажатие — не действие на холсте.
+fn is_modifier(code: &str) -> bool {
+    matches!(
+        code,
+        "ShiftLeft"
+            | "ShiftRight"
+            | "ControlLeft"
+            | "ControlRight"
+            | "AltLeft"
+            | "AltRight"
+            | "MetaLeft"
+            | "MetaRight"
+    )
 }
 
 fn finite_point(p: Point) -> bool {
@@ -189,6 +207,8 @@ struct FrameKey {
     guides_revision: u64,
     /// Тянущаяся направляющая: положение, длина и значение на плашке.
     active_guide: Option<ferrum_render::ActiveGuide>,
+    /// Другие участники: их курсоры, рамки, плавное движение.
+    presence: u64,
     /// Подсказки привязки тянущейся линии: меняются без сдвига самой линии.
     guide_snap: Vec<kurbo::Line>,
     /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
@@ -218,7 +238,7 @@ pub struct Editor {
     pub(crate) settings: Settings,
     theme: OverlayTheme,
     pub(crate) out: Outbox,
-    last_pointer: Option<PointerEvent>,
+    pub(crate) last_pointer: Option<PointerEvent>,
     seen: Seen,
     /// Жест панели свойств (перетаскивание поля, палитра): свойства на начало.
     pub(crate) panel: Option<PanelGesture>,
@@ -262,6 +282,10 @@ pub struct Editor {
     pub(crate) rulers_cache: crate::guides::RulersCache,
     /// Протяжка направляющей из линейки или за неё саму.
     pub(crate) guide_drag: Option<crate::guides::GuideDrag>,
+    /// Другие участники файла (спека подсистемы 4, раздел 9).
+    pub(crate) presence: crate::presence::Presence,
+    /// Указатель над холстом: курсор виден другим.
+    pub(crate) pointer_inside: bool,
     /// Превью `SetGuides`: список владельца вместо его направляющих, пока жест идёт.
     pub(crate) guides_preview: Option<(ferrum_doc::GuideOwner, Vec<ferrum_doc::Guide>)>,
     /// Что под указателем без жеста: линейка или направляющая — курсор и нажатие.
@@ -328,6 +352,7 @@ impl Editor {
                 guides_shown: false,
                 guides_revision: 0,
                 active_guide: None,
+                presence: 0,
                 guide_snap: Vec::new(),
                 measures: Vec::new(),
                 text: None,
@@ -373,6 +398,8 @@ impl Editor {
             guide_drag: None,
             guides_preview: None,
             guide_hover: None,
+            presence: Default::default(),
+            pointer_inside: false,
         })
     }
 
@@ -587,6 +614,7 @@ impl Editor {
             rulers: self.rulers_overlay(),
             guides: self.guide_marks(),
             active_guide: self.active_guide(),
+            remote: self.remote_marks(),
         }
     }
 
@@ -644,12 +672,32 @@ impl Editor {
             return;
         }
         // Нажатие, клавиша или потеря фокуса на холсте во время жеста панели —
-        // жест панели отменяется: его превью и жест холста не живут вместе.
+        // жест панели отменяется: его превью и жест холста не живут вместе. Уход указателя с
+        // холста меняет только курсор присутствия: жест панели, начатый сразу после него, —
+        // не отменяется (запись кольца и сообщение панели не упорядочены).
         if !matches!(
             input,
-            Input::PointerMove(_) | Input::Wheel(_) | Input::Pinch { .. }
+            Input::PointerMove(_) | Input::Wheel(_) | Input::Pinch { .. } | Input::PointerLeave
         ) {
             self.cancel_panel();
+        }
+        // Чужое превью снимает не каждое событие, а то, что пишет в документ или берёт из сцены
+        // опоры для записи (`own_action`): нажатие инструмента (`press_tool`), команда клавиши
+        // (`run`), вход в правку текста и вектора. Остальное его не читает: модификаторы,
+        // отпускание без жеста, потеря фокуса; а идущий жест и правка держат слой снятым.
+        // Действие на холсте кончает следование за участником (поведение, как в Figma):
+        // нажатие, колесо, щипок, клавиша. Движение указателя — не действие.
+        match &input {
+            Input::PointerDown(_) | Input::Wheel(_) | Input::Pinch { .. } => self.stop_following(),
+            Input::KeyDown(e) if !is_modifier(&e.code) => self.stop_following(),
+            _ => {}
+        }
+        match &input {
+            Input::PointerDown(_) | Input::PointerMove(_) | Input::PointerUp(_) => {
+                self.pointer_inside = true
+            }
+            Input::PointerLeave => self.pointer_inside = false,
+            _ => {}
         }
         match &input {
             Input::PointerDown(e) | Input::PointerMove(e) | Input::PointerUp(e) => {
@@ -676,6 +724,7 @@ impl Editor {
                 self.cancel_gesture();
                 self.release_hold();
             }
+            Input::PointerLeave => {}
         }
         self.emit();
     }
@@ -717,7 +766,11 @@ impl Editor {
         }
     }
 
-    /// Нажатие достаётся инструменту.
+    /// Нажатие достаётся инструменту. Цель — по тому, что человек видит (как в Figma: наведение
+    /// и нажатие берут один узел, в том числе под чужим перетаскиванием), затем своё действие
+    /// снимает чужой слой, и опоры жеста инструмент берёт заново по документу (`Tool::rebase`).
+    /// Опоры, которые инструмент берёт позже (перенос и ресайз — на первом движении), уже без
+    /// слоя: идущий жест его не держит.
     pub(crate) fn press_tool(&mut self, e: &PointerEvent) {
         let (tool, mut cx) = self.split();
         tool.pointer_down(&mut cx, e);
@@ -743,6 +796,11 @@ impl Editor {
             }
             self.start_vector_edit(id);
         }
+        // Вход в правку снимает слой сам (по точке, выбранной по виду); жест инструмента —
+        // здесь.
+        self.own_action();
+        let (tool, mut cx) = self.split();
+        tool.rebase(&mut cx);
     }
 
     fn pointer_move(&mut self, e: PointerEvent) {
@@ -1002,6 +1060,7 @@ impl Editor {
     pub(crate) fn begin_doc_edit(&mut self) {
         self.finish_pen_path();
         self.cancel_gesture();
+        self.own_action();
     }
 
     /// Выбирает инструмент (тулбар, горячая клавиша). Жест текущего отменяется.
@@ -1083,6 +1142,7 @@ impl Editor {
         // Жест панели (поле, палитра) держит узлы на начало жеста: команда могла бы
         // их удалить или сдвинуть, поэтому он отменяется.
         self.cancel_panel();
+        self.stop_following();
         if self.is_busy() {
             if cmd == CommandId::Escape {
                 self.cancel_gesture();
@@ -1100,6 +1160,10 @@ impl Editor {
     {
         self.begin_doc_edit();
         let before = self.selection.to_vec();
+        debug_assert!(
+            !self.scene.has_remote_preview(),
+            "чужое превью попало бы в документ"
+        );
         let result = self.doc.transact(self.page, before, f);
         let changed = sync(&mut self.doc, self.page, &mut self.scene, &mut self.out);
         if let Ok(sel) = &result {
@@ -1164,6 +1228,8 @@ impl Editor {
 
     /// Переключает страницу: сцена строится заново, выделение снимается.
     pub fn set_page(&mut self, page: PageId) -> DocResult<()> {
+        // Своя смена страницы кончает следование; смена следованием — нет.
+        self.stop_following();
         self.cancel_gesture();
         self.finish_text_edit();
         self.finish_vector_edit();
@@ -1290,6 +1356,7 @@ impl Editor {
         // Правимый вектор изменился (запись, отмена, панель) — сеть заново.
         self.resync_vector_edit();
         self.sync_text_outlines();
+        self.sync_remote_preview();
         self.update_measures();
         self.refresh_guides();
         let now = Seen {
@@ -1309,6 +1376,7 @@ impl Editor {
                 guides_shown: self.guides_visible(),
                 guides_revision: self.guides.revision,
                 active_guide: self.active_guide(),
+                presence: self.presence_revision(),
                 guide_snap: self
                     .guide_drag
                     .as_ref()

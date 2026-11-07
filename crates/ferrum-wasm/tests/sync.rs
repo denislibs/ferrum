@@ -649,3 +649,51 @@ fn ack_with_wrong_document_does_not_cancel_the_real_one() {
     }
     assert!(!a.editor().sync_unacked(), "настоящее подтверждение дошло");
 }
+
+/// Следование: кадр участника обогнал правку с его новой страницей — переход на неё, как только
+/// она дойдёт, а не со следующим кадром участника.
+#[test]
+fn following_moves_to_peer_page_as_soon_as_it_arrives() {
+    let bytes = file();
+    let mut a = opened(&bytes);
+    let mut b = opened(&bytes);
+    a.command(Command::AddPage);
+    let page = a.editor().page().to_string();
+    let first = b.editor().page();
+    assert_ne!(first.to_string(), page);
+    b.command(Command::Presence {
+        items: vec![
+            PresenceItemDto::Join {
+                participant: 1,
+                user: "u-1".into(),
+                name: "Анна".into(),
+                color: 0x0d74ce,
+            },
+            PresenceItemDto::State {
+                participant: 1,
+                page: page.clone(),
+                view: [0.0, 0.0, 800.0, 600.0],
+                cursor: Some([1.0, 1.0]),
+                selection: None,
+                gesture: None,
+            },
+        ],
+    });
+    b.command(Command::Follow {
+        participant: Some(1),
+    });
+    assert_eq!(b.editor().page(), first, "страницы ещё нет");
+    assert_eq!(b.editor().following(), Some(1));
+    for (doc, _, bytes) in updates(&mut a) {
+        b.command(Command::ApplyRemote {
+            doc,
+            batches: vec![ByteBuf::from(bytes)],
+        });
+    }
+    assert_eq!(
+        b.editor().page().to_string(),
+        page,
+        "страница дошла — переход"
+    );
+    assert_eq!(b.editor().following(), Some(1));
+}

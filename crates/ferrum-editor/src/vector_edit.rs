@@ -271,7 +271,12 @@ impl Editor {
         {
             return false;
         }
+        // Сеть и база правки — по документу: первая правка точки запишет их, и чужое превью
+        // (например, `w`/`h` чужого «Масштаба») попало бы в документ.
+        self.own_action();
+        let n = self.scene.at(slot);
         let Some(net) = shape_network(&n.props) else {
+            self.emit();
             return false;
         };
         let (props, world, version) = (n.props.clone(), n.world, n.version);

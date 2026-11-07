@@ -76,6 +76,7 @@ scope.onmessage = (e: MessageEvent<ToSync>) => {
     status: (status, detail) => post({ t: 'status', status, detail }),
     access: (state) => post({ t: 'access', state }),
     reload: () => post({ t: 'reload' }),
+    participants: (list) => post({ t: 'participants', list }),
   });
   port.onmessage = (ev: MessageEvent<CoreToSync>) => {
     if (ev.data.t === 'applied') client?.onApplied();

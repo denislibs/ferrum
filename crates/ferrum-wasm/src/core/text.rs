@@ -289,6 +289,8 @@ impl Core {
     pub fn set_time(&mut self, now_ms: f64) {
         self.now_ms = now_ms;
         self.editor.set_time(now_ms);
+        // Своё присутствие — по времени кадра: не чаще 20 раз в секунду и только при изменении.
+        self.presence_flush();
         let overdue = self
             .font_state
             .waiting_since
@@ -441,7 +443,11 @@ impl Core {
             self.events.push(caret);
         }
         if properties || caret_changed {
-            let summary = self.editor.text_style_summary().map(|s| style_dto(&s));
+            // По документу: чужое превью (например, «Масштаб» текста) — не свои значения.
+            let summary = self
+                .editor
+                .with_document(|e| e.text_style_summary())
+                .map(|s| style_dto(&s));
             if self.text_state.style_sent.as_ref() != Some(&summary) {
                 self.text_state.style_sent = Some(summary.clone());
                 self.events

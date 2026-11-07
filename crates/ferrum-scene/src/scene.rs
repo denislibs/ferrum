@@ -214,6 +214,10 @@ pub struct Scene {
     rtree: RTree<Entry, Params>,
     /// Узлы под превью жеста: свойства из документа и временная правка поверх них.
     preview: HashMap<Slot, (Props, PropsPatch)>,
+    /// Живое превью жестов других участников (спека подсистемы 4, раздел 9): так же
+    /// свойства из документа и правка поверх них. Своё превью у узла главнее: узел
+    /// под своим жестом чужую правку не показывает. В документ не попадает никогда.
+    remote: HashMap<Slot, (Props, PropsPatch)>,
     /// Изменения R-tree, накопленные за один пересчёт (см. `flush_tree`).
     tree_removals: Vec<(Slot, Rect)>,
     tree_inserts: Vec<(Slot, Rect)>,
@@ -227,6 +231,8 @@ pub struct Scene {
     /// Растёт при каждом изменении сцены (`apply`, превью): холст по нему понимает,
     /// что нужен новый кадр, не сравнивая сцены.
     changes: u64,
+    /// Сколько раз из `changes` пришлось на слой чужого превью (`set_remote_preview`).
+    remote_changes: u64,
     /// Метка состава и имён: растёт на 1 при каждом `apply` и при превью имени.
     /// Превью геометрии и черновики её не меняют — по ней панель слоёв понимает,
     /// что кэш строк устарел.
@@ -345,6 +351,12 @@ impl Scene {
     /// сравнение с запомненным.
     pub fn change_counter(&self) -> u64 {
         self.changes
+    }
+
+    /// Как `change_counter`, но без изменений от слоя чужого превью: наложение и снятие слоя
+    /// его не меняют. По нему видно, что сменились документ или своё превью.
+    pub fn own_change_counter(&self) -> u64 {
+        self.changes.saturating_sub(self.remote_changes)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -695,7 +707,9 @@ impl Scene {
             (Some(p), [i])
                 if p.inputs.len() == inputs.len()
                     && inputs.len() > 1
-                    && (!self.preview.is_empty() || p.rest.as_ref().is_some_and(|r| r.0 == *i)) =>
+                    && (!self.preview.is_empty()
+                        || !self.remote.is_empty()
+                        || p.rest.as_ref().is_some_and(|r| r.0 == *i)) =>
             {
                 // Пустые формы в операции не участвуют — тогда без частей.
                 let was = &p.inputs[*i].1;
@@ -986,6 +1000,7 @@ impl Scene {
                 .iter()
                 .map(|(&s, (_, patch))| (self.at(s).id, patch.clone()))
                 .collect();
+            let remote = self.remote_patches();
             let outlines = self.text_outlines.take();
             *self = Scene::from_page(page);
             // Ревизия текстов, как и счётчик, не откатывается: пересборка — смена.
@@ -993,6 +1008,7 @@ impl Scene {
             if outlines.is_some() {
                 self.set_text_outlines(outlines);
             }
+            self.set_remote_preview(&remote);
             self.set_preview(&preview);
         }
         if !drafts.is_empty() {
@@ -1112,11 +1128,27 @@ impl Scene {
         Some(())
     }
 
-    /// Свойства из документа; превью жеста, если оно есть, накладывается поверх.
+    /// Свойства из документа; превью жеста, если оно есть, накладывается поверх: своё,
+    /// иначе чужое.
     fn set_doc_props(&mut self, slot: Slot, mut props: Props) {
-        if let Some((doc, patch)) = self.preview.get_mut(&slot) {
-            *doc = props.clone();
-            patch.apply_to(&mut props);
+        let own = match self.preview.get_mut(&slot) {
+            Some((doc, patch)) => {
+                *doc = props.clone();
+                Some(patch.clone())
+            }
+            None => None,
+        };
+        let remote = match self.remote.get_mut(&slot) {
+            Some((doc, patch)) => {
+                *doc = props.clone();
+                Some(patch)
+            }
+            None => None,
+        };
+        match (own, remote) {
+            (Some(patch), _) => patch.apply_to(&mut props),
+            (None, Some(patch)) => patch.apply_to(&mut props),
+            (None, None) => {}
         }
         shape::sanitize(&mut props);
         let version = fresh_version();
@@ -1186,6 +1218,7 @@ impl Scene {
             }
             self.by_id.remove(&n.id);
             self.preview.remove(&s);
+            self.remote.remove(&s);
             self.free.push(s);
         }
     }
@@ -1220,7 +1253,7 @@ impl Scene {
             let Some(slot) = self.slot(*id) else { continue };
             let doc = match self.preview.remove(&slot) {
                 Some((doc, _)) => doc,
-                None => self.at(slot).props.clone(),
+                None => self.doc_props(slot),
             };
             self.preview.insert(slot, (doc.clone(), patch.clone()));
             self.set_doc_props(slot, doc);
@@ -1231,6 +1264,71 @@ impl Scene {
         }
         self.recompute(dirty, Vec::new());
         self.flush_tree();
+    }
+
+    /// Свойства узла из документа, без превью: своё и чужое лежат поверх них.
+    fn doc_props(&self, slot: Slot) -> Props {
+        match (self.preview.get(&slot), self.remote.get(&slot)) {
+            (Some((doc, _)), _) | (None, Some((doc, _))) => doc.clone(),
+            (None, None) => self.at(slot).props.clone(),
+        }
+    }
+
+    /// Живое превью жестов других участников целиком (узлы, которых нет в списке,
+    /// возвращаются к документу). Как `set_preview`, но слоем под своим превью: узел
+    /// под своим жестом остаётся своим. Меняет только сцену, не документ. Правки имени
+    /// и текста сюда не приходят: чужой жест двигает, тянет и поворачивает.
+    pub fn set_remote_preview(&mut self, patches: &[(NodeId, PropsPatch)]) {
+        let mut dirty = Vec::new();
+        let new: HashSet<Slot> = patches
+            .iter()
+            .filter_map(|(id, _)| self.slot(*id))
+            .collect();
+        let stale: Vec<Slot> = self
+            .remote
+            .keys()
+            .copied()
+            .filter(|s| !new.contains(s))
+            .collect();
+        for s in stale {
+            let (doc, _) = self.remote.remove(&s).expect("есть в чужом превью");
+            self.set_doc_props(s, doc);
+            dirty.push(s);
+        }
+        for (id, patch) in patches {
+            let Some(slot) = self.slot(*id) else { continue };
+            let doc = match self.remote.remove(&slot) {
+                Some((doc, _)) => doc,
+                None => self.doc_props(slot),
+            };
+            self.remote.insert(slot, (doc.clone(), patch.clone()));
+            self.set_doc_props(slot, doc);
+            dirty.push(slot);
+        }
+        if !dirty.is_empty() {
+            self.changes += 1;
+            self.remote_changes += 1;
+        }
+        self.recompute(dirty, Vec::new());
+        self.flush_tree();
+    }
+
+    /// Есть ли живое превью других участников.
+    pub fn has_remote_preview(&self) -> bool {
+        !self.remote.is_empty()
+    }
+
+    /// Свойства узла из документа, если узел под слоем чужого превью (`None` — не под слоем).
+    pub fn remote_base(&self, slot: Slot) -> Option<&Props> {
+        self.remote.get(&slot).map(|(doc, _)| doc)
+    }
+
+    /// Чужое превью как список правок: пересборка сцены его сохраняет.
+    pub fn remote_patches(&self) -> Vec<(NodeId, PropsPatch)> {
+        self.remote
+            .iter()
+            .map(|(&s, (_, patch))| (self.at(s).id, patch.clone()))
+            .collect()
     }
 
     /// Убирает превью и черновики: все узлы возвращаются к свойствам документа.

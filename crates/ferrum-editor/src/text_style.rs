@@ -498,6 +498,7 @@ impl Editor {
         }
         // Открытый путь пера записывается раньше правки (см. `begin_doc_edit`).
         self.finish_pen_path();
+        self.own_action();
         // Курсор без выделения: стиль следующего ввода, документ не меняется.
         let caret_only = self
             .text_edit
@@ -589,6 +590,7 @@ impl Editor {
         }
         // Открытый путь пера записывается раньше правки (см. `begin_doc_edit`).
         self.finish_pen_path();
+        self.own_action();
         let mut edits = Vec::new();
         for id in self.style_targets(ids) {
             let Some(before) = self.doc_props(id) else {

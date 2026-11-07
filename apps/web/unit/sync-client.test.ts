@@ -2,13 +2,34 @@
 // `bufferedAmount`, пока «сеть» не вычитает; часы — ручные: ничего не ждёт настоящего времени, и видно, какой таймер идёт во время паузы.
 
 import { expect, test } from '@playwright/test';
-import { encodeServerFrame, encodeVersion, parseClientFrame, SYNC_CLOSE, type ClientFrame, type ServerFrame } from '@ferrum/protocol';
 import {
+  encodeClientFrame,
+  encodePartBody,
+  encodePresenceBatch,
+  encodePresenceBody,
+  encodePresenceRecord,
+  encodeSelectionIds,
+  encodeServerFrame,
+  encodeVersion,
+  parseClientFrame,
+  SYNC_CLOSE,
+  SYNC_PROTOCOL,
+  type ClientFrame,
+  type PresenceState,
+  type ServerFrame,
+} from '@ferrum/protocol';
+import {
+  PARTICIPANTS_MS,
   PING_EVERY_MS,
   PONG_WAIT_MS,
+  PRESENCE_BURST,
+  PRESENCE_HEARTBEAT_MS,
+  PRESENCE_HIGH_WATER,
+  PRESENCE_RATE,
   RECONNECT_MAX_MS,
   SyncClient,
   type CoreCommand,
+  type Participant,
   type SocketLike,
   type SyncEnv,
 } from '../src/core/sync-client';
@@ -49,6 +70,9 @@ class FakeSocket implements SocketLike {
   receive(f: ServerFrame): void {
     this.onmessage?.({ data: encodeServerFrame(f).buffer });
   }
+  receiveRaw(b: Uint8Array): void {
+    this.onmessage?.({ data: b.slice().buffer });
+  }
   dropped(code = 1006): void {
     this.closedCode = code;
     this.onclose?.({ code });
@@ -86,6 +110,7 @@ function stand(over: Partial<SyncEnv['files']> = {}) {
   const flushes: boolean[] = [];
   const statuses: { status: string; detail?: string }[] = [];
   const access: AccessState[] = [];
+  const participants: Participant[][] = [];
   let reloads = 0;
   const env: SyncEnv = {
     file: 'f',
@@ -114,6 +139,7 @@ function stand(over: Partial<SyncEnv['files']> = {}) {
     status: (status, detail) => statuses.push({ status, detail }),
     access: (s) => access.push(s),
     reload: () => reloads++,
+    participants: (list) => participants.push(list),
   };
   const client = new SyncClient(env);
   return {
@@ -121,6 +147,7 @@ function stand(over: Partial<SyncEnv['files']> = {}) {
     clock,
     sockets,
     commands,
+    participants,
     flushes,
     statuses,
     access,
@@ -173,7 +200,7 @@ test('открытие: hello, сброс курсора, ядро отдаёт 
   const ws = s.last();
   ws.open();
   ws.drain();
-  expect(ws.sent[0]).toEqual({ t: 'hello', protocol: 1, schema: 1 });
+  expect(ws.sent[0]).toEqual({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 });
   expect(s.commands).toContainEqual({ type: 'syncReset' });
   expect(s.flushing()).toBe(true);
   s.reset();
@@ -996,4 +1023,200 @@ test('сокет не открывается: срок на рукопожати
   // Открылся вовремя — срок снят.
   s.clock.advance(PONG_WAIT_MS);
   expect(s.last().closedCode).toBeNull();
+});
+
+// ——— Присутствие (спека подсистемы 4, раздел 9) ———
+
+const page = '3@7910247476534078275';
+const own = (x: number, extra: Partial<Extract<Parameters<SyncClient['onCore']>[0], { type: 'presence' }>> = {}) => ({
+  type: 'presence' as const,
+  page,
+  view: [0, 0, 100, 100] as [number, number, number, number],
+  cursor: [x, 1] as [number, number],
+  ...extra,
+});
+const presenceFrames = (ws: FakeSocket) => ws.sent.filter((f) => f.t === 'presence' || f.t === 'presence-part');
+const role = (ws: FakeSocket) => ws.receive({ t: 'role', role: 'editor', canShare: true, version: 1 });
+
+test('присутствие: до роли не уходит, после — состояние, затем части выделения', () => {
+  const s = stand();
+  const ws = s.live();
+  ws.drain();
+  const ids = encodeSelectionIds(['1@2', '5@2']);
+  s.client.onCore(own(10, { selection: { rev: 3, count: 2, parts: 1, bounds: [0, 0, 1, 1] }, parts: [ids] }));
+  ws.drain();
+  expect(presenceFrames(ws)).toEqual([]);
+  role(ws);
+  ws.drain();
+  const sent = presenceFrames(ws);
+  expect(sent.map((f) => f.t)).toEqual(['presence', 'presence-part']);
+  expect(sent[0].t === 'presence' && sent[0].state?.cursor).toEqual([10, 1]);
+  expect(sent[1].t === 'presence-part' && sent[1].part).toEqual({ rev: 3, index: 0, parts: 1, ids: ['1@2', '5@2'] });
+});
+
+test('присутствие: не чаще предела, лишнее сливается в последнее; повтор раз в 10 с', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  for (let i = 0; i < 200; i++) s.client.onCore(own(i));
+  ws.drain();
+  expect(presenceFrames(ws).length).toBeLessThanOrEqual(PRESENCE_BURST);
+  s.clock.advance(100);
+  ws.drain();
+  const last = presenceFrames(ws).at(-1)!;
+  expect(last.t === 'presence' && last.state?.cursor?.[0]).toBe(199);
+  const n = presenceFrames(ws).length;
+  s.clock.advance(PRESENCE_HEARTBEAT_MS + 10);
+  ws.drain();
+  expect(presenceFrames(ws).length).toBe(n + 1);
+});
+
+test('присутствие других: ядру — записи с цветом, шапке — список не чаще 4 раз в секунду; обрыв — сброс', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  const st: PresenceState = { page, view: [0, 0, 10, 10], cursor: [1, 2], selection: null, gesture: null };
+  ws.receiveRaw(
+    encodePresenceBatch([
+      encodePresenceRecord({ k: 'join', participant: 7, user: 'u-7', name: 'Анна', color: 3 }),
+      encodePresenceRecord({ k: 'state', participant: 7, body: encodePresenceBody(st) }),
+      encodePresenceRecord({
+        k: 'part',
+        participant: 7,
+        body: encodePartBody({ rev: 1, index: 0, parts: 1, bytes: encodeSelectionIds(['4@2']) }),
+      }),
+    ]),
+  );
+  const cmd = s.commands.findLast((c) => c.type === 'presence');
+  expect(cmd).toEqual({
+    type: 'presence',
+    items: [
+      { k: 'join', participant: 7, user: 'u-7', name: 'Анна', color: 0x0d74ce },
+      { k: 'state', participant: 7, page, view: [0, 0, 10, 10], cursor: [1, 2] },
+      { k: 'part', participant: 7, rev: 1, index: 0, parts: 1, ids: ['4@2'] },
+    ],
+  });
+  expect(s.participants.at(-1)).toEqual([{ id: 7, user: 'u-7', name: 'Анна', color: '#0d74ce', page }]);
+  // Второй сразу за первым — список придёт одним сообщением после паузы.
+  ws.receiveRaw(encodePresenceBatch([encodePresenceRecord({ k: 'join', participant: 8, user: 'u-8', name: 'Борис', color: 1 })]));
+  expect(s.participants).toHaveLength(1);
+  s.clock.advance(PARTICIPANTS_MS);
+  expect(s.participants.at(-1)?.map((p) => p.id)).toEqual([7, 8]);
+  ws.dropped();
+  expect(s.commands.at(-1)).toEqual({ type: 'presenceReset' });
+  s.clock.advance(PARTICIPANTS_MS);
+  expect(s.participants.at(-1)).toEqual([]);
+});
+
+test('присутствие: новое соединение получает последнее своё состояние без нового кадра ядра', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  s.client.onCore(own(42));
+  ws.drain();
+  ws.dropped();
+  const next = nextSocket(s);
+  next.open();
+  next.drain();
+  expect(presenceFrames(next)).toEqual([]);
+  role(next);
+  next.drain();
+  const f = presenceFrames(next)[0];
+  expect(f.t === 'presence' && f.state?.cursor?.[0]).toBe(42);
+});
+
+test('присутствие: устойчиво не чаще 25 кадров в секунду при непрерывном движении, повтора между ними нет', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  const perSecond: number[] = [];
+  let x = 0;
+  let total = 0;
+  for (let sec = 0; sec < 4; sec++) {
+    // Кадр ядра каждые 10 мс — 100 в секунду.
+    for (let t = 0; t < 100; t++) {
+      s.client.onCore(own(x++));
+      s.clock.advance(10);
+    }
+    ws.drain();
+    const n = presenceFrames(ws).length;
+    perSecond.push(n - total);
+    total = n;
+  }
+  // Первая секунда — запас и частота, дальше — только частота.
+  expect(perSecond[0]).toBeLessThanOrEqual(PRESENCE_BURST + PRESENCE_RATE + 1);
+  for (const n of perSecond.slice(1)) {
+    expect(n).toBeGreaterThanOrEqual(PRESENCE_RATE - 1);
+    expect(n).toBeLessThanOrEqual(PRESENCE_RATE + 1);
+  }
+});
+
+test('присутствие: снятое выделение снимает и неотправленные части прежнего', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  // Запас кончился: следующее ждёт в очереди.
+  for (let i = 0; i < PRESENCE_BURST; i++) s.client.onCore(own(i));
+  ws.drain();
+  const before = presenceFrames(ws).length;
+  const parts = Array.from({ length: 5 }, (_, i) => encodeSelectionIds([`${i + 1}@2`]));
+  s.client.onCore(own(50, { selection: { rev: 4, count: 5, parts: 5, bounds: [0, 0, 1, 1] }, parts }));
+  s.client.onCore(own(51));
+  s.clock.advance(1000);
+  ws.drain();
+  const after = presenceFrames(ws).slice(before);
+  expect(after.map((f) => f.t)).toEqual(['presence']);
+  expect(after[0].t === 'presence' && after[0].state?.cursor?.[0]).toBe(51);
+});
+
+test('присутствие: буфер сокета занят — кадр в него не ложится, а сливается в последнее и уходит, когда буфер освободится', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  ws.drain();
+  ws.queued.push(encodeClientFrame({ t: 'update', doc: 'root', clientSeq: 1, bytes: new Uint8Array(PRESENCE_HIGH_WATER + 1) }));
+  for (let i = 0; i < 5; i++) s.client.onCore(own(i));
+  s.clock.advance(1000);
+  expect(ws.queued).toHaveLength(1);
+  ws.drain();
+  s.clock.advance(100);
+  ws.drain();
+  const sent = presenceFrames(ws);
+  expect(sent).toHaveLength(1);
+  expect(sent[0].t === 'presence' && sent[0].state?.cursor?.[0]).toBe(4);
+});
+
+test('присутствие: после `access-revoked` при открытом сокете ничего не уходит, участники и таймеры сброшены', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  ws.receiveRaw(encodePresenceBatch([encodePresenceRecord({ k: 'join', participant: 7, user: 'u-7', name: 'Анна', color: 3 })]));
+  s.client.onCore(own(1));
+  ws.drain();
+  const sent = presenceFrames(ws).length;
+  ws.receive({ t: 'access-revoked', reason: 'access' });
+  expect(s.commands.at(-1)).toEqual({ type: 'presenceReset' });
+  expect(s.participants.at(-1)).toEqual([]);
+  // Сервер не закрыл сокет сразу: ни кадра от ядра, ни повтора, ни ответа на кадры сервера.
+  s.client.onCore(own(2));
+  role(ws);
+  ws.receiveRaw(encodePresenceBatch([encodePresenceRecord({ k: 'join', participant: 8, user: 'u-8', name: 'Борис', color: 1 })]));
+  s.clock.advance(PRESENCE_HEARTBEAT_MS * 3);
+  ws.drain();
+  expect(presenceFrames(ws)).toHaveLength(sent);
+  expect(ws.sent.filter((f) => f.t === 'ping')).toEqual([]);
+  expect(s.participants.at(-1)).toEqual([]);
+  expect(s.clock.timers.size).toBe(0);
+});
+
+test('присутствие: соединение закрыто со снятием доступа сразу после входа участника — шапке всё равно пустой список', () => {
+  const s = stand();
+  const ws = s.live();
+  role(ws);
+  ws.receiveRaw(encodePresenceBatch([encodePresenceRecord({ k: 'join', participant: 7, user: 'u-7', name: 'Анна', color: 3 })]));
+  expect(s.participants.at(-1)?.map((p) => p.id)).toEqual([7]);
+  // Пауза списка ещё идёт, а конец снимает таймеры: пустой список не должен застрять в ней.
+  ws.dropped(SYNC_CLOSE.REVOKED);
+  expect(s.participants.at(-1)).toEqual([]);
+  expect(s.clock.timers.size).toBe(0);
 });

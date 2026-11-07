@@ -22,6 +22,7 @@ use crate::geometry::{
 };
 use crate::input::{Modifiers, PointerEvent};
 use crate::ops::{duplicate, local_delta, reposition};
+use crate::presence::{Gesture, GestureKind};
 use crate::scale::{scale_patches, uniform_factor};
 use crate::selection::{
     deeper, drop_frame_at, frame_label_at, locked, resolve_with, root_frame_at, selection_parents,
@@ -162,6 +163,11 @@ pub struct SelectTool {
     cache: Option<SelCache>,
     /// Инструмент «Масштаб» (K): ручки масштабируют выделение со свойствами.
     scale: bool,
+    /// Рамка выделения, какой её видно при нажатии на ручку или зону поворота (со слоем чужого
+    /// превью), и поправка точки указателя на жест: разница между точкой нажатия на этой рамке и
+    /// той же точкой рамки по документу (`Tool::rebase`). Без чужого сдвига — ноль.
+    press_box: Option<SelectionBox>,
+    grab: Vec2,
 }
 
 /// Что наведение берёт из выделения: рамку редактируемых выделенных и родителей
@@ -213,6 +219,8 @@ impl SelectTool {
             last_click: None,
             cache: None,
             scale: false,
+            press_box: None,
+            grab: Vec2::ZERO,
         }
     }
 
@@ -367,7 +375,7 @@ impl SelectTool {
     }
 
     fn begin(&mut self, cx: &mut Ctx, press: Press, e: &PointerEvent) {
-        let world = press.world;
+        let world = press.world + self.grab;
         self.state = match press.target {
             Target::Node { id, .. } => {
                 let ids = editable(cx, &top_level(cx.scene, cx.selection));
@@ -465,7 +473,8 @@ impl SelectTool {
     }
 
     fn update(&mut self, cx: &mut Ctx, e: &PointerEvent) {
-        let p = cx.to_world(e.point);
+        // Ручки и поворот под чужим превью — от точки рамки по документу (`grab`).
+        let p = cx.to_world(e.point) + self.grab;
         let mods = e.modifiers;
         let threshold = SNAP_THRESHOLD_PX / cx.camera.zoom();
         let view = cx.view();
@@ -719,6 +728,162 @@ impl SelectTool {
             },
         }
     }
+}
+
+/// Правки живого превью чужого жеста (спека подсистемы 4, раздел 9): те же функции, что у
+/// своего жеста этого вида, по выделению участника и матрице его жеста. Привязки и пиксели
+/// участник уже учёл в матрице. Сцена — без чужого превью: базы берутся из документа.
+///
+/// `budget` — сколько узлов слоя может стоить жест: узлы с **всем** поддеревом при любом виде
+/// жеста — сцена пересчитывает мировые матрицы и рамки поддерева каждого изменённого узла,
+/// так что перенос фрейма с 10 000 потомков стоит как 10 001 узел. Больше — `None`, и правки
+/// не считаются (пределы живого превью, `presence::PREVIEW_*`); иначе — правки и их цена в
+/// узлах (для общего предела всех участников).
+pub(crate) fn gesture_patches(
+    scene: &ferrum_scene::Scene,
+    selection: &[NodeId],
+    g: &Gesture,
+    fonts: &ferrum_text::SharedFonts,
+    budget: usize,
+) -> Option<(Vec<(NodeId, PropsPatch)>, usize)> {
+    let ids = gesture_ids(scene, selection);
+    if ids.is_empty() {
+        return Some((Vec::new(), 0));
+    }
+    let cost = nodes_within(scene, &ids, budget)?;
+    let patches = match g.kind {
+        GestureKind::Move => move_patches(scene, &ids, g.transform.translation()),
+        GestureKind::Rotate => rigid_patches(&bases(scene, &ids, false), g.transform, false),
+        GestureKind::Resize => {
+            let bases = bases(scene, &ids, true);
+            let mut patches = scale_patches_in(&bases, g.transform, g.frame, false.into());
+            // Реестр шрифтов занят (раскладка посреди кадра) — текст без переноса строк до
+            // следующего кадра участника.
+            if let Ok(mut f) = fonts.try_borrow_mut() {
+                resize_texts(&mut f, bases.iter().map(|b| (b.id, &b.props)), &mut patches);
+            }
+            patches
+        }
+        GestureKind::Scale => {
+            let bases = bases_deep(scene, &ids);
+            match fonts.try_borrow_mut() {
+                Ok(mut f) => scale_patches(&bases, g.transform, g.frame, g.k, Some(&mut f)),
+                Err(_) => scale_patches(&bases, g.transform, g.frame, g.k, None),
+            }
+        }
+    };
+    Some((patches, cost))
+}
+
+/// Точка `p` рамки `from` — то же место (доли сторон) рамки `to`. У нулевой стороны — тот же
+/// сдвиг от её начала. Нечисловой ответ (вырожденная матрица) — `p`.
+fn same_place(from: SelectionBox, to: SelectionBox, p: Point) -> Point {
+    let l = from.to_world.inverse() * p;
+    let along = |v: f64, a0: f64, a1: f64, b0: f64, b1: f64| {
+        if (a1 - a0).abs() > 1e-9 {
+            b0 + (v - a0) / (a1 - a0) * (b1 - b0)
+        } else {
+            b0 + (v - a0)
+        }
+    };
+    let (f, t) = (from.rect, to.rect);
+    let q = to.to_world
+        * Point::new(
+            along(l.x, f.x0, f.x1, t.x0, t.x1),
+            along(l.y, f.y0, f.y1, t.y0, t.y1),
+        );
+    if q.x.is_finite() && q.y.is_finite() {
+        q
+    } else {
+        p
+    }
+}
+
+/// Узлы чужого жеста: верхние в выделении, есть в сцене, не черновики, не заблокированные.
+fn gesture_ids(scene: &ferrum_scene::Scene, selection: &[NodeId]) -> Vec<NodeId> {
+    top_level(scene, selection)
+        .into_iter()
+        .filter(|id| {
+            scene
+                .slot(*id)
+                .is_some_and(|s| !scene.is_draft(*id) && !locked(scene, s))
+        })
+        .collect()
+}
+
+/// Правки переноса на мировой `delta`: от свойств узла в документе — под слоем чужого превью
+/// это его база (`Scene::remote_base`), иначе свойства сцены.
+fn move_patches(
+    scene: &ferrum_scene::Scene,
+    ids: &[NodeId],
+    delta: Vec2,
+) -> Vec<(NodeId, PropsPatch)> {
+    ids.iter()
+        .filter_map(|id| {
+            let slot = scene.slot(*id)?;
+            let n = scene.at(slot);
+            let props = scene.remote_base(slot).unwrap_or(&n.props);
+            let parent_world = n.parent.map_or(Affine::IDENTITY, |p| scene.at(p).world);
+            let dl = local_delta(parent_world, delta);
+            Some((
+                *id,
+                PropsPatch {
+                    x: Some(props.x + dl.x),
+                    y: Some(props.y + dl.y),
+                    ..Default::default()
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Перенос по документу поверх наложенного слоя чужого превью, без его снятия: свойства узлов —
+/// из базы слоя (`Scene::remote_base`), а перевод мирового сдвига в оси родителя берёт только
+/// линейную часть его матрицы (`local_delta`), которую слой из одних переносов не меняет. Так
+/// слой пересобирается один раз на пачку, а не дважды (снять и наложить). `None` — не перенос:
+/// правки — после снятия слоя (`gesture_patches`); `Some(None)` — больше `budget`; иначе —
+/// правки и их цена в узлах.
+#[allow(clippy::type_complexity)]
+pub(crate) fn move_patches_over_layer(
+    scene: &ferrum_scene::Scene,
+    selection: &[NodeId],
+    g: &Gesture,
+    budget: usize,
+) -> Option<Option<(Vec<(NodeId, PropsPatch)>, usize)>> {
+    if g.kind != GestureKind::Move {
+        return None;
+    }
+    let ids = gesture_ids(scene, selection);
+    let Some(cost) = nodes_within(scene, &ids, budget) else {
+        return Some(None);
+    };
+    Some(Some((
+        move_patches(scene, &ids, g.transform.translation()),
+        cost,
+    )))
+}
+
+/// Сколько узлов с поддеревьями у `ids`, если не больше `budget` (иначе `None`). Обход
+/// кончается, как только предел превышен: поддерево в 100 000 узлов не обходится целиком.
+fn nodes_within(scene: &ferrum_scene::Scene, ids: &[NodeId], budget: usize) -> Option<usize> {
+    let mut n = 0usize;
+    let mut stack = Vec::new();
+    for id in ids {
+        let Some(slot) = scene.slot(*id) else {
+            continue;
+        };
+        stack.push(slot);
+        while let Some(s) = stack.pop() {
+            n += 1;
+            let children = &scene.at(s).children;
+            // Всё, что в стеке, будет посчитано: сверх предела — сразу, не копируя детей.
+            if n + stack.len() + children.len() > budget {
+                return None;
+            }
+            stack.extend_from_slice(children);
+        }
+    }
+    Some(n)
 }
 
 /// Узлы, которые жест может менять: есть в сцене, не черновики, не заблокированы.
@@ -1021,11 +1186,32 @@ impl Tool for SelectTool {
             }
         };
         *cx.hover = None;
+        self.grab = Vec2::ZERO;
+        self.press_box = match target {
+            Target::Handle(_) | Target::Rotate => sbox,
+            _ => None,
+        };
         self.state = State::Pressed(Press {
             screen: e.point,
             world,
             target,
         });
+    }
+
+    /// **(поведение)** Ручка или зона поворота выбраны на рамке, какой её видно (со слоем чужого
+    /// превью), а жест считается по рамке документа: точка нажатия переносится в то же место
+    /// рамки по документу, и размер или угол меняются только на своё движение — без скачка на
+    /// чужой сдвиг (финальное ревью, Important 2).
+    fn rebase(&mut self, cx: &mut Ctx) {
+        let State::Pressed(press) = &self.state else {
+            return;
+        };
+        let (Some(seen), world) = (self.press_box, press.world) else {
+            return;
+        };
+        if let Some(doc) = self.sel_cache(cx).sbox {
+            self.grab = same_place(seen, doc, world) - world;
+        }
     }
 
     fn pointer_move(&mut self, cx: &mut Ctx, e: &PointerEvent) {
@@ -1090,6 +1276,36 @@ impl Tool for SelectTool {
         match &self.state {
             State::Dragging(d) if d.copies.is_some() => Cursor::Duplicate,
             _ => self.cursor,
+        }
+    }
+
+    /// Перенос (без копий с Alt: черновиков у других нет), ресайз, «Масштаб» и поворот выделения —
+    /// той же матрицей, что и превью здесь. Конец линии и рамка выделения другим не видны.
+    fn gesture(&self) -> Option<Gesture> {
+        match &self.state {
+            State::Dragging(d) if d.copies.is_none() => Some(Gesture {
+                kind: GestureKind::Move,
+                transform: Affine::translate(d.delta),
+                frame: Affine::IDENTITY,
+                k: 1.0,
+            }),
+            State::Resizing(r) => Some(Gesture {
+                kind: if self.scale {
+                    GestureKind::Scale
+                } else {
+                    GestureKind::Resize
+                },
+                transform: r.transform,
+                frame: r.sbox.to_world,
+                k: r.k,
+            }),
+            State::Rotating(r) => Some(Gesture {
+                kind: GestureKind::Rotate,
+                transform: r.transform,
+                frame: Affine::IDENTITY,
+                k: 1.0,
+            }),
+            _ => None,
         }
     }
 

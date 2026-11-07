@@ -881,3 +881,75 @@ fn native_paste_in_a_read_only_document_does_nothing() {
     assert_ne!(c.editor().camera().center(), center);
     c.handle(Input::PointerUp(p(200.0, 48.0)));
 }
+
+/// Повторное ревью, N5 (поведение, как в Figma): панель стиля текста показывает свой документ,
+/// а не чужое превью: участник «Масштабом» увеличил мой текст вдвое, я правлю выравнивание — в
+/// сводке размер документа, на холсте превью.
+#[test]
+fn text_style_summary_shows_document_under_peer_scale() {
+    let (mut c, id) = core();
+    let page = c.editor().page().to_string();
+    c.command(Command::Presence {
+        items: vec![
+            PresenceItemDto::Join {
+                participant: 1,
+                user: "u-1".into(),
+                name: "Анна".into(),
+                color: 0x0d74ce,
+            },
+            PresenceItemDto::Part {
+                participant: 1,
+                rev: 1,
+                index: 0,
+                parts: 1,
+                ids: vec![id.clone()],
+            },
+            PresenceItemDto::State {
+                participant: 1,
+                page,
+                view: [0.0, 0.0, 400.0, 300.0],
+                cursor: None,
+                selection: Some(PresenceSelectionDto {
+                    rev: 1,
+                    count: 1,
+                    parts: 1,
+                    bounds: [0.0, 0.0, 1.0, 1.0],
+                }),
+                gesture: Some(PresenceGestureDto {
+                    kind: GestureKindDto::Scale,
+                    transform: [2.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+                    frame: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                    k: 2.0,
+                }),
+            },
+        ],
+    });
+    let node = id.parse().unwrap();
+    let shown = |c: &Core| {
+        c.editor()
+            .scene()
+            .node(node)
+            .unwrap()
+            .props
+            .text
+            .as_ref()
+            .unwrap()
+            .props
+            .style
+            .size
+    };
+    assert_eq!(shown(&c), 48.0, "превью «Масштаба»");
+    c.take_events();
+    c.command(Command::SetTextProps {
+        patch: TextPropsPatchDto {
+            align_h: Some(AlignHDto::Right),
+            ..Default::default()
+        },
+        phase: EditPhase::Commit,
+        ids: None,
+    });
+    let s = summary(&c.take_events()).unwrap().unwrap();
+    assert_eq!(s.align_h.value, "right");
+    assert_eq!(s.size.value, 24.0, "в панели — документ");
+    assert_eq!(shown(&c), 48.0, "на холсте — чужое превью");
+}

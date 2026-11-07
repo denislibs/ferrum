@@ -6,7 +6,7 @@
 //   slow MB                — медленный читатель: не читает, пока другой пишет MB мегабайт, затем читает и получает всё по порядку.
 //   slowbig MB COUNT       — то же кадрами по MB мегабайт: ни один кадр, свой ack и чужие правки, не теряется.
 
-import { encodeClientFrame, encodeVersion, parseServerFrame, syncPath } from '@ferrum/protocol';
+import { encodeClientFrame, encodeVersion, parseServerFrame, SYNC_PROTOCOL, syncPath } from '@ferrum/protocol';
 import { LoroDoc } from 'loro-crdt';
 import { connect } from 'node:net';
 import { apiStand } from './api-stand';
@@ -28,7 +28,7 @@ if (mode === 'clients') {
     const ws = new WebSocket(url, { headers: { cookie, origin } } as never);
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
-      ws.send(encodeClientFrame({ t: 'hello', protocol: 1, schema: 1 }));
+      ws.send(encodeClientFrame({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 }));
       ws.send(encodeClientFrame({ t: 'subscribe', doc: 'root', version: encodeVersion(new Map()) }));
     };
     ws.onmessage = (e) => {
@@ -172,7 +172,7 @@ if (mode === 'memory') {
         : Buffer.concat([Buffer.from([0x82, 0x80 | 126]), Buffer.from([p.length >> 8, p.length & 255])]);
     return Buffer.concat([head, Buffer.from([0, 0, 0, 0]), p]);
   };
-  raw.write(mask(encodeClientFrame({ t: 'hello', protocol: 1, schema: 1 })));
+  raw.write(mask(encodeClientFrame({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 })));
   raw.write(mask(encodeClientFrame({ t: 'subscribe', doc: 'root', version: encodeVersion(new Map()) })));
   await Bun.sleep(300);
   raw.pause();

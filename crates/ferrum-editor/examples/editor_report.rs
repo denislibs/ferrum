@@ -262,6 +262,362 @@ fn alt(ed: &mut Editor, down: bool) {
     ed.take_events();
 }
 
+/// Чужое перетаскивание: участник выделил `ids` (одной частью кадра) и тянет их; каждый его
+/// кадр — сдвиг. Замер — приём кадра целиком (`presence_state`: слой превью и сцена) при своём
+/// выделении `own` (подпись `own_label`, цель `limit_ms`): своя рамка для других не
+/// пересчитывается на каждом кадре участника. Ещё — Shift под чужим превью: клавиша ничего не
+/// правит, и слой не снимается и не накладывается заново.
+fn presence_preview(
+    report: &mut Report,
+    ed: &mut Editor,
+    ids: &[NodeId],
+    (own, own_label, limit_ms): (&[NodeId], &str, f64),
+) {
+    use ferrum_editor::{peer_color, Gesture, GestureKind, PeerSelection, PeerState};
+    use kurbo::{Affine, Rect};
+    ed.select(own);
+    let page = ed.page();
+    let before = ed.page_doc().props(ids[500]).unwrap().x;
+    ed.presence_join(7, "u-7", "Участник", peer_color(0x0d74ce));
+    let head = PeerSelection {
+        rev: 1,
+        count: ids.len() as u32,
+        parts: 1,
+        bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+    };
+    ed.presence_part(7, 1, 0, 1, ids.to_vec());
+    let state = |k: f64, moving: bool| PeerState {
+        page: Some(page),
+        view: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+        cursor: Some(Point::new(k, k)),
+        selection: Some(head),
+        gesture: moving.then_some(Gesture {
+            kind: GestureKind::Move,
+            transform: Affine::translate((k, k * 0.5)),
+            frame: Affine::IDENTITY,
+            k: 1.0,
+        }),
+    };
+    ed.presence_state(7, state(0.0, false));
+    let runs: Vec<Duration> = (1..=MOVES)
+        .map(|i| {
+            let t = Instant::now();
+            ed.presence_state(7, state(i as f64 * 3.0, true));
+            t.elapsed()
+        })
+        .collect();
+    let shown = ed.scene().node(ids[500]).unwrap().props.x;
+    let doc = ed.page_doc().props(ids[500]).unwrap().x;
+    report.gate_median(
+        &format!(
+            "Живое превью чужого перетаскивания 1000 узлов: кадр участника, своё выделение {own_label}"
+        ),
+        &runs,
+        limit_ms,
+    );
+    report.check(
+        &format!("Чужое превью: сцена сдвинута, документ — нет (своё выделение {own_label})"),
+        shown == before + MOVES as f64 * 3.0 && doc == before,
+        format!("сцена {shown}, документ {doc}"),
+        "сцена сдвинута, документ прежний",
+    );
+    let keys: Vec<Duration> = (0..MOVES)
+        .map(|i| {
+            let (input, mods): (fn(KeyEvent) -> Input, _) = if i % 2 == 0 {
+                (Input::KeyDown, Modifiers::SHIFT)
+            } else {
+                (Input::KeyUp, Modifiers::NONE)
+            };
+            timed(ed, input(KeyEvent::new("ShiftLeft", mods)))
+        })
+        .collect();
+    report.gate_median(
+        &format!("Shift под чужим превью 1000 узлов, своё выделение {own_label}"),
+        &keys,
+        1.0,
+    );
+    let t = Instant::now();
+    ed.presence_state(7, state(0.0, false));
+    report.info("Конец чужого жеста: превью снято", ms(t.elapsed()));
+    ed.presence_left(7);
+    ed.take_events();
+}
+
+/// Враждебная пачка присутствия (ревью безопасности, H2 и M3): `peers` участников выделили по
+/// `each` узлов страницы и тянут их; пачка — `PRESENCE_RECORDS` записей состояния подряд, у каждой
+/// свой сдвиг. Замер — приём пачки целиком: слой превью пересобирается не больше раза на пачку и
+/// не больше пределов узлов (`PREVIEW_*`), поэтому цена не растёт с числом записей и участников.
+fn presence_hostile_batch(
+    report: &mut Report,
+    ed: &mut Editor,
+    ids: &[NodeId],
+    (peers, each, limit_ms): (usize, usize, f64),
+) {
+    use ferrum_editor::{peer_color, Gesture, GestureKind, PeerSelection, PeerState};
+    use kurbo::{Affine, Rect};
+    const RECORDS: usize = 64;
+    ed.select(&[]);
+    let page = ed.page();
+    // Узлы без фреймов: по `each` подряд на участника.
+    let shapes: Vec<NodeId> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 100 != 0)
+        .map(|(_, id)| *id)
+        .collect();
+    let head = PeerSelection {
+        rev: 1,
+        count: each as u32,
+        parts: 1,
+        bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+    };
+    for p in 0..peers {
+        let id = 100 + p as u32;
+        ed.presence_join(id, &format!("u-{id}"), "Участник", peer_color(0x0d74ce));
+        let sel = shapes[p * each..(p + 1) * each].to_vec();
+        ed.presence_part(id, 1, 0, 1, sel);
+    }
+    let state = |k: f64| PeerState {
+        page: Some(page),
+        view: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+        cursor: Some(Point::new(k, k)),
+        selection: Some(head),
+        gesture: Some(Gesture {
+            kind: GestureKind::Move,
+            transform: Affine::translate((k, k * 0.5)),
+            frame: Affine::IDENTITY,
+            k: 1.0,
+        }),
+    };
+    let mut k = 0.0;
+    let runs: Vec<Duration> = (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            ed.presence_batch(|ed| {
+                for r in 0..RECORDS {
+                    k += 1.0;
+                    ed.presence_state(100 + (r % peers) as u32, state(k));
+                }
+            });
+            let d = t.elapsed();
+            ed.take_events();
+            d
+        })
+        .collect();
+    let shown = ed.scene().remote_patches().len();
+    report.gate_median(
+        &format!("Враждебная пачка {RECORDS} записей: {peers} участников тянут по {each} узлов"),
+        &runs,
+        limit_ms,
+    );
+    report.info(
+        &format!("То же, узлов в слое превью ({peers} × {each})"),
+        format!("{shown}"),
+    );
+    // Курсоры движутся, выделения стоят: рамки чужих выделений не пересчитываются на кадре.
+    ed.presence_batch(|ed| {
+        for p in 0..peers {
+            let mut s = state(0.0);
+            s.gesture = None;
+            ed.presence_state(100 + p as u32, s);
+        }
+    });
+    let mut now = 0.0;
+    let frames: Vec<Duration> = (0..MOVES)
+        .map(|i| {
+            now += 16.0;
+            ed.set_time(now);
+            if i % 3 == 0 {
+                ed.presence_batch(|ed| {
+                    for p in 0..peers {
+                        let mut s = state(i as f64);
+                        s.gesture = None;
+                        ed.presence_state(100 + p as u32, s);
+                    }
+                });
+            }
+            let t = Instant::now();
+            let marks = ed.overlay().remote;
+            let d = t.elapsed();
+            assert_eq!(marks.len(), peers.min(ferrum_editor::PEERS_DRAWN));
+            ed.take_events();
+            d
+        })
+        .collect();
+    report.gate_median(
+        &format!("Кадр оверлея: {peers} курсоров движутся, выделения по {each} узлов стоят"),
+        &frames,
+        1.0,
+    );
+    ed.presence_reset();
+    ed.take_events();
+}
+
+/// Чужой жест кадром участника: страница, выделение одной частью версии 1 и сдвиг на `k`.
+fn peer_move(page: ferrum_doc::PageId, count: usize, k: Option<f64>) -> ferrum_editor::PeerState {
+    use ferrum_editor::{Gesture, GestureKind, PeerSelection, PeerState};
+    use kurbo::{Affine, Rect};
+    PeerState {
+        page: Some(page),
+        view: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+        cursor: Some(Point::new(k.unwrap_or(0.0), 0.0)),
+        selection: Some(PeerSelection {
+            rev: 1,
+            count: count as u32,
+            parts: 1,
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+        }),
+        gesture: k.map(|k| Gesture {
+            kind: GestureKind::Move,
+            transform: Affine::translate((k, 0.0)),
+            frame: Affine::IDENTITY,
+            k: 1.0,
+        }),
+    }
+}
+
+/// Перенос фреймов с `children` потомками каждый — `peers` участников, у каждого свой фрейм
+/// (повторные ревью, N1 и M1): цена пачки — пересборка поддеревьев, поэтому в пределы превью
+/// (у участника и у всех вместе) идут поддеревья. `shown` — сколько фреймов ожидается в
+/// превью — проверка без времени.
+fn presence_frame_drag(
+    report: &mut Report,
+    (peers, children): (usize, usize),
+    shown: usize,
+    limit_ms: f64,
+) {
+    use ferrum_doc::NodeKind;
+    let mut doc = Document::new();
+    let page = doc.pages()[0].0;
+    let frames = doc
+        .transact(page, vec![], |tx| {
+            let mut frames = Vec::new();
+            for p in 0..peers {
+                let f = tx.create_node(None, None, NodeKind::Frame)?;
+                tx.set_props(
+                    f,
+                    &PropsPatch {
+                        x: Some(p as f64 * 5000.0),
+                        w: Some(4000.0),
+                        h: Some(4000.0),
+                        ..Default::default()
+                    },
+                )?;
+                for i in 0..children {
+                    let id = tx.create_node(Some(f), None, NodeKind::Rect)?;
+                    tx.set_props(
+                        id,
+                        &PropsPatch {
+                            x: Some((i % 300) as f64 * 12.0),
+                            y: Some((i / 300) as f64 * 12.0),
+                            w: Some(10.0),
+                            h: Some(10.0),
+                            ..Default::default()
+                        },
+                    )?;
+                }
+                frames.push(f);
+            }
+            Ok(frames)
+        })
+        .unwrap();
+    let mut ed = Editor::new(doc, Some(page), VIEWPORT, 1.0, Platform::Mac).unwrap();
+    for (p, f) in frames.iter().enumerate() {
+        let id = 7 + p as u32;
+        ed.presence_join(id, "u-7", "Участник", ferrum_editor::peer_color(0x0d74ce));
+        ed.presence_part(id, 1, 0, 1, vec![*f]);
+        ed.presence_state(id, peer_move(page, 1, None));
+    }
+    ed.take_events();
+    let runs: Vec<Duration> = (1..=MOVES)
+        .map(|i| {
+            let t = Instant::now();
+            ed.presence_batch(|ed| {
+                for p in 0..peers {
+                    ed.presence_state(7 + p as u32, peer_move(page, 1, Some(i as f64)));
+                }
+            });
+            let d = t.elapsed();
+            ed.take_events();
+            d
+        })
+        .collect();
+    let what = if peers == 1 {
+        format!("Чужой перенос фрейма с {children} потомками")
+    } else {
+        format!("Чужой перенос: {peers} участников, у каждого фрейм с {children} потомками")
+    };
+    report.gate_median(&format!("{what}: пачка"), &runs, limit_ms);
+    let moved = frames
+        .iter()
+        .filter(|f| {
+            ed.scene()
+                .remote_base(ed.scene().slot(**f).unwrap())
+                .is_some()
+        })
+        .count();
+    report.check(
+        &format!("{what}: фреймов в превью"),
+        moved == shown,
+        format!("{moved}"),
+        &format!("{shown}"),
+    );
+}
+
+/// Рамки чужих выделений при тянущем участнике (финальное повторное ревью, N2): 49 участников
+/// стоят с выделениями по 2000 узлов, 50-й тянет один узел. Пачка пересобирает слой, а рамки
+/// стоящих — не задетых слоем — не пересчитываются.
+fn presence_marks_with_dragger(report: &mut Report, ed: &mut Editor, ids: &[NodeId]) {
+    let page = ed.page();
+    ed.select(&[]);
+    let shapes: Vec<NodeId> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 100 != 0)
+        .map(|(_, id)| *id)
+        .collect();
+    for p in 0..49 {
+        let id = 200 + p as u32;
+        ed.presence_join(
+            id,
+            &format!("u-{id}"),
+            "Участник",
+            ferrum_editor::peer_color(0x0d74ce),
+        );
+        ed.presence_part(id, 1, 0, 1, shapes[p * 2000..(p + 1) * 2000].to_vec());
+        ed.presence_state(id, peer_move(page, 2000, None));
+    }
+    let lone = shapes[98_999];
+    ed.presence_join(
+        300,
+        "u-300",
+        "Участник",
+        ferrum_editor::peer_color(0x0d74ce),
+    );
+    ed.presence_part(300, 1, 0, 1, vec![lone]);
+    ed.presence_state(300, peer_move(page, 1, None));
+    let _ = ed.overlay();
+    ed.take_events();
+    let runs: Vec<Duration> = (1..=MOVES)
+        .map(|i| {
+            ed.presence_batch(|ed| ed.presence_state(300, peer_move(page, 1, Some(i as f64))));
+            let t = Instant::now();
+            let marks = ed.overlay().remote;
+            let d = t.elapsed();
+            assert_eq!(marks.len(), 50);
+            ed.take_events();
+            d
+        })
+        .collect();
+    report.gate_median(
+        "Кадр оверлея после пачки: 49 выделений по 2000 узлов стоят, один участник тянет узел",
+        &runs,
+        1.0,
+    );
+    ed.presence_reset();
+    ed.take_events();
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -312,6 +668,26 @@ fn main() {
     ed.handle(Input::PointerUp(clock.at(end)));
     ed.execute(CommandId::Undo);
     ed.take_events();
+
+    // 1а. Живое превью чужого перетаскивания тех же 1000 узлов (спека подсистемы 4, раздел 9):
+    // кадр участника 20 раз в секунду — слой превью сцены по выделению и матрице жеста, без
+    // правки документа. Цель — как у своего движения. При своём выделении всей страницы — не
+    // дороже прохода оверлея по своему выделению (своя рамка для других — не на каждый кадр).
+    presence_preview(&mut report, &mut ed, &children, (&[], "пусто", 4.0));
+    presence_preview(&mut report, &mut ed, &children, (&children, "1000", 4.0));
+    presence_preview(&mut report, &mut ed, &children, (&ids, "100 000", 10.0));
+    presence_hostile_batch(&mut report, &mut ed, &ids, (10, 1000, 16.0));
+    presence_hostile_batch(&mut report, &mut ed, &ids, (10, 3000, 16.0));
+    presence_hostile_batch(&mut report, &mut ed, &ids, (50, 1900, 16.0));
+    presence_marks_with_dragger(&mut report, &mut ed, &ids);
+    presence_frame_drag(&mut report, (1, 1500), 1, 8.0);
+    presence_frame_drag(&mut report, (1, 10_000), 0, 8.0);
+    presence_frame_drag(&mut report, (1, 50_000), 0, 8.0);
+    // Восемь артбордов: в слой помещается один (1501 + 1501 > 3000). Цель — как у враждебной
+    // пачки: пачка дороже одного артборда на маленькой странице, потому что на странице 12 000
+    // узлов (пересборка R-tree сцены), а не из-за числа участников.
+    presence_frame_drag(&mut report, (8, 1500), 1, 16.0);
+    ed.select(&children);
 
     // 2. Запись перетаскивания 1000 узлов одной транзакцией и её отмена.
     let mut commits = Vec::new();

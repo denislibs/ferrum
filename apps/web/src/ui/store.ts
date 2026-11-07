@@ -2,7 +2,7 @@
 // фазе mutate планировщика (одна `batch()` на кадр), живые значения жеста — из
 // общей памяти в фазе measure. Здесь ничего не вычисляется о документе.
 
-import type { SyncStatus } from '../core/sync-client';
+import type { Participant, SyncStatus } from '../core/sync-client';
 import { createStore, reconcile } from 'solid-js/store';
 import type {
   ConflictInfo,
@@ -50,6 +50,9 @@ export interface UiState {
   syncStatus: SyncStatus | null;
   /** Сервер разрешает звать людей в открытый файл (пришедшему по ссылке — нет). */
   fileCanShare: boolean;
+  /** Участники открытого файла (спека подсистемы 4, раздел 9) и тот, за кем следуем. */
+  participants: Participant[];
+  following: number | null;
   layers: { start: number; total: number; rows: LayerRow[]; reveal: number | null; revealSeq: number };
   summary: Summary | null;
   pages: { list: PageInfo[]; current: string; background: string | null };
@@ -101,6 +104,8 @@ const initial: UiState = {
   fileRole: null,
   syncStatus: null,
   fileCanShare: false,
+  participants: [],
+  following: null,
   layers: { start: 0, total: 0, rows: [], reveal: null, revealSeq: 0 },
   summary: null,
   pages: { list: [], current: '', background: null },
@@ -267,6 +272,9 @@ export function createUiStore() {
         break;
       case 'undoNotice':
         undoToast(e.text, e.step);
+        break;
+      case 'following':
+        setState('following', e.participant ?? null);
         break;
       case 'error':
         // Сохранённая раскладка не принята: ошибка показана, а в хранилище она не остаётся.

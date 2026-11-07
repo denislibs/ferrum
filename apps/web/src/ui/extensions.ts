@@ -3,9 +3,19 @@
 
 import type { Component, JSX } from 'solid-js';
 import type { FileMeta, Section } from '../core/file-list';
+import type { Participant } from '../core/sync-client';
 import type { IconName } from './icons';
 import type { MenuItem } from './menu';
 import type { Route } from './router';
+
+/** Полоса аватаров: участники, свой человек, за кем следуем, текущая страница; `follow(null)` — перестать. */
+export interface PresenceBarProps {
+  participants: () => Participant[];
+  self: string;
+  following: () => number | null;
+  currentPage: () => string;
+  follow: (participant: number | null) => void;
+}
 
 /** Строка панели разделов: раздел или подпись группы. */
 export type NavEntry = { kind: 'section'; id: Section; title: string; icon: IconName } | { kind: 'label'; title: string };
@@ -34,6 +44,8 @@ export const extensions: {
   newFileRoute?: (section: Section) => Route;
   /** Кнопка «Поделиться» открытого файла. */
   shareButton?: Component<{ file: FileMeta; role: () => FileMeta['role']; canShare: () => boolean; children?: JSX.Element }>;
+  /** Аватары участников открытого файла (спека подсистемы 4, раздел 9). */
+  presenceBar?: Component<PresenceBarProps>;
 } = {};
 
 /** Связь корня приложения с кодом входа: ставит `Root` (в обеих сборках, это просто два поля),

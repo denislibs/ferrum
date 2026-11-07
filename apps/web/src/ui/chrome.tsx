@@ -125,7 +125,7 @@ export function FileHeader(props: {
 
 const ZOOMS = [0.5, 1, 2];
 
-export function DesignHeader(props: { file?: FileMeta }) {
+export function DesignHeader(props: { file?: FileMeta; self?: string }) {
   const ed = useEditor();
   let tabs!: HTMLDivElement;
   onMount(() => onCleanup(roving(tabs, '[role="tab"]')));
@@ -169,6 +169,15 @@ export function DesignHeader(props: { file?: FileMeta }) {
             </span>
           )}
         </Show>
+        {extensions.presenceBar && props.self ? (
+          <extensions.presenceBar
+            participants={() => ed.store.state.participants}
+            self={props.self}
+            following={() => ed.store.state.following}
+            currentPage={() => ed.store.state.pages.current}
+            follow={(participant) => ed.send({ type: 'follow', participant: participant ?? undefined })}
+          />
+        ) : null}
         {extensions.shareButton && props.file ? (
           <extensions.shareButton
             file={props.file}

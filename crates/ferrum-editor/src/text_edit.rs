@@ -150,7 +150,9 @@ impl Editor {
     pub fn set_time(&mut self, now_ms: f64) {
         if now_ms.is_finite() {
             self.now_ms = now_ms;
-            if self.text_edit.is_some() {
+            // Плавное движение чужих курсоров и уход молчащих участников — тоже по времени.
+            let presence = self.presence_time(now_ms);
+            if self.text_edit.is_some() || presence {
                 self.emit();
             }
         }
@@ -261,6 +263,20 @@ impl Editor {
             return false;
         };
         let last = last_index(&content);
+        // Точка входа — в осях узла, каким его видно (нажатие выбрало его под чужим превью),
+        // а правка — по документу: чужой слой снимается, и курсор ставится по тому же месту
+        // текста.
+        let at = match at {
+            EnterAt::Point(world) => {
+                let local = self.scene.at(slot).world.inverse() * world;
+                self.own_action();
+                EnterAt::Point(self.scene.at(slot).world * local)
+            }
+            EnterAt::All => {
+                self.own_action();
+                EnterAt::All
+            }
+        };
         self.selection.set(vec![id]);
         self.hover = None;
         self.text_hover = false;

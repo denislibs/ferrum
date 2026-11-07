@@ -380,6 +380,8 @@ export class Core {
       enc.pointer(sink, Kind.POINTER_UP, e, x, y);
     });
     this.add(c, 'pointercancel', () => enc.simple(sink, Kind.POINTER_CANCEL));
+    // Указатель ушёл с холста: другие участники больше не видят его курсор (спека подсистемы 4, раздел 9).
+    this.add(c, 'pointerleave', () => enc.simple(sink, Kind.POINTER_LEAVE));
     this.add(
       c,
       'wheel',

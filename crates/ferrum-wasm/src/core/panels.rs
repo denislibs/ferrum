@@ -755,6 +755,7 @@ impl Core {
             | Command::MarkSaved { .. }
             | Command::ReadPixels { .. }
             | Command::ReadMeasurements
+            | Command::ReadPresence
             | Command::DemoText { .. }
             | Command::FontsAvailable { .. }
             | Command::LoadFont { .. }
@@ -768,6 +769,9 @@ impl Core {
             | Command::ApplyRemote { .. }
             | Command::AddRemoteImage { .. }
             | Command::Thumbnail
+            | Command::Presence { .. }
+            | Command::PresenceReset
+            | Command::Follow { .. }
             | Command::TextEditStart { .. }
             | Command::TextEditEnd
             | Command::TextInput { .. }
@@ -1069,7 +1073,8 @@ impl Core {
             }
         }
         if ui.properties {
-            let s = summarize(self.editor.scene(), self.editor.selection());
+            // По документу: чужое превью — не свои значения (ревью безопасности, L4).
+            let s = self.editor.with_document_scene(summarize);
             if self.summary.as_ref() != Some(&s) {
                 self.summary = Some(s.clone());
                 self.events

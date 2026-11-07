@@ -10,8 +10,8 @@ use ferrum_doc::container::{decode, encode};
 use ferrum_doc::fixture::fill;
 use ferrum_doc::{Document, NodeId, NodeKind, PageId, PropsPatch};
 use ferrum_render::{
-    Camera, CpuBackend, GuideMark, NoImages, Overlay, Renderer, RulersOverlay, TextEngine,
-    LABEL_SIZE,
+    Camera, CpuBackend, GuideMark, NoImages, Overlay, RemoteMark, Renderer, Rgba, RulersOverlay,
+    TextEngine, LABEL_SIZE,
 };
 use ferrum_scene::Scene;
 use kurbo::{Point, Size};
@@ -766,6 +766,114 @@ fn rulers_section(report: &mut Report, scene: &Scene, base: &Camera) {
     }
 }
 
+/// Присутствие (спека подсистемы 4, разделы 9 и 13.1): 50 чужих курсоров с подписями и
+/// 50 рамок чужого выделения на экране 1920×1080, у каждого участника — по 4 узла
+/// (рамка каждого и общая), один повёрнут. Цель — прибавка к кадру не больше 1 мс. Курсор
+/// движется каждый кадр, как при интерполяции в ядре.
+fn presence_section(report: &mut Report, scene: &Scene, base: &Camera) {
+    const RUNS: usize = 61;
+    let names = [
+        "Анна Смирнова",
+        "Борис",
+        "Вероника Кузнецова-Петрова",
+        "Глеб",
+        "Дарья",
+    ];
+    let palette: [u32; 10] = [
+        0xe5484d, 0xf76b15, 0x2d8a3e, 0x0d74ce, 0x8e4ec6, 0xd6409f, 0x12a594, 0x5b5bd6, 0xab6400,
+        0x3e63dd,
+    ];
+    let marks = |t: f64| -> Vec<RemoteMark> {
+        let view = base.visible_world_rect();
+        (0..50)
+            .map(|i| {
+                let fx = (i % 10) as f64 / 10.0 + 0.03;
+                let fy = (i / 10) as f64 / 5.0 + 0.05;
+                let at = kurbo::Point::new(
+                    view.x0 + view.width() * fx + t * 3.0,
+                    view.y0 + view.height() * fy + t,
+                );
+                let boxes = (0..4)
+                    .map(|k| {
+                        let o = kurbo::Affine::translate((at.x + 30.0 * k as f64, at.y - 60.0));
+                        let o = if k == 3 {
+                            o * kurbo::Affine::rotate(0.3)
+                        } else {
+                            o
+                        };
+                        (o, kurbo::Rect::new(0.0, 0.0, 24.0, 18.0))
+                    })
+                    .collect::<Vec<_>>();
+                let c = palette[i % palette.len()];
+                RemoteMark {
+                    color: Rgba::from_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, 255),
+                    name: format!("{} {i}", names[i % names.len()]).into(),
+                    cursor: Some(at),
+                    frame: Some(kurbo::Rect::new(
+                        at.x,
+                        at.y - 60.0,
+                        at.x + 120.0,
+                        at.y - 30.0,
+                    )),
+                    boxes,
+                }
+            })
+            .collect()
+    };
+    for dpr in [1.0, 2.0] {
+        let mut camera = Camera::new(VIEWPORT, dpr);
+        camera.set_zoom(base.zoom());
+        camera.set_center(base.center());
+        let (w, h) = camera.device_size();
+        let mut backend = CpuBackend::new(w, h);
+        let mut renderer = Renderer::new();
+        let plain = Overlay::default();
+        let mut with = Overlay {
+            remote: marks(0.0).into(),
+            ..Default::default()
+        };
+        renderer.render(&mut backend, scene, &camera, &plain, &NoImages, None);
+        renderer.render(&mut backend, scene, &camera, &with, &NoImages, None);
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        for i in 0..RUNS {
+            with.remote = marks(i as f64 * 0.37).into();
+            for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                backend.reset(w, h);
+                let t = Instant::now();
+                renderer.render(&mut backend, scene, &camera, overlay, &NoImages, None);
+                runs.push(t.elapsed());
+            }
+        }
+        report.gate(
+            if dpr == 1.0 {
+                "Кадр с 50 курсорами и 50 чужими выделениями: прибавка, 1920×1080"
+            } else {
+                "Кадр с 50 курсорами и 50 чужими выделениями: прибавка, 3840×2160 (2×)"
+            },
+            median(on).saturating_sub(median(off)),
+            1.0,
+            "≤ 1 мс",
+        );
+        // С растеризацией CPU — справочно: на GPU растеризация не на этом потоке.
+        let empty = Scene::new();
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        for i in 0..RUNS {
+            with.remote = marks(i as f64 * 0.37).into();
+            for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                backend.reset(w, h);
+                let t = Instant::now();
+                renderer.render(&mut backend, &empty, &camera, overlay, &NoImages, None);
+                std::hint::black_box(backend.render());
+                runs.push(t.elapsed());
+            }
+        }
+        report.info(
+            &format!("Кадр с 50 курсорами и 50 чужими выделениями: прибавка с растеризацией CPU, dpr {dpr}"),
+            ms(median(on).saturating_sub(median(off))),
+        );
+    }
+}
+
 /// Экспорт SVG и PDF (подсистема 3, этап 5): SVG страницы из 10 000 узлов
 /// (фреймы по 100: фрейм + 99 фигур) и PDF страницы с текстом и вектором в
 /// 100 000 точек — в worker'е, без замирания интерфейса; цель — секунда.
@@ -1214,6 +1322,7 @@ fn main() {
         ms(t.elapsed()),
     );
     rulers_section(&mut report, &scene, &camera);
+    presence_section(&mut report, &scene, &camera);
 
     // Вся страница при сильном отдалении: LOD и растровый кэш фреймов. Кэш
     // строится по `RASTER_BUILD_TIME_PER_FRAME` за кадр (не больше
