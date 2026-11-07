@@ -17,6 +17,7 @@ import type { Pool } from 'pg';
 import type { Auth } from './auth';
 import { originAllowed } from './auth-routes';
 import type { BlobStore, UploadPace } from './blob-store';
+import type { CommentEvent } from '@ferrum/protocol';
 import type { Mailer } from './mail';
 import { valkeyStorage } from './secondary-storage';
 
@@ -41,6 +42,11 @@ export const LIMITS = {
   mail: { max: 30, windowSeconds: 3600 },
   /** Попытки открыть файл по ссылке. */
   redeem: { max: 30, windowSeconds: 60 },
+  /** Новые комментарии и ответы (спека, раздел 10.4): на человека, общий для всех его вкладок и сеансов. */
+  comment: { max: 60, windowSeconds: 60 },
+  /** Список обсуждений файла: первая загрузка — 1000 обсуждений за две страницы по ~50 мс базы, догоняние — дёшево. Общий
+   * `read` (1200 в минуту) дал бы одному человеку занять ядро базы. */
+  commentList: { max: 120, windowSeconds: 60 },
 } as const;
 export type LimitName = keyof typeof LIMITS;
 export type Limits = Record<LimitName, { max: number; windowSeconds: number }>;
@@ -69,6 +75,11 @@ export interface ApiDeps {
   /** Сжать журнал файла сейчас: копия для скачивания должна быть полной. Не вышло — когда повторить; `incomplete` — журнал
    * документа, который видят люди, в файл не входит. */
   compactNow?: (file: string, user: string) => Promise<{ ok: true } | { ok: false; retryAfter: number } | { ok: false; incomplete: true }>;
+  /** Комментарии и соединения файла: событие после фиксации изменения и кто держит файл открытым (им письма не нужны).
+   * Нет — событий нет, письма всем (тесты маршрутов без концентратора). */
+  comments?: { event(file: string, ev: CommentEvent): void; openUsers(file: string): string[] };
+  /** Группировка писем о комментариях; по умолчанию — `COMMENT_MAIL_DELAY_MS`. */
+  commentMailDelayMs?: number;
 }
 
 export interface ApiUser {
@@ -102,12 +113,14 @@ export interface Ctx {
 
 export interface Route {
   method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  /** `:id`, `:teamId`, `:projectId`, `:entryId` — UUID, `:hash` — blake3: неверный вид — 404. */
+  /** `:id`, `:teamId`, `:projectId`, `:entryId`, `:threadId`, `:commentId` — UUID, `:hash` — blake3: неверный вид — 404. */
   path: string;
   access: Access;
   limit: LimitName;
   /** Тело идёт потоком: обработчик следит за простоем сам, общего срока нет. */
   stream?: boolean;
+  /** Удачная запись не меняет доступа к файлам (комментарии, настройки): открытые соединения роль не сверяют. */
+  keepsAccess?: boolean;
   handle(ctx: Ctx): Promise<Response>;
 }
 
@@ -122,14 +135,14 @@ export function ok(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
-/** Разбирает JSON не больше `MAX_JSON_BYTES`; иначе и при мусоре — `null`, разбор протокола ответит 400. */
-export async function readJson(req: Request): Promise<unknown> {
+/** Разбирает JSON не больше `max` байт; иначе и при мусоре — `null`, разбор протокола ответит 400. */
+export async function readJson(req: Request, max = MAX_JSON_BYTES): Promise<unknown> {
   if (!req.body) return null;
   const chunks: Uint8Array[] = [];
   let size = 0;
   for await (const chunk of req.body) {
     size += chunk.length;
-    if (size > MAX_JSON_BYTES) return null;
+    if (size > max) return null;
     chunks.push(chunk);
   }
   try {
@@ -146,6 +159,8 @@ const PARAM_CHECK: Record<string, (v: string) => boolean> = {
   entryId: isUuid,
   hash: isHash,
   doc: isSyncDoc,
+  threadId: isUuid,
+  commentId: isUuid,
 };
 
 interface Compiled {

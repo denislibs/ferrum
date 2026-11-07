@@ -8,6 +8,7 @@ import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
 import type { BlobStore, UploadPace } from './blob-store';
 import { clientIp, proxyMatcher } from './client-ip';
+import { commentRoutes } from './comment-routes';
 import { fileRoutes, uploadGate } from './file-routes';
 import { imageRoutes } from './image-routes';
 import { shareRoutes } from './share-routes';
@@ -34,6 +35,8 @@ export interface AppDeps {
   secret: string;
   /** Тесты сокращают пределы и сроки API. */
   limits?: Partial<Limits>;
+  /** Группировка писем о комментариях: тесты сокращают. */
+  commentMailDelayMs?: number;
   apiDeadlineMs?: number;
   uploadIdleMs?: number;
   uploadPace?: UploadPace;
@@ -51,6 +54,7 @@ const NO_ACCESS_CHANGE = /\/(content|thumb|touch|images\/[^/]+)$/;
  * к файлам она не меняет. Маршрут, назвавший затронутые файлы, сверяет только их; без `:id` и без названных — все файлы,
  * запуски сливаются. */
 function accessChanged(hub: SyncHub, route: Route, ctx: Ctx): void {
+  if (route.keepsAccess) return;
   if (NO_ACCESS_CHANGE.test(route.path) || route.path === '/api/files' || (route.method === 'POST' && route.path === '/api/teams')) return;
   const files = ctx.touched ?? (ctx.params.id ? [ctx.params.id] : null);
   if (files) for (const id of files) void hub.recheckFile(id).catch((e: unknown) => console.error('Проверка ролей:', e));
@@ -66,7 +70,7 @@ const apiDeps = (deps: AppDeps): ApiDeps => ({ ...deps, allowedEmails: deps.allo
 export function apiRoutes(deps: AppDeps | ApiDeps): Route[] {
   const api = apiDeps(deps as AppDeps);
   const gate = uploadGate();
-  return [...fileRoutes(api, gate), ...imageRoutes(api, gate), ...teamRoutes(api), ...shareRoutes(api)];
+  return [...fileRoutes(api, gate), ...imageRoutes(api, gate), ...teamRoutes(api), ...shareRoutes(api), ...commentRoutes(api)];
 }
 
 /** Проверка не должна висеть дольше проверки контейнера. */
