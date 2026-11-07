@@ -2,6 +2,7 @@
 // WebSocket файла. Комментарии живут в Postgres, а не в Loro: не шаг отмены, не часть документа, не экспорт. Разбор не
 // доверяет данным: неверное — `null`, лишние поля тоже неверны (событие приходит из сети, запрос — от чужого клиента).
 
+import { MAX_NAME_CHARS } from './auth';
 import { isUuid } from './files';
 import { isPageDoc } from './presence';
 
@@ -24,8 +25,6 @@ export const THREAD_PARTICIPANTS_MAX = 50;
 export const COMMENT_EVENT_MAX_BYTES = 64 * 1024;
 /** Координаты метки: как у присутствия, дальше мира ядра не бывает. */
 const COORD_MAX = 1e9;
-/** Имя человека: `MAX_NAME_CHARS` кодовых точек, по 4 байта, с запасом на будущее. */
-const NAME_MAX_CHARS = 256;
 
 const USER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** Упоминание в тексте: `@[userId]`. Имя не хранится — оно показывается по текущему имени человека. */
@@ -203,7 +202,7 @@ const isCount = (v: unknown, max = Number.MAX_SAFE_INTEGER): v is number =>
   Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= max;
 const isTime = (v: unknown): v is number => isCount(v);
 const isTreeId = (v: unknown): v is string => typeof v === 'string' && v.length <= 40 && isPageDoc(v);
-const isName = (v: unknown): v is string => typeof v === 'string' && commentLength(v) <= NAME_MAX_CHARS;
+const isName = (v: unknown): v is string => typeof v === 'string' && commentLength(v) <= MAX_NAME_CHARS;
 
 export function parsePin(v: unknown): PinDto | null {
   const o = exact(v, ['page', 'node', 'x', 'y', 'wx', 'wy']);

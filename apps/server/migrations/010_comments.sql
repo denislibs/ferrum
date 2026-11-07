@@ -7,6 +7,7 @@
 -- несёт состояние со всеми изменениями до N. Изменения — функции ниже: в одном операторе с CTE всё читается снимком начала
 -- оператора, то есть до ожидания блокировки, и ответ на ответ мог бы не видеть одновременного соседа с меньшим номером. В
 -- функции каждый оператор после блокировки видит всё зафиксированное до неё. Для сервера это по-прежнему один запрос.
+-- Роль функция сверяет тоже после блокировки: доступ, снятый, пока вызов ждал соседа, запись не пропускает.
 -- Отказ внутри функции (нет обсуждения, нет прав, предел) — исключение с кодом `CM404`/`CM403`/`CM409`: номер не тратится.
 
 CREATE FUNCTION epoch_ms(t timestamptz) RETURNS bigint
@@ -158,6 +159,30 @@ END
 $$;
 CREATE TRIGGER comment_user_gone AFTER DELETE ON "user" FOR EACH ROW EXECUTE FUNCTION comment_user_gone();
 
+-- Удаление человека меняет обсуждения, где он автор, закрывший, участник, писал или упомянут (имя пропадает): каждое
+-- получает новый номер своего файла под блокировкой счётчика, как всякое изменение, — клиенты, догоняющие по `?after=`,
+-- видят нового автора и участников. До удаления: после внешних ключей `created_by` и `resolved_by` уже пусты.
+CREATE FUNCTION comment_user_leaving() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT t.id, t.file_id FROM comment_thread t
+    WHERE t.deleted_at IS NULL AND (
+      t.created_by = OLD.id OR t.resolved_by = OLD.id OR t.participants @> ARRAY[OLD.id]
+      OR t.id IN (SELECT c.thread_id FROM comment c WHERE c.author_id = OLD.id)
+      OR t.id IN (SELECT c.thread_id FROM comment_mention m JOIN comment c ON c.id = m.comment_id WHERE m.user_id = OLD.id))
+    -- Файлы — по порядку: два удаления людей разом не ждут друг друга крест-накрест.
+    ORDER BY t.file_id, t.seq
+  LOOP
+    UPDATE comment_thread SET seq = comment_next_seq(r.file_id) WHERE id = r.id;
+  END LOOP;
+  RETURN OLD;
+END
+$$;
+CREATE TRIGGER comment_user_leaving BEFORE DELETE ON "user" FOR EACH ROW EXECUTE FUNCTION comment_user_leaving();
+
 CREATE FUNCTION comment_thread_json(t comment_thread) RETURNS jsonb
 LANGUAGE sql STABLE AS $$
   SELECT jsonb_build_object(
@@ -203,7 +228,8 @@ LANGUAGE sql AS $$
   RETURNING seq
 $$;
 
--- Роль — здесь же, в транзакции изменения: снятие роли между проверкой маршрута и записью не пропускает запись.
+-- Роль — здесь же, в транзакции изменения и после `comment_next_seq`: снимок оператора берётся после ожидания
+-- блокировки, и снятие роли между проверкой маршрута и записью (и пока вызов ждал соседа) не пропускает запись.
 CREATE FUNCTION comment_rank(p_file uuid, p_user text) RETURNS integer
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -263,8 +289,11 @@ DECLARE
   v_seq bigint;
   v_at timestamptz;
 BEGIN
-  PERFORM comment_rank(p_file, p_user);
+  -- Строка файла — раньше номера, как у удаления файла (файл, потом каскад на счётчик): вставка обсуждения всё равно
+  -- берёт её (внешний ключ), и в обратном порядке удаление файла и новое обсуждение ждали бы друг друга крест-накрест.
+  PERFORM 1 FROM file WHERE id = p_file FOR KEY SHARE;
   v_seq := comment_next_seq(p_file);
+  PERFORM comment_rank(p_file, p_user);
   -- После блокировки: время комментариев файла растёт в порядке номеров, прочтение по времени не пропустит соседа.
   v_at := clock_timestamp();
   INSERT INTO comment_thread (id, file_id, page_id, node_id, x, y, wx, wy, first_id, created_by, created_at, seq)
@@ -287,8 +316,8 @@ DECLARE
   v_seq bigint;
   v_at timestamptz;
 BEGIN
-  PERFORM comment_rank(p_file, p_user);
   v_seq := comment_next_seq(p_file);
+  PERFORM comment_rank(p_file, p_user);
   UPDATE comment_thread SET seq = v_seq WHERE id = p_thread AND file_id = p_file AND deleted_at IS NULL;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'нет обсуждения' USING ERRCODE = 'CM404';
@@ -315,8 +344,8 @@ DECLARE
   v_seq bigint;
   v_author text;
 BEGIN
-  PERFORM comment_rank(p_file, p_user);
   v_seq := comment_next_seq(p_file);
+  PERFORM comment_rank(p_file, p_user);
   SELECT c.author_id INTO v_author FROM comment c JOIN comment_thread t ON t.id = c.thread_id
   WHERE c.id = p_comment AND c.thread_id = p_thread AND t.file_id = p_file AND t.deleted_at IS NULL;
   IF NOT FOUND THEN
@@ -343,8 +372,8 @@ DECLARE
   v_first uuid;
   v_result jsonb;
 BEGIN
-  v_rank := comment_rank(p_file, p_user);
   v_seq := comment_next_seq(p_file);
+  v_rank := comment_rank(p_file, p_user);
   SELECT c.author_id, t.first_id INTO v_author, v_first FROM comment c JOIN comment_thread t ON t.id = c.thread_id
   WHERE c.id = p_comment AND c.thread_id = p_thread AND t.file_id = p_file AND t.deleted_at IS NULL;
   IF NOT FOUND THEN
@@ -376,8 +405,8 @@ DECLARE
   v_seq bigint;
   v_author text;
 BEGIN
-  v_rank := comment_rank(p_file, p_user);
   v_seq := comment_next_seq(p_file);
+  v_rank := comment_rank(p_file, p_user);
   SELECT created_by INTO v_author FROM comment_thread WHERE id = p_thread AND file_id = p_file AND deleted_at IS NULL;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'нет обсуждения' USING ERRCODE = 'CM404';
@@ -404,8 +433,8 @@ DECLARE
   v_seq bigint;
   v_author text;
 BEGIN
-  v_rank := comment_rank(p_file, p_user);
   v_seq := comment_next_seq(p_file);
+  v_rank := comment_rank(p_file, p_user);
   SELECT created_by INTO v_author FROM comment_thread WHERE id = p_thread AND file_id = p_file AND deleted_at IS NULL;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'нет обсуждения' USING ERRCODE = 'CM404';

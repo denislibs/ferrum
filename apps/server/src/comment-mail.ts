@@ -6,7 +6,8 @@
 // SMTP (сервер ответил кодом, соединение не открылось) — строка возвращается в очередь с паузой, после `MAX_ATTEMPTS` —
 // `dropped`. Строка, оставшаяся в `sending` (процесс упал между отправкой и отметкой, отметка не записалась, отправка
 // зависла дольше срока), не отправляется снова: `uncertain` и запись в журнал. Лишнее письмо хуже потерянного уведомления:
-// комментарий всё равно виден в файле.
+// комментарий всё равно виден в файле. Строка, взятая, но точно не отданная SMTP (остановка посреди прохода, сбой базы до
+// отправки), возвращается в очередь (`pending`), а не в `uncertain`.
 //
 // Перед отправкой — снова: доступ есть, письма не выключены, файл не открыт сейчас и не открывался после первого
 // комментария, комментарии ещё есть. Иначе — `skipped`.
@@ -75,9 +76,9 @@ export function knownSmtpFailure(e: unknown): boolean {
   return (typeof responseCode === 'number' && responseCode >= 400) || command === 'CONN';
 }
 
-/** Управляющие (CR, LF и прочие), разделители строк и знаки направления: в заголовке письма их быть не должно. */
-// eslint-disable-next-line no-control-regex
-const HEADER_UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+/** Управляющие (C0, DEL, C1), разделители строк и знаки направления (тот же класс, что у текста комментария): в заголовке
+ * письма их быть не должно. */
+const HEADER_UNSAFE_RE = /[\p{Cc}\p{Bidi_Control}\u2028\u2029]/gu;
 
 /** Строка заголовка: без `HEADER_UNSAFE_RE` и пробелов по краям, не длиннее предела. */
 export function headerSafe(s: string, max = SUBJECT_CHARS): string {
@@ -130,6 +131,10 @@ export class CommentMailWorker {
   private timer: Timer | null = null;
   private running: Promise<void> | null = null;
   private stopped = false;
+  /** Строки прошлого процесса в `sending` уже признаны `uncertain`: до этого проход ничего не берёт. */
+  private recovering: Promise<void> | null = null;
+  /** Взяты, но SMTP не отданы (остановка, сбой базы до отправки): вернуть в очередь при первой возможности. */
+  private readonly untried = new Set<string>();
   /** Счётчики для тестов и пробы. */
   readonly counts = { sent: 0, skipped: 0, retried: 0, dropped: 0, uncertain: 0 };
 
@@ -145,17 +150,29 @@ export class CommentMailWorker {
     this.opts = { ...COMMENT_MAIL_OPTIONS, ...opts };
   }
 
-  /** Запуск: строки, взятые прошлым процессом и не отмеченные, — исход неизвестен, снова не шлются. */
+  /** Запуск: таймер — сразу, и при недоступной базе (проход сам повторит то, что не вышло здесь); строки, взятые прошлым
+   * процессом и не отмеченные, — исход неизвестен, снова не шлются. */
   async start(): Promise<void> {
-    const { rows } = await this.pool.query<{ id: string }>(
-      `UPDATE mail_outbox SET state = 'uncertain', done_at = now() WHERE state = 'sending' RETURNING id`,
-    );
-    this.noteUncertain(rows.length, 'остались от прошлого запуска');
     this.timer = setInterval(() => void this.tick().catch(report), this.opts.pollMs);
     this.timer.unref?.();
+    await this.recover();
   }
 
-  /** Один проход; идущий проход не запускается второй раз. Число отработанных строк. */
+  /** Один раз за процесс, до первого взятия: иначе своё взятое признали бы чужим. */
+  private recover(): Promise<void> {
+    this.recovering ??= (async () => {
+      const { rows } = await this.pool.query<{ id: string }>(
+        `UPDATE mail_outbox SET state = 'uncertain', done_at = now() WHERE state = 'sending' RETURNING id`,
+      );
+      this.noteUncertain(rows.length, 'остались от прошлого запуска');
+    })().catch((e: unknown) => {
+      this.recovering = null;
+      throw e;
+    });
+    return this.recovering;
+  }
+
+  /** Один проход; идущий проход не запускается второй раз. */
   tick(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     this.running ??= this.round().finally(() => {
@@ -168,6 +185,22 @@ export class CommentMailWorker {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     await this.running?.catch(() => {});
+    // Проход вернул своё сам; это — на случай, если и он не смог.
+    await this.returnUntried();
+  }
+
+  /** Взятые и не отданные SMTP — обратно в очередь, без потраченной попытки. Не вышло (база недоступна) — останутся до
+   * следующего раза. */
+  private async returnUntried(): Promise<void> {
+    for (const id of this.untried) {
+      try {
+        await this.release(id, 0, true);
+        this.untried.delete(id);
+      } catch (e) {
+        report(e);
+        return;
+      }
+    }
   }
 
   private noteUncertain(n: number, why: string): void {
@@ -178,6 +211,9 @@ export class CommentMailWorker {
 
   private async round(): Promise<void> {
     const { opts, pool } = this;
+    await this.recover();
+    // Не отданные прошлым проходом — раньше срока аренды: иначе их признали бы `uncertain`.
+    await this.returnUntried();
     const expired = await pool.query(
       `UPDATE mail_outbox SET state = 'uncertain', done_at = now()
        WHERE state = 'sending' AND sending_at < now() - make_interval(secs => $1 / 1000.0)`,
@@ -185,12 +221,12 @@ export class CommentMailWorker {
     );
     this.noteUncertain(expired.rowCount ?? 0, 'отправка дольше срока');
     await pool.query(`DELETE FROM mail_outbox WHERE done_at < now() - make_interval(secs => $1 / 1000.0)`, [opts.keepMs]);
-    // Взять — и зафиксировать — до SMTP. Человеку, которому за час ушло (или уходит) `perHour` писем, строка ждёт дальше и
-    // копит комментарии; в одном проходе ему — не больше остатка.
+    // Взять — и зафиксировать — до SMTP. Человеку, которому за час ушло (или уходит, или, может быть, ушло — `uncertain`)
+    // `perHour` писем, строка ждёт дальше и копит комментарии; в одном проходе ему — не больше остатка.
     const { rows } = await pool.query<Claimed>(
       `WITH recent AS (
          SELECT q.recipient_id AS r, (SELECT count(*) FROM mail_outbox x
-                WHERE x.recipient_id = q.recipient_id AND x.state IN ('sent', 'sending')
+                WHERE x.recipient_id = q.recipient_id AND x.state IN ('sent', 'sending', 'uncertain')
                   AND COALESCE(x.done_at, x.sending_at) > now() - interval '1 hour') AS n
          FROM (SELECT DISTINCT recipient_id FROM mail_outbox WHERE state = 'pending' AND due_at <= now()) q),
        cand AS (
@@ -205,38 +241,38 @@ export class CommentMailWorker {
        RETURNING o.id, o.recipient_id, o.file_id, o.extra, o.attempts`,
       [opts.batch, opts.perHour],
     );
-    for (const row of rows) {
-      if (this.stopped) break;
+    for (const [i, row] of rows.entries()) {
+      if (this.stopped) {
+        // Остановка: остальные взятые SMTP не отдавались — обратно в очередь.
+        for (const r of rows.slice(i)) this.untried.add(r.id);
+        break;
+      }
       await this.deliver(row).catch(report);
     }
+    await this.returnUntried();
   }
 
   private async deliver(row: Claimed): Promise<void> {
-    const { rows } = await this.pool.query<Content>(
-      `SELECT u.email, f.name AS file_name, file_role_rank(o.file_id, o.recipient_id) AS rank,
-              COALESCE((SELECT comment_mail FROM user_pref WHERE user_id = o.recipient_id), true) AS wants,
-              EXISTS (SELECT 1 FROM file_recent r WHERE r.user_id = o.recipient_id AND r.file_id = o.file_id AND r.opened_at > o.first_at)
-                AS opened_after,
-              (SELECT jsonb_agg(comment_json(c) ORDER BY c.created_at, c.id)
-               FROM comment c JOIN comment_thread t ON t.id = c.thread_id
-               WHERE c.id = ANY (o.comment_ids) AND t.file_id = o.file_id AND t.deleted_at IS NULL) AS items
-       FROM mail_outbox o JOIN "user" u ON u.id = o.recipient_id JOIN file f ON f.id = o.file_id
-       WHERE o.id = $1`,
-      [row.id],
-    );
-    const c = rows[0];
-    // Файл или человек удалены — строка ушла вместе с ними.
-    if (!c) return;
-    const skip =
-      (c.rank ?? 0) < 1 ||
-      !c.wants ||
-      c.opened_after ||
-      !c.items?.length ||
-      !emailAllowed(c.email, this.allowedEmails) ||
-      this.openUsers(row.file_id).includes(row.recipient_id);
-    if (skip) {
-      await this.mark(row.id, 'skipped');
-      this.counts.skipped++;
+    let c: Content | undefined;
+    try {
+      c = await this.content(row);
+      // Файл или человек удалены — строка ушла вместе с ними.
+      if (!c) return;
+      const skip =
+        (c.rank ?? 0) < 1 ||
+        !c.wants ||
+        c.opened_after ||
+        !c.items?.length ||
+        !emailAllowed(c.email, this.allowedEmails) ||
+        this.openUsers(row.file_id).includes(row.recipient_id);
+      if (skip) {
+        this.counts.skipped += await this.mark(row.id, 'skipped');
+        return;
+      }
+    } catch (e) {
+      // До SMTP: письмо точно не ушло — в очередь, а не в `uncertain`.
+      report(e);
+      this.untried.add(row.id);
       return;
     }
     const mail = commentMail(c.email, c.file_name, c.items!, row.extra, this.publicUrl, row.file_id);
@@ -251,35 +287,56 @@ export class CommentMailWorker {
       }),
     ]).finally(() => clearTimeout(timer));
     if (outcome === 'sent') {
-      await this.mark(row.id, 'sent');
-      this.counts.sent++;
+      this.counts.sent += await this.mark(row.id, 'sent');
       return;
     }
     if (outcome === 'timeout' || !knownSmtpFailure(outcome)) {
       if (outcome !== 'timeout') console.error('Письмо о комментариях: сбой отправки,', mailFailure(outcome));
-      await this.mark(row.id, 'uncertain');
-      this.noteUncertain(1, outcome === 'timeout' ? 'SMTP не ответил в срок' : 'обрыв посреди отправки');
+      this.noteUncertain(await this.mark(row.id, 'uncertain'), outcome === 'timeout' ? 'SMTP не ответил в срок' : 'обрыв посреди отправки');
       return;
     }
     console.error('Письмо о комментариях не принято:', mailFailure(outcome));
     if (row.attempts >= this.opts.maxAttempts) {
-      await this.mark(row.id, 'dropped');
-      this.counts.dropped++;
-      console.error(`Письмо о комментариях брошено после ${row.attempts} попыток`);
+      const n = await this.mark(row.id, 'dropped');
+      this.counts.dropped += n;
+      if (n > 0) console.error(`Письмо о комментариях брошено после ${row.attempts} попыток`);
       return;
     }
     await this.release(row.id, this.opts.retryMs * row.attempts);
     this.counts.retried++;
   }
 
-  /** Отметка только своей строки в `sending`: строку, признанную `uncertain` (срок, новый процесс), она не трогает. */
-  private mark(id: string, state: 'sent' | 'skipped' | 'dropped' | 'uncertain'): Promise<unknown> {
-    return this.pool.query(`UPDATE mail_outbox SET state = $2, done_at = now() WHERE id = $1 AND state = 'sending'`, [id, state]);
+  /** Что нужно письму и проверке перед ним — одним запросом. */
+  private async content(row: Claimed): Promise<Content | undefined> {
+    const { rows } = await this.pool.query<Content>(
+      `SELECT u.email, f.name AS file_name, file_role_rank(o.file_id, o.recipient_id) AS rank,
+              COALESCE((SELECT comment_mail FROM user_pref WHERE user_id = o.recipient_id), true) AS wants,
+              EXISTS (SELECT 1 FROM file_recent r WHERE r.user_id = o.recipient_id AND r.file_id = o.file_id AND r.opened_at > o.first_at)
+                AS opened_after,
+              (SELECT jsonb_agg(comment_json(c) ORDER BY c.created_at, c.id)
+               FROM comment c JOIN comment_thread t ON t.id = c.thread_id
+               WHERE c.id = ANY (o.comment_ids) AND t.file_id = o.file_id AND t.deleted_at IS NULL) AS items
+       FROM mail_outbox o JOIN "user" u ON u.id = o.recipient_id JOIN file f ON f.id = o.file_id
+       WHERE o.id = $1`,
+      [row.id],
+    );
+    return rows[0];
+  }
+
+  /** Отметка только своей строки в `sending`: строку, признанную `uncertain` (срок, новый процесс), она не трогает. Сколько
+   * строк отмечено (0 или 1): счётчики считают только свои отметки. */
+  private async mark(id: string, state: 'sent' | 'skipped' | 'dropped' | 'uncertain'): Promise<number> {
+    const { rowCount } = await this.pool.query(`UPDATE mail_outbox SET state = $2, done_at = now() WHERE id = $1 AND state = 'sending'`, [
+      id,
+      state,
+    ]);
+    return rowCount ?? 0;
   }
 
   /** Вернуть в очередь с паузой. Пока строка отправлялась, могла появиться новая ждущая на того же человека и файл: тогда
-   * эта сливается в неё (старое — вперёд), а сама уходит. Одновременная вставка — повтор. */
-  private async release(id: string, delayMs: number): Promise<void> {
+   * эта сливается в неё (старое — вперёд), а сама уходит. Одновременная вставка — повтор. `untried` — SMTP строку не видел:
+   * попытка не тратится. */
+  private async release(id: string, delayMs: number, untried = false): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       try {
         await this.pool.query(
@@ -290,16 +347,17 @@ export class CommentMailWorker {
                     extra = p.extra + me.extra + GREATEST(0, cardinality(me.comment_ids) + cardinality(p.comment_ids) - 20),
                     first_at = LEAST(p.first_at, me.first_at),
                     due_at = LEAST(p.due_at, now() + make_interval(secs => $2 / 1000.0)),
-                    attempts = GREATEST(p.attempts, me.attempts)
+                    attempts = GREATEST(p.attempts, me.attempts - $3)
                   FROM me WHERE p.recipient_id = me.recipient_id AND p.file_id = me.file_id AND p.state = 'pending'
                   RETURNING p.id)
            UPDATE mail_outbox o SET
              state = CASE WHEN EXISTS (SELECT 1 FROM merged) THEN 'skipped' ELSE 'pending' END,
              done_at = CASE WHEN EXISTS (SELECT 1 FROM merged) THEN now() END,
              due_at = now() + make_interval(secs => $2 / 1000.0),
-             sending_at = NULL
+             sending_at = NULL,
+             attempts = o.attempts - $3
            FROM me WHERE o.id = me.id`,
-          [id, delayMs],
+          [id, delayMs, untried ? 1 : 0],
         );
         return;
       } catch (e) {

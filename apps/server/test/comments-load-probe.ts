@@ -4,8 +4,10 @@
 //   fanout SECS [hostile] — 50 соединений одного файла (5 человек по 10 вкладок) в дочернем процессе, раз в 100 мс новый
 //                        комментарий по REST: задержка от ответа REST до прихода события на каждое соединение (часы одного
 //                        процесса). `hostile` — ещё процесс враждебного человека: 5 сеансов, 40 потоков создают комментарии и
-//                        читают список из 1000 обсуждений без остановки, и его сокет, который не читает. Процессор, память и
-//                        буферы — сервера (клиенты в других процессах).
+//                        читают список из 1000 обсуждений без остановки, и его сокет, который не читает (открытие и
+//                        подтверждение роли проверяются, после замера ему шлются крупные события, пока сервер не начнёт
+//                        их пропускать). Процессор, память и буферы — сервера (клиенты в других процессах); память — пик
+//                        по третям замера: первая — разогрев, рост последней над средней — не плато.
 
 import { encodeClientFrame, parseServerFrame, SYNC_PROTOCOL, syncPath, type PinDto } from '@ferrum/protocol';
 import { connect } from 'node:net';
@@ -176,7 +178,10 @@ async function timed(n: number, work: () => Promise<void>): Promise<{ p50: numbe
 const unlimited = { max: 1_000_000, windowSeconds: 60 };
 
 if (mode === 'big') {
-  const s = await apiStand({ commentMail: false, limits: { comment: unlimited, read: unlimited, write: unlimited } });
+  const s = await apiStand({
+    commentMail: false,
+    limits: { comment: unlimited, read: unlimited, write: unlimited, commentList: unlimited, commentThread: unlimited },
+  });
   const people: Person[] = [];
   for (let i = 0; i < 5; i++) people.push(await s.signIn(`load-${i}-${Date.now()}@example.com`, `Человек ${i}`));
   const file = (await s.newFile(people[0])).id;
@@ -273,20 +278,37 @@ if (mode === 'fanout') {
     .rows[0].id;
   let evil: Person[] = [];
   let raw: ReturnType<typeof connect> | null = null;
+  let rawUpgraded = false;
+  let rawConfirmed = false;
   if (hostile) {
     // Пять сеансов одного человека — как вкладки и устройства: предел частоты у них общий.
     const email = `evil-${Date.now()}@example.com`;
     for (let i = 0; i < 5; i++) evil.push(await s.signIn(email, 'Враждебный'));
     await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [file, evil[0].id]);
     raw = connect(Number(new URL(s.publicUrl).port), '127.0.0.1');
+    const got: Buffer[] = [];
+    const waiters: (() => void)[] = [];
+    raw.on('data', (b: Buffer) => {
+      got.push(b);
+      for (const w of waiters.splice(0)) w();
+    });
+    const until = async (cond: () => boolean) => {
+      while (!cond()) await new Promise<void>((resolve) => waiters.push(resolve));
+    };
     raw.write(
       `GET ${syncPath(file, evil[0].id)} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
         `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: ${s.publicUrl}\r\nCookie: ${evil[0].cookie}\r\n\r\n`,
     );
-    await Bun.sleep(200);
+    // Открытие — ответ 101, потом `hello`; подтверждение — кадр `role` (первый кадр сервера после открытия).
+    const all = () => Buffer.concat(got);
+    await until(() => all().includes('\r\n\r\n'));
+    rawUpgraded = all().toString('latin1').startsWith('HTTP/1.1 101 ');
+    const head = all().indexOf('\r\n\r\n') + 4;
     const hello = encodeClientFrame({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 });
     raw.write(Buffer.concat([Buffer.from([0x82, 0x80 | hello.length, 0, 0, 0, 0]), hello]));
-    await Bun.sleep(200);
+    await until(() => all().length >= head + 2 && all().length >= head + 2 + (all()[head + 1] & 0x7f));
+    const len = all()[head + 1] & 0x7f;
+    rawConfirmed = parseServerFrame(new Uint8Array(all().subarray(head + 2, head + 2 + len)))?.t === 'role';
     raw.pause();
   } else evil = [];
   Bun.gc(true);
@@ -322,7 +344,11 @@ if (mode === 'fanout') {
   const cpu0 = process.cpuUsage();
   const t0 = performance.now();
   let peakBuffered = 0;
+  let peakConnBuffered = 0;
   let peakRss = 0;
+  // Пик памяти по третям замера: первая — разогрев (пулы, распределитель), плато — последняя не выше средней.
+  const third = (Number(secs) * 1000) / 3;
+  const rssThirds = [0, 0, 0];
   // Задержка цикла событий сервера: таймер на 10 мс.
   const lags: number[] = [];
   let tick = performance.now();
@@ -331,7 +357,11 @@ if (mode === 'fanout') {
     lags.push(now - tick - 10);
     tick = now;
     peakBuffered = Math.max(peakBuffered, s.hub.bufferedBytes());
-    peakRss = Math.max(peakRss, process.memoryUsage().rss);
+    peakConnBuffered = Math.max(peakConnBuffered, s.hub.bufferedMax());
+    const rss = process.memoryUsage().rss;
+    peakRss = Math.max(peakRss, rss);
+    const k = Math.min(2, Math.floor((now - t0) / third));
+    rssThirds[k] = Math.max(rssThirds[k], rss);
   }, 10);
   const report = JSON.parse(await next()) as Record<string, number>;
   clearInterval(probe);
@@ -342,6 +372,16 @@ if (mode === 'fanout') {
     flood.kill('SIGTERM');
     const out = await new Response(flood.stdout).text();
     floodCounts = JSON.parse(out.trim().split('\n').at(-1) ?? '{}') as Record<string, number>;
+  }
+  // Медленный читатель: если за замер буферы ядра ОС всё вместили, — крупные события после замера, пока сервер не начнёт
+  // пропускать; буфер его сокета на сервере при этом — не больше порога и одного события.
+  if (hostile) {
+    const big = '😀'.repeat(4000);
+    for (let i = 0; i < 400 && s.hub.commentSkipped === 0; i++) {
+      const res = await s.call(people[0], 'POST', `/api/files/${file}/comments/${thread}/comments`, { body: big });
+      await res.text();
+      peakConnBuffered = Math.max(peakConnBuffered, s.hub.bufferedMax());
+    }
   }
   Bun.gc(true);
   const accepted = (await s.pool.query<{ n: number }>('SELECT count(*)::int AS n FROM comment WHERE author_id = $1', [evil[0]?.id ?? '']))
@@ -355,9 +395,13 @@ if (mode === 'fanout') {
       loopLagP95: round(pct(lags, 95)),
       loopLagMax: round(pct(lags, 100)),
       rssPeakGrowthMb: round((peakRss - rss0) / 1e6),
+      rssThirdsPeakMb: rssThirds.map((v) => round((v - rss0) / 1e6)),
       heapGrowthMb: round((process.memoryUsage().heapUsed - heap0) / 1e6),
       peakBufferedKb: round(peakBuffered / 1024),
+      peakConnBufferedKb: round(peakConnBuffered / 1024),
       commentSkipped: s.hub.commentSkipped,
+      rawUpgraded,
+      rawConfirmed,
       hostileAcceptedComments: accepted,
       hostile429: Object.entries(floodCounts)
         .filter(([k]) => k.endsWith(':429'))

@@ -3,7 +3,7 @@
 // попытки. Последний тест шлёт настоящее письмо через nodemailer в Mailpit стенда и читает его через API Mailpit.
 
 import { parseCommentWrite, type CommentWriteDto, type PinDto } from '@ferrum/protocol';
-import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { CommentMailWorker, type CommentMailOptions } from '../src/comment-mail';
 import { smtpMailer, type Mail, type Mailer } from '../src/mail';
 import { apiStand, type Person } from './api-stand';
@@ -21,19 +21,32 @@ class FakeMail implements Mailer {
   readonly attempts: Mail[] = [];
   readonly delivered: Mail[] = [];
   readonly failures: unknown[] = [];
+  /** Все отправки, и зависшие: тест дожидается их конца, а не времени. */
+  readonly sending: Promise<void>[] = [];
   hang: Promise<void> | null = null;
-  async send(mail: Mail): Promise<void> {
+  private readonly waiters: (() => void)[] = [];
+  send(mail: Mail): Promise<void> {
+    const p = this.deliver(mail);
+    this.sending.push(p.catch(() => {}));
+    return p;
+  }
+  private async deliver(mail: Mail): Promise<void> {
     this.attempts.push(mail);
+    for (const w of this.waiters.splice(0)) w();
     if (this.hang) await this.hang;
     const e = this.failures.shift();
     if (e) throw e;
     this.delivered.push(mail);
   }
+  /** Дождаться `n`-й попытки отправки. */
+  async attempted(n: number): Promise<void> {
+    while (this.attempts.length < n) await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
 }
 
 const workers: CommentMailWorker[] = [];
-async function worker(mail: Mailer, opts: Partial<CommentMailOptions> = {}): Promise<CommentMailWorker> {
-  const w = new CommentMailWorker(s.pool, mail, s.publicUrl, (f) => s.hub.openUsers(f), [], {
+async function worker(mail: Mailer, opts: Partial<CommentMailOptions> = {}, allowedEmails: string[] = []): Promise<CommentMailWorker> {
+  const w = new CommentMailWorker(s.pool, mail, s.publicUrl, (f) => s.hub.openUsers(f), allowedEmails, {
     pollMs: 3_600_000,
     retryMs: 0,
     ...opts,
@@ -190,7 +203,9 @@ test('отказ SMTP: повтор с паузой; после 5 попыток
   expect(await states()).toEqual(['uncertain/1']);
   mail.hang = null;
   release();
-  await Bun.sleep(50);
+  // Поздний ответ SMTP пришёл (письмо дошло) — отметку он не меняет.
+  await Promise.all(mail.sending);
+  expect(mail.delivered.at(-1)?.text).toContain('четыре');
   await due();
   await w.tick();
   expect(await states()).toEqual(['uncertain/1']);
@@ -206,7 +221,7 @@ test('перезапуск посреди отправки и падение м�
   await create(owner, `@[${viewer.id}] перезапуск`);
   await due();
   const flight = first.tick();
-  for (let i = 0; i < 100 && mail.attempts.length === 0; i++) await Bun.sleep(10);
+  await mail.attempted(1);
   expect(await states()).toEqual(['sending/1']);
   // Новый процесс на той же базе: взятое прошлым — исход неизвестен.
   const second = await worker(mail);
@@ -221,6 +236,8 @@ test('перезапуск посреди отправки и падение м�
   await second.tick();
   expect(await states()).toEqual(['uncertain/1']);
   expect(mail.attempts).toHaveLength(1);
+  // Отметка прошлого процесса не прошла — и в его счётчик не попала.
+  expect(first.counts.sent).toBe(0);
 
   // Письмо ушло, а отметка не записалась (база отказала): после перезапуска — не снова.
   await s.pool.query('DELETE FROM mail_outbox');
@@ -259,7 +276,7 @@ test('повтор после отказа сливается с новой ст
   mail.hang = hang;
   mail.failures.push(Object.assign(new Error('452'), { responseCode: 452, command: 'RCPT TO' }));
   const flight = w.tick();
-  for (let i = 0; i < 100 && mail.attempts.length === 0; i++) await Bun.sleep(10);
+  await mail.attempted(1);
   // Пока первое отправлялось, пришло второе: новая ждущая строка.
   const b = await create(editor, `@[${viewer.id}] второе`);
   expect(await states()).toEqual(['sending/1', 'pending/0']);
@@ -293,14 +310,14 @@ test('письмо — текст как текст: HTML экранирован
   const w = await worker(mail);
   const eve = await s.signIn(`m-eve-${crypto.randomUUID()}@example.com`, '<b>Ева</b> "q"');
   await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [file, eve.id]);
-  await s.pool.query(`UPDATE file SET name = $2 WHERE id = $1`, [file, 'Макет\r\nBcc: evil@example.com\u202e']);
+  await s.pool.query(`UPDATE file SET name = $2 WHERE id = $1`, [file, 'Макет\r\nBcc: evil@example.com\u202e\u200f\u061c\u0085']);
   const stranger = await s.signIn(`m-stranger-${crypto.randomUUID()}@example.com`, 'Чужой');
   await create(eve, `<script>alert(1)</script> & @[${viewer.id}] @[${stranger.id}]`);
   await due();
   await w.tick();
   const m = mail.delivered[0];
   expect(m.subject).toBe('<b>Ева</b> "q": комментарий в «Макет Bcc: evil@example.com»');
-  expect(m.subject).not.toMatch(/[\r\n\u202e]/);
+  expect(m.subject).not.toMatch(/[\r\n\u202e\u200f\u061c\u0085]/);
   expect(m.html).not.toContain('<script>');
   expect(m.html).not.toContain('<b>Ева');
   expect(m.html).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &amp; @Вера @неизвестный');
@@ -344,4 +361,104 @@ test('настоящая почта: письмо через nodemailer прих
   expect(msg.Text).toContain(`${s.publicUrl}/#/file/${file}?comment=${t.thread.id}`);
   const headers = (await (await fetch(`${api}/message/${id}/headers`)).json()) as Record<string, string[]>;
   expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain('bcc');
+});
+
+test('остановка посреди прохода: взятые, но не отданные SMTP строки — обратно в очередь, без потраченной попытки', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail);
+  await create(owner, `@[${viewer.id}] первое`);
+  await create(owner, `@[${editor.id}] второе`);
+  await due();
+  const { promise: hang, resolve: release } = Promise.withResolvers<void>();
+  mail.hang = hang;
+  const flight = w.tick();
+  await mail.attempted(1);
+  expect(await states()).toEqual(['sending/1', 'sending/1']);
+  const stopping = w.stop();
+  mail.hang = null;
+  release();
+  await stopping;
+  await flight;
+  // Какая из двух взята первой — порядок равных сроков не задан.
+  expect((await states()).sort()).toEqual(['pending/0', 'sent/1']);
+  // Следующий процесс отправляет её как обычно, а не признаёт неизвестной.
+  const next = await worker(mail);
+  await next.tick();
+  expect(await states()).toEqual(['sent/1', 'sent/1']);
+  expect([mail.attempts.length, next.counts.uncertain]).toEqual([2, 0]);
+});
+
+test('сбой базы до SMTP: строка — обратно в очередь, следующий проход её отправляет', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail);
+  await create(owner, `@[${viewer.id}] сбой`);
+  await due();
+  const pool = s.pool as unknown as { query: (...a: unknown[]) => Promise<unknown> };
+  const real = pool.query.bind(pool);
+  const spy = spyOn(pool, 'query').mockImplementation((...a: unknown[]) =>
+    typeof a[0] === 'string' && a[0].includes('AS opened_after') ? Promise.reject(new Error('сбой теста')) : real(...a),
+  );
+  try {
+    await w.tick();
+  } finally {
+    spy.mockRestore();
+  }
+  expect(await states()).toEqual(['pending/0']);
+  expect(mail.attempts).toHaveLength(0);
+  await w.tick();
+  expect(await states()).toEqual(['sent/1']);
+  expect(w.counts.uncertain).toBe(0);
+});
+
+test('база недоступна при запуске: таймер всё равно идёт, проход сам доделывает запуск и шлёт', async () => {
+  const mail = new FakeMail();
+  await create(owner, `@[${viewer.id}] потом`);
+  await due();
+  const pool = s.pool as unknown as { query: (...a: unknown[]) => Promise<unknown> };
+  const real = pool.query.bind(pool);
+  let failed = false;
+  const spy = spyOn(pool, 'query').mockImplementation((...a: unknown[]) => {
+    if (!failed && typeof a[0] === 'string' && a[0].includes(`WHERE state = 'sending' RETURNING id`)) {
+      failed = true;
+      return Promise.reject(new Error('сбой теста'));
+    }
+    return real(...a);
+  });
+  const w = new CommentMailWorker(s.pool, mail, s.publicUrl, (f) => s.hub.openUsers(f), [], { pollMs: 5, retryMs: 0 });
+  workers.push(w);
+  try {
+    await expect(w.start()).rejects.toThrow('сбой теста');
+    await mail.attempted(1);
+  } finally {
+    spy.mockRestore();
+  }
+  await w.stop();
+  expect(await states()).toEqual(['sent/1']);
+});
+
+test('предел писем в час считает и `uncertain`: такое письмо могло дойти', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail, { perHour: 2 });
+  for (let i = 0; i < 3; i++) {
+    const f = (await s.newFile(owner, `Ф${i}`)).id;
+    await s.pool.query(`INSERT INTO file_access (file_id, user_id, role) VALUES ($1, $2, 'viewer')`, [f, viewer.id]);
+    await create(owner, `@[${viewer.id}]`, f);
+  }
+  // Одно — исход неизвестен в этот час.
+  await s.pool.query(`UPDATE mail_outbox SET state = 'uncertain', done_at = now() WHERE id = (SELECT min(id) FROM mail_outbox)`);
+  await due();
+  await w.tick();
+  await w.tick();
+  expect(mail.delivered).toHaveLength(1);
+  expect((await states()).sort()).toEqual(['pending/0', 'sent/1', 'uncertain/0']);
+});
+
+test('адрес не из разрешённых (`allowedEmails`) — письма нет, строка пропущена', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail, {}, ['allowed.example']);
+  await create(owner, `@[${viewer.id}] мимо`);
+  await due();
+  await w.tick();
+  expect(await states()).toEqual(['skipped/1']);
+  expect([mail.attempts.length, w.counts.skipped]).toEqual([0, 1]);
 });

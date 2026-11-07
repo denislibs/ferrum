@@ -227,4 +227,8 @@ test('ответы REST разбираются строго', () => {
   expect(parseCommentWrite({ seq: 7, thread: view, comment: null, removed: true })?.removed).toBe(true);
   expect(parseMentionList({ people: [{ id: U, name: 'А', email: null }] })).toEqual({ people: [{ id: U, name: 'А', email: null }] });
   expect(parseMentionList({ people: Array(9).fill({ id: U, name: 'А', email: null }) })).toBeNull();
+  // Имя — не длиннее имени входа (`MAX_NAME_CHARS`): длиннее сервер не хранит, а оценка худшего события считает по нему.
+  const named = (name: string) => ({ ...view, author: { id: U, name } });
+  expect(parseCommentList({ seq: 3, threads: [named('𝔄'.repeat(MAX_NAME_CHARS))], removed: [], more: false })).not.toBeNull();
+  expect(parseCommentList({ seq: 3, threads: [named('𝔄'.repeat(MAX_NAME_CHARS + 1))], removed: [], more: false })).toBeNull();
 });
