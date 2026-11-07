@@ -135,6 +135,7 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
 
   const stop = async () => {
     server.compactor?.stop();
+    await server.commentMail?.stop();
     await server.hub.stop();
     server.stop(true);
     valkey.close();

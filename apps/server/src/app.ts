@@ -8,6 +8,7 @@ import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
 import type { BlobStore, UploadPace } from './blob-store';
 import { clientIp, proxyMatcher } from './client-ip';
+import { CommentMailWorker, type CommentMailOptions } from './comment-mail';
 import { commentRoutes } from './comment-routes';
 import { fileRoutes, uploadGate } from './file-routes';
 import { imageRoutes } from './image-routes';
@@ -37,6 +38,8 @@ export interface AppDeps {
   limits?: Partial<Limits>;
   /** Группировка писем о комментариях: тесты сокращают. */
   commentMailDelayMs?: number;
+  /** Отправка писем о комментариях; `false` — без неё (тесты гоняют свою с поддельной почтой). */
+  commentMail?: Partial<CommentMailOptions> | false;
   apiDeadlineMs?: number;
   uploadIdleMs?: number;
   uploadPace?: UploadPace;
@@ -89,7 +92,7 @@ async function health(deps: AppDeps): Promise<Response> {
 }
 
 /** Сервер и его WebSocket: остановка контейнера и тесты обращаются к обоим. */
-export type Running = Bun.Server<ConnData> & { hub: SyncHub; compactor: Compactor | null };
+export type Running = Bun.Server<ConnData> & { hub: SyncHub; compactor: Compactor | null; commentMail: CommentMailWorker | null };
 
 export function startServer(deps: AppDeps, port: number): Running {
   const hub = new SyncHub(deps.pool, deps.blobs, deps.auth, deps.publicUrl, deps.syncLimits);
@@ -100,6 +103,11 @@ export function startServer(deps: AppDeps, port: number): Running {
     compactor.active = (file) => hub.isOpen(file);
   }
   const handleAuth = authRoutes({ ...deps, hub });
+  const commentMail =
+    deps.commentMail === false
+      ? null
+      : new CommentMailWorker(deps.pool, deps.mailer, deps.publicUrl, (file) => hub.openUsers(file), deps.allowedEmails, deps.commentMail);
+  void commentMail?.start().catch((e: unknown) => console.error('Письма о комментариях:', e instanceof Error ? e.message : e));
   const trusted = proxyMatcher(deps.trustedProxies);
   const withHeaders = responseHeaders(deps.publicUrl);
   const api: ApiDeps = {
@@ -133,5 +141,5 @@ export function startServer(deps: AppDeps, port: number): Running {
     },
     websocket: hub.websocket,
   });
-  return Object.assign(server, { hub, compactor });
+  return Object.assign(server, { hub, compactor, commentMail });
 }
