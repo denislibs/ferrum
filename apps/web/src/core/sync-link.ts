@@ -21,6 +21,15 @@ export interface SyncLinkEnv {
   clearInterval(t: unknown): void;
 }
 
+/** Команды `sync.worker`, после которых собирать нечего. */
+const QUIET = new Set<SyncToCore extends infer M ? (M extends { t: 'cmd'; cmd: { type: infer T } } ? T : never) : never>([
+  'presence',
+  'presenceReset',
+  'commentsAvailable',
+  'commentPins',
+  'commentPinsRemove',
+]);
+
 export class SyncLink {
   private port: PortLike | null = null;
   private timer: unknown = null;
@@ -68,8 +77,9 @@ export class SyncLink {
       this.setFlush(m.on);
       return;
     }
-    // Присутствие правок не рождает: сборка пачек на него не просыпается (оно приходит 30 раз в секунду).
-    if (m.cmd.type !== 'presence' && m.cmd.type !== 'presenceReset') this.wanted = true;
+    // Присутствие и метки комментариев правок не рождают: сборка пачек на них не просыпается (присутствие приходит 30 раз в
+    // секунду, метки — с каждым комментарием файла).
+    if (!QUIET.has(m.cmd.type)) this.wanted = true;
     this.env.run(m.cmd);
     // Порядок порта: всё, что ядро пришлёт после этих ответов, — после команды.
     if (m.cmd.type === 'applyRemote') this.post({ t: 'applied' });

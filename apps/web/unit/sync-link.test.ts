@@ -106,3 +106,18 @@ test('ядро выполнило сброс и пачку чужих право
   expect(s.runs).toEqual(['syncReset', 'applyRemote']);
   expect(port.posted).toEqual([{ t: 'reset' }, { t: 'applied' }]);
 });
+
+test('присутствие и метки комментариев не будят сборку пачек', () => {
+  const s = stand();
+  const port = new FakePort();
+  s.link.connect(port);
+  port.deliver({ t: 'flush', on: true });
+  expect(s.flushes()).toBe(1);
+  port.deliver({ t: 'cmd', cmd: { type: 'presenceReset' } });
+  port.deliver({ t: 'cmd', cmd: { type: 'commentsAvailable', on: true } });
+  port.deliver({ t: 'cmd', cmd: { type: 'commentPins', pins: [], replace: true } });
+  port.deliver({ t: 'cmd', cmd: { type: 'commentPinsRemove', ids: ['a'] } });
+  s.tick();
+  expect(s.flushes()).toBe(1);
+  expect(s.runs).toContain('commentPins');
+});
