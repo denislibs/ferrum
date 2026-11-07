@@ -107,6 +107,7 @@ export function startServer(deps: AppDeps, port: number): Running {
     afterWrite: (route, ctx) => accessChanged(hub, route, ctx),
     contentReplaced: (file) => hub.forgetFile(file),
     compactNow: (file, user) => (compactor ? compactor.manual(file, user) : Promise.resolve({ ok: true as const })),
+    comments: { event: (file, ev) => hub.commentEvent(file, ev), openUsers: (file) => hub.openUsers(file) },
   };
   const handleApi = apiHandler(apiRoutes(api), api);
   const server = Bun.serve({
