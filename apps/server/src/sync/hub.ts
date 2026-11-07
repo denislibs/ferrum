@@ -54,8 +54,9 @@ export interface ConnData {
   name: string;
   /** Роль подтверждена запросом `hello`: соединение получает события комментариев и считается «файл открыт» для писем. */
   confirmed: boolean;
-  /** Пропущено событие комментариев (сокет не успевал): при освобождении — `gap`, клиент догонит по REST. */
-  commentGap: boolean;
+  /** Пропущены события комментариев до этого номера (сокет не успевал, очередь переполнилась, роли не узнать): при
+   * освобождении или со следующим событием — `gap`, клиент догонит по REST. 0 — пропуска нет. */
+  commentGap: number;
 }
 
 interface DocSub {
@@ -343,7 +344,7 @@ export class SyncHub {
       lagSince: 0,
       name: '',
       confirmed: false,
-      commentGap: false,
+      commentGap: 0,
     };
     if (!server.upgrade(req, { data })) return new Response(null, { status: 400 });
     return undefined;
@@ -452,6 +453,9 @@ export class SyncHub {
       this.conns.delete(d.file);
       this.commentHeads.delete(d.file);
       this.commentQueued.delete(d.file);
+      const early = this.commentEarly.get(d.file);
+      if (early) clearTimeout(early.timer);
+      this.commentEarly.delete(d.file);
       this.onLastLeft(d.file);
     }
   }
@@ -1071,6 +1075,8 @@ export class SyncHub {
   }
 
   private queueComment(file: string, ev: CommentEvent): void {
+    // Последний ушёл, пока событие ждало соседа: слать некому, номер файла помнить незачем.
+    if (!this.conns.has(file)) return;
     this.commentQueued.set(file, Math.max(ev.seq, this.commentQueued.get(file) ?? 0));
     let room = this.commentRooms.get(file);
     if (!room) this.commentRooms.set(file, (room = { queue: [], busy: false, overflow: false }));
@@ -1107,28 +1113,42 @@ export class SyncHub {
     const targets = [...(this.conns.get(file) ?? [])].filter((d) => d.confirmed && !d.closed);
     if (targets.length === 0) return;
     const last = evs[evs.length - 1].seq;
-    this.commentHeads.set(file, last);
     const users = [...new Set(targets.map((d) => d.user))];
-    const { rows } = await this.pool.query<{ u: string; rank: number | null }>(
-      'SELECT u, file_role_rank($1, u) AS rank FROM unnest($2::text[]) AS u',
-      [file, users],
-    );
+    let rows: { u: string; rank: number | null }[];
+    try {
+      ({ rows } = await this.pool.query<{ u: string; rank: number | null }>(
+        'SELECT u, file_role_rank($1, u) AS rank FROM unnest($2::text[]) AS u',
+        [file, users],
+      ));
+    } catch (e) {
+      // Роли не узнать — события прохода не уходят, но и не теряются молча: соединениям, чью роль концентратор ещё
+      // считает действующей, — `gap`, клиент догонит по REST (там роль сверяется заново). Голова файла не сдвигается.
+      report(e);
+      for (const d of targets) this.commentGapTo(d, last);
+      return;
+    }
+    // Голова — после запроса и только у открытого файла: ушёл последний — `closed` её уже убрал.
+    if (this.conns.has(file)) this.commentHeads.set(file, last);
     const allowed = new Set(rows.filter((r) => (r.rank ?? 0) > 0).map((r) => r.u));
     const frames = evs.map((ev) => encodeServerFrame({ t: 'comment', event: ev }));
     for (const d of targets) {
-      if (d.closed || !allowed.has(d.user)) continue;
+      if (d.closed) continue;
+      if (!allowed.has(d.user)) {
+        // Доступ снят: и прежний пропуск ему не сообщается — догонять нечего.
+        d.commentGap = 0;
+        continue;
+      }
       // Очередь переполнялась — пропущено у всех: догнать по REST.
-      if (overflow) d.commentGap = true;
+      if (overflow) d.commentGap = Math.max(d.commentGap, last);
       for (const [i, frame] of frames.entries()) {
         if (this.commentSlow(d)) {
-          d.commentGap = true;
+          d.commentGap = Math.max(d.commentGap, last);
           this.commentSkipped += frames.length - i;
           break;
         }
-        if (d.commentGap) {
+        if (d.commentGap > 0) {
           // Пропуск был: это событие и следующие клиент получит вместе с пропущенными, догоняя по REST.
-          d.commentGap = false;
-          this.send(d, { t: 'comment', event: { kind: 'gap', seq: last } });
+          this.commentGapTo(d, last);
           break;
         }
         this.sendBytes(d, frame);
@@ -1140,11 +1160,22 @@ export class SyncHub {
     return !!d.ws && d.ws.getBufferedAmount() > this.limits.commentHighWaterBytes;
   }
 
-  /** Сокет освободился: пропустившему события — `gap` с последним номером файла. */
+  /** Пропуск до `seq`: `gap` сейчас, а медленному сокету — когда освободится (`commentDrained`). Единственное место, откуда
+   * уходит `gap`. */
+  private commentGapTo(d: ConnData, seq: number): void {
+    if (d.closed) return;
+    d.commentGap = Math.max(d.commentGap, seq);
+    if (this.commentSlow(d)) return;
+    const gap = d.commentGap;
+    d.commentGap = 0;
+    this.send(d, { t: 'comment', event: { kind: 'gap', seq: gap } });
+  }
+
+  /** Сокет освободился: пропустившему события — `gap`. Только соединению, чья роль подтверждена и не снята (снятый доступ
+   * закрывает соединение или сбрасывает пропуск в проходе рассылки). */
   private commentDrained(d: ConnData): void {
-    if (!d.commentGap || d.closed || this.commentSlow(d)) return;
-    d.commentGap = false;
-    this.send(d, { t: 'comment', event: { kind: 'gap', seq: this.commentHeads.get(d.file) ?? 0 } });
+    if (d.commentGap === 0 || !d.confirmed) return;
+    this.commentGapTo(d, d.commentGap);
   }
 
   /** Кто держит файл открытым: соединения с подтверждённой ролью. Им письма о комментариях не нужны. */

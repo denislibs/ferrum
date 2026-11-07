@@ -9,13 +9,14 @@ import {
   parseServerFrame,
   SYNC_PROTOCOL,
   syncPath,
+  type ClientFrame,
   type CommentEvent,
   type CommentWriteDto,
   type PinDto,
   type ServerFrame,
   type ThreadDto,
 } from '@ferrum/protocol';
-import { afterAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { connect as tcp, type Socket } from 'node:net';
 import { apiStand, type Person } from './api-stand';
 import { Client } from './sync-client';
@@ -142,7 +143,8 @@ test('файл открыт — письма о комментарии нет; �
   expect(await recipients()).toEqual([editor.id]);
   v.close();
   await v.waitClosed();
-  for (let i = 0; i < 50 && s.hub.openUsers(file).includes(viewer.id); i++) await Bun.sleep(10);
+  // Сервер узнаёт о закрытии своим событием: условие, предел — срок теста.
+  while (s.hub.openUsers(file).includes(viewer.id)) await Bun.sleep(1);
   await write(await s.call(owner, 'POST', base(file), { pin, body: `@[${viewer.id}]` }));
   expect((await recipients()).sort()).toEqual([editor.id, viewer.id].sort());
   // Неподтверждённое соединение файл открытым не делает.
@@ -215,18 +217,33 @@ test('порядок: события одного файла приходят п
 });
 
 /** Сокет, который не читает: настоящий TCP с WebSocket поверх, кадры разбираются вручную. */
-async function rawSocket(who: Person): Promise<{ raw: Socket; frames: () => ServerFrame[] }> {
+async function rawSocket(
+  who: Person,
+): Promise<{ raw: Socket; frames: () => ServerFrame[]; until: (cond: () => boolean) => Promise<void>; send: (f: ClientFrame) => void }> {
   const raw = tcp(Number(new URL(s.publicUrl).port), '127.0.0.1');
   const got: Buffer[] = [];
-  raw.on('data', (b: Buffer) => got.push(b));
+  const waiters: (() => void)[] = [];
+  raw.on('data', (b: Buffer) => {
+    got.push(b);
+    for (const w of waiters.splice(0)) w();
+  });
+  /** Ждать пришедших байт, пока условие не выполнится: предел — срок теста. */
+  const until = async (cond: () => boolean) => {
+    while (!cond()) await new Promise<void>((resolve) => waiters.push(resolve));
+  };
   raw.write(
     `GET ${syncPath(file, who.id)} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
       `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: ${s.publicUrl}\r\nCookie: ${who.cookie}\r\n\r\n`,
   );
   // Кадр — после ответа на открытие: раньше сервер его не читает.
-  await Bun.sleep(200);
-  const hello = encodeClientFrame({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 });
-  raw.write(Buffer.concat([Buffer.from([0x82, 0x80 | hello.length, 0, 0, 0, 0]), hello]));
+  await until(() => Buffer.concat(got).includes('\r\n\r\n'));
+  expect(Buffer.concat(got).toString('latin1').split('\r\n')[0]).toBe('HTTP/1.1 101 Switching Protocols');
+  /** Кадр клиента: маска нулевая, длина меньше 126. */
+  const send = (f: ClientFrame) => {
+    const bytes = encodeClientFrame(f);
+    raw.write(Buffer.concat([Buffer.from([0x82, 0x80 | bytes.length, 0, 0, 0, 0]), bytes]));
+  };
+  send({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 });
   const frames = (): ServerFrame[] => {
     const all = Buffer.concat(got);
     let at = all.indexOf('\r\n\r\n') + 4;
@@ -252,13 +269,12 @@ async function rawSocket(who: Person): Promise<{ raw: Socket; frames: () => Serv
     }
     return out;
   };
-  return { raw, frames };
+  return { raw, frames, until, send };
 }
 
 test('медленный читатель: события пропускаются без очереди, буфер сервера не растёт; после чтения — `gap` с головой файла', async () => {
-  const { raw, frames } = await rawSocket(viewer);
-  for (let i = 0; i < 100 && !frames().some((f) => f.t === 'role'); i++) await Bun.sleep(10);
-  expect(frames().some((f) => f.t === 'role')).toBe(true);
+  const { raw, frames, until } = await rawSocket(viewer);
+  await until(() => frames().some((f) => f.t === 'role'));
   raw.pause();
   const fast = await join(editor);
   // Крупные события (первый комментарий и ответ — по 4000 четырёхбайтных знаков, ~32 КБ на событие): буфер ядра ОС
@@ -286,13 +302,146 @@ test('медленный читатель: события пропускаютс
   expect(fastSeqs.at(-1)).toBe(last.seq);
   expect(fastSeqs).toEqual(Array.from({ length: fastSeqs.length }, (_, i) => fastSeqs[0] + i));
   raw.resume();
-  let gap: CommentEvent | undefined;
-  for (let i = 0; i < 300 && !gap; i++) {
-    await Bun.sleep(20);
-    gap = frames()
+  const gap = () =>
+    frames()
       .flatMap((f) => (f.t === 'comment' ? [f.event] : []))
       .find((e) => e.kind === 'gap');
-  }
-  expect(gap).toEqual({ kind: 'gap', seq: last.seq });
+  await until(() => gap() !== undefined);
+  expect(gap()).toEqual({ kind: 'gap', seq: last.seq });
   raw.destroy();
 }, 120_000);
+
+/** Запрос ролей рассылки комментариев (`fanOutComments`): по нему тесты подменяют ответ базы. */
+const isRoleQuery = (sql: unknown) => typeof sql === 'string' && sql.includes('unnest($2::text[]) AS u');
+
+/** Подмена запроса ролей рассылки: `fake` решает, что вернуть; остальные запросы — как есть. */
+function fakeRoles(fake: (real: () => Promise<unknown>) => Promise<unknown>) {
+  const pool = s.pool as unknown as { query: (...a: unknown[]) => Promise<unknown> };
+  const real = pool.query.bind(pool);
+  return spyOn(pool, 'query').mockImplementation((...a: unknown[]) => (isRoleQuery(a[0]) ? fake(() => real(...a)) : real(...a)));
+}
+
+/** Проход рассылки файла кончился, и всё, что он отправил соединению, уже у клиента: `ping` после прохода, `pong` — после
+ * его кадров. */
+async function settled(c: Client, f = file): Promise<void> {
+  const rooms = (s.hub as unknown as { commentRooms: Map<string, unknown> }).commentRooms;
+  while (rooms.has(f)) await Bun.sleep(1);
+  const pongs = c.frames.filter((x) => x.t === 'pong').length;
+  c.send(encodeClientFrame({ t: 'ping' }));
+  await c.wait('pong', () => c.frames.filter((x) => x.t === 'pong').length > pongs);
+}
+
+test('сбой запроса ролей: события прохода не теряются молча — получателям `gap`, дальше — как обычно', async () => {
+  const v = await join(viewer);
+  const e = await join(editor);
+  const spy = fakeRoles(() => Promise.reject(new Error('сбой теста')));
+  let made: CommentWriteDto;
+  try {
+    made = await write(await s.call(owner, 'POST', base(file), { pin, body: 'потеряется?' }));
+    for (const c of [v, e]) expect((await c.wait('comment')).event).toEqual({ kind: 'gap', seq: made.seq });
+  } finally {
+    spy.mockRestore();
+  }
+  // Голова файла не сдвинута сбоем, следующее событие уходит как обычно.
+  const next = await write(await s.call(owner, 'POST', base(file), { pin, body: 'дальше' }));
+  expect((await v.wait('comment', (f) => f.event.seq === next.seq)).event).toMatchObject({ kind: 'thread', action: 'create' });
+  expect(events(v).map((x) => [x.kind, x.seq])).toEqual([
+    ['gap', made!.seq],
+    ['thread', next.seq],
+  ]);
+});
+
+test('переполнение очереди файла (1024): дальше — только последнее, всем — `gap` с ним', async () => {
+  const a = await join(owner);
+  const v = await join(viewer);
+  // Первый проход застрял на запросе ролей, следующие события копятся в очереди файла.
+  const gate = Promise.withResolvers<void>();
+  const spy = fakeRoles(async (real) => {
+    await gate.promise;
+    return real();
+  });
+  try {
+    const ev = (seq: number): CommentEvent => ({ kind: 'removed', seq, by: owner.id, thread: crypto.randomUUID() });
+    for (let seq = 1; seq <= 1100; seq++) s.hub.commentEvent(file, ev(seq));
+    gate.resolve();
+    for (const c of [a, v]) await c.wait('comment', (f) => f.event.kind === 'gap');
+  } finally {
+    spy.mockRestore();
+  }
+  for (const c of [a, v]) {
+    await settled(c);
+    expect(events(c).map((x) => [x.kind, x.seq])).toEqual([
+      ['removed', 1],
+      ['gap', 1100],
+    ]);
+  }
+});
+
+test('файл в корзине и удалённый: события прекращаются со следующего прохода, и до сверки ролей', async () => {
+  const o = await join(owner);
+  const v = await join(viewer);
+  const ev = (seq: number): CommentEvent => ({ kind: 'removed', seq, by: owner.id, thread: crypto.randomUUID() });
+  // В корзину — мимо маршрутов (сверки ролей нет): читателю — ничего, владельцу, убравшему его, — событие.
+  await s.pool.query('UPDATE file SET trashed_at = now(), trashed_by = $2 WHERE id = $1', [file, owner.id]);
+  s.hub.commentEvent(file, ev(1));
+  await o.wait('comment', (f) => f.event.seq === 1);
+  await settled(v);
+  expect(events(v)).toEqual([]);
+  // Удалён: никому.
+  await s.pool.query('DELETE FROM file WHERE id = $1', [file]);
+  s.hub.commentEvent(file, ev(2));
+  for (const c of [o, v]) await settled(c);
+  expect(events(o).map((x) => x.seq)).toEqual([1]);
+  expect(events(v)).toEqual([]);
+});
+
+test('медленный читатель, у которого сняли доступ: пропуск ему не сообщается — `gap` на освобождении не уходит', async () => {
+  const { raw, frames, until, send } = await rawSocket(viewer);
+  await until(() => frames().some((f) => f.t === 'role'));
+  raw.pause();
+  const fast = await join(editor);
+  const big = '😀'.repeat(4000);
+  const t = await write(await s.call(owner, 'POST', base(file), { pin, body: big }));
+  const skipped0 = s.hub.commentSkipped;
+  while (s.hub.commentSkipped === skipped0)
+    await write(await s.call(owner, 'POST', `${base(file)}/${t.thread.id}/comments`, { body: big }));
+  // Доступ сняли мимо маршрутов; следующий проход видит это и забывает пропуск.
+  await s.pool.query('DELETE FROM file_access WHERE file_id = $1 AND user_id = $2', [file, viewer.id]);
+  const last = await write(await s.call(owner, 'POST', base(file), { pin, body: 'после снятия' }));
+  await fast.wait('comment', (f) => f.event.seq === last.seq);
+  raw.resume();
+  // Сокет освободился (сервер обработал освобождение), потом `ping`: `gap`, если бы он ушёл, пришёл бы раньше `pong`.
+  while (s.hub.bufferedBytes() > 0) await Bun.sleep(1);
+  send({ t: 'ping' });
+  await until(() => frames().some((f) => f.t === 'pong'));
+  expect(
+    frames()
+      .flatMap((f) => (f.t === 'comment' ? [f.event] : []))
+      .filter((e) => e.kind === 'gap'),
+  ).toEqual([]);
+  raw.destroy();
+}, 120_000);
+
+test('последний ушёл, пока шёл запрос ролей: номер файла не остаётся в памяти', async () => {
+  const v = await join(viewer);
+  const gate = Promise.withResolvers<void>();
+  const asked = Promise.withResolvers<void>();
+  const spy = fakeRoles(async (real) => {
+    asked.resolve();
+    await gate.promise;
+    return real();
+  });
+  try {
+    await write(await s.call(owner, 'POST', base(file), { pin, body: 'ушёл' }));
+    await asked.promise;
+    v.close();
+    await v.waitClosed();
+    while (s.hub.isOpen(file)) await Bun.sleep(1);
+    gate.resolve();
+    const rooms = (s.hub as unknown as { commentRooms: Map<string, unknown> }).commentRooms;
+    while (rooms.has(file)) await Bun.sleep(1);
+  } finally {
+    spy.mockRestore();
+  }
+  expect((s.hub as unknown as { commentHeads: Map<string, number> }).commentHeads.has(file)).toBe(false);
+});
