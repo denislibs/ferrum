@@ -51,8 +51,9 @@ test('подсказка «Название  Клавиша» — из дейс�
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
   await page.getByRole('button', { name: 'Перо', exact: true }).hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перо  P');
-  await page.getByRole('button', { name: 'Комментарии — только в файлах на сервере' }).hover();
-  await expect(page.getByRole('tooltip')).toHaveText('Комментарии  C — только в файлах на сервере');
+  // Отключённая кнопка подписана так же, как включённая (название команды «Комментарий»), плюс причина.
+  await page.getByRole('button', { name: 'Комментарий — только в файлах на сервере' }).hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Комментарий  C — только в файлах на сервере');
   // Открытая подсказка следует за раскладкой: V снят, Q назначен — текст меняется на месте.
   await move.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
@@ -322,11 +323,11 @@ test('тулбар и вкладки: одна точка Tab, стрелки и
   await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('button', { name: 'Фрейм', exact: true })).toBeFocused();
   await page.keyboard.press('End');
-  await expect(page.getByRole('button', { name: /Комментарии/ })).toBeFocused();
+  await expect(page.getByRole('button', { name: /Комментарий/ })).toBeFocused();
   await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('button', { name: 'Перемещение' })).toBeFocused();
   await page.keyboard.press('ArrowLeft');
-  await expect(page.getByRole('button', { name: /Комментарии/ })).toBeFocused();
+  await expect(page.getByRole('button', { name: /Комментарий/ })).toBeFocused();
   await page.keyboard.press('Home');
   await expect(page.getByRole('button', { name: 'Перемещение' })).toBeFocused();
   // Tab уходит из тулбара одним нажатием (внутри остальные кнопки вне порядка Tab).

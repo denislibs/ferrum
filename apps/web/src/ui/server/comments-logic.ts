@@ -45,6 +45,12 @@ export function authorName(a: CommentAuthor | null): string {
   return a.name.trim() || 'Участник';
 }
 
+/** Имя в упоминании: известное без имени — «Участник», как у автора; не из списка упомянутых — «неизвестный». */
+export function mentionName(name: string | null | undefined): string {
+  if (name === null || name === undefined) return 'неизвестный';
+  return name.trim() || 'Участник';
+}
+
 /** Упоминание, которое пишут сейчас: `@` и текст до каретки без пробелов. `null` — не пишут. */
 export function mentionAt(text: string, caret: number): { start: number; query: string } | null {
   const before = text.slice(0, caret);
@@ -79,8 +85,9 @@ export function storedBody(text: string, picked: { id: string; name: string }[])
 export function editableBody(body: string, names: Record<string, string>): { text: string; picked: { id: string; name: string }[] } {
   const picked: { id: string; name: string }[] = [];
   const text = body.replace(/@\[([A-Za-z0-9_-]{1,64})\]/g, (all, id: string) => {
-    const name = names[id];
-    if (!name) return all;
+    // Не из списка упомянутых — остаётся `@[id]`: при сохранении это то же упоминание. Без имени — «Участник», как при вставке.
+    if (!Object.hasOwn(names, id)) return all;
+    const name = mentionName(names[id]);
     if (!picked.some((p) => p.id === id)) picked.push({ id, name });
     return `@${name}`;
   });
@@ -100,4 +107,17 @@ export function timeLabel(at: number, now: number): string {
   if (s < 3600) return `${Math.floor(s / 60)} мин назад`;
   if (s < 86_400) return `${Math.floor(s / 3600)} ч назад`;
   return new Date(at).toLocaleDateString('ru', { day: 'numeric', month: 'short' });
+}
+
+/** Окно у метки: справа сверху от неё (`anchor` — точка метки в координатах холста), целиком в пределах холста `box` с
+ * отступом `gap`. Не помещается — прижато к левому и верхнему краю (длинное прокручивается внутри). */
+export function popoverPlace(
+  anchor: { x: number; y: number },
+  box: { left: number; top: number; width: number; height: number },
+  size: { width: number; height: number },
+  gap = 8,
+): { left: number; top: number } {
+  const left = Math.min(box.left + anchor.x + 36, box.left + box.width - size.width - gap);
+  const top = Math.min(box.top + anchor.y - 28, box.top + box.height - size.height - gap);
+  return { left: Math.max(box.left + gap, left), top: Math.max(box.top + gap, top) };
 }

@@ -10,7 +10,9 @@ import {
   insertMention,
   listWindow,
   mentionAt,
+  mentionName,
   panelThreads,
+  popoverPlace,
   storedBody,
 } from '../src/ui/server/comments-logic';
 
@@ -87,4 +89,27 @@ test('подпись автора: удалённый и без имени', () 
   expect(authorName({ id: null, name: 'x' })).toBe('Удалённый пользователь');
   expect(authorName({ id: 'a', name: ' ' })).toBe('Участник');
   expect(authorName({ id: 'a', name: '<b>Ив</b>' })).toBe('<b>Ив</b>');
+});
+
+test('упоминание без имени — «Участник» и в тексте, и в правке; не из списка — «неизвестный» и `@[id]` в правке', () => {
+  expect(mentionName('')).toBe('Участник');
+  expect(mentionName('  ')).toBe('Участник');
+  expect(mentionName(null)).toBe('неизвестный');
+  expect(mentionName('Анна')).toBe('Анна');
+  const e = editableBody('для @[u3] и @[zz]', { u3: '' });
+  expect(e).toEqual({ text: 'для @Участник и @[zz]', picked: [{ id: 'u3', name: 'Участник' }] });
+  // Сохранение без правки — то же упоминание.
+  expect(storedBody(e.text, e.picked)).toBe('для @[u3] и @[zz]');
+});
+
+test('окно у метки: справа сверху от неё и целиком в пределах холста', () => {
+  const box = { left: 100, top: 40, width: 800, height: 600 };
+  const size = { width: 320, height: 200 };
+  expect(popoverPlace({ x: 200, y: 200 }, box, size)).toEqual({ left: 336, top: 212 });
+  // У правого нижнего края — внутрь холста с отступом.
+  expect(popoverPlace({ x: 790, y: 590 }, box, size)).toEqual({ left: 100 + 800 - 320 - 8, top: 40 + 600 - 200 - 8 });
+  // У левого верхнего — не левее и не выше отступа.
+  expect(popoverPlace({ x: -50, y: 0 }, box, size)).toEqual({ left: 108, top: 48 });
+  // Холст меньше окна — прижато к левому верхнему краю (длинное прокручивается внутри).
+  expect(popoverPlace({ x: 100, y: 100 }, { left: 0, top: 0, width: 200, height: 150 }, size)).toEqual({ left: 8, top: 8 });
 });

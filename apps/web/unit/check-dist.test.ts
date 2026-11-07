@@ -2,7 +2,15 @@ import { expect, test } from '@playwright/test';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AUTH_MARKER, checkDist, FILES_MARKER, LOCAL_MARKER, TAURI_STORE_MARKER, TEST_STORE_MARKER } from '../scripts/check-dist.mjs';
+import {
+  AUTH_MARKER,
+  checkDist,
+  COMMENTS_MARKER,
+  FILES_MARKER,
+  LOCAL_MARKER,
+  TAURI_STORE_MARKER,
+  TEST_STORE_MARKER,
+} from '../scripts/check-dist.mjs';
 
 function dist(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'ferrum-dist-'));
@@ -26,14 +34,26 @@ test('автономная сборка: без кода файлов на се�
   expect(checkDist(dist(files), 'standalone')).toContain('код файлов на сервере');
 });
 
+test('автономная сборка: без комментариев — ни кода, ни стилей', () => {
+  const base = { 'index.html': INDEX, 'debug.html': DEBUG, 'assets/main.js': `x.${LOCAL_MARKER}=1;h('fe-comments-host')` };
+  expect(checkDist(dist({ ...base, 'assets/main.css': '.fe-following{}' }), 'standalone')).toBeNull();
+  expect(checkDist(dist({ ...base, 'assets/main.css': `.${COMMENTS_MARKER}{position:absolute}` }), 'standalone')).toContain(
+    'есть комментарии',
+  );
+  const js = { ...base, 'assets/main.js': `x.${LOCAL_MARKER}=1;c('${COMMENTS_MARKER}')` };
+  expect(checkDist(dist(js), 'standalone')).toContain('есть комментарии');
+});
+
 test('автономная сборка: без кода входа', () => {
   const files = { 'index.html': INDEX, 'debug.html': DEBUG, 'assets/main.js': `x.${LOCAL_MARKER}=1;f('${AUTH_MARKER}')` };
   expect(checkDist(dist(files), 'standalone')).toContain('есть код входа');
 });
 
 test('рабочая сборка: без стенда и кода автономного режима', () => {
-  const server = `f('${AUTH_MARKER}session');g('${FILES_MARKER}')`;
-  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': server }), 'server')).toBeNull();
+  const server = `f('${AUTH_MARKER}session');g('${FILES_MARKER}');c('${COMMENTS_MARKER}')`;
+  const css = `.${COMMENTS_MARKER}{}`;
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': server, 'assets/main.css': css }), 'server')).toBeNull();
+  expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': server }), 'server')).toContain('нет комментариев');
   expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `f('${AUTH_MARKER}session')` }), 'server')).toContain('нет кода файлов');
   expect(checkDist(dist({ 'index.html': INDEX, 'assets/main.js': `${server};h('${TAURI_STORE_MARKER}')` }), 'server')).toContain(
     'хранилище десктопа',

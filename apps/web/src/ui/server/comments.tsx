@@ -12,6 +12,8 @@ import { Portal } from 'solid-js/web';
 import type { CommentsToMain } from '../../core/comments-store';
 import type { CommentsProps } from '../extensions';
 import { apiFailureText, type ApiFailure } from './server-api';
+// Стили комментариев — отсюда, а не из `main.tsx`: в автономную сборку этот файл не попадает, и стили с ним.
+import '../styles/comments.css';
 import {
   authorName,
   bodyState,
@@ -20,7 +22,9 @@ import {
   insertMention,
   listWindow,
   mentionAt,
+  mentionName,
   panelThreads,
+  popoverPlace,
   storedBody,
   timeLabel,
   type PanelFilter,
@@ -37,7 +41,7 @@ function Body(props: { comment: CommentDto }) {
   return (
     <p class="fe-comment__body">
       <For each={splitCommentBody(props.comment.body, props.comment.mentions)}>
-        {(part) => ('mention' in part ? <span class="fe-comment__mention">@{part.name ?? 'неизвестный'}</span> : <>{part.text}</>)}
+        {(part) => ('mention' in part ? <span class="fe-comment__mention">@{mentionName(part.name)}</span> : <>{part.text}</>)}
       </For>
     </p>
   );
@@ -103,6 +107,8 @@ function Composer(props: ComposerProps) {
   const send = async () => {
     const body = storedBody(text(), picked).trim();
     if (!bodyState(body).ok || busy()) return;
+    // Пока идёт запрос, поле недоступно и теряет фокус: после ответа он возвращается, чтобы писать дальше.
+    const focused = document.activeElement === field;
     setBusy(true);
     const ok = await props.onSubmit(body);
     setBusy(false);
@@ -111,6 +117,7 @@ function Composer(props: ComposerProps) {
       picked = [];
       field.value = '';
     }
+    if (focused && field.isConnected) field.focus();
   };
 
   const onKey = (e: KeyboardEvent) => {
@@ -127,10 +134,14 @@ function Composer(props: ComposerProps) {
       pick(list[active()]);
       return;
     }
+    // Esc отменяет ближайшее: список людей, иначе само поле (правку — без закрытия окна). Обработчик окна это событие
+    // пропускает (`onKey` в `CommentsUi`).
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (list.length > 0) setPeople([]);
-      else props.onCancel();
+      if (list.length > 0) {
+        setPeople([]);
+        asked++;
+      } else props.onCancel();
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -204,17 +215,33 @@ export function CommentsUi(props: CommentsProps) {
   const [filter, setFilter] = createSignal<PanelFilter>(DEFAULT_FILTER);
   const [top, setTop] = createSignal(0);
   const [height, setHeight] = createSignal(600);
+  /** Холст (в координатах общего с окном предка) и размер окна: по ним окно держится в пределах холста. */
+  const measureCanvas = () => ({
+    left: props.canvas.offsetLeft,
+    top: props.canvas.offsetTop,
+    width: props.canvas.clientWidth,
+    height: props.canvas.clientHeight,
+  });
+  const [box, setBox] = createSignal(measureCanvas());
+  const [size, setSize] = createSignal({ width: 320, height: 0 });
   const [now, setNow] = createSignal(Date.now());
   let link = props.link;
   let popover: HTMLDivElement | undefined;
   let panel: HTMLDivElement | undefined;
-  /** Щелчок по холсту закрыл окно: место нового комментария из того же щелчка не ставится (как в Figma). */
+  /** Щелчок по холсту закрыл окно: место нового комментария из того же щелчка не ставится (как в Figma). Снимается
+   * событием этого щелчка (`commentPlace`/`commentOpened`) или следующим нажатием: щелчок мог не дать события вовсе
+   * (протяжка метки, панорама, другой инструмент) — тогда следующий щелчок ставит комментарий. */
   let swallowPlace = false;
+  /** Первый комментарий этого обсуждения удаляю я: исчезновение обсуждения — моё действие, без тоста. */
+  let removing: string | null = null;
 
   const tick = setInterval(() => setNow(Date.now()), 30_000);
   onCleanup(() => clearInterval(tick));
 
   const close = () => {
+    // Фокус был в окне — после закрытия он у холста: клавиши холста (C, Shift+C, Esc) снова работают. Если щелчок
+    // пришёлся на другое поле, браузер переведёт фокус туда уже после этого.
+    const inside = !!popover?.contains(document.activeElement);
     batch(() => {
       setOpen(null);
       setDetail(null);
@@ -225,6 +252,7 @@ export function CommentsUi(props: CommentsProps) {
     props.editor.send({ type: 'commentOpen' });
     props.editor.send({ type: 'commentDraft' });
     void props.request({ k: 'open', thread: null });
+    if (inside) props.canvas.focus({ preventScroll: true });
   };
 
   const openThread = (id: string, sx?: number, sy?: number) => {
@@ -268,13 +296,16 @@ export function CommentsUi(props: CommentsProps) {
         if (!t) props.toast('Обсуждение не найдено или нет доступа');
         else {
           if (t.resolvedAt !== null) setResolved(true);
+          // Ссылка открывает режим комментариев с панелью, как в Figma **(поведение)**.
+          props.editor.send({ type: 'setTool', tool: 'comment' });
           props.editor.send({ type: 'commentFocus', id });
         }
       }
     } else if (m.t === 'detail') {
       if (m.thread !== open()) return;
       if (!m.view) {
-        props.toast('Обсуждение удалено');
+        if (removing !== m.thread) props.toast('Обсуждение удалено');
+        removing = null;
         close();
       } else setDetail({ view: m.view, comments: m.comments });
     }
@@ -328,7 +359,10 @@ export function CommentsUi(props: CommentsProps) {
 
   // Щелчок мимо окна закрывает его; Esc закрывает окно раньше, чем ядро выйдет из режима.
   const onPointer = (e: PointerEvent) => {
-    if (!open() && !draft()) return;
+    if (!open() && !draft()) {
+      swallowPlace = false;
+      return;
+    }
     const t = e.target as Node;
     if (popover?.contains(t) || panel?.contains(t)) return;
     swallowPlace = t === props.canvas;
@@ -336,6 +370,8 @@ export function CommentsUi(props: CommentsProps) {
   };
   const onKey = (e: KeyboardEvent) => {
     if (e.key !== 'Escape' || (!open() && !draft())) return;
+    // Esc в поле сначала решает поле (список людей, отмена правки): перехват на `window` его не глотает.
+    if (e.target instanceof Element && e.target.closest('.fe-composer') && popover?.contains(e.target)) return;
     e.preventDefault();
     e.stopPropagation();
     close();
@@ -375,12 +411,23 @@ export function CommentsUi(props: CommentsProps) {
   const canDelete = (c: CommentDto) => canEdit(c) || me()?.role === 'owner';
   const canResolve = (t: ThreadView) => me()?.role === 'owner' || me()?.role === 'editor' || t.author.id === me()?.user;
 
-  // Окно у метки: справа сверху от неё, в пределах холста.
+  // Окно у метки: справа сверху от неё, целиком в пределах холста; холст и окно меняют размер — окно следует.
+  const sizes = new ResizeObserver((entries) => {
+    for (const en of entries) {
+      if (en.target === props.canvas) setBox(measureCanvas());
+      else if (en.target === popover) setSize({ width: popover.offsetWidth, height: popover.offsetHeight });
+    }
+  });
+  sizes.observe(props.canvas);
+  onCleanup(() => sizes.disconnect());
+  const popoverRef = (el: HTMLDivElement) => {
+    if (popover && popover !== el) sizes.unobserve(popover);
+    popover = el;
+    sizes.observe(el);
+  };
   const position = createMemo(() => {
-    const a = anchor();
-    const left = (props.canvas.offsetLeft ?? 0) + a.x + 36;
-    const top = Math.max(8, (props.canvas.offsetTop ?? 0) + a.y - 28);
-    return { left: `${Math.min(left, Math.max(8, props.canvas.clientWidth - 328))}px`, top: `${top}px` };
+    const p = popoverPlace(anchor(), box(), size());
+    return { left: `${p.left}px`, top: `${p.top}px` };
   });
 
   const rows = createMemo(() => panelThreads(Object.values(threads), filter(), props.page(), me()?.user ?? ''));
@@ -389,7 +436,7 @@ export function CommentsUi(props: CommentsProps) {
   return (
     <>
       <Show when={draft()}>
-        <div ref={popover} class="fe-thread" role="dialog" aria-label="Новый комментарий" style={position()}>
+        <div ref={popoverRef} class="fe-thread" role="dialog" aria-label="Новый комментарий" style={position()}>
           <Composer
             label="Комментарий"
             placeholder="Добавьте комментарий. @ — упомянуть"
@@ -402,7 +449,7 @@ export function CommentsUi(props: CommentsProps) {
       </Show>
       <Show when={open()}>
         {(id) => (
-          <div ref={popover} class="fe-thread" role="dialog" aria-label="Обсуждение" style={position()}>
+          <div ref={popoverRef} class="fe-thread" role="dialog" aria-label="Обсуждение" style={position()}>
             <div class="fe-thread__head">
               <span class="t-strong">Обсуждение</span>
               <Show when={detail()?.view}>
@@ -458,7 +505,11 @@ export function CommentsUi(props: CommentsProps) {
                                           return;
                                         }
                                         setConfirmDelete(null);
-                                        void write({ k: 'delete', thread: id(), comment: c.id });
+                                        const thread = id();
+                                        if (i() === 0) removing = thread;
+                                        void write({ k: 'delete', thread, comment: c.id }).then((ok) => {
+                                          if (!ok && removing === thread) removing = null;
+                                        });
                                       }}
                                     >
                                       {confirmDelete() === c.id ? (i() === 0 ? 'Удалить обсуждение?' : 'Удалить комментарий?') : 'Удалить'}
@@ -542,7 +593,10 @@ export function CommentsUi(props: CommentsProps) {
               <div
                 class="fe-comments__scroll"
                 ref={(el) => {
-                  queueMicrotask(() => setHeight(el.clientHeight || 600));
+                  // Высота окна списка — по живому размеру: панель растёт вместе с окном браузера.
+                  const ro = new ResizeObserver(() => setHeight(el.clientHeight || 600));
+                  ro.observe(el);
+                  onCleanup(() => ro.disconnect());
                 }}
                 onScroll={(e) => setTop(e.currentTarget.scrollTop)}
               >
@@ -561,7 +615,8 @@ export function CommentsUi(props: CommentsProps) {
                                 <span class="t-strong">{authorName(t.author)}</span>
                                 <span class="t-muted">{timeLabel(t.lastAt, now())}</span>
                                 <Show when={t.unread}>
-                                  <span class="fe-comments__dot" aria-label="Не прочитано" />
+                                  <span class="fe-comments__dot" aria-hidden="true" />
+                                  <span class="fe-visually-hidden">не прочитано</span>
                                 </Show>
                               </span>
                               <span class="fe-comments__text">

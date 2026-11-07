@@ -253,8 +253,8 @@ export function Toolbar() {
           <button
             class="fe-tool"
             aria-disabled="true"
-            aria-label="Комментарии — только в файлах на сервере"
-            data-tip="Комментарии  C — только в файлах на сервере"
+            aria-label="Комментарий — только в файлах на сервере"
+            data-tip="Комментарий  C — только в файлах на сервере"
             data-tip-side="top"
           >
             <Icon name="comment" />
