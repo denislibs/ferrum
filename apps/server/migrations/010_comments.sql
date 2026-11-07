@@ -268,10 +268,21 @@ LANGUAGE sql AS $$
   ON CONFLICT DO NOTHING;
 $$;
 
+-- Участник в деле **(поведение)**: открывал этот файл или любой файл команды этого файла (`file_recent`). Одно правило для
+-- подсказки упоминаний и для писем: приглашение в файл и в команду заводит доступ существующему адресу без согласия, и
+-- без этого правила подсказка выдавала бы, есть ли у адреса учётная запись, а письма с чужим текстом шли бы тому, кто ни
+-- в файл, ни в команду не приходил. Настоящий коллега по команде, не открывавший именно этот файл, — участник.
+CREATE FUNCTION comment_engaged(p_file uuid, p_user text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (SELECT 1 FROM file_recent r WHERE r.user_id = p_user AND r.file_id = p_file)
+      OR EXISTS (SELECT 1 FROM file_recent r JOIN file f ON f.id = r.file_id JOIN project p ON p.id = f.project_id
+                 WHERE r.user_id = p_user
+                   AND p.team_id = (SELECT p2.team_id FROM file f2 JOIN project p2 ON p2.id = f2.project_id WHERE f2.id = p_file));
+$$;
+
 -- Письма о комментарии (раздел 10.4): упомянутые с доступом и, у ответа, участники обсуждения — кроме автора, тех, у кого
--- файл открыт сейчас (`p_open`, соединения сервера), выключивших письма, потерявших доступ и ни разу не открывавших файл
--- (`file_recent`): иначе приглашение любого адреса и упоминание слали бы от Ferrum письма с чужим текстом тому, кто в файл
--- не приходил **(поведение)**. Строка на получателя и файл
+-- файл открыт сейчас (`p_open`, соединения сервера), выключивших письма, потерявших доступ и не участников в деле
+-- (`comment_engaged`). Строка на получателя и файл
 -- одна: новое сливается в ждущую, не больше 20 id и счётчик сверху; ждущих строк у человека — не больше 50 (ещё файл
 -- сверх этого — без письма). Срок — от первого: группировка за `p_delay_ms`.
 CREATE FUNCTION comment_enqueue(p_file uuid, p_thread uuid, p_comment uuid, p_author text, p_reply boolean, p_open text[], p_delay_ms integer)
@@ -290,7 +301,7 @@ LANGUAGE sql AS $$
     AND r.u <> ALL (p_open)
     AND COALESCE((SELECT comment_mail FROM user_pref WHERE user_id = r.u), true)
     AND COALESCE(file_role_rank(p_file, r.u), 0) >= 1
-    AND EXISTS (SELECT 1 FROM file_recent fr WHERE fr.user_id = r.u AND fr.file_id = p_file)
+    AND comment_engaged(p_file, r.u)
     AND (EXISTS (SELECT 1 FROM mail_outbox q WHERE q.recipient_id = r.u AND q.file_id = p_file AND q.state = 'pending')
          OR (SELECT count(*) FROM mail_outbox q WHERE q.recipient_id = r.u AND q.state = 'pending') < 50)
   ON CONFLICT (recipient_id, file_id) WHERE state = 'pending' DO UPDATE SET

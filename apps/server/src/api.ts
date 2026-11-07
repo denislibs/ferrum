@@ -67,6 +67,9 @@ export type InFlight = typeof IN_FLIGHT;
  * (`IN_FLIGHT`) не спасают пул от десятка людей, каждый из которых в своём пределе. Сверх `running` запрос ждёт, не держа
  * соединения базы; сверх `waiting` — 429 `BUSY`. Остальные маршруты всегда находят свободные соединения пула. */
 export const HEAVY_IN_FLIGHT: InFlight = { running: 3, waiting: 500 };
+/** Тяжёлые чтения одного человека: из общих мест (`HEAVY_IN_FLIGHT`) у него в работе не больше `running`, остальные ждут
+ * своей очереди, не стоя в общей; сверх `waiting` — 429 `BUSY`. Несколько вкладок одного человека не забирают все общие места. */
+export const HEAVY_PER_USER: InFlight = { running: 2, waiting: 20 };
 
 export interface ApiDeps {
   pool: Pool;
@@ -101,6 +104,8 @@ export interface ApiDeps {
   slots?: UserSlots;
   /** Места тяжёлых чтений на процесс; по умолчанию — свои, по `HEAVY_IN_FLIGHT`. */
   heavySlots?: UserSlots;
+  /** Места тяжёлых чтений на человека; по умолчанию — свои, по `HEAVY_PER_USER`. */
+  heavyUserSlots?: UserSlots;
 }
 
 export interface ApiUser {
@@ -280,11 +285,13 @@ function withinDeadline<T>(work: Promise<T>, ms: number, path: string): Promise<
   return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
 
-/** Место запроса в работе: `handle` освобождает его в конце, как бы запрос ни кончился. `heavy` — место тяжёлого чтения. */
+/** Место запроса в работе: `handle` освобождает его в конце, как бы запрос ни кончился. `heavy` — место тяжёлого чтения
+ * в общей очереди, `mine` — среди тяжёлых мест человека. */
 interface Job {
   done: boolean;
   release: () => void;
   heavy: () => void;
+  mine: () => void;
 }
 
 /** Ключ общей очереди тяжёлых чтений в `UserSlots`. */
@@ -297,6 +304,7 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
   const deadline = deps.deadlineMs ?? API_DEADLINE_MS;
   const slots = deps.slots ?? new UserSlots(IN_FLIGHT);
   const heavySlots = deps.heavySlots ?? new UserSlots(HEAVY_IN_FLIGHT);
+  const heavyUserSlots = deps.heavyUserSlots ?? new UserSlots(HEAVY_PER_USER);
 
   /** Всё, что до обработчика: порядок важен, чужой запрос не тратит ни базу, ни счётчик другого. Место в работе (`job`)
    * берётся после предела частоты и до первого запроса к базе; освобождает его `handle`. */
@@ -353,7 +361,17 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
       ctx.teamId = rows[0].team_id;
     }
     if (route.heavy) {
-      // После проверки прав: чужой запрос не занимает общих мест.
+      // После проверки прав: чужой запрос не занимает общих мест. Место человека (`IN_FLIGHT`) отдаётся: ожидая общую
+      // очередь, тяжёлое чтение не держит его лёгкие запросы; базу тяжёлых бережёт свой предел — `HEAVY_PER_USER` на
+      // человека и `HEAVY_IN_FLIGHT` на всех.
+      job.release();
+      job.release = () => {};
+      if (job.done) refuse(503, 'UNAVAILABLE');
+      const mine = heavyUserSlots.take(user.id);
+      if (!mine) throw new Refused(busy());
+      job.mine = mine.release;
+      await mine.ready;
+      // Срок мог выйти, пока ждали своей очереди: место уже отдано, общее не берётся.
       if (job.done) refuse(503, 'UNAVAILABLE');
       const slot = heavySlots.take(HEAVY_KEY);
       if (!slot) throw new Refused(busy());
@@ -369,7 +387,7 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
     for (const c of compiled) {
       const params = match(c, req.method, parts);
       if (!params) continue;
-      const job: Job = { done: false, release: () => {}, heavy: () => {} };
+      const job: Job = { done: false, release: () => {}, heavy: () => {}, mine: () => {} };
       try {
         const ctx = await withinDeadline(prepare(c.route, req, url, params, job), deadline, url.pathname);
         const res = await (c.route.stream ? c.route.handle(ctx) : withinDeadline(c.route.handle(ctx), deadline, url.pathname));
@@ -383,6 +401,7 @@ export function apiHandler(routes: Route[], deps: ApiDeps) {
         // И по сроку: запрос к базе ограничен своими сроками пула (меньше срока API), место дольше не держится.
         job.done = true;
         job.heavy();
+        job.mine();
         job.release();
       }
     }

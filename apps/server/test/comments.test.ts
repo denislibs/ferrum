@@ -469,6 +469,35 @@ test('M3: приглашённый, ещё не открывавший файл,
   expect(await people('corp.example')).toEqual({ people: [{ id: ceo.id, name: 'Иван Секретов', email: 'ceo@corp.example' }] });
 });
 
+test('I-1: приглашённый в команду, не открывавший ни одного её файла, не предлагается — адреса неотличимы; открыл другой файл команды — предлагается', async () => {
+  const { file } = await world();
+  const [{ team_id: team, project_id: project }] = (await rows(
+    'SELECT p.team_id, p.id AS project_id FROM file f JOIN project p ON p.id = f.project_id WHERE f.id = $1',
+    [file],
+  )) as { team_id: string; project_id: string }[];
+  const ceo = await s.signIn('ceo@corp.example', 'Иван Секретов');
+  // Владелец команды приглашает существующий адрес (сразу `team_member`) и несуществующий (`team_invite`).
+  for (const email of ['ceo@corp.example', 'nobody@corp.example'])
+    expect((await s.call(owner, 'POST', `/api/teams/${team}/invite`, { email })).status).toBe(200);
+  expect(await rows('SELECT role FROM team_member WHERE team_id = $1 AND user_id = $2', [team, ceo.id])).toEqual([{ role: 'member' }]);
+  const people = async (q: string) =>
+    (await (await s.call(owner, 'GET', `/api/files/${file}/mentions?q=${encodeURIComponent(q)}`)).json()) as {
+      people: { id: string; name: string; email: string | null }[];
+    };
+  for (const q of ['corp.example', 'ceo', 'nobody', 'Иван', '']) {
+    const got = await people(q);
+    expect(
+      got.people.some((p) => p.id === ceo.id),
+      q,
+    ).toBe(false);
+  }
+  expect(await people('corp.example')).toEqual({ people: [] });
+  // Открыл другой файл этой команды — участник в деле, его можно упомянуть и в этом файле.
+  const sibling = (await s.newFile(owner, 'Соседний', project)).id;
+  expect((await s.call(ceo, 'POST', `/api/files/${sibling}/touch`)).status).toBeLessThan(300);
+  expect(await people('corp.example')).toEqual({ people: [{ id: ceo.id, name: 'Иван Секретов', email: 'ceo@corp.example' }] });
+});
+
 test('функции изменения сверяют роль сами: снятый доступ не пишет, даже минуя маршрут', async () => {
   const { file } = await world();
   const t = await create(owner, file);
@@ -857,7 +886,7 @@ test('H1: обсуждений в файле — не больше 10 000, у ч
   await create(editor, other);
 });
 
-test('H1: список — начало первого текста и «есть ещё», целиком — в обсуждении; страница 500 предельных обсуждений — меньше 1 МБ', async () => {
+test('H1: список — начало первого текста и «есть ещё», целиком — в обсуждении; страница 500 предельных обсуждений — меньше 700 КБ', async () => {
   const { file } = await world();
   const long = 'Длинный текст. '
     .repeat(400)
@@ -892,8 +921,9 @@ test('H1: список — начало первого текста и «ест�
   expect(page.threads).toHaveLength(COMMENT_PAGE_MAX);
   expect(page.threads.every((x) => x.first.more)).toBe(true);
   // Было 8,3 МБ (полные тексты). Сейчас ~0,63 МБ: начало текста — до 280 кодовых точек (до 1,1 КБ у четырёхбайтных), а
-  // остальное обсуждение (id, метка, автор, участники) — ~0,68 КБ и без текста; только четырёхбайтные — ~0,9 МБ.
-  expect(new TextEncoder().encode(text).length).toBeLessThan(1024 * 1024);
+  // остальное обсуждение (id, метка, автор, участники) — ~0,68 КБ и без текста; только четырёхбайтные — ~0,9 МБ. Предел — для
+  // этой смеси с запасом ~10 %: рост страницы в полтора раза не пройдёт молча.
+  expect(new TextEncoder().encode(text).length).toBeLessThan(700 * 1024);
 });
 
 test('M1: текст обсуждения — не больше 512 КБ: ответ и правка сверх — 409 THREAD_FULL без записи', async () => {
@@ -945,6 +975,39 @@ test('M1: список и обсуждение всех людей — под о
   }
 });
 
+test('(b): у человека не больше 2 общих тяжёлых мест, ожидая их, он не держит своих мест для лёгких запросов', async () => {
+  const slots = new UserSlots({ running: 1, waiting: 5 });
+  const heavySlots = new UserSlots({ running: 3, waiting: 10 });
+  const heavyUserSlots = new UserSlots({ running: 2, waiting: 5 });
+  const tight = await apiStand({ slots, heavySlots, heavyUserSlots, commentMail: false }, true);
+  try {
+    const { file } = await world();
+    const t = await create(editor, file);
+    // Все общие места заняты: три чтения одного человека — два в общей очереди, третье ждёт в своей.
+    const held = [heavySlots.take('')!, heavySlots.take('')!, heavySlots.take('')!];
+    const reads = [
+      tight.call(editor, 'GET', base(file)),
+      tight.call(editor, 'GET', `${base(file)}/${t.thread.id}`),
+      tight.call(editor, 'GET', base(file)),
+    ];
+    while (heavyUserSlots.count(editor.id).waiting < 1 || heavySlots.count('').waiting < 2) await Bun.sleep(1);
+    expect(heavySlots.count('')).toEqual({ running: 3, waiting: 2 });
+    expect(heavyUserSlots.count(editor.id)).toEqual({ running: 2, waiting: 1 });
+    // Ожидание не держит места человека: его лёгкий запрос проходит при одном месте.
+    expect(slots.count(editor.id)).toEqual({ running: 0, waiting: 0 });
+    expect((await tight.call(editor, 'GET', '/api/me/prefs')).status).toBe(200);
+    for (const h of held) h.release();
+    expect((await Promise.all(reads)).map((r) => r.status)).toEqual([200, 200, 200]);
+    expect([heavySlots.count(''), heavyUserSlots.count(editor.id), slots.count(editor.id)]).toEqual([
+      { running: 0, waiting: 0 },
+      { running: 0, waiting: 0 },
+      { running: 0, waiting: 0 },
+    ]);
+  } finally {
+    await tight.stop();
+  }
+});
+
 test('L2: правка, перенос и закрытие — свой предел 60 в минуту, а не общий `write`', async () => {
   const { file } = await world();
   const t = await create(viewer, file);
@@ -961,8 +1024,8 @@ test('L2: правка, перенос и закрытие — свой пред
 
 test('L4: невидимые знаки убираются, текст только из них — 400', async () => {
   const { file } = await world();
-  for (const body of ['​‌⁠', 'ㅤ', '‍', '́́'])
+  for (const body of ['\u200b\u200c\u2060', '\u3164', '\u200d', '\u0301\u0301'])
     expect((await s.call(owner, 'POST', base(file), { pin, body })).status, JSON.stringify(body)).toBe(400);
-  const t = await create(owner, file, 'а​б⁣в 👩‍💻' + '́'.repeat(30));
-  expect(t.comment!.body).toBe('а' + 'бв 👩‍💻' + '́'.repeat(8));
+  const t = await create(owner, file, 'а\u200bб\u2063в 👩\u200d💻' + '\u0301'.repeat(30));
+  expect(t.comment!.body).toBe('а' + 'бв 👩\u200d💻' + '\u0301'.repeat(8));
 });

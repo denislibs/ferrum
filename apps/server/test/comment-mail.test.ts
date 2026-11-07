@@ -486,6 +486,30 @@ test('L1: письма — только тем, кто хоть раз откр�
   expect(mail.delivered.map((m) => m.to)).toEqual([guest.email]);
 });
 
+test('(f): письмо — участнику в деле: коллега, открывавший другой файл команды, получает; навязанный в команду — нет', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail);
+  const team = (await s.pool.query<{ id: string }>(`INSERT INTO team (name) VALUES ('Команда') RETURNING id`)).rows[0].id;
+  const project = (await s.pool.query<{ id: string }>(`INSERT INTO project (team_id, name) VALUES ($1, 'Проект') RETURNING id`, [team]))
+    .rows[0].id;
+  const colleague = await s.signIn(`m-colleague-${crypto.randomUUID()}@example.com`, 'Коллега');
+  const pushed = await s.signIn(`m-pushed-${crypto.randomUUID()}@example.com`, 'Навязанный');
+  await s.pool.query(`INSERT INTO team_member (team_id, user_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'member'), ($1, $4, 'member')`, [
+    team,
+    owner.id,
+    colleague.id,
+    pushed.id,
+  ]);
+  const teamFile = (await s.newFile(owner, 'Командный', project)).id;
+  const sibling = (await s.newFile(owner, 'Соседний', project)).id;
+  // Коллега открывал соседний файл команды, но не этот; навязанный не открывал ни одного.
+  expect((await s.call(colleague, 'POST', `/api/files/${sibling}/touch`)).status).toBeLessThan(300);
+  await write(await s.call(owner, 'POST', base(teamFile), { pin, body: `@[${colleague.id}] и @[${pushed.id}], гляньте` }));
+  await s.pool.query(`UPDATE mail_outbox SET due_at = now() - interval '1 second', first_at = now() + interval '1 second'`);
+  await w.tick();
+  expect(mail.delivered.map((m) => m.to)).toEqual([colleague.email]);
+});
+
 test('база недоступна при запуске: таймер всё равно идёт, проход сам доделывает запуск и шлёт', async () => {
   const mail = new FakeMail();
   await create(owner, `@[${viewer.id}] потом`);
