@@ -1251,8 +1251,10 @@ impl Editor {
         result
     }
 
-    /// Выделение из панели слоёв. Неизвестные узлы пропускаются.
+    /// Выделение из панели слоёв. Неизвестные узлы пропускаются. Режим комментариев
+    /// заканчивается (`leave_comment_mode`).
     pub fn select(&mut self, ids: &[NodeId]) {
+        self.leave_comment_mode();
         self.cancel_gesture();
         let sel = self.alive(ids);
         // Другое выделение из панели слоёв заканчивает правку текста и вектора.

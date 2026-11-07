@@ -955,8 +955,6 @@ fn comment_mode_drops_selection_and_node_edits_do_nothing() {
     // Выделение всего, удаление, сдвиг, дублирование, вставка — молчат.
     h.key("KeyA", ctrl());
     assert!(h.sel().is_empty(), "Ctrl+A в режиме не выделяет");
-    // Выделенное мимо холста (панель слоёв) клавиши в режиме всё равно не правят.
-    h.ed.select(&[r]);
     for (code, mods) in [
         ("Delete", none()),
         ("Backspace", none()),
@@ -987,10 +985,48 @@ fn comment_mode_drops_selection_and_node_edits_do_nothing() {
     // Камера работает.
     assert!(h.ed.command_state(CommandId::ZoomIn).enabled);
     // Выход из режима выделение не возвращает, правки снова доступны.
-    h.ed.select(&[]);
     h.key("KeyV", none());
     assert_eq!(h.ed.tool_kind(), ToolKind::Move);
     assert!(h.sel().is_empty());
     assert!(h.ed.command_state(CommandId::Paste).enabled);
     assert!(h.ed.command_state(CommandId::SelectAll).enabled);
+}
+
+#[test]
+fn layers_panel_select_or_edit_leaves_comment_mode_for_move() {
+    // Выбор и правка из панели слоёв в режиме «Комментарий» выводят на «Перемещение»
+    // (поведение, как в Figma): выделения в режиме не бывает.
+    let mut h = available();
+    let a = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    let b = h.rect(None, 400.0, 100.0, 100.0, 100.0);
+    type Edit = Box<dyn Fn(&mut H)>;
+    let edits: [(&str, Edit); 5] = [
+        ("выбор", Box::new(move |h: &mut H| h.ed.select(&[a]))),
+        ("снятие выделения", Box::new(|h: &mut H| h.ed.select(&[]))),
+        (
+            "глаз",
+            Box::new(move |h: &mut H| h.ed.set_flags(&[a], Some(false), None)),
+        ),
+        (
+            "переименование",
+            Box::new(move |h: &mut H| h.ed.rename_node(b, "Б")),
+        ),
+        (
+            "перетаскивание",
+            Box::new(move |h: &mut H| {
+                h.ed.move_layers(&[a], DropTarget::Above(b));
+            }),
+        ),
+    ];
+    for (what, edit) in edits {
+        h.ed.set_tool(ToolKind::Comment);
+        assert_eq!(h.ed.tool_kind(), ToolKind::Comment, "{what}");
+        edit(&mut h);
+        assert_eq!(h.ed.tool_kind(), ToolKind::Move, "{what}");
+    }
+    assert_eq!(
+        h.sel(),
+        vec![a],
+        "выбор из панели — выделение уже на «Перемещении»"
+    );
 }

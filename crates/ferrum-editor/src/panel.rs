@@ -635,6 +635,7 @@ impl Editor {
 
     /// Скрыть или заблокировать узлы (кнопки строки слоя) одним шагом.
     pub fn set_flags(&mut self, ids: &[NodeId], visible: Option<bool>, locked: Option<bool>) {
+        self.leave_comment_mode();
         self.begin_doc_edit();
         let ids = self.alive(ids);
         if ids.is_empty() || (visible.is_none() && locked.is_none()) {
@@ -657,6 +658,7 @@ impl Editor {
 
     /// Переименование слоя одним шагом; пустое или то же имя ничего не меняет.
     pub fn rename_node(&mut self, id: NodeId, name: &str) {
+        self.leave_comment_mode();
         self.begin_doc_edit();
         let Some(name) = clean_name(name) else {
             return;
@@ -683,6 +685,7 @@ impl Editor {
     /// на экране. Один шаг; перенос узла внутрь самого себя или в лист ничего не
     /// делает. Возвращает, изменился ли документ.
     pub fn move_layers(&mut self, ids: &[NodeId], target: DropTarget) -> bool {
+        self.leave_comment_mode();
         self.begin_doc_edit();
         let ids = top_level(&self.scene, &self.alive(ids));
         let anchor = match target {

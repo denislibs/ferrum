@@ -290,6 +290,15 @@ impl Editor {
         }
     }
 
+    /// Выбор или правка из панели слоёв в режиме комментариев выводит из него на
+    /// «Перемещение» **(поведение, как в Figma)**: выделение и правки узлов в режиме
+    /// не бывают, а панель слоёв в нём работает.
+    pub(crate) fn leave_comment_mode(&mut self) {
+        if self.tool.kind() == ToolKind::Comment {
+            self.set_tool(ToolKind::Move);
+        }
+    }
+
     pub fn set_comments_show_resolved(&mut self, on: bool) {
         if self.comments.show_resolved != on {
             self.comments.show_resolved = on;
