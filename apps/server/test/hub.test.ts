@@ -126,7 +126,7 @@ test('кадры: первым hello, мусор и текст закрываю�
   expect((await old.waitClosed()).code).toBe(SYNC_CLOSE.RELOAD);
   // Вкладка прошлой сборки (протокол без кадра `comment`) тоже: кадра комментария она не разобрала бы.
   const stale = (await Client.open(s, owner, file))!;
-  stale.hello(SYNC_PROTOCOL - 1);
+  stale.hello(2);
   await stale.wait('please-reload');
   expect((await stale.waitClosed()).code).toBe(SYNC_CLOSE.RELOAD);
 

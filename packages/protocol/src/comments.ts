@@ -33,8 +33,8 @@ const MENTION_RE = /@\[([A-Za-z0-9_-]{1,64})\]/g;
 /** Управляющие C0 (кроме перевода строки и табуляции), DEL и C1. */
 // eslint-disable-next-line no-control-regex
 const CONTROLS_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
-/** Направление текста (RLO и родня): переставляют показ чужого текста, в письме — тоже. */
-const BIDI_RE = /[‪-‮⁦-⁩]/g;
+/** Знаки направления текста (RLO, LRM, ALM и родня): переставляют показ чужого текста, в письме — тоже. Тот же класс, что у имён (`auth.ts`). */
+const BIDI_RE = /\p{Bidi_Control}/gu;
 
 export const isCommentUserId = (v: unknown): v is string => typeof v === 'string' && USER_ID_RE.test(v);
 

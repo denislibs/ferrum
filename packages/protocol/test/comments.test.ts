@@ -69,14 +69,16 @@ test('текст: только текст — переводы строк, уп�
   expect(normalizeCommentBody('  a\r\nb\rc\n\td  ')).toBe('a\nb\nc\n\td');
   expect(normalizeCommentBody('a\u0000b\u0007c\u001bd\u007fe\u0085f\u009fg')).toBe('abcdefg');
   // RLO переворачивает показ: «exe.txt» выглядел бы иначе, чем есть.
-  expect(normalizeCommentBody('file‮txt.exe⁦x⁩')).toBe('filetxt.exex');
+  expect(normalizeCommentBody('file\u202etxt.exe\u2066x\u2069')).toBe('filetxt.exex');
+  // Метки направления (LRM, RLM, ALM) и встраивание LRE — тоже.
+  expect(normalizeCommentBody('a\u200eb\u200fc\u061cd\u202ae')).toBe('abcde');
   // Одиночный суррогат в базу не идёт.
   expect(normalizeCommentBody('a\ud800b')).toBe('a�b');
-  for (const bad of ['', '   ', '‮', '\r\n', 1, null, undefined, {}, ['a']]) expect(normalizeCommentBody(bad)).toBeNull();
+  for (const bad of ['', '   ', '\u202e', '\r\n', 1, null, undefined, {}, ['a']]) expect(normalizeCommentBody(bad)).toBeNull();
   // HTML не трогается: это текст, показывают его как текст.
   expect(normalizeCommentBody('<b>x</b>')).toBe('<b>x</b>');
   // Нормальный текст не меняется при повторе: сервер и клиент считают одно.
-  const once = normalizeCommentBody(' x\r\ny‮ ')!;
+  const once = normalizeCommentBody(' x\r\ny\u202e ')!;
   expect(normalizeCommentBody(once)).toBe(once);
 });
 
@@ -148,7 +150,7 @@ test('событие туда и обратно; каждое поле пров�
     { ...good, thread: thread({ participants: Array(THREAD_PARTICIPANTS_MAX + 1).fill(U) }) },
     { ...good, thread: thread({ first: comment({ thread: C }) }) },
     { ...good, thread: thread({ pin: { ...pin, wx: Infinity } }) },
-    { ...good, comment: comment({ body: '<b>‮</b>' }) },
+    { ...good, comment: comment({ body: '<b>\u202e</b>' }) },
     { ...good, comment: comment({ body: ' x' }) },
     { ...good, comment: comment({ thread: C }) },
     { ...good, comment: comment({ author: { id: U } as never }) },
