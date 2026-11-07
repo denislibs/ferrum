@@ -1,6 +1,7 @@
 // Человек в интерфейсе: кружок с инициалами, вкладка настроек и строка на экране файлов.
 
-import { createSignal, Show } from 'solid-js';
+import { createSignal, onMount, Show } from 'solid-js';
+import { apiFailureText, getPrefs, setPrefs } from '../server/server-api';
 import { avatarHue, initials } from './auth-logic';
 import { currentUser, leave } from './session';
 import type { SessionUser } from '@ferrum/protocol';
@@ -17,6 +18,19 @@ export function Avatar(props: { user: SessionUser }) {
 export function AccountTab() {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // «Письма о комментариях»: по умолчанию включены; пока ответа сервера нет — выключатель недоступен.
+  const [mail, setMail] = createSignal<boolean | null>(null);
+  onMount(() => {
+    void getPrefs().then((r) => setMail(r.ok ? r.value.commentMail : null));
+  });
+  const toggleMail = async (on: boolean) => {
+    setMail(on);
+    const r = await setPrefs({ commentMail: on });
+    if (!r.ok) {
+      setMail(!on);
+      setError(apiFailureText(r.failure));
+    }
+  };
   const out = async (everywhere: boolean) => {
     setBusy(true);
     setError(await leave(everywhere));
@@ -35,6 +49,15 @@ export function AccountTab() {
           </div>
         )}
       </Show>
+      <label class="fe-account__pref">
+        <input
+          type="checkbox"
+          checked={mail() ?? true}
+          disabled={mail() === null}
+          onChange={(e) => void toggleMail(e.currentTarget.checked)}
+        />
+        Письма о комментариях: упоминания и ответы, пока файл не открыт
+      </label>
       <div class="fe-account__actions">
         <button class="fe-btn fe-btn--secondary" disabled={busy()} onClick={() => void out(false)}>
           Выйти

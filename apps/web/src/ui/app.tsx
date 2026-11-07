@@ -13,6 +13,7 @@ import { boot, dismissSplash, isTestMode } from './boot';
 import { DesignHeader, FileHeader, PanelToggle, ResizeEdge } from './chrome';
 import { buildContextMenu, type ContextTarget } from './context-menu';
 import { EditorContext, type Editor } from './context';
+import { extensions } from './extensions';
 import { ConfirmDialog } from './dialog';
 import { Menu, type MenuItem, type MenuSearch } from './menu';
 import { buildMainMenu, entriesByKey, searchMenu } from './main-menu';
@@ -26,7 +27,8 @@ import type { SettingsStore } from './settings-store';
 import { SettingsDialog } from './settings-dialog';
 import { ShortcutsPanel } from './shortcuts-panel';
 import { downloadBytes, fileName } from './files';
-import { importFromDisk, type FileMeta, type FileStore } from './file-store';
+import { importFromDisk, type FileMeta, type FileStore, type SyncHandle } from './file-store';
+import type { CommentsToMain } from '../core/comments-store';
 import { systemFonts } from './system-fonts';
 import { isTauri, saveExport } from './tauri';
 import type { Backend, MenuActionDto } from '../wasm/ferrum_wasm';
@@ -66,6 +68,8 @@ export interface AppProps {
   navigate: (r: Route) => void;
   /** Страница из ссылки (`?page=`): открыть её, если она есть в файле. */
   page?: string;
+  /** Обсуждение из ссылки (`?comment=`, письмо о комментарии): открыть его, когда комментарии загрузятся. */
+  comment?: string;
 }
 
 /** Тестовый режим: интервалы журнала и полного файла из адреса (`?journal=`, `?fullSave=`). */
@@ -267,7 +271,11 @@ export function App(props: AppProps) {
   const [lost, setLost] = createSignal<Lost>(null);
   /** Сервер не принял правки: причина для плашки. */
   const [rejected, setRejected] = createSignal('');
-  let syncHandle: { stop(): void } | undefined;
+  let syncHandle: SyncHandle | undefined;
+  /** Комментарии из `sync.worker` (спека подсистемы 4, раздел 10): получатели — окно и панель. */
+  const commentListeners = new Set<(m: CommentsToMain) => void>();
+  const [commentsHost, setCommentsHost] = createSignal<HTMLElement>();
+  const commentMode = () => store.state.tool === 'comment' && !!extensions.comments && !!props.files.sync;
   /** Просьба о доступе из плашки «Нет доступа». */
   const [asked, setAsked] = createSignal(false);
   store.setState('fileRole', props.file.role ?? null);
@@ -480,6 +488,9 @@ export function App(props: AppProps) {
               store.toast('Вышла новая версия Ferrum — обновите страницу, правки сохранятся');
             },
             participants: (list) => store.setState('participants', reconcile(list, { key: 'id' })),
+            comments: (m) => {
+              for (const l of commentListeners) l(m);
+            },
           });
         };
         saver = createSaver(ed, props.files, id, version, stored, {
@@ -949,6 +960,27 @@ export function App(props: AppProps) {
             {(ed) => (
               <EditorContext.Provider value={ed()}>
                 <Toolbar />
+                <Show when={extensions.comments && props.files.sync ? extensions.comments : null}>
+                  {(Comments) => {
+                    const C = Comments();
+                    return (
+                      <C
+                        editor={ed()}
+                        canvas={canvas}
+                        request={(req) => syncHandle?.comments?.(req) ?? Promise.resolve({ ok: false, failure: 'NETWORK' })}
+                        subscribe={(l) => {
+                          commentListeners.add(l);
+                          return () => commentListeners.delete(l);
+                        }}
+                        panelHost={commentsHost}
+                        mode={commentMode}
+                        page={() => store.state.pages.current}
+                        link={props.comment}
+                        toast={(text) => store.toast(text)}
+                      />
+                    );
+                  }}
+                </Show>
                 <Show when={palette()}>
                   <QuickActions hidden={hidden()} recent={recent()} onClose={() => setPalette(false)} />
                 </Show>
@@ -982,7 +1014,9 @@ export function App(props: AppProps) {
                 </div>
                 <Show when={!rightCollapsed()}>
                   <DesignHeader file={props.file} self={props.files.user} />
-                  <PropertiesPanel theme={theme()} />
+                  <Show when={commentMode()} fallback={<PropertiesPanel theme={theme()} />}>
+                    <div ref={setCommentsHost} class="fe-comments-host" />
+                  </Show>
                   <ResizeEdge side="right" width={right()} onWidth={setRight} />
                 </Show>
               </aside>

@@ -1,7 +1,8 @@
 // Маршруты приложения в адресе после `#` (назад и вперёд браузера работают):
 // - `#/` (и пустой) — экран файлов, «Недавние»; `#/drafts`, `#/trash` — другие разделы;
 // - `#/file/<id>` — редактор с файлом из хранилища; `#/file/<id>?page=<pageId>` —
-//   с этой страницей («Копировать ссылку на страницу»);
+//   с этой страницей («Копировать ссылку на страницу»); `#/file/<id>?comment=<threadId>` — на обсуждении (ссылка из письма,
+//   спека подсистемы 4, раздел 10.3);
 // - `#/new` — создать файл в хранилище и открыть его (адрес заменяется на `#/file/<id>`);
 //   `#/new?project=<id>` — в этом проекте, где проекты есть;
 // - `#/file/<id>?link=<токен>` — файл по ссылке «Поделиться», токен из адреса сразу убирается.
@@ -13,7 +14,9 @@ import { MAX_ID_BYTES } from '../core/file-list';
 import { extensions } from './extensions';
 
 export type Route =
-  { kind: 'files'; section: Section } | { kind: 'file'; id: string; page?: string; link?: string } | { kind: 'new'; project?: string };
+  | { kind: 'files'; section: Section }
+  | { kind: 'file'; id: string; page?: string; link?: string; comment?: string }
+  | { kind: 'new'; project?: string };
 
 const SECTION_PATH: Partial<Record<Section, string>> = { recent: '', drafts: 'drafts', trash: 'trash', shared: 'shared' };
 const sectionPath = (s: Section): string => SECTION_PATH[s] ?? s.replace(':', '/');
@@ -53,6 +56,9 @@ export function parseRoute(hash: string): Route {
     if (page !== null && validPage(page)) route.page = page;
     const link = new URLSearchParams(query).get('link');
     if (link !== null && /^[A-Za-z0-9_-]{1,64}$/.test(link)) route.link = link;
+    // Обсуждение — UUID сервера; другое отбрасывается: файл откроется как обычно.
+    const comment = new URLSearchParams(query).get('comment');
+    if (comment !== null && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(comment)) route.comment = comment;
     return route;
   }
   const other = extensions.parseSection?.(path);

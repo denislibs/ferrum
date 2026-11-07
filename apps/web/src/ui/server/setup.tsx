@@ -8,6 +8,7 @@ import { extensions } from '../extensions';
 import { LocalFilesEntry } from './local-files';
 import { redeemLink, requestFileAccess } from './server-api';
 import { ServerFileStore } from './server-store';
+import { CommentsUi } from './comments';
 import { PresenceBar } from './presence-bar';
 import { ShareButton } from './share-dialog';
 import { fileMenuItems, MoveDialog, refreshTeams, setOnMoved, teamNavEntries, TeamsEntry, teamSectionTitle } from './teams';
@@ -48,4 +49,5 @@ export function installServerUi(): void {
   extensions.newFileRoute = (section) => (section.startsWith('project:') ? { kind: 'new', project: section.slice(8) } : { kind: 'new' });
   extensions.shareButton = ShareButton;
   extensions.presenceBar = PresenceBar;
+  extensions.comments = CommentsUi;
 }

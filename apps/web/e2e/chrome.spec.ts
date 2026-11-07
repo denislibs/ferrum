@@ -51,8 +51,8 @@ test('подсказка «Название  Клавиша» — из дейс�
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');
   await page.getByRole('button', { name: 'Перо', exact: true }).hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перо  P');
-  await page.getByRole('button', { name: 'Комментарии — подсистема 4' }).hover();
-  await expect(page.getByRole('tooltip')).toHaveText('Комментарии  C — подсистема 4');
+  await page.getByRole('button', { name: 'Комментарии — только в файлах на сервере' }).hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Комментарии  C — только в файлах на сервере');
   // Открытая подсказка следует за раскладкой: V снят, Q назначен — текст меняется на месте.
   await move.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Перемещение  V');

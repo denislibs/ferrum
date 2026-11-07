@@ -24,7 +24,7 @@ type View =
   | { kind: 'files'; section: Section; notice: { text: string; seq: number } | null }
   /** `restart` — редактор запущен заново после сбоя; `backend` — бэкенд рендера
    * (после потери GPU — запасной, и для следующих перезапусков тоже). */
-  | { kind: 'editor'; file: FileMeta; restart?: Restart; backend?: Backend; page?: string }
+  | { kind: 'editor'; file: FileMeta; restart?: Restart; backend?: Backend; page?: string; comment?: string }
   /** Файл на диске без доступа (браузер перезапущен): вопрос, ответ — по щелчку. */
   | { kind: 'access'; file: FileMeta; answer: (ok: boolean) => void }
   /** Файла нет или нет доступа к нему (хранилище с ролями их не различает). */
@@ -139,7 +139,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
   };
 
   /** Открыть файл в редакторе: занят другой вкладкой — к экрану файлов. */
-  async function edit(file: FileMeta, my: number, page?: string): Promise<void> {
+  async function edit(file: FileMeta, my: number, page?: string, comment?: string): Promise<void> {
     // Файл на диске: доступ к нему после перезапуска браузера снова разрешает
     // пользователь — щелчком в вопросе (запросу нужно действие пользователя).
     if (file.disk && files.disk && (await files.disk.access(file.id).catch(() => 'denied' as const)) !== 'granted') {
@@ -172,7 +172,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
     // Страница из ссылки открывается один раз: в адресе остаётся только файл.
     current = { kind: 'file', id: file.id };
     replace(current);
-    setView({ kind: 'editor', file, page });
+    setView({ kind: 'editor', file, page, comment });
   }
 
   /** Переход к маршруту. `push` — из интерфейса: новая запись истории, когда уход
@@ -241,7 +241,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
         } else if (!file) toFiles('Файл не найден');
         // Файл из корзины для правки не открывается: сначала восстановить.
         else if (file.trashedAt !== undefined) toFiles('Файл в корзине — восстановите его, чтобы открыть');
-        else await edit(file, my, route.page);
+        else await edit(file, my, route.page, route.comment);
       }
     } catch (e) {
       toFiles(`Хранилище файлов недоступно: ${e instanceof Error ? e.message : String(e)}`);
@@ -350,6 +350,7 @@ export function Root(props: { createStore: () => FileStore & SettingsBackend }) 
             restart={v.restart}
             backend={v.backend}
             page={v.page}
+            comment={v.comment}
             onRestart={(r) => restart(v.file, r, v.backend)}
             navigate={navigate}
             onLeave={(fn) => (leave = fn)}

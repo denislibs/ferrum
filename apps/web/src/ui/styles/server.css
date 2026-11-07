@@ -141,3 +141,238 @@
   border: 2px solid var(--select);
   pointer-events: none;
 }
+
+/* Комментарии (спека подсистемы 4, раздел 10.3): окно обсуждения у метки и панель справа в режиме комментариев. */
+.fe-account__pref {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.fe-thread {
+  position: absolute;
+  z-index: 20;
+  width: 320px;
+  max-height: min(480px, calc(100% - 16px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  overflow: auto;
+  background: var(--surface-raised);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+}
+
+.fe-thread__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.fe-thread__head > .t-strong {
+  flex: 1;
+}
+
+.fe-thread__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.fe-comment__meta {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.fe-comment__body {
+  margin: var(--space-1) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fe-comment__mention {
+  color: var(--select);
+  font-weight: 500;
+}
+
+.fe-comment__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+}
+
+.fe-comment__actions .fe-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.fe-comment__actions .fe-link:hover {
+  color: var(--ink);
+}
+
+.fe-composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.fe-composer__field {
+  resize: vertical;
+  min-height: 52px;
+  padding: var(--space-2);
+  border: 1px solid var(--line-control);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.fe-composer__row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.fe-composer__over {
+  color: var(--danger);
+}
+
+.fe-composer__people {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  margin: var(--space-1) 0 0;
+  padding: var(--space-1);
+  list-style: none;
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+}
+
+.fe-composer__person {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.fe-composer__person.is-active {
+  background: var(--select-soft);
+}
+
+.fe-comments-host {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Высота панели — от колонки, а не от списка: прокручивается только список. */
+.fe-comments {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fe-comments__head,
+.fe-comments__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+}
+
+.fe-comments__head > .t-strong {
+  flex: 1 0 100%;
+}
+
+.fe-comments__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.fe-comments__empty {
+  padding: var(--space-3);
+}
+
+.fe-comments__list {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fe-comments__row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--line);
+}
+
+.fe-comments__row.is-resolved {
+  opacity: 0.6;
+}
+
+.fe-comments__row.is-open .fe-comments__item {
+  background: var(--select-soft);
+}
+
+.fe-comments__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.fe-comments__item:hover {
+  background: var(--surface-hover);
+}
+
+.fe-comments__who {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.fe-comments__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--select);
+}
+
+.fe-comments__text .fe-comment__body {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+}
