@@ -910,3 +910,87 @@ fn pin_on_a_page_guide_wins_over_the_guide() {
     assert_eq!(h.ed.step_count(), steps);
     assert_eq!(pins_on_screen(&h), vec![Point::new(390.0, 460.0)]);
 }
+
+#[test]
+fn focus_on_the_same_page_ends_following_and_camera_stays_on_the_pin() {
+    let mut h = available();
+    h.ed.presence_join(1, "u-1", "Анна", peer_color(0x0d74ce));
+    let view = PeerState {
+        page: Some(h.ed.page()),
+        view: Rect::new(1000.0, 1000.0, 1500.0, 1400.0),
+        cursor: None,
+        selection: None,
+        gesture: None,
+    };
+    h.ed.presence_state(1, view.clone());
+    h.ed.follow(Some(1));
+    assert_eq!(h.ed.following(), Some(1));
+    let p = world_pin(&h, "a", -300.0, 200.0, false);
+    h.ed.set_comment_pins(vec![p], true);
+    h.ed.take_events();
+    // Переход из панели — своё действие с камерой: следование кончается.
+    h.ed.comment_focus("a");
+    assert_eq!(h.ed.following(), None);
+    assert!(h.ed.take_events().contains(&EditorEvent::Following(None)));
+    assert!(close_pt(h.ed.camera().center(), Point::new(-300.0, 200.0)));
+    // Следующий кадр присутствия ведущего камеру не уводит: окно смотрит на метку.
+    h.ed.presence_state(1, view);
+    assert!(close_pt(h.ed.camera().center(), Point::new(-300.0, 200.0)));
+    assert_eq!(h.ed.comment_open(), Some("a"));
+}
+
+#[test]
+fn comment_mode_drops_selection_and_node_edits_do_nothing() {
+    let mut h = available();
+    let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    h.click(150.0, 120.0, none());
+    assert_eq!(h.sel(), vec![r]);
+    let before = h.state();
+    let steps = h.ed.step_count();
+    // Вход в режим снимает выделение без шага истории.
+    h.key("KeyC", none());
+    assert_eq!(h.ed.tool_kind(), ToolKind::Comment);
+    assert!(h.sel().is_empty());
+    assert_eq!(h.ed.step_count(), steps);
+    // Выделение всего, удаление, сдвиг, дублирование, вставка — молчат.
+    h.key("KeyA", ctrl());
+    assert!(h.sel().is_empty(), "Ctrl+A в режиме не выделяет");
+    // Выделенное мимо холста (панель слоёв) клавиши в режиме всё равно не правят.
+    h.ed.select(&[r]);
+    for (code, mods) in [
+        ("Delete", none()),
+        ("Backspace", none()),
+        ("ArrowRight", none()),
+        ("ArrowDown", shift()),
+        ("KeyD", ctrl()),
+        ("KeyG", ctrl()),
+        ("KeyX", ctrl()),
+    ] {
+        h.key(code, mods);
+        assert_eq!(h.ed.tool_kind(), ToolKind::Comment, "{code}");
+    }
+    for cmd in [
+        CommandId::Delete,
+        CommandId::NudgeLeft,
+        CommandId::Duplicate,
+        CommandId::Cut,
+        CommandId::Paste,
+        CommandId::PasteOver,
+        CommandId::PasteProps,
+        CommandId::SelectAll,
+    ] {
+        assert!(!h.ed.command_state(cmd).enabled, "{cmd:?}");
+        h.ed.execute(cmd);
+    }
+    assert_eq!(h.state(), before, "документ тот же");
+    assert_eq!(h.ed.step_count(), steps, "шагов истории нет");
+    // Камера работает.
+    assert!(h.ed.command_state(CommandId::ZoomIn).enabled);
+    // Выход из режима выделение не возвращает, правки снова доступны.
+    h.ed.select(&[]);
+    h.key("KeyV", none());
+    assert_eq!(h.ed.tool_kind(), ToolKind::Move);
+    assert!(h.sel().is_empty());
+    assert!(h.ed.command_state(CommandId::Paste).enabled);
+    assert!(h.ed.command_state(CommandId::SelectAll).enabled);
+}
