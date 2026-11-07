@@ -150,6 +150,13 @@ export class ServerFileStore implements FileStore, SettingsBackend {
     /** Запросы комментариев в `sync.worker`: ответ приходит тем же порядком сообщений, по номеру. */
     const pending = new Map<number, (r: CommentResult) => void>();
     let nextId = 0;
+    /** Worker остановлен или не запустился: ответа на запрос не будет. */
+    let dead = false;
+    const fail = () => {
+      dead = true;
+      for (const done of pending.values()) done({ ok: false, failure: 'NETWORK' });
+      pending.clear();
+    };
     worker.onmessage = (e: MessageEvent<FromSync>) => {
       const m = e.data;
       if (m.t === 'status') events.status(m.status, m.detail);
@@ -164,6 +171,7 @@ export class ServerFileStore implements FileStore, SettingsBackend {
     };
     worker.onerror = (e) => {
       e.preventDefault?.();
+      fail();
       events.status('rejected', 'Не удалось запустить часть приложения — обновите страницу');
     };
     worker.postMessage({ t: 'start', file, user: this.user, schema: SCHEMA_VERSION, port: channel.port2 } satisfies ToSync, [
@@ -175,11 +183,11 @@ export class ServerFileStore implements FileStore, SettingsBackend {
         // Сначала ядро: его таймер пачек и порт живут в его worker'е, `terminate` этого worker'а их не снимает.
         core.disconnectSync();
         worker.terminate();
-        for (const done of pending.values()) done({ ok: false, failure: 'NETWORK' });
-        pending.clear();
+        fail();
       },
       comments: (req: CommentRequest) =>
         new Promise<CommentResult>((resolve) => {
+          if (dead) return resolve({ ok: false, failure: 'NETWORK' });
           const id = ++nextId;
           pending.set(id, resolve);
           worker.postMessage({ t: 'comments', id, req } satisfies ToSync);

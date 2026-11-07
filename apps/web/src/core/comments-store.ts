@@ -120,6 +120,8 @@ export class CommentStore {
   private known = 0;
   private loaded = false;
   private fetching = false;
+  /** Новое соединение подтверждено, пока шло догоняние: его запрос ушёл раньше, нужен ещё проход. */
+  private again = false;
   private readonly waiting: CommentEvent[] = [];
   private role: FileRole | null = null;
   private open: string | null = null;
@@ -143,6 +145,8 @@ export class CommentStore {
     this.env.post({ t: 'me', user: this.env.user, role });
     // Право двигать метку зависит от роли: метки заново.
     if (changed && this.loaded) this.env.core({ type: 'commentPins', pins: this.pins([...this.threads.values()]), replace: true });
+    // Идущее догоняние спросило сервер до подтверждения этого соединения: изменения между ними не придут ему событиями.
+    if (this.fetching) this.again = true;
     void this.catchUp();
   }
 
@@ -163,10 +167,12 @@ export class CommentStore {
   }
 
   private apply(ev: CommentEvent): void {
-    if (ev.kind === 'gap' || ev.seq > this.known + 1) {
+    // `gap` несёт последний номер сервера: если он уже учтён (ждал догоняния), второго догоняния не нужно.
+    if (ev.kind === 'gap' ? ev.seq > this.known : ev.seq > this.known + 1) {
       void this.catchUp();
       return;
     }
+    if (ev.kind === 'gap') return;
     if (ev.seq <= this.known) return;
     this.known = ev.seq;
     if (ev.kind === 'removed') {
@@ -182,9 +188,9 @@ export class CommentStore {
     else if (fresh) unread = this.open !== ev.thread.id;
     this.upsert({ ...ev.thread, unread });
     if (this.detail?.thread === ev.thread.id) {
-      const list = this.detail.comments;
-      if (ev.deleted) this.detail.comments = list.filter((c) => c.id !== ev.deleted);
+      if (ev.deleted) this.detail.comments = this.detail.comments.filter((c) => c.id !== ev.deleted);
       if (ev.comment) {
+        const list = this.detail.comments;
         const at = list.findIndex((c) => c.id === ev.comment!.id);
         if (at >= 0) list[at] = ev.comment;
         else list.push(ev.comment);
@@ -201,20 +207,30 @@ export class CommentStore {
     this.fetching = true;
     const first = !this.loaded;
     try {
-      for (;;) {
-        const res = await this.env.fetch(`${this.env.base}/comments?after=${this.known}&limit=${COMMENT_PAGE_MAX}`);
-        const body = await json(res);
-        const list = res.ok ? parseCommentList(body) : null;
-        if (!list) throw new Error(`список комментариев: ${res.status}`);
-        if (first && this.known === 0) this.resetOut = true;
-        for (const t of list.threads) {
-          const was = this.threads.get(t.id);
-          if (!was || was.seq <= t.seq) this.upsert(t);
+      do {
+        this.again = false;
+        for (;;) {
+          const res = await this.env.fetch(`${this.env.base}/comments?after=${this.known}&limit=${COMMENT_PAGE_MAX}`);
+          const body = await json(res);
+          const list = res.ok ? parseCommentList(body) : null;
+          if (!list) throw new Error(`список комментариев: ${res.status}`);
+          if (first && this.known === 0) this.resetOut = true;
+          // Метки страницы — ядру одной пачкой: после долгого отсутствия обсуждений могут быть сотни.
+          const changed: ThreadView[] = [];
+          for (const t of list.threads) {
+            const was = this.threads.get(t.id);
+            if (!was || was.seq <= t.seq) {
+              this.upsert(t, false);
+              changed.push(t);
+            }
+          }
+          const gone = list.removed.filter((id) => this.remove(id, false));
+          if (this.loaded && changed.length > 0) this.env.core({ type: 'commentPins', pins: this.pins(changed), replace: false });
+          if (gone.length > 0) this.env.core({ type: 'commentPinsRemove', ids: gone });
+          this.known = Math.max(this.known, list.seq);
+          if (!list.more) break;
         }
-        for (const id of list.removed) this.remove(id);
-        this.known = Math.max(this.known, list.seq);
-        if (!list.more) break;
-      }
+      } while (this.again);
       this.loaded = true;
     } catch {
       this.fetching = false;
@@ -243,21 +259,24 @@ export class CommentStore {
     else if (this.open) this.closeDetail(this.open);
   }
 
-  private upsert(t: ThreadView): void {
+  /** `toCore: false` — метку ядру отправит вызывающий (пачкой). */
+  private upsert(t: ThreadView, toCore = true): void {
     this.threads.set(t.id, t);
     this.upserts.set(t.id, t);
     this.removedOut.delete(t.id);
-    if (this.loaded) this.env.core({ type: 'commentPins', pins: this.pins([t]), replace: false });
+    if (toCore && this.loaded) this.env.core({ type: 'commentPins', pins: this.pins([t]), replace: false });
     this.schedule();
   }
 
-  private remove(id: string): void {
-    if (!this.threads.delete(id)) return;
+  /** `false` — такого обсуждения не было. `toCore: false` — снять метку в ядре должен вызывающий. */
+  private remove(id: string, toCore = true): boolean {
+    if (!this.threads.delete(id)) return false;
     this.upserts.delete(id);
     this.removedOut.add(id);
-    this.env.core({ type: 'commentPinsRemove', ids: [id] });
+    if (toCore) this.env.core({ type: 'commentPinsRemove', ids: [id] });
     if (this.open === id) this.closeDetail(id);
     this.schedule();
+    return true;
   }
 
   private pins(list: ThreadView[]): CommentPinForCore[] {
@@ -396,8 +415,10 @@ export class CommentStore {
     }
     const d = parseThreadDetail(data);
     if (!d) return { ok: false, failure: 'NETWORK' };
-    this.detail = { thread, comments: d.comments };
     const was = this.threads.get(thread);
+    // Пока шёл запрос, пришёл ответ или правка (окна ещё не было — событие его не тронуло): ответ сервера устарел, ещё раз.
+    if (was && was.seq > d.thread.seq) return this.loadDetail(thread);
+    this.detail = { thread, comments: d.comments };
     // Список мог ещё не дойти (ссылка на обсуждение): обсуждение из ответа, прочитанное.
     if (!was || was.seq <= d.thread.seq) this.upsert({ ...d.thread, unread: false });
     else if (was.unread) this.upsert({ ...was, unread: false });

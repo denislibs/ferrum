@@ -3,7 +3,7 @@
 
 import { expect, test } from '@playwright/test';
 import type { CommentDto, CommentEvent, ThreadDto, ThreadView } from '@ferrum/protocol';
-import { COMMENTS_FLUSH_MS, CommentStore, initialsOf, type CommentsCoreCommand, type CommentsToMain } from '../src/core/comments-store';
+import { CommentStore, initialsOf, type CommentsCoreCommand, type CommentsToMain } from '../src/core/comments-store';
 
 const ME = 'me';
 const OTHER = 'other';
@@ -294,7 +294,6 @@ test('панель получает изменения пачкой, не по �
   const out = s.main.filter((m) => m.t === 'threads');
   expect(out).toHaveLength(before + 1);
   expect(out.at(-1)).toMatchObject({ reset: false, upserts: [expect.objectContaining({ seq: 11 })] });
-  expect(COMMENTS_FLUSH_MS).toBeGreaterThan(0);
 });
 
 test('сбой сети при загрузке — повтор по таймеру', async () => {
@@ -331,4 +330,114 @@ test('первый список уходит панели только цели�
   const out = s.main.filter((m) => m.t === 'threads');
   expect(out).toHaveLength(1);
   expect((out[0] as { upserts: ThreadView[] }).upserts.map((t) => t.id).sort()).toEqual([uuid(1), uuid(2)]);
+});
+
+/** Загружен список до `seq` 1 с обсуждением 1; следующий запрос задержан до `open()`. */
+async function loadedAndHeld() {
+  const s = stand();
+  s.list(0, { seq: 1, threads: [thread(1, 1)] });
+  s.store.connected('editor');
+  await s.settle();
+  let open!: () => void;
+  s.gates.push(new Promise<void>((r) => (open = r)));
+  return { s, open: () => open() };
+}
+
+const listCalls = (s: ReturnType<typeof stand>) => s.calls.filter((c) => c.path.includes('comments?after')).map((c) => c.path);
+
+test('T9-I1: событие во время догоняния после загрузки ждёт его конца — событие за дырой не теряется', async () => {
+  const { s, open } = await loadedAndHeld();
+  s.list(1, { seq: 2, threads: [thread(1, 2)] });
+  s.store.event({ kind: 'gap', seq: 2 });
+  // Список отдаст до 2, а 3 пришло, пока догоняние шло.
+  s.store.event(ev(3, { ...thread(1, 1), replies: 3 }));
+  open();
+  await s.settle();
+  expect(s.store.seq).toBe(3);
+  expect(s.store.thread(uuid(1))?.replies).toBe(3);
+  expect(listCalls(s)).toHaveLength(2);
+});
+
+test('T9-I2: новое соединение во время догоняния — ещё один проход от известного', async () => {
+  const { s, open } = await loadedAndHeld();
+  s.list(1, { seq: 2, threads: [thread(1, 2)] });
+  s.store.event({ kind: 'gap', seq: 2 });
+  // Запрос `after=1` ушёл до подтверждения нового соединения: то, что сервер записал между ними, этому соединению не придёт.
+  s.store.connected('editor');
+  s.list(2, { seq: 3, threads: [thread(2, 3)] });
+  open();
+  await s.settle();
+  expect(listCalls(s)).toEqual([
+    '/api/files/f/comments?after=0&limit=500',
+    '/api/files/f/comments?after=1&limit=500',
+    '/api/files/f/comments?after=2&limit=500',
+  ]);
+  expect(s.store.seq).toBe(3);
+  expect(s.store.thread(uuid(2))).toBeTruthy();
+});
+
+test('T9-M1: ответ, пришедший пока грузилось окно, не теряется — окно грузится ещё раз', async () => {
+  const { s, open } = await loadedAndHeld();
+  const reply = comment(1, 101);
+  let n = 0;
+  s.routes.push((c) => {
+    if (c.path !== `/api/files/f/comments/${uuid(1)}`) return null;
+    // Первый ответ сервер собрал до ответа 101, второй — после.
+    return ++n === 1
+      ? { status: 200, body: { thread: thread(1, 1), comments: [comment(1, 100)] } }
+      : { status: 200, body: { thread: { ...thread(1, 2), replies: 1 }, comments: [comment(1, 100), reply] } };
+  });
+  const opening = s.store.request(1, { k: 'open', thread: uuid(1) });
+  s.store.event(ev(2, { ...thread(1, 1), replies: 1 }, 'reply', OTHER, reply));
+  open();
+  await opening;
+  const d = s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>;
+  expect(d.comments.map((c) => c.id)).toEqual([comment(1, 100).id, reply.id]);
+  expect(d.view?.seq).toBe(2);
+});
+
+test('T9-M2: `gap`, дождавшийся конца догоняния и уже учтённый, второго догоняния не запускает', async () => {
+  const { s, open } = await loadedAndHeld();
+  s.list(1, { seq: 3, threads: [thread(1, 3)] });
+  // Дыра: 2 потеряно — догоняние `after=1`; пока оно идёт, сервер присылает `gap` с номером, который список уже покроет.
+  s.store.event(ev(3, thread(1, 1)));
+  s.store.event({ kind: 'gap', seq: 3 });
+  open();
+  await s.settle();
+  expect(s.store.seq).toBe(3);
+  expect(listCalls(s)).toHaveLength(2);
+});
+
+test('T9-M3: догоняние после загрузки шлёт ядру метки страницы одной пачкой', async () => {
+  const { s, open } = await loadedAndHeld();
+  s.list(1, { seq: 4, threads: [thread(2, 2), thread(3, 3), thread(4, 4)], removed: [uuid(1)] });
+  const before = s.core.length;
+  s.store.event({ kind: 'gap', seq: 4 });
+  open();
+  await s.settle();
+  expect(s.core.slice(before)).toEqual([
+    {
+      type: 'commentPins',
+      replace: false,
+      pins: [expect.objectContaining({ id: uuid(2) }), expect.objectContaining({ id: uuid(3) }), expect.objectContaining({ id: uuid(4) })],
+    },
+    { type: 'commentPinsRemove', ids: [uuid(1)] },
+  ]);
+});
+
+test('T9-M4: событие с удалённым и новым комментарием меняет окно целиком', async () => {
+  const s = stand();
+  s.list(0, { seq: 1, threads: [thread(1, 1)] });
+  s.store.connected('editor');
+  await s.settle();
+  s.routes.push((c) =>
+    c.path === `/api/files/f/comments/${uuid(1)}`
+      ? { status: 200, body: { thread: thread(1, 1), comments: [comment(1, 100), comment(1, 101)] } }
+      : null,
+  );
+  await s.store.request(1, { k: 'open', thread: uuid(1) });
+  const added = comment(1, 102);
+  s.store.event({ ...ev(2, thread(1, 1), 'edit', OTHER, added), deleted: comment(1, 101).id } as CommentEvent);
+  const d = s.main.filter((m) => m.t === 'detail').at(-1) as Extract<CommentsToMain, { t: 'detail' }>;
+  expect(d.comments.map((c) => c.id)).toEqual([comment(1, 100).id, added.id]);
 });
