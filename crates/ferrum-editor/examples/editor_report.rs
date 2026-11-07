@@ -618,6 +618,159 @@ fn presence_marks_with_dragger(report: &mut Report, ed: &mut Editor, ids: &[Node
     ed.take_events();
 }
 
+/// Метки комментариев (спека подсистемы 4, раздел 10.2): 1000 обсуждений на странице из
+/// 100 000 узлов — по 10 на каждом из первых 100 фреймов и 50 в мире. Каждый кадр, пока узлы
+/// едут, редактор раскладывает метки заново (мировая точка по матрице узла в сцене, экран,
+/// группы) — замер `Editor::overlay` после каждого движения своего перетаскивания 10 фреймов
+/// (100 меток едут) и после каждого кадра участника, который тянет те же 10 фреймов (живое
+/// превью), при зуме 1, 0,25 и «вся страница» (метки собраны в группы). Без меток та же
+/// `overlay` стоит микросекунды: замер — прибавка к кадру. Цель — 1 мс, как у присутствия.
+fn comments_probe(report: &mut Report, ed: &mut Editor, ids: &[NodeId], clock: &mut Clock) {
+    use ferrum_editor::{peer_color, CommentPin, PinAnchor};
+    use ferrum_render::{PinKind, Rgba};
+    use std::sync::Arc;
+    let page = ed.page();
+    let frames: Vec<NodeId> = ids.iter().step_by(100).take(100).copied().collect();
+    let mut pins = Vec::new();
+    for (f, id) in frames.iter().enumerate() {
+        let world = ed.scene().node(*id).unwrap().world;
+        for k in 0..10 {
+            let local = Point::new(60.0 + k as f64 * 130.0, 80.0 + (k % 3) as f64 * 300.0);
+            pins.push(CommentPin {
+                id: Arc::from(format!("t{f}-{k}")),
+                anchor: PinAnchor {
+                    page,
+                    node: Some(*id),
+                    local,
+                    world: world * local,
+                },
+                initials: Arc::from(["АС", "Б", "ВК", "ГЛ", "Д"][(f + k) % 5]),
+                color: peer_color([0xe5484d, 0x0d74ce, 0x2d8a3e][k % 3]),
+                replies: (k % 4) as u32,
+                unread: k % 3 == 0,
+                resolved: false,
+                movable: true,
+            });
+        }
+    }
+    for i in 0..50 {
+        let at = Point::new(-500.0 - i as f64 * 97.0, -300.0 - (i % 7) as f64 * 113.0);
+        pins.push(CommentPin {
+            id: Arc::from(format!("w{i}")),
+            anchor: PinAnchor {
+                page,
+                node: None,
+                local: at,
+                world: at,
+            },
+            initials: Arc::from("Е"),
+            color: Rgba::from_rgba8(0x8e, 0x4e, 0xc6, 255),
+            replies: 0,
+            unread: false,
+            resolved: false,
+            movable: false,
+        });
+    }
+    assert_eq!(pins.len(), 1050);
+    ed.set_comments_available(true);
+    ed.set_comment_pins(pins, true);
+    ed.take_events();
+    let dragged = &frames[..10];
+    let saved = ed.camera().clone();
+    let all = ed.scene().bounds().unwrap();
+    for (zoom_label, zoom) in [
+        ("зум 1", Some(1.0)),
+        ("зум 0,25", Some(0.25)),
+        ("вся страница", None),
+    ] {
+        let mut cam = saved.clone();
+        match zoom {
+            Some(z) => {
+                cam.set_zoom(z);
+                cam.set_center(Point::new(1600.0 * 2.0, 1024.0));
+            }
+            None => cam.fit(all, 0.0),
+        }
+        ed.set_camera(cam);
+        let layout = ed.comment_layout_for_tests();
+        let groups = layout
+            .iter()
+            .filter(|(_, k)| matches!(k, PinKind::Cluster { .. }))
+            .count();
+        report.info(
+            &format!("Метки комментариев, {zoom_label}: меток / групп в раскладке"),
+            format!("{} / {groups}", layout.len() - groups),
+        );
+        // Своё перетаскивание 10 фреймов: метки едут с ними каждый кадр.
+        ed.select(dragged);
+        let f0 = ed.scene().node(dragged[0]).unwrap().world_bounds.unwrap();
+        let grab = ed
+            .camera()
+            .world_to_screen(Point::new(f0.x0 + 2.0, f0.y0 + 2.0));
+        ed.handle(Input::PointerDown(clock.at(grab)));
+        ed.handle(Input::PointerMove(
+            clock.at(Point::new(grab.x + 4.0, grab.y)),
+        ));
+        let before = ed.overlay().comments.clone();
+        let mut runs = Vec::new();
+        for i in 1..=MOVES {
+            let p = Point::new(grab.x + 4.0 + 1.7 * i as f64, grab.y + 0.37 * i as f64);
+            ed.handle(Input::PointerMove(clock.at(p)));
+            ed.take_events();
+            let t = Instant::now();
+            std::hint::black_box(ed.overlay());
+            runs.push(t.elapsed());
+        }
+        let after = ed.overlay().comments.clone();
+        report.gate_median(
+            &format!("Метки комментариев за своим перетаскиванием 10 фреймов, {zoom_label}: раскладка кадра"),
+            &runs,
+            1.0,
+        );
+        report.check(
+            &format!("Метки едут за своим перетаскиванием, {zoom_label}"),
+            zoom.is_none() || before != after,
+            format!("{} меток в оверлее", after.len()),
+            "метки сдвинулись",
+        );
+        ed.handle(Input::KeyDown(KeyEvent::new("Escape", Modifiers::NONE)));
+        ed.handle(Input::PointerUp(clock.at(grab)));
+        ed.select(&[]);
+        ed.take_events();
+        // Чужое живое превью тех же 10 фреймов (1000 узлов — в пределах превью участника).
+        ed.presence_join(41, "u-41", "Участник", peer_color(0x0d74ce));
+        ed.presence_part(41, 1, 0, 1, dragged.to_vec());
+        ed.presence_state(41, peer_move(page, dragged.len(), None));
+        let before = ed.overlay().comments.clone();
+        let mut runs = Vec::new();
+        for i in 1..=MOVES {
+            ed.presence_state(41, peer_move(page, dragged.len(), Some(i as f64 * 3.0)));
+            ed.take_events();
+            let t = Instant::now();
+            std::hint::black_box(ed.overlay());
+            runs.push(t.elapsed());
+        }
+        let after = ed.overlay().comments.clone();
+        report.gate_median(
+            &format!("Метки комментариев за чужим живым превью 10 фреймов, {zoom_label}: раскладка кадра"),
+            &runs,
+            1.0,
+        );
+        report.check(
+            &format!("Метки едут за чужим превью, {zoom_label}"),
+            zoom.is_none() || before != after,
+            format!("{} меток в оверлее", after.len()),
+            "метки сдвинулись",
+        );
+        ed.presence_left(41);
+        ed.take_events();
+    }
+    ed.set_comment_pins(Vec::new(), true);
+    ed.set_comments_available(false);
+    ed.set_camera(saved);
+    ed.take_events();
+}
+
 fn main() {
     let mut report = Report(Vec::new());
 
@@ -687,6 +840,7 @@ fn main() {
     // пачки: пачка дороже одного артборда на маленькой странице, потому что на странице 12 000
     // узлов (пересборка R-tree сцены), а не из-за числа участников.
     presence_frame_drag(&mut report, (8, 1500), 1, 16.0);
+    comments_probe(&mut report, &mut ed, &ids, &mut clock);
     ed.select(&children);
 
     // 2. Запись перетаскивания 1000 узлов одной транзакцией и её отмена.

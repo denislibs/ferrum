@@ -29,8 +29,8 @@ use crate::measure::{measure, AltState, MeasureCache};
 use crate::panel::PanelGesture;
 use crate::text_edit::{EnterAt, TextEdit};
 use crate::tools::{
-    sync, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape, TextTool,
-    Tool, ToolKind, ToolOverlay,
+    sync, CommentTool, Ctx, Cursor, DrawTool, Flow, HandTool, Outbox, SelectTool, Selection, Shape,
+    TextTool, Tool, ToolKind, ToolOverlay,
 };
 use crate::vector_edit::{Drag, VectorEdit, VectorTool};
 
@@ -145,6 +145,34 @@ pub enum EditorEvent {
     /// Следование за участником началось (номер) или кончилось (`None`): действием на
     /// холсте, уходом участника, сменой страницы.
     Following(Option<u32>),
+    /// Комментарии (спека подсистемы 4, раздел 10.3). Щелчок по холсту в режиме комментариев:
+    /// место новой метки и экранная точка щелчка (CSS-пиксели) — интерфейс открывает поле.
+    CommentPlace {
+        anchor: crate::comments::PinAnchor,
+        screen: Point,
+    },
+    /// Обсуждение открыто щелчком по метке или переходом к нему: окно — у экранной точки метки.
+    CommentOpened {
+        id: Arc<str>,
+        screen: Point,
+    },
+    /// Метку перетащили на новое место (только своя или владельцу файла).
+    CommentMoved {
+        id: Arc<str>,
+        anchor: crate::comments::PinAnchor,
+    },
+    /// Экранная точка открытой метки (или черновика) сменилась: окно едет за ней. `visible` —
+    /// метка на этой странице и в пределах холста.
+    CommentAnchor {
+        screen: Point,
+        visible: bool,
+    },
+    /// Режим комментариев, видны ли метки (Shift+C), есть ли комментарии вообще.
+    CommentsState {
+        mode: bool,
+        visible: bool,
+        available: bool,
+    },
 }
 
 /// Клавиша-модификатор: её нажатие — не действие на холсте.
@@ -209,6 +237,8 @@ struct FrameKey {
     active_guide: Option<ferrum_render::ActiveGuide>,
     /// Другие участники: их курсоры, рамки, плавное движение.
     presence: u64,
+    /// Метки комментариев: набор, открытая, жест; сцена и камера — уже в ключе.
+    comments: u64,
     /// Подсказки привязки тянущейся линии: меняются без сдвига самой линии.
     guide_snap: Vec<kurbo::Line>,
     /// Измерения с Alt: кадр нужен, когда они изменились, и не нужен, пока те же.
@@ -286,6 +316,8 @@ pub struct Editor {
     pub(crate) presence: crate::presence::Presence,
     /// Указатель над холстом: курсор виден другим.
     pub(crate) pointer_inside: bool,
+    /// Метки комментариев (спека подсистемы 4, раздел 10).
+    pub(crate) comments: crate::comments::Comments,
     /// Превью `SetGuides`: список владельца вместо его направляющих, пока жест идёт.
     pub(crate) guides_preview: Option<(ferrum_doc::GuideOwner, Vec<ferrum_doc::Guide>)>,
     /// Что под указателем без жеста: линейка или направляющая — курсор и нажатие.
@@ -353,6 +385,7 @@ impl Editor {
                 guides_revision: 0,
                 active_guide: None,
                 presence: 0,
+                comments: 0,
                 guide_snap: Vec::new(),
                 measures: Vec::new(),
                 text: None,
@@ -399,6 +432,7 @@ impl Editor {
             guides_preview: None,
             guide_hover: None,
             presence: Default::default(),
+            comments: Default::default(),
             pointer_inside: false,
         })
     }
@@ -558,6 +592,8 @@ impl Editor {
     pub fn cursor(&self) -> Cursor {
         if self.pan.is_some() {
             Cursor::Grabbing
+        } else if let Some(c) = self.comment_cursor() {
+            c
         } else if let Some(c) = self.guide_cursor() {
             c
         } else if self.text_edit.is_some() {
@@ -615,8 +651,7 @@ impl Editor {
             guides: self.guide_marks(),
             active_guide: self.active_guide(),
             remote: self.remote_marks(),
-            // Метки комментариев раскладывает редактор (этап 5, следующая задача).
-            comments: Arc::from(Vec::new()),
+            comments: self.comment_marks(),
         }
     }
 
@@ -749,6 +784,11 @@ impl Editor {
                 if self.guide_press(&e) {
                     return;
                 }
+                // Метки комментариев — раньше выделения на холсте и правки (`comment_press`:
+                // рука и её удержание Space метки не трогают).
+                if self.comment_press(&e) {
+                    return;
+                }
                 // Правка текста: нажатие в тексте ставит курсор; мимо — правка
                 // кончается, и нажатие достаётся инструменту.
                 if self.text_edit.is_some() && self.text_pointer_down(&e) {
@@ -816,6 +856,10 @@ impl Editor {
             self.guide_drag_move(&e);
             return;
         }
+        if self.comment_drag(&e) {
+            return;
+        }
+        self.comment_hover(&e);
         // Над линейкой инструмента нет: ни наведения, ни его курсора.
         if self.ruler_hover_update(&e) {
             return;
@@ -844,6 +888,9 @@ impl Editor {
             if let Some(mut hand) = self.pan.take() {
                 hand.pointer_up(&mut self.ctx(), &e);
             }
+            return;
+        }
+        if e.button == PointerButton::Primary && self.comment_release(&e) {
             return;
         }
         if self.guide_drag.is_some() {
@@ -909,6 +956,9 @@ impl Editor {
     /// Камера сдвинулась во время жеста: та же экранная точка теперь над другим
     /// местом мира, жест пересчитывается.
     fn refresh_gesture(&mut self) {
+        if let (true, Some(e)) = (self.comment_pressed(), self.last_pointer) {
+            self.comment_drag(&e);
+        }
         if let (true, Some(e)) = (self.guide_drag.is_some(), self.last_pointer) {
             self.guide_drag_move(&e);
         }
@@ -947,6 +997,13 @@ impl Editor {
     }
 
     fn key_down(&mut self, e: KeyEvent) {
+        // Нажатая метка: Esc возвращает протянутую на место, остальные клавиши ждут отпускания.
+        if self.comment_pressed() {
+            if e.code == "Escape" {
+                self.cancel_comment_press();
+            }
+            return;
+        }
         // Правка текста: раскладка клавиш не действует (спека подсистемы 3, 7).
         if self.text_edit.is_some() {
             self.text_key(&e.code, e.modifiers);
@@ -1029,6 +1086,7 @@ impl Editor {
     /// Отменяет жест (холста или панели): превью убирается, документ и история
     /// не меняются.
     pub fn cancel_gesture(&mut self) {
+        self.cancel_comment_press();
         self.cancel_panel();
         self.cancel_guides();
         self.cancel_vector_drag();
@@ -1067,6 +1125,11 @@ impl Editor {
 
     /// Выбирает инструмент (тулбар, горячая клавиша). Жест текущего отменяется.
     pub fn set_tool(&mut self, kind: ToolKind) {
+        // Без комментариев (локальный файл, роль не пришла) режима комментариев нет: ни
+        // клавишей, ни тулбаром.
+        if kind == ToolKind::Comment && !self.comments_available() {
+            return;
+        }
         self.cancel_gesture();
         self.end_text_edit();
         // Перо в правке — перо внутри неё; «Перемещение» в правке узла —
@@ -1109,6 +1172,10 @@ impl Editor {
             ToolKind::Arrow => Box::new(DrawTool::new(Shape::Arrow)),
             ToolKind::Hand => Box::new(HandTool::new()),
             ToolKind::Text => Box::new(TextTool::new()),
+            ToolKind::Comment => {
+                self.comment_mode_entered();
+                Box::new(CommentTool)
+            }
             ToolKind::Pen => Box::new(SelectTool::new()),
             // Изображению нужны хэш и размер: интерфейс сначала выбирает файл.
             ToolKind::Image => {
@@ -1361,6 +1428,7 @@ impl Editor {
         self.sync_remote_preview();
         self.update_measures();
         self.refresh_guides();
+        self.emit_comments();
         let now = Seen {
             selection: self.selection.version(),
             tool: self.tool_kind(),
@@ -1379,6 +1447,7 @@ impl Editor {
                 guides_revision: self.guides.revision,
                 active_guide: self.active_guide(),
                 presence: self.presence_revision(),
+                comments: self.comments_revision(),
                 guide_snap: self
                     .guide_drag
                     .as_ref()

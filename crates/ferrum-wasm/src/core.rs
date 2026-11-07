@@ -146,6 +146,7 @@ fn tool_kind(t: Tool) -> ToolKind {
         Tool::Pen => ToolKind::Pen,
         Tool::Arrow => ToolKind::Arrow,
         Tool::Scale => ToolKind::Scale,
+        Tool::Comment => ToolKind::Comment,
     }
 }
 
@@ -162,6 +163,7 @@ fn tool(k: ToolKind) -> Tool {
         ToolKind::Pen => Tool::Pen,
         ToolKind::Arrow => Tool::Arrow,
         ToolKind::Scale => Tool::Scale,
+        ToolKind::Comment => Tool::Comment,
     }
 }
 
@@ -1031,6 +1033,13 @@ impl Core {
                 EditorEvent::Following(participant) => {
                     self.events.push(CoreEvent::Following { participant })
                 }
+                // Комментарии: события протокола — следующая задача; без `CommentsAvailable`
+                // редактор их и не шлёт, кроме состояния.
+                EditorEvent::CommentPlace { .. }
+                | EditorEvent::CommentOpened { .. }
+                | EditorEvent::CommentMoved { .. }
+                | EditorEvent::CommentAnchor { .. }
+                | EditorEvent::CommentsState { .. } => {}
             }
         }
         if let Some(ids) = selection {

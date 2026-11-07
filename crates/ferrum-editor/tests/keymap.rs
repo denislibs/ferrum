@@ -27,6 +27,7 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::ToolLine, &["KeyL"]),
     (CommandId::ToolHand, &["KeyH"]),
     (CommandId::ToolScale, &["KeyK"]),
+    (CommandId::ToolComment, &["KeyC"]),
     (CommandId::HandHold, &["Space"]),
     (CommandId::ToolImage, &["Mod+Shift+KeyK"]),
     (CommandId::Delete, &["Delete", "Backspace"]),
@@ -81,6 +82,7 @@ const EXPECTED: &[(CommandId, &[&str])] = &[
     (CommandId::PixelGrid, &["Shift+Quote"]),
     (CommandId::ViewRulers, &["Shift+KeyR"]),
     (CommandId::ViewGuides, &["Shift+KeyG"]),
+    (CommandId::ViewComments, &["Shift+KeyC"]),
     (CommandId::EditObject, &["Enter"]),
     (CommandId::TextBold, &["Mod+KeyB"]),
     (CommandId::TextItalic, &["Mod+KeyI"]),
@@ -155,7 +157,7 @@ fn defaults_match_figma_on_both_platforms() {
         );
     }
     assert_eq!(map.bindings(CommandId::Redo).len(), 2);
-    assert_eq!(COMMANDS.len(), 88);
+    assert_eq!(COMMANDS.len(), 90);
 }
 
 #[test]

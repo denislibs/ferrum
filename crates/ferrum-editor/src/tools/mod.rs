@@ -6,11 +6,13 @@
 //! (`Scene::set_preview`, черновики); при отпускании записывается одна транзакция —
 //! один шаг отмены; Esc убирает превью, и в истории ничего не остаётся.
 
+mod comment;
 mod draw;
 mod hand;
 pub(crate) mod select;
 mod text;
 
+pub use comment::CommentTool;
 pub use draw::{DrawTool, Shape};
 pub use hand::HandTool;
 pub use select::SelectTool;
@@ -46,6 +48,8 @@ pub enum ToolKind {
     Arrow,
     /// «Масштаб» (K): ресайз выделения вместе с обводками, радиусами и текстом.
     Scale,
+    /// «Комментарий» (C, подсистема 4, этап 5): режим комментариев.
+    Comment,
 }
 
 impl ToolKind {

@@ -3,7 +3,8 @@
 //! меню, тулбар и палитру по таблице `ключ → состояние`. Интерфейс получает
 //! только изменившиеся команды и только после шага, который мог их изменить:
 //! выделение, сцена, история, «только чтение», режим правки, настройки.
-//! Инструмент и вид в ключ не входят — ни одно состояние от них пока не зависит.
+//! Инструмент и вид в ключ не входят — ни одно состояние от них пока не зависит; от
+//! комментариев зависят — есть ли они и видны ли метки.
 //! Недоступная команда при вызове ничего не делает: ни шага, ни сообщения.
 
 use ferrum_doc::{BooleanOp, NodeKind};
@@ -33,6 +34,8 @@ pub(crate) struct StatesKey {
     text_edit: bool,
     vector_edit: bool,
     settings: crate::editor::Settings,
+    /// Комментарии есть и метки видны.
+    comments: (bool, bool),
 }
 
 /// Что о выделении нужно состояниям — за один проход.
@@ -68,6 +71,7 @@ impl Editor {
             text_edit: self.text_edit.is_some(),
             vector_edit: self.vector_edit.is_some(),
             settings: self.settings.clone(),
+            comments: (self.comments_available(), self.comments_visible()),
         }
     }
 
@@ -208,6 +212,10 @@ impl Editor {
             C::ViewRulers => (true, checked(self.settings.rulers)),
             // Как в Figma, без линеек направляющих не видно — пункт серый.
             C::ViewGuides => (self.settings.rulers, checked(self.settings.guides)),
+            // Без комментариев (локальный файл, роль ещё не пришла) — серые, клавиши молчат.
+            // Читателю можно: комментировать могут все с доступом (раздел 10.3).
+            C::ToolComment => (self.comments_available(), None),
+            C::ViewComments => (self.comments_available(), checked(self.comments_visible())),
             C::EditObject => (edit && !text && !vector && f.editable, None),
             C::TextBold
             | C::TextItalic
