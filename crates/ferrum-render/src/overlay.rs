@@ -1,7 +1,8 @@
 //! Оверлеи поверх содержимого в экранных пикселях: пиксельная сетка, названия
 //! фреймов, направляющие, подсветка наведения, рамка выделения мышью, линии привязки,
 //! рамка выделения с ручками, бейдж «W × H», измерения расстояний с Alt, линейки и
-//! участники совместной работы: их курсоры с подписью и рамки выделения.
+//! участники совместной работы: их курсоры с подписью и рамки выделения; метки комментариев
+//! (`pins`).
 //! Толщины и размеры задаются в CSS-пикселях и умножаются на `devicePixelRatio`.
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use vello_cpu::Pixmap;
 
 use crate::backend::{CpuBackend, ImageKey, ImagePaint, RenderBackend, Rgba};
 use crate::camera::Camera;
+use crate::pins::{draw_pins, PinMark, PinSprites};
 use crate::text::{Label, TextEngine};
 
 /// Сторона квадратной ручки выделения.
@@ -237,6 +239,9 @@ pub struct Overlay {
     pub active_guide: Option<ActiveGuide>,
     /// Другие участники файла на этой странице (спека подсистемы 4, раздел 9).
     pub remote: Arc<[RemoteMark]>,
+    /// Метки комментариев этой страницы, уже разложенные редактором (раздел 10.2): над
+    /// выделением и измерениями, под чужими курсорами и линейками.
+    pub comments: Arc<[PinMark]>,
 }
 
 /// Другой участник на холсте: его курсор с подписью и рамка его выделения, цветом
@@ -278,6 +283,7 @@ impl Default for Overlay {
             guides: Vec::new(),
             active_guide: None,
             remote: Arc::from(Vec::new()),
+            comments: Arc::from(Vec::new()),
         }
     }
 }
@@ -315,6 +321,7 @@ pub(crate) fn draw(
     backend: &mut impl RenderBackend,
     text: &mut TextEngine,
     sprites: &mut CursorSprites,
+    pins: &mut PinSprites,
     scene: &Scene,
     camera: &Camera,
     overlay: &Overlay,
@@ -375,6 +382,15 @@ pub(crate) fn draw(
     remote_frames(backend, view, dpr, &overlay.remote);
     selection(backend, text, scene, camera, overlay);
     measurements(backend, text, camera, overlay);
+    draw_pins(
+        backend,
+        text,
+        pins,
+        view,
+        dpr,
+        theme.select,
+        &overlay.comments,
+    );
     remote_cursors(backend, text, sprites, view, dpr, &overlay.remote);
     if let Some(r) = &overlay.rulers {
         rulers(backend, text, camera, theme, r);

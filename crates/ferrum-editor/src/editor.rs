@@ -615,6 +615,8 @@ impl Editor {
             guides: self.guide_marks(),
             active_guide: self.active_guide(),
             remote: self.remote_marks(),
+            // Метки комментариев раскладывает редактор (этап 5, следующая задача).
+            comments: Arc::from(Vec::new()),
         }
     }
 

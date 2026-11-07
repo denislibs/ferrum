@@ -511,3 +511,275 @@ mod remote {
         assert_px(&img, (REMOTE_BOXES_MAX * 5) as u16, 15, [255, 255, 255], 0);
     }
 }
+
+/// Метки комментариев (спека подсистемы 4, раздел 10.2): капля с инициалами цветом автора,
+/// плашка «не прочитано», группа с числом; картинками, построенными не больше нескольких за кадр.
+mod comments {
+    use super::common::*;
+    use ferrum_render::{
+        pin_contains, Camera, CpuBackend, ImagePaint, NoImages, Overlay, OverlayTheme, PinKind,
+        PinMark, RenderBackend, Renderer, Rgba, PIN_BUILDS_PER_FRAME, PIN_SPRITE_LIMIT,
+    };
+    use ferrum_scene::Scene;
+    use kurbo::{Affine, BezPath, Point, Rect, Stroke};
+    use std::sync::Arc;
+    use vello_cpu::peniko::Fill;
+
+    const BLUE: [u8; 3] = [0x0d, 0x74, 0xce];
+
+    fn pin(at: Point, initials: &str, replies: u32, unread: bool) -> PinMark {
+        PinMark {
+            at,
+            kind: PinKind::Pin {
+                initials: initials.into(),
+                color: Rgba::from_rgba8(BLUE[0], BLUE[1], BLUE[2], 255),
+                replies,
+                unread,
+                resolved: false,
+                open: false,
+            },
+        }
+    }
+
+    fn overlay(marks: Vec<PinMark>) -> Overlay {
+        Overlay {
+            frame_labels: false,
+            comments: Arc::from(marks),
+            ..Default::default()
+        }
+    }
+
+    fn frame(r: &mut Renderer, b: &mut impl RenderBackend, cam: &Camera, o: &Overlay) {
+        r.render(b, &Scene::new(), cam, o, &NoImages, Some(BLACK));
+    }
+
+    /// Бэкенд без картинок: метка рисуется формой и глифами напрямую.
+    struct Direct(CpuBackend);
+
+    impl RenderBackend for Direct {
+        fn begin_frame(&mut self, w: u16, h: u16) {
+            self.0.begin_frame(w, h)
+        }
+        fn size(&self) -> (u16, u16) {
+            self.0.size()
+        }
+        fn set_transform(&mut self, t: Affine) {
+            self.0.set_transform(t)
+        }
+        fn set_color(&mut self, c: Rgba) {
+            self.0.set_color(c)
+        }
+        fn set_image(&mut self, i: &ImagePaint) {
+            self.0.set_image(i)
+        }
+        fn fill_path(&mut self, p: &BezPath, f: Fill) {
+            self.0.fill_path(p, f)
+        }
+        fn fill_rect(&mut self, r: &Rect) {
+            self.0.fill_rect(r)
+        }
+        fn stroke_path(&mut self, p: &BezPath, s: &Stroke) {
+            self.0.stroke_path(p, s)
+        }
+        fn push_clip(&mut self, p: &BezPath) {
+            self.0.push_clip(p)
+        }
+        fn pop_clip(&mut self) {
+            self.0.pop_clip()
+        }
+        fn push_opacity_layer(&mut self, a: f32) {
+            self.0.push_opacity_layer(a)
+        }
+        fn pop_layer(&mut self) {
+            self.0.pop_layer()
+        }
+        fn supports_images(&self) -> bool {
+            false
+        }
+    }
+
+    /// Сколько пикселей прямоугольника почти белые.
+    fn whites(img: &vello_cpu::Pixmap, r: (u16, u16, u16, u16)) -> usize {
+        let mut n = 0;
+        for y in r.1..r.3 {
+            for x in r.0..r.2 {
+                let p = px(img, x, y);
+                if p[0] > 200 && p[1] > 200 && p[2] > 200 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn pin_is_a_drop_over_its_point_in_author_colour_with_initials() {
+        let mut cam = camera(200.0, 100.0);
+        // Мир сдвинут: метка в мире (1040, 560) — на экране (40, 60).
+        cam.set_center(Point::new(1100.0, 550.0));
+        let o = overlay(vec![pin(Point::new(1040.0, 560.0), "АБ", 0, true)]);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(200, 100);
+        frame(&mut r, &mut cpu, &cam, &o);
+        let img = cpu.render();
+        // Капля над остриём (40, 60): 28 × 28 вправо и вверх; левее и ниже — фон.
+        assert_px(&img, 44, 56, BLUE, 30);
+        assert_px(&img, 60, 55, BLUE, 30);
+        assert_px(&img, 35, 50, [0, 0, 0], 0);
+        assert_px(&img, 50, 65, [0, 0, 0], 0);
+        // Инициалы белым посередине капли.
+        assert!(whites(&img, (46, 38, 62, 52)) > 5, "инициалов не видно");
+        // «Не прочитано» без ответов — точка цвета выделения в правом верхнем углу.
+        let select = OverlayTheme::dark().select.to_rgba8().to_u8_array();
+        assert_px(&img, 65, 35, [select[0], select[1], select[2]], 30);
+        assert_eq!(r.pin_sprites(), 2, "капля и точка — две картинки");
+    }
+
+    #[test]
+    fn cluster_is_a_dark_circle_with_count() {
+        let cam = camera(200.0, 100.0);
+        let o = overlay(vec![PinMark {
+            at: Point::new(100.0, 50.0),
+            kind: PinKind::Cluster {
+                count: 12,
+                unread: false,
+            },
+        }]);
+        let img = render_overlay(&Scene::new(), &cam, &o, BLACK);
+        assert_px(&img, 100, 37, [0x2c, 0x2a, 0x28], 6);
+        assert!(whites(&img, (92, 44, 108, 56)) > 5, "числа не видно");
+        // Белое кольцо по краю круга, за ним — фон.
+        assert_px(&img, 100, 33, [255, 255, 255], 60);
+        assert_px(&img, 100, 29, [0, 0, 0], 0);
+    }
+
+    #[test]
+    fn hit_geometry_matches_drawing() {
+        let pin = pin(Point::ZERO, "А", 0, false).kind;
+        let at = Point::new(40.0, 60.0);
+        assert!(pin_contains(&pin, at, Point::new(44.0, 56.0)));
+        assert!(pin_contains(&pin, at, Point::new(67.0, 33.0)));
+        assert!(!pin_contains(&pin, at, Point::new(39.0, 56.0)));
+        assert!(!pin_contains(&pin, at, Point::new(44.0, 61.0)));
+        let cluster = PinKind::Cluster {
+            count: 3,
+            unread: false,
+        };
+        assert!(pin_contains(&cluster, at, Point::new(55.0, 60.0)));
+        assert!(!pin_contains(&cluster, at, Point::new(57.0, 60.0)));
+    }
+
+    #[test]
+    fn off_screen_pins_are_not_drawn_and_build_nothing() {
+        let cam = camera(100.0, 100.0);
+        for at in [
+            Point::new(5000.0, 50.0),
+            Point::new(50.0, -5000.0),
+            Point::new(f64::NAN, 50.0),
+        ] {
+            let mut r = Renderer::new();
+            let mut cpu = CpuBackend::new(100, 100);
+            frame(
+                &mut r,
+                &mut cpu,
+                &cam,
+                &overlay(vec![pin(at, "А", 3, true)]),
+            );
+            let img = cpu.render();
+            for (x, y) in [(5, 5), (50, 50), (95, 95)] {
+                assert_px(&img, x, y, [0, 0, 0], 0);
+            }
+            assert_eq!(r.pin_sprites(), 0);
+        }
+    }
+
+    #[test]
+    fn sprite_looks_like_direct_drawing_and_is_built_once() {
+        let cam = camera(160.0, 80.0);
+        let o = overlay(vec![
+            pin(Point::new(20.0, 50.0), "ВК", 5, true),
+            pin(Point::new(80.0, 50.0), "Г", 120, false),
+            PinMark {
+                at: Point::new(135.0, 40.0),
+                kind: PinKind::Cluster {
+                    count: 7,
+                    unread: true,
+                },
+            },
+        ]);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(160, 80);
+        frame(&mut r, &mut cpu, &cam, &o);
+        let sprite = cpu.render();
+        let built = r.pin_sprites();
+        assert_eq!(built, 6, "три тела и три плашки");
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.pin_sprites(), built, "те же метки — те же картинки");
+        let mut direct = Direct(CpuBackend::new(160, 80));
+        let mut r2 = Renderer::new();
+        frame(&mut r2, &mut direct, &cam, &o);
+        assert_eq!(r2.pin_sprites(), 0);
+        let direct = direct.0.render();
+        let mut worst = 0u8;
+        for y in 0..80 {
+            for x in 0..160 {
+                let (a, b) = (px(&sprite, x, y), px(&direct, x, y));
+                worst = worst.max((0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap());
+            }
+        }
+        assert!(
+            worst <= 8,
+            "картинка метки отличается от прямого рисования на {worst}"
+        );
+    }
+
+    #[test]
+    fn sprites_are_built_a_few_per_frame_and_missing_ones_are_plain() {
+        let cam = camera(400.0, 100.0);
+        let marks: Vec<_> = (0..30)
+            .map(|i| {
+                pin(
+                    Point::new(5.0 + i as f64 * 13.0, 60.0),
+                    &format!("{i}"),
+                    0,
+                    false,
+                )
+            })
+            .collect();
+        let last = marks.last().unwrap().at;
+        let o = overlay(marks);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(400, 100);
+        frame(&mut r, &mut cpu, &cam, &o);
+        assert_eq!(r.pin_sprites(), PIN_BUILDS_PER_FRAME);
+        // Метка без картинки в этом кадре всё равно видна: заливкой цвета автора.
+        let img = cpu.render();
+        assert_px(&img, last.x as u16 + 4, last.y as u16 - 4, BLUE, 30);
+        for _ in 0..3 {
+            frame(&mut r, &mut cpu, &cam, &o);
+        }
+        assert_eq!(r.pin_sprites(), 30);
+    }
+
+    #[test]
+    fn sprite_cache_is_bounded() {
+        let cam = camera(800.0, 800.0);
+        let marks: Vec<_> = (0..PIN_SPRITE_LIMIT + 100)
+            .map(|i| {
+                pin(
+                    Point::new(5.0 + (i % 30) as f64 * 26.0, 30.0 + (i / 30) as f64 * 26.0),
+                    &format!("{i}"),
+                    0,
+                    false,
+                )
+            })
+            .collect();
+        let o = overlay(marks);
+        let mut r = Renderer::new();
+        let mut cpu = CpuBackend::new(800, 800);
+        for _ in 0..(PIN_SPRITE_LIMIT + 100) / PIN_BUILDS_PER_FRAME + 5 {
+            frame(&mut r, &mut cpu, &cam, &o);
+        }
+        assert_eq!(r.pin_sprites(), PIN_SPRITE_LIMIT);
+    }
+}

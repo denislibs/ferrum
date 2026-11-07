@@ -10,8 +10,8 @@ use ferrum_doc::container::{decode, encode};
 use ferrum_doc::fixture::fill;
 use ferrum_doc::{Document, NodeId, NodeKind, PageId, PropsPatch};
 use ferrum_render::{
-    Camera, CpuBackend, GuideMark, NoImages, Overlay, RemoteMark, Renderer, Rgba, RulersOverlay,
-    TextEngine, LABEL_SIZE,
+    Camera, CpuBackend, GuideMark, NoImages, Overlay, PinKind, PinMark, RemoteMark, Renderer, Rgba,
+    RulersOverlay, TextEngine, LABEL_SIZE,
 };
 use ferrum_scene::Scene;
 use kurbo::{Point, Size};
@@ -874,6 +874,161 @@ fn presence_section(report: &mut Report, scene: &Scene, base: &Camera) {
     }
 }
 
+/// Метки комментариев (спека подсистемы 4, раздел 10.2): 1000 обсуждений на странице. Зум 1 —
+/// все 1000 меток на экране сеткой (худший случай: слипшихся нет, каждая — своя картинка и, у
+/// трети, плашка счётчика), каждый кадр метки сдвигаются, как при перетаскивании их узлов.
+/// Мелкий зум — те же метки, собранные редактором в группы: 80 кругов с числом и 20 одиночных.
+/// Цель — прибавка к кадру не больше 1 мс, как у присутствия. Картинки строятся в прогреве
+/// (не больше `PIN_BUILDS_PER_FRAME` за кадр); первый кадр без картинок — справочно.
+fn comments_section(report: &mut Report, scene: &Scene, base: &Camera) {
+    const RUNS: usize = 61;
+    const WARM: usize = 40;
+    let palette: [u32; 10] = [
+        0xe5484d, 0xf76b15, 0x2d8a3e, 0x0d74ce, 0x8e4ec6, 0xd6409f, 0x12a594, 0x5b5bd6, 0xab6400,
+        0x3e63dd,
+    ];
+    let initials = ["АС", "Б", "ВК", "ГЛ", "Д"];
+    let pin = |i: usize, at: kurbo::Point| {
+        let c = palette[i % palette.len()];
+        PinMark {
+            at,
+            kind: PinKind::Pin {
+                // 50 авторов: инициалы и цвет.
+                initials: format!("{}{}", initials[i % 5], (i / 5) % 10).into(),
+                color: Rgba::from_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, 255),
+                replies: if i.is_multiple_of(3) {
+                    (i % 17) as u32
+                } else {
+                    0
+                },
+                unread: i.is_multiple_of(4),
+                resolved: false,
+                open: i == 7,
+            },
+        }
+    };
+    for dpr in [1.0, 2.0] {
+        let mut camera = Camera::new(VIEWPORT, dpr);
+        camera.set_zoom(base.zoom());
+        camera.set_center(base.center());
+        let view = camera.visible_world_rect();
+        let grid = |t: f64| -> Vec<PinMark> {
+            (0..1000)
+                .map(|i| {
+                    let (col, row) = ((i % 40) as f64, (i / 40) as f64);
+                    let at = kurbo::Point::new(
+                        view.x0 + view.width() * (col + 0.2) / 40.0 + t,
+                        view.y0 + view.height() * (row + 0.8) / 25.0 + t * 0.5,
+                    );
+                    pin(i, at)
+                })
+                .collect()
+        };
+        let clustered = |t: f64| -> Vec<PinMark> {
+            let mut out: Vec<PinMark> = (0..80)
+                .map(|i| PinMark {
+                    at: kurbo::Point::new(
+                        view.x0 + view.width() * ((i % 10) as f64 + 0.5) / 10.0 + t,
+                        view.y0 + view.height() * ((i / 10) as f64 + 0.5) / 8.0,
+                    ),
+                    kind: PinKind::Cluster {
+                        count: 6 + (i % 20) as u32,
+                        unread: i % 3 == 0,
+                    },
+                })
+                .collect();
+            out.extend((0..20).map(|i| {
+                pin(
+                    i,
+                    kurbo::Point::new(
+                        view.x0 + view.width() * (i as f64 + 0.25) / 20.0 + t,
+                        view.y0 + view.height() * 0.97,
+                    ),
+                )
+            }));
+            out
+        };
+        let (w, h) = camera.device_size();
+        let mut backend = CpuBackend::new(w, h);
+        for (name, marks) in [
+            (
+                "1000 меток на экране, зум 1",
+                &grid as &dyn Fn(f64) -> Vec<PinMark>,
+            ),
+            ("1000 меток в 80 группах и 20 меток, мелкий зум", &clustered),
+        ] {
+            let mut renderer = Renderer::new();
+            let plain = Overlay::default();
+            let mut with = Overlay {
+                comments: marks(0.0).into(),
+                ..Default::default()
+            };
+            renderer.render(&mut backend, scene, &camera, &plain, &NoImages, None);
+            // Первый кадр: картинок ещё нет, метки — простой заливкой (справочно).
+            backend.reset(w, h);
+            let t = Instant::now();
+            renderer.render(&mut backend, scene, &camera, &with, &NoImages, None);
+            let cold = t.elapsed();
+            for i in 0..WARM {
+                with.comments = marks(i as f64 * 0.37).into();
+                backend.reset(w, h);
+                renderer.render(&mut backend, scene, &camera, &with, &NoImages, None);
+            }
+            report.info(
+                &format!("Метки комментариев: {name}, dpr {dpr}: картинок после прогрева"),
+                format!("{}", renderer.pin_sprites()),
+            );
+            let (mut off, mut on) = (Vec::new(), Vec::new());
+            for i in 0..RUNS {
+                with.comments = marks(i as f64 * 0.37).into();
+                for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                    backend.reset(w, h);
+                    let t = Instant::now();
+                    renderer.render(&mut backend, scene, &camera, overlay, &NoImages, None);
+                    runs.push(t.elapsed());
+                }
+            }
+            let base_ms = median(off.clone());
+            report.gate(
+                &format!(
+                    "Кадр с метками комментариев: {name}: прибавка, {}",
+                    if dpr == 1.0 {
+                        "1920×1080"
+                    } else {
+                        "3840×2160 (2×)"
+                    }
+                ),
+                median(on).saturating_sub(base_ms),
+                1.0,
+                "≤ 1 мс",
+            );
+            report.info(
+                &format!(
+                    "Метки комментариев: {name}, dpr {dpr}: первый кадр без картинок, прибавка"
+                ),
+                ms(cold.saturating_sub(base_ms)),
+            );
+            // С растеризацией CPU — справочно: на GPU растеризация не на этом потоке.
+            let empty = Scene::new();
+            let (mut off, mut on) = (Vec::new(), Vec::new());
+            for i in 0..RUNS {
+                with.comments = marks(i as f64 * 0.37).into();
+                for (overlay, runs) in [(&plain, &mut off), (&with, &mut on)] {
+                    backend.reset(w, h);
+                    let t = Instant::now();
+                    renderer.render(&mut backend, &empty, &camera, overlay, &NoImages, None);
+                    std::hint::black_box(backend.render());
+                    runs.push(t.elapsed());
+                }
+            }
+            report.info(
+                &format!("Метки комментариев: {name}, dpr {dpr}: прибавка с растеризацией CPU"),
+                ms(median(on).saturating_sub(median(off))),
+            );
+        }
+    }
+}
+
 /// Экспорт SVG и PDF (подсистема 3, этап 5): SVG страницы из 10 000 узлов
 /// (фреймы по 100: фрейм + 99 фигур) и PDF страницы с текстом и вектором в
 /// 100 000 точек — в worker'е, без замирания интерфейса; цель — секунда.
@@ -1323,6 +1478,7 @@ fn main() {
     );
     rulers_section(&mut report, &scene, &camera);
     presence_section(&mut report, &scene, &camera);
+    comments_section(&mut report, &scene, &camera);
 
     // Вся страница при сильном отдалении: LOD и растровый кэш фреймов. Кэш
     // строится по `RASTER_BUILD_TIME_PER_FRAME` за кадр (не больше

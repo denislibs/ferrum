@@ -13,6 +13,7 @@ mod gpu;
 mod image;
 mod overlay;
 mod pdf;
+mod pins;
 mod svg;
 mod text;
 mod text_node;
@@ -43,6 +44,10 @@ pub use overlay::{
     VECTOR_MAX_POINTS_DRAWN, VECTOR_POINT_RADIUS,
 };
 pub use pdf::MAX_PDF_SIDE;
+pub use pins::{
+    pin_contains, PinKind, PinMark, PIN_BUILDS_PER_FRAME, PIN_CLUSTER_SIZE, PIN_REPLIES_SHOWN,
+    PIN_SIZE, PIN_SPRITE_LIMIT,
+};
 pub use svg::{ImageBytes, NoImageBytes, SvgOptions};
 pub use text::{Label, TextEngine, ONEST};
 pub use text_node::{
@@ -85,6 +90,8 @@ pub struct Renderer {
     text: TextEngine,
     /// Картинки чужих курсоров (`overlay::CursorSprites`).
     sprites: overlay::CursorSprites,
+    /// Картинки меток комментариев (`pins::PinSprites`).
+    pins: pins::PinSprites,
     /// Реестр шрифтов и раскладка текстовых узлов — общие с редактором
     /// (`set_fonts`); свой рендерер без реестра знает только вшитый Onest.
     fonts: SharedFonts,
@@ -108,6 +115,7 @@ impl Renderer {
             painter: Painter::with_raster_limit(bytes),
             text: TextEngine::new(),
             sprites: Default::default(),
+            pins: Default::default(),
             fonts: Fonts::shared(),
         }
     }
@@ -169,6 +177,7 @@ impl Renderer {
             backend,
             &mut self.text,
             &mut self.sprites,
+            &mut self.pins,
             scene,
             camera,
             overlay,
@@ -179,6 +188,11 @@ impl Renderer {
     /// Сколько картинок чужих курсоров построено и хранится (для проверки кэша).
     pub fn cursor_sprites(&self) -> usize {
         self.sprites.len()
+    }
+
+    /// Сколько картинок меток комментариев построено и хранится (для проверки кэша).
+    pub fn pin_sprites(&self) -> usize {
+        self.pins.len()
     }
 
     /// Сколько раскладок подписей выполнено за всё время (для проверки кэша).
