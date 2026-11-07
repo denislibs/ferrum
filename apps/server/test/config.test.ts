@@ -70,3 +70,10 @@ test('FERRUM_PORT пустой — 8090, а не случайный порт', (
   expect(loadConfig({ ...ENV, FERRUM_PORT: '  ' }).port).toBe(8090);
   expect(loadConfig({ ...ENV, FERRUM_PORT: '9000' }).port).toBe(9000);
 });
+
+test('COMMENT_MAIL_DELAY_MS: по умолчанию 5 минут, стенд сокращает, мусор — отказ', () => {
+  expect(loadConfig(ENV).commentMailDelayMs).toBe(300_000);
+  expect(loadConfig({ ...ENV, COMMENT_MAIL_DELAY_MS: '2000' }).commentMailDelayMs).toBe(2000);
+  expect(() => loadConfig({ ...ENV, COMMENT_MAIL_DELAY_MS: '10' })).toThrow(/COMMENT_MAIL_DELAY_MS/);
+  expect(() => loadConfig({ ...ENV, COMMENT_MAIL_DELAY_MS: 'x' })).toThrow(/COMMENT_MAIL_DELAY_MS/);
+});

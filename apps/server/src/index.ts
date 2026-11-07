@@ -53,6 +53,9 @@ const server = startServer(
     allowedEmails: config.allowedEmails,
     secret: config.authSecret,
     compact: { init: { databaseUrl: config.databaseUrl, dataDir: config.dataDir } },
+    commentMailDelayMs: config.commentMailDelayMs,
+    // Очередь смотрится не реже окна группировки: короткое окно стенда не ждёт 15 с прохода.
+    commentMail: { pollMs: Math.min(15_000, config.commentMailDelayMs) },
   },
   config.port,
 );

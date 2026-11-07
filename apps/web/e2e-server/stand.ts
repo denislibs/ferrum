@@ -115,3 +115,30 @@ export async function mailsFor(email: string, subject: string, count = 1): Promi
     .toBeGreaterThanOrEqual(count);
   return Promise.all(found.map(async (m) => ((await (await fetch(`${MAILPIT}/message/${m.ID}`)).json()) as { Text: string }).Text));
 }
+
+/** Письма на адрес, тема которых подходит: текст целиком, новые первыми; ждёт, пока их станет `count`. */
+export async function mailsMatching(email: string, subject: RegExp, count = 1): Promise<{ subject: string; text: string }[]> {
+  let found: MailSummary[] = [];
+  await expect
+    .poll(
+      async () => {
+        const list = (await (await fetch(`${MAILPIT}/messages`)).json()) as { messages: MailSummary[] };
+        found = list.messages.filter((m) => subject.test(m.Subject) && m.To.some((t) => t.Address === email));
+        return found.length;
+      },
+      { message: `письма ${subject} на ${email}`, timeout: 20_000 },
+    )
+    .toBeGreaterThanOrEqual(count);
+  return Promise.all(
+    found.map(async (m) => ({
+      subject: m.Subject,
+      text: ((await (await fetch(`${MAILPIT}/message/${m.ID}`)).json()) as { Text: string }).Text,
+    })),
+  );
+}
+
+/** Все письма на адрес с такой темой — сейчас, без ожидания. */
+export async function mailsNow(email: string, subject: RegExp): Promise<number> {
+  const list = (await (await fetch(`${MAILPIT}/messages`)).json()) as { messages: MailSummary[] };
+  return list.messages.filter((m) => subject.test(m.Subject) && m.To.some((t) => t.Address === email)).length;
+}

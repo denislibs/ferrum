@@ -19,6 +19,8 @@ export interface Config {
   webDist: string;
   /** Адреса обратных прокси (точные и IPv4 CIDR): только от них верим `X-Forwarded-For`. */
   trustedProxies: string[];
+  /** Окно группировки писем о комментариях (спека, раздел 10.4): 5 минут; стенд тестов сокращает. */
+  commentMailDelayMs: number;
 }
 
 const MIN_SECRET_CHARS = 32;
@@ -64,6 +66,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     const problem = proxyProblem(entry);
     if (problem) problems.push(`TRUSTED_PROXIES: ${problem}`);
   }
+  const delayRaw = env.COMMENT_MAIL_DELAY_MS?.trim();
+  const commentMailDelayMs = delayRaw ? Number(delayRaw) : 5 * 60 * 1000;
+  if (!Number.isSafeInteger(commentMailDelayMs) || commentMailDelayMs < 1000)
+    problems.push('COMMENT_MAIL_DELAY_MS — целое число миллисекунд, не меньше 1000');
   const config: Config = {
     port,
     publicUrl,
@@ -79,6 +85,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     dataDir: env.FERRUM_DATA_DIR ?? '/data',
     webDist: env.FERRUM_WEB_DIST ?? '/app/web',
     trustedProxies,
+    commentMailDelayMs,
   };
   if (problems.length > 0) throw new Error(`Настройки сервера: ${problems.join('; ')}`);
   return config;
