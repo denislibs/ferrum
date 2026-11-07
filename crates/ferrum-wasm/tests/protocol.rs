@@ -826,3 +826,50 @@ fn find_layers_field_names() {
     )
     .is_err());
 }
+
+/// Списки меток и идентификаторов длиннее `COMMENT_PINS_MAX` отвергаются до разбора элементов:
+/// лишний элемент (даже неверной формы) не разбирается, ошибка — о длине.
+#[test]
+fn comment_lists_are_bounded_before_their_elements_are_parsed() {
+    let pin = json!({
+        "id": "t", "page": "1@1", "x": 0.0, "y": 0.0, "wx": 0.0, "wy": 0.0,
+        "initials": "А", "color": 0, "replies": 0, "unread": false, "resolved": false,
+        "movable": false
+    });
+    let pins = |n: usize| vec![pin.clone(); n];
+    let ok: Command = serde_json::from_value(json!({
+        "type": "commentPins", "pins": pins(COMMENT_PINS_MAX), "replace": true
+    }))
+    .unwrap();
+    assert!(matches!(ok, Command::CommentPins { pins, .. } if pins.len() == COMMENT_PINS_MAX));
+    let mut long = pins(COMMENT_PINS_MAX);
+    long.push(json!(5));
+    let err = serde_json::from_value::<Command>(json!({
+        "type": "commentPins", "pins": long, "replace": true
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid length"), "{err}");
+    let mut ids = vec![json!("t"); COMMENT_PINS_MAX];
+    assert!(serde_json::from_value::<Command>(json!({
+        "type": "commentPinsRemove", "ids": ids.clone()
+    }))
+    .is_ok());
+    ids.push(json!({ "не": "строка" }));
+    let err = serde_json::from_value::<Command>(json!({
+        "type": "commentPinsRemove", "ids": ids
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid length"), "{err}");
+    // Мост смотрит длину массива JS до разбора по тем же пределам.
+    assert_eq!(
+        command_list_limit("commentPins"),
+        Some(("pins", COMMENT_PINS_MAX))
+    );
+    assert_eq!(
+        command_list_limit("commentPinsRemove"),
+        Some(("ids", COMMENT_PINS_MAX))
+    );
+    assert_eq!(command_list_limit("presence"), None);
+}

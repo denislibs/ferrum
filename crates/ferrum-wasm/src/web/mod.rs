@@ -15,7 +15,7 @@ use web_sys::OffscreenCanvas;
 
 use crate::core::Core;
 use crate::present::{Action, PresentWatch, Soft, SoftErrors};
-use crate::protocol::{Backend, Command, CoreEvent};
+use crate::protocol::{command_list_limit, Backend, Command, CoreEvent};
 use crate::recover::{OnLost, Recovery};
 pub use clock::PerformanceClock;
 use surface::{Pixels, Readback, Surface};
@@ -96,8 +96,24 @@ impl WasmSurface {
     }
 }
 
-/// Команда из JS-объекта. Неверная форма — текст ошибки, не паника.
+/// Команда из JS-объекта. Неверная форма — текст ошибки, не паника. Список длиннее предела
+/// (`command_list_limit`) отвергается до разбора: массив не обходится.
 pub fn parse_command(cmd: JsValue) -> Result<Command, String> {
+    let kind = js_sys::Reflect::get(&cmd, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|t| t.as_string());
+    if let Some((field, max)) = kind.as_deref().and_then(command_list_limit) {
+        let list = js_sys::Reflect::get(&cmd, &JsValue::from_str(field)).ok();
+        let len = list
+            .as_ref()
+            .and_then(|l| l.dyn_ref::<js_sys::Array>())
+            .map_or(0, |a| a.length() as usize);
+        if len > max {
+            return Err(format!(
+                "Неверная команда: в «{field}» {len} элементов, больше {max}"
+            ));
+        }
+    }
     serde_wasm_bindgen::from_value::<Command>(cmd).map_err(|e| format!("Неверная команда: {e}"))
 }
 

@@ -141,6 +141,9 @@ fn host_input_is_validated_and_bad_pins_are_skipped_alone() {
         |p: &mut CommentPinDto| p.node = Some("1@".into()),
         |p: &mut CommentPinDto| p.color = 0x1000000,
         |p: &mut CommentPinDto| p.initials = "e\u{301}".repeat(20),
+        // Разбираются как `1@1`, но длиннее 64 байт.
+        |p: &mut CommentPinDto| p.page = format!("{}1@1", "0".repeat(70)),
+        |p: &mut CommentPinDto| p.node = Some(format!("{}1@1", "0".repeat(70))),
     ] {
         let mut p = pin(&c, "bad", 0.0, 0.0);
         f(&mut p);
@@ -522,4 +525,63 @@ fn comment_messages_have_typescript_field_names() {
         .unwrap()["node"],
         json!("2@1")
     );
+}
+
+/// Проверки ядра, которых нет у редактора: он принял бы и конечную точку за пределом мира, и
+/// длинную страницу, и любой идентификатор перехода.
+#[test]
+fn core_rejects_what_the_editor_would_accept() {
+    let mut c = core();
+    available(&mut c);
+    let has_draft = |c: &Core| {
+        c.editor()
+            .overlay()
+            .comments
+            .iter()
+            .any(|m| matches!(m.kind, ferrum_render::PinKind::Draft))
+    };
+    let draft = |wx: f64, page: String| CommentDraftDto {
+        page,
+        node: None,
+        x: wx,
+        y: 0.0,
+        wx,
+        wy: 0.0,
+    };
+    // Конечная, но за пределом мира — у редактора метка была бы.
+    let d = draft(2e9, page(&c));
+    c.command(Command::CommentDraft { draft: Some(d) });
+    assert!(!has_draft(&c));
+    let d = draft(0.0, format!("{}{}", "0".repeat(70), page(&c)));
+    c.command(Command::CommentDraft { draft: Some(d) });
+    assert!(!has_draft(&c));
+    let d = draft(0.0, page(&c));
+    c.command(Command::CommentDraft { draft: Some(d) });
+    assert!(has_draft(&c), "верный черновик виден");
+    c.command(Command::CommentDraft { draft: None });
+    // Открыть: идентификатор длиннее 64 байт из верных знаков — не меняет открытое.
+    let p = pin(&c, "t1", 0.0, 0.0);
+    c.command(Command::CommentPins {
+        pins: vec![p],
+        replace: true,
+    });
+    c.command(Command::CommentOpen {
+        id: Some("t1".into()),
+    });
+    c.command(Command::CommentOpen {
+        id: Some("x".repeat(65)),
+    });
+    assert_eq!(c.editor().comment_open(), Some("t1"));
+    c.command(Command::CommentOpen { id: None });
+    // Переход: неверный идентификатор не заменяет ждущий переход — метка `late` пришла позже
+    // ссылки, переход к ней случается.
+    c.command(Command::CommentFocus { id: "late".into() });
+    c.command(Command::CommentFocus { id: "a/b".into() });
+    c.command(Command::CommentFocus { id: "y".repeat(65) });
+    let p = pin(&c, "late", 50.0, 60.0);
+    c.command(Command::CommentPins {
+        pins: vec![p],
+        replace: false,
+    });
+    assert_eq!(c.editor().comment_open(), Some("late"));
 }

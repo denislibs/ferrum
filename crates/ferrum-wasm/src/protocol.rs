@@ -461,9 +461,72 @@ pub const PRESENCE_PEERS_MAX: usize = 1024;
 /// Узлов в одной части выделения: 2 КБ кадра — не больше байта на узел и заголовка.
 pub const PRESENCE_PART_IDS_MAX: usize = 2048;
 
-/// Комментарии (спека подсистемы 4, раздел 10): меток в одной команде и у ядра всего не больше —
-/// лишние не принимаются; идентификатор обсуждения — не длиннее; инициалы — не больше графем.
+/// Комментарии (спека подсистемы 4, раздел 10): меток и идентификаторов в одной команде не
+/// больше — длиннее список отвергается до разбора элементов (`command_list_limit`,
+/// `bounded_list`), у ядра всего меток не больше — лишние не принимаются; идентификатор
+/// обсуждения — не длиннее; инициалы — не больше графем.
 pub const COMMENT_PINS_MAX: usize = ferrum_editor::COMMENT_PINS_MAX;
+
+/// Список команды с пределом длины: по `type` команды — поле и предел. Мост (`web::parse_command`)
+/// смотрит длину массива JS до разбора: длинный не обходится вовсе; разбор сам отвергает
+/// длинный список раньше его элементов (`bounded_list`).
+pub fn command_list_limit(kind: &str) -> Option<(&'static str, usize)> {
+    match kind {
+        "commentPins" => Some(("pins", COMMENT_PINS_MAX)),
+        "commentPinsRemove" => Some(("ids", COMMENT_PINS_MAX)),
+        _ => None,
+    }
+}
+
+/// Разбор списка не длиннее `max`: длиннее — ошибка по объявленной длине до разбора элементов,
+/// без неё — на `max + 1`-м элементе (он и дальнейшие не разбираются).
+fn bounded_list<'de, D, T>(d: D, max: usize) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
+    use std::marker::PhantomData;
+
+    struct Bounded<T>(usize, PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "список не длиннее {}", self.0)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            if let Some(n) = seq.size_hint().filter(|n| *n > self.0) {
+                return Err(A::Error::invalid_length(n, &self));
+            }
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.0));
+            while out.len() < self.0 {
+                match seq.next_element()? {
+                    Some(x) => out.push(x),
+                    None => return Ok(out),
+                }
+            }
+            if seq.next_element::<IgnoredAny>()?.is_some() {
+                return Err(A::Error::invalid_length(self.0 + 1, &self));
+            }
+            Ok(out)
+        }
+    }
+
+    d.deserialize_seq(Bounded(max, PhantomData))
+}
+
+fn comment_pins_list<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<CommentPinDto>, D::Error> {
+    bounded_list(d, COMMENT_PINS_MAX)
+}
+
+fn comment_ids_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    bounded_list(d, COMMENT_PINS_MAX)
+}
 pub const COMMENT_ID_MAX_BYTES: usize = 64;
 pub const COMMENT_INITIALS_MAX: usize = 3;
 
@@ -775,10 +838,12 @@ pub enum Command {
     },
     /// Метки обсуждений: `replace` — весь набор, иначе добавить и заменить по `id`.
     CommentPins {
+        #[serde(deserialize_with = "comment_pins_list")]
         pins: Vec<CommentPinDto>,
         replace: bool,
     },
     CommentPinsRemove {
+        #[serde(deserialize_with = "comment_ids_list")]
         ids: Vec<String>,
     },
     /// Открытое обсуждение (его метка выделена, `CommentAnchor` следует за ней); без `id` — нет.
@@ -1641,4 +1706,22 @@ pub enum CoreEvent {
     PageFonts {
         families: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+
+    /// Поток JSON длины не объявляет: отказ на `max + 1`-м элементе, сам он не разбирается
+    /// (неверная форма не важна — ошибка о длине).
+    #[test]
+    fn bounded_list_stops_at_limit_without_declared_length() {
+        let mut d = serde_json::Deserializer::from_str(r#"["a", "b", {"не": "строка"}]"#);
+        let err = bounded_list::<_, String>(&mut d, 2)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid length"), "{err}");
+        let mut d = serde_json::Deserializer::from_str(r#"["a", "b"]"#);
+        assert_eq!(bounded_list::<_, String>(&mut d, 2).unwrap(), ["a", "b"]);
+    }
 }

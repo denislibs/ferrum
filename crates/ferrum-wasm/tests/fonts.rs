@@ -769,3 +769,58 @@ fn command_waiting_for_fonts_runs_without_peer_preview() {
 
 /// `FONT_WAIT_MS` ядра: дольше ответа на запрос шрифта не ждут.
 const FONT_WAIT_MS: f64 = 15_000.0;
+
+/// Метка обсуждения `id` на текущей странице в мире `(x, y)`.
+fn comment_pin(c: &Core, id: &str, x: f64, y: f64) -> CommentPinDto {
+    CommentPinDto {
+        id: id.into(),
+        page: c.editor().page().to_string(),
+        node: None,
+        x,
+        y,
+        wx: x,
+        wy: y,
+        initials: "АБ".into(),
+        color: 0x0d74ce,
+        replies: 0,
+        unread: false,
+        resolved: false,
+        movable: false,
+    }
+}
+
+/// Переход к обсуждению ждёт шрифтов, а закрытие обсуждения идёт сразу: закрытое до загрузки
+/// шрифтов не открывается после неё; без закрытия переход случается.
+#[test]
+fn closing_a_thread_cancels_focus_waiting_for_fonts() {
+    for close in [true, false] {
+        let mut c = core();
+        c.command(Command::CommentsAvailable { on: true });
+        let p = comment_pin(&c, "t1", 1500.0, 900.0);
+        c.command(Command::CommentPins {
+            pins: vec![p],
+            replace: true,
+        });
+        create(&mut c, "Ferrum", None);
+        let events = c.take_events();
+        c.command(Command::CommentFocus { id: "t1".into() });
+        assert_eq!(c.editor().comment_open(), None, "переход ждёт шрифтов");
+        if close {
+            c.command(Command::CommentOpen { id: None });
+        }
+        c.take_events();
+        assert!(serve(&mut c, &events) > 0);
+        assert_eq!(nodes(&c), 1, "текст дождался шрифтов");
+        let opened = c
+            .take_events()
+            .iter()
+            .any(|e| matches!(e, CoreEvent::CommentOpened { .. }));
+        if close {
+            assert_eq!(c.editor().comment_open(), None, "закрытое не открылось");
+            assert!(!opened);
+        } else {
+            assert_eq!(c.editor().comment_open(), Some("t1"));
+            assert!(opened);
+        }
+    }
+}

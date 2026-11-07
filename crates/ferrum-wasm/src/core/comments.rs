@@ -17,6 +17,7 @@ use ferrum_editor::{peer_color, CommentPin, EditorEvent, PinAnchor};
 use kurbo::Point;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::fonts::Waiting;
 use super::Core;
 use crate::protocol::{
     Command, CommentDraftDto, CommentPinDto, CoreEvent, COMMENT_ID_MAX_BYTES, COMMENT_INITIALS_MAX,
@@ -139,8 +140,14 @@ impl Core {
                 self.editor.remove_comment_pins(&ids);
             }
             Command::CommentOpen { id } => match id {
-                None => self.editor.set_comment_open(None),
-                Some(id) if thread_id(&id) => self.editor.set_comment_open(Some(&id)),
+                None => {
+                    self.drop_waiting_focus();
+                    self.editor.set_comment_open(None);
+                }
+                Some(id) if thread_id(&id) => {
+                    self.drop_waiting_focus();
+                    self.editor.set_comment_open(Some(&id));
+                }
                 Some(_) => {}
             },
             Command::CommentDraft { draft: d } => match d {
@@ -158,6 +165,19 @@ impl Core {
             }
             Command::CommentShowResolved { on } => self.editor.set_comments_show_resolved(on),
             _ => unreachable!("is_comment_command"),
+        }
+    }
+}
+
+impl Core {
+    /// `CommentFocus` ждёт шрифтов (меняет страницу), а `CommentOpen` идёт сразу: открыть другое
+    /// обсуждение или закрыть отменяет ждущий переход, как `Editor::set_comment_open` отменяет
+    /// ждущий метки, — иначе после загрузки шрифтов закрытое обсуждение открылось бы снова.
+    fn drop_waiting_focus(&mut self) {
+        let q = &mut self.font_state.waiting;
+        q.retain(|w| !matches!(w, Waiting::Command(Command::CommentFocus { .. })));
+        if q.is_empty() {
+            self.font_state.waiting_since = None;
         }
     }
 }
