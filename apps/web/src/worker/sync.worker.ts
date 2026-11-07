@@ -2,6 +2,7 @@
 // получает только состояние соединения и роль.
 
 import { asUser, ServerFiles, type JournalStore } from '../core/server-files';
+import { CommentStore } from '../core/comments-store';
 import { SyncClient, type CoreCommand, type SocketLike } from '../core/sync-client';
 import type { CoreToSync, FromSync, SyncToCore, ToSync } from '../core/sync-messages';
 
@@ -18,6 +19,7 @@ const noJournal: JournalStore = {
 };
 
 let client: SyncClient | null = null;
+let comments: CommentStore | null = null;
 
 function transferOf(c: CoreCommand): Transferable[] {
   switch (c.type) {
@@ -36,7 +38,13 @@ scope.onmessage = (e: MessageEvent<ToSync>) => {
   const m = e.data;
   if (m.t === 'stop') {
     client?.stop();
-    client = null;
+    comments?.stop();
+    client = comments = null;
+    return;
+  }
+  if (m.t === 'comments') {
+    if (comments) void comments.request(m.id, m.req);
+    else post({ t: 'comments', m: { t: 'result', id: m.id, result: { ok: false, failure: 'NETWORK' } } });
     return;
   }
   const port = m.port;
@@ -51,6 +59,21 @@ scope.onmessage = (e: MessageEvent<ToSync>) => {
       clearTimeout: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
     },
   );
+  const clock = {
+    now: () => performance.now(),
+    setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+    clearTimeout: (t: unknown) => clearTimeout(t as ReturnType<typeof setTimeout>),
+  };
+  const fetchAs = asUser(m.user, (input, init) => fetch(input, init));
+  comments = new CommentStore({
+    user: m.user,
+    base: `/api/files/${m.file}`,
+    fetch: (path, init) => fetchAs(path, init),
+    core: (cmd) => toCore({ t: 'cmd', cmd }),
+    post: (c) => post({ t: 'comments', m: c }),
+    clock,
+  });
+  const store = comments;
   client = new SyncClient({
     file: m.file,
     user: m.user,
@@ -77,6 +100,7 @@ scope.onmessage = (e: MessageEvent<ToSync>) => {
     access: (state) => post({ t: 'access', state }),
     reload: () => post({ t: 'reload' }),
     participants: (list) => post({ t: 'participants', list }),
+    comments: { connected: (role) => store.connected(role), event: (ev) => store.event(ev) },
   });
   port.onmessage = (ev: MessageEvent<CoreToSync>) => {
     if (ev.data.t === 'applied') client?.onApplied();

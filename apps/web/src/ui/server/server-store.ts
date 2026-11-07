@@ -6,6 +6,7 @@ import { MAX_FILE_NAME_CHARS } from '@ferrum/protocol';
 import type { FileMeta, IoResults, JournalMark, Section } from '../../core/file-list';
 import type { AccessState } from '../../core/server-files';
 import type { FromServer, ServerOp, ServerResults, ToServer } from '../../core/server-messages';
+import type { CommentRequest, CommentResult } from '../../core/comments-store';
 import type { FromSync, ToSync } from '../../core/sync-messages';
 import { IdbFileStore, type FileStore, type SyncCore, type SyncEvents } from '../file-store';
 import type { SettingsBackend } from '../settings-store';
@@ -146,12 +147,20 @@ export class ServerFileStore implements FileStore, SettingsBackend {
     const worker = new Worker(new URL('../../worker/sync.worker.ts', import.meta.url), { type: 'module' });
     const channel = new MessageChannel();
     core.connectSync(channel.port1);
+    /** Запросы комментариев в `sync.worker`: ответ приходит тем же порядком сообщений, по номеру. */
+    const pending = new Map<number, (r: CommentResult) => void>();
+    let nextId = 0;
     worker.onmessage = (e: MessageEvent<FromSync>) => {
       const m = e.data;
       if (m.t === 'status') events.status(m.status, m.detail);
       else if (m.t === 'reload') events.reload();
       else if (m.t === 'participants') events.participants(m.list);
-      else for (const w of this.watchers.get(file) ?? []) w(m.state);
+      else if (m.t === 'comments') {
+        if (m.m.t === 'result') {
+          pending.get(m.m.id)?.(m.m.result);
+          pending.delete(m.m.id);
+        } else events.comments?.(m.m);
+      } else for (const w of this.watchers.get(file) ?? []) w(m.state);
     };
     worker.onerror = (e) => {
       e.preventDefault?.();
@@ -166,7 +175,15 @@ export class ServerFileStore implements FileStore, SettingsBackend {
         // Сначала ядро: его таймер пачек и порт живут в его worker'е, `terminate` этого worker'а их не снимает.
         core.disconnectSync();
         worker.terminate();
+        for (const done of pending.values()) done({ ok: false, failure: 'NETWORK' });
+        pending.clear();
       },
+      comments: (req: CommentRequest) =>
+        new Promise<CommentResult>((resolve) => {
+          const id = ++nextId;
+          pending.set(id, resolve);
+          worker.postMessage({ t: 'comments', id, req } satisfies ToSync);
+        }),
     };
   }
   stopPolling(file: string) {

@@ -21,12 +21,15 @@ import {
   SYNC_PROTOCOL,
   syncPath,
   type Affine6,
+  type CommentEvent,
+  type FileRole,
   type GestureKind,
   type PresenceItem,
   type Rect4,
   type ServerFrame,
   type SyncRefusal,
 } from '@ferrum/protocol';
+import type { CommentsCoreCommand } from './comments-store';
 import type { AccessState, Clock } from './server-files';
 
 /** `offline` и `saving` — тексты индикатора §8.1. `rejected` — правки больше не уходят, человек должен знать. */
@@ -54,7 +57,9 @@ export type CoreCommand =
   /** Присутствие других участников (спека подсистемы 4, раздел 9): записи пачки сервера, уже разобранные. */
   | { type: 'presence'; items: PresenceItemForCore[] }
   /** Соединение заново: прежние участники уходят у ядра, своё состояние оно скажет снова. */
-  | { type: 'presenceReset' };
+  | { type: 'presenceReset' }
+  /** Метки комментариев (спека подсистемы 4, раздел 10.2): их ведёт `CommentStore`. */
+  | CommentsCoreCommand;
 
 /** Выделение и жест в кадре присутствия — те же поля, что у `PresenceSelection` и `PresenceGesture` протокола. */
 export interface PresenceSelectionForCore {
@@ -138,6 +143,8 @@ export interface SyncEnv {
   reload(): void;
   /** Участники файла для шапки: не чаще `PARTICIPANTS_MS` и только при изменении. */
   participants(list: Participant[]): void;
+  /** Комментарии файла (спека подсистемы 4, раздел 10): роль подтверждена этим соединением — догнать пропущенное; событие сокета. */
+  comments?: { connected(role: FileRole): void; event(ev: CommentEvent): void };
 }
 
 /** Переподключение: от 0,5 до 30 с с разбросом, сразу при `online` (спека, раздел 8.1). */
@@ -443,6 +450,11 @@ export class SyncClient {
           if (this.ownState) this.queuePresence(this.ownState, this.ownParts);
           this.armHeartbeat();
         }
+        // Новое соединение (или новая роль): события, пропущенные без связи, комментарии догоняют по `seq`.
+        this.env.comments?.connected(f.role);
+        break;
+      case 'comment':
+        this.env.comments?.event(f.event);
         break;
       case 'presence':
         this.onPresence(f.items);
