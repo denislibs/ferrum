@@ -397,7 +397,7 @@ test('остановка посреди прохода: взятые, но не 
   expect([mail.attempts.length, next.counts.uncertain]).toEqual([2, 0]);
 });
 
-test('сбой базы до SMTP: строка — обратно в очередь, следующий проход её отправляет', async () => {
+test('сбой базы до SMTP: строка — обратно в очередь с потраченной попыткой, следующий проход её отправляет', async () => {
   const mail = new FakeMail();
   const w = await worker(mail);
   await create(owner, `@[${viewer.id}] сбой`);
@@ -412,11 +412,62 @@ test('сбой базы до SMTP: строка — обратно в очере
   } finally {
     spy.mockRestore();
   }
-  expect(await states()).toEqual(['pending/0']);
+  expect(await states()).toEqual(['pending/1']);
   expect(mail.attempts).toHaveLength(0);
   await w.tick();
-  expect(await states()).toEqual(['sent/1']);
+  expect(await states()).toEqual(['sent/2']);
   expect(w.counts.uncertain).toBe(0);
+});
+
+test('R1: подготовка письма падает всегда — строка не берётся бесконечно: попытка за проходом, после 5 — брошена', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail);
+  await create(owner, `@[${viewer.id}] вечный сбой`);
+  await due();
+  const pool = s.pool as unknown as { query: (...a: unknown[]) => Promise<unknown> };
+  const real = pool.query.bind(pool);
+  let failures = 0;
+  const spy = spyOn(pool, 'query').mockImplementation((...a: unknown[]) => {
+    if (typeof a[0] === 'string' && a[0].includes('AS opened_after')) {
+      failures++;
+      return Promise.reject(new Error('сбой теста'));
+    }
+    return real(...a);
+  });
+  try {
+    const seen: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      // Пауза повтора (`retryMs × попытка`) в тесте — ноль; срок строки — «вышел» перед каждым проходом.
+      await due();
+      await w.tick();
+      seen.push(...(await states()));
+    }
+    expect(seen).toEqual(['pending/1', 'pending/2', 'pending/3', 'pending/4', 'dropped/5', 'dropped/5', 'dropped/5']);
+    expect([failures, w.counts.dropped, mail.attempts.length]).toEqual([5, 1, 0]);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('R1: пауза повтора после сбоя подготовки — `retryMs × попытка`, а не сразу', async () => {
+  const mail = new FakeMail();
+  const w = await worker(mail, { retryMs: 60_000 });
+  await create(owner, `@[${viewer.id}] пауза`);
+  await due();
+  const pool = s.pool as unknown as { query: (...a: unknown[]) => Promise<unknown> };
+  const real = pool.query.bind(pool);
+  const spy = spyOn(pool, 'query').mockImplementation((...a: unknown[]) =>
+    typeof a[0] === 'string' && a[0].includes('AS opened_after') ? Promise.reject(new Error('сбой теста')) : real(...a),
+  );
+  try {
+    await w.tick();
+  } finally {
+    spy.mockRestore();
+  }
+  const [row] = (await s.pool.query<{ wait: number }>(`SELECT extract(epoch FROM due_at - now())::int AS wait FROM mail_outbox`)).rows;
+  expect(row.wait).toBeGreaterThan(50);
+  await w.tick();
+  expect([await states(), mail.attempts.length]).toEqual([['pending/1'], 0]);
 });
 
 test('L1: письма — только тем, кто хоть раз открывал файл; приглашённый, не приходивший, письма не получает', async () => {

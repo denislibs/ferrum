@@ -6,8 +6,10 @@
 // SMTP (сервер ответил кодом, соединение не открылось) — строка возвращается в очередь с паузой, после `MAX_ATTEMPTS` —
 // `dropped`. Строка, оставшаяся в `sending` (процесс упал между отправкой и отметкой, отметка не записалась, отправка
 // зависла дольше срока), не отправляется снова: `uncertain` и запись в журнал. Лишнее письмо хуже потерянного уведомления:
-// комментарий всё равно виден в файле. Строка, взятая, но точно не отданная SMTP (остановка посреди прохода, сбой базы до
-// отправки), возвращается в очередь (`pending`), а не в `uncertain`.
+// комментарий всё равно виден в файле. Строка, взятая, но точно не отданная SMTP, возвращается в очередь (`pending`), а не в
+// `uncertain`: остановка посреди прохода — без потраченной попытки, сбой подготовки письма (запрос содержимого) — с попыткой
+// и паузой, как отказ SMTP: строка, на которой подготовка падает всегда, не берётся каждый проход бесконечно, а становится
+// `dropped`.
 //
 // Перед отправкой — снова: доступ есть, письма не выключены, файл не открыт сейчас и не открывался после первого
 // комментария, комментарии ещё есть. Иначе — `skipped`.
@@ -133,7 +135,8 @@ export class CommentMailWorker {
   private stopped = false;
   /** Строки прошлого процесса в `sending` уже признаны `uncertain`: до этого проход ничего не берёт. */
   private recovering: Promise<void> | null = null;
-  /** Взяты, но SMTP не отданы (остановка, сбой базы до отправки): вернуть в очередь при первой возможности. */
+  /** Взяты, но SMTP не отданы и вернуть их сразу не вышло (остановка, база недоступна и для возврата): в очередь при первой
+   * возможности, без потраченной попытки. */
   private readonly untried = new Set<string>();
   /** Счётчики для тестов и пробы. */
   readonly counts = { sent: 0, skipped: 0, retried: 0, dropped: 0, uncertain: 0 };
@@ -270,9 +273,13 @@ export class CommentMailWorker {
         return;
       }
     } catch (e) {
-      // До SMTP: письмо точно не ушло — в очередь, а не в `uncertain`.
+      // До SMTP: письмо точно не ушло — в очередь, а не в `uncertain`; попытка потрачена, повтор — с паузой. Не вышло и это
+      // (база недоступна) — вернуть потом, без попытки.
       report(e);
-      this.untried.add(row.id);
+      await this.retryLater(row).catch((e2: unknown) => {
+        report(e2);
+        this.untried.add(row.id);
+      });
       return;
     }
     const mail = commentMail(c.email, c.file_name, c.items!, row.extra, this.publicUrl, row.file_id);
@@ -296,6 +303,11 @@ export class CommentMailWorker {
       return;
     }
     console.error('Письмо о комментариях не принято:', mailFailure(outcome));
+    await this.retryLater(row);
+  }
+
+  /** Письмо точно не ушло, попытка потрачена: обратно в очередь с паузой `retryMs × попытка`, после `maxAttempts` — `dropped`. */
+  private async retryLater(row: Claimed): Promise<void> {
     if (row.attempts >= this.opts.maxAttempts) {
       const n = await this.mark(row.id, 'dropped');
       this.counts.dropped += n;

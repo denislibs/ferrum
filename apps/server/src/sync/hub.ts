@@ -1106,6 +1106,9 @@ export class SyncHub {
     }
   }
 
+  /** Кадр события комментария. Тесты подменяют его, чтобы проверить сбой кодирования. */
+  encodeComment: (ev: CommentEvent) => Uint8Array = (ev) => encodeServerFrame({ t: 'comment', event: ev });
+
   private async fanOutComments(file: string, batch: CommentEvent[], overflow: boolean): Promise<void> {
     const head = this.commentHeads.get(file) ?? 0;
     const evs = batch.filter((e) => e.seq > head).sort((a, b) => a.seq - b.seq);
@@ -1113,6 +1116,18 @@ export class SyncHub {
     const targets = [...(this.conns.get(file) ?? [])].filter((d) => d.confirmed && !d.closed);
     if (targets.length === 0) return;
     const last = evs[evs.length - 1].seq;
+    // Кодирование — до запроса ролей и сдвига головы: событие, которое не кодируется (больше кадра — ошибка сервера), не
+    // теряет проход молча. Всем целям — `gap` (как при сбое запроса ролей: клиент догонит по REST, где роль сверяется
+    // заново), голова — за проходом: его номера разосланы пропуском.
+    let frames: Uint8Array[];
+    try {
+      frames = evs.map((ev) => this.encodeComment(ev));
+    } catch (e) {
+      report(e);
+      if (this.conns.has(file)) this.commentHeads.set(file, last);
+      for (const d of targets) this.commentGapTo(d, last);
+      return;
+    }
     const users = [...new Set(targets.map((d) => d.user))];
     let rows: { u: string; rank: number | null }[];
     try {
@@ -1130,7 +1145,6 @@ export class SyncHub {
     // Голова — после запроса и только у открытого файла: ушёл последний — `closed` её уже убрал.
     if (this.conns.has(file)) this.commentHeads.set(file, last);
     const allowed = new Set(rows.filter((r) => (r.rank ?? 0) > 0).map((r) => r.u));
-    const frames = evs.map((ev) => encodeServerFrame({ t: 'comment', event: ev }));
     for (const d of targets) {
       if (d.closed) continue;
       if (!allowed.has(d.user)) {

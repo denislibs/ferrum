@@ -354,6 +354,29 @@ test('сбой запроса ролей: события прохода не т�
   ]);
 });
 
+test('L3: событие не кодируется — проход не теряется молча: получателям `gap`, голова сдвинута, дальше — как обычно', async () => {
+  const v = await join(viewer);
+  const e = await join(editor);
+  const hub = s.hub as unknown as { encodeComment: (ev: CommentEvent) => Uint8Array };
+  const real = hub.encodeComment;
+  hub.encodeComment = () => {
+    throw new RangeError('событие комментария: слишком большое (тест)');
+  };
+  let made: CommentWriteDto;
+  try {
+    made = await write(await s.call(owner, 'POST', base(file), { pin, body: 'не закодируется' }));
+    for (const c of [v, e]) expect((await c.wait('comment')).event).toEqual({ kind: 'gap', seq: made.seq });
+  } finally {
+    hub.encodeComment = real;
+  }
+  const next = await write(await s.call(owner, 'POST', base(file), { pin, body: 'дальше' }));
+  expect((await v.wait('comment', (f) => f.event.seq === next.seq)).event).toMatchObject({ kind: 'thread', action: 'create' });
+  expect(events(v).map((x) => [x.kind, x.seq])).toEqual([
+    ['gap', made!.seq],
+    ['thread', next.seq],
+  ]);
+});
+
 test('переполнение очереди файла (1024): дальше — только последнее, всем — `gap` с ним', async () => {
   const a = await join(owner);
   const v = await join(viewer);
