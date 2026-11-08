@@ -16,7 +16,7 @@ use crate::editor::Editor;
 use crate::geometry::SelectionBox;
 use crate::menu::{sub, MenuAction, MenuNode};
 use crate::selection::{frame_label_at, resolve, top_hit, Pick};
-use crate::tools::HIT_TOLERANCE_PX;
+use crate::tools::{ToolKind, HIT_TOLERANCE_PX};
 
 /// Сколько узлов под точкой показывает «Выделить слой».
 pub const MAX_SELECT_LAYER_ITEMS: usize = 50;
@@ -70,6 +70,13 @@ impl Editor {
         }
         let items = match target {
             ContextTarget::Canvas(p) => {
+                // В режиме «Комментарий» правый щелчок по холсту меню не открывает и
+                // выделения не меняет **(поведение, как в Figma)**: выделения и правок
+                // узлов в режиме не бывает, а пунктов без узла (вставка, «Выделить
+                // всё») в нём тоже нет — меню вышло бы пустым или с одним видом.
+                if self.tool.kind() == ToolKind::Comment {
+                    return Vec::new();
+                }
                 // Над линейкой выбора нет: меню — по нынешнему выделению.
                 let under = if self.over_ruler(p).is_some() {
                     None

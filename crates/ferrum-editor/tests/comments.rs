@@ -1030,3 +1030,25 @@ fn layers_panel_select_or_edit_leaves_comment_mode_for_move() {
         "выбор из панели — выделение уже на «Перемещении»"
     );
 }
+
+#[test]
+fn right_click_on_canvas_in_comment_mode_keeps_selection_and_opens_no_menu() {
+    // B-440: в режиме «Комментарий» правый щелчок по холсту не выделяет узел и не
+    // открывает меню узла (поведение, как в Figma).
+    let mut h = available();
+    let r = h.rect(None, 100.0, 100.0, 200.0, 100.0);
+    h.ed.set_tool(ToolKind::Comment);
+    h.ed.take_events();
+    for p in [Point::new(150.0, 120.0), Point::new(600.0, 500.0)] {
+        let items = h.ed.context_menu(ContextTarget::Canvas(p));
+        assert!(items.is_empty(), "меню в режиме нет: {items:?}");
+        assert!(h.sel().is_empty(), "выделения в режиме нет");
+        assert_eq!(h.ed.tool_kind(), ToolKind::Comment);
+    }
+    // Вне режима тот же щелчок выделяет узел и открывает меню.
+    h.ed.set_tool(ToolKind::Move);
+    let items =
+        h.ed.context_menu(ContextTarget::Canvas(Point::new(150.0, 120.0)));
+    assert!(!items.is_empty());
+    assert_eq!(h.sel(), vec![r]);
+}
