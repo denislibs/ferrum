@@ -6,7 +6,7 @@
 // Текст комментариев и имена — только текстом (`{…}` Solid), без `innerHTML`.
 
 import { splitCommentBody, type CommentDto, type FileRole, type MentionCandidate, type PinDto, type ThreadView } from '@ferrum/protocol';
-import { batch, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { batch, createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { Portal } from 'solid-js/web';
 import type { CommentsToMain } from '../../core/comments-store';
@@ -88,6 +88,24 @@ function Composer(props: ComposerProps) {
     field.setSelectionRange(field.value.length, field.value.length);
   });
   onCleanup(() => clearTimeout(timer));
+  let list: HTMLUListElement | undefined;
+  // Список в потоке окна: у длинного обсуждения он ниже видимой части — окно прокручивается так, чтобы был виден
+  // список (сколько поместится), и в первую очередь — активный пункт. Прокручивается только само окно: предки
+  // редактора (`overflow: hidden`) не сдвигаются, как сдвинул бы их `scrollIntoView`.
+  createEffect(
+    on([people, active], () => {
+      const option = list?.children[active()];
+      const box = list?.closest<HTMLElement>('.fe-thread');
+      if (!list || !option || !box) return;
+      const b = box.getBoundingClientRect();
+      const l = list.getBoundingClientRect();
+      const o = option.getBoundingClientRect();
+      let dy = Math.max(0, l.bottom - b.bottom);
+      dy = Math.min(dy, o.top - b.top);
+      if (o.bottom - dy > b.bottom) dy = o.bottom - b.bottom;
+      if (dy !== 0) box.scrollTop += dy;
+    }),
+  );
 
   const lookup = () => {
     clearTimeout(timer);
@@ -183,7 +201,7 @@ function Composer(props: ComposerProps) {
         onKeyUp={(e) => e.stopPropagation()}
       />
       <Show when={people().length > 0}>
-        <ul class="fe-composer__people" role="listbox" aria-label="Упомянуть">
+        <ul ref={list} class="fe-composer__people" role="listbox" aria-label="Упомянуть">
           <For each={people()}>
             {(p, i) => (
               <li

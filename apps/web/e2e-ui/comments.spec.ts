@@ -282,3 +282,71 @@ test('H1: предел обсуждений файла и своих — пон�
     await expect(field).toHaveValue('ещё одно');
   }
 });
+
+/** Активный пункт списка упоминаний виден: в окне браузера и не обрезан окном обсуждения — точка в его середине —
+ * он сам. */
+const activePersonVisible = (page: Page) =>
+  page.evaluate(() => {
+    const o = document.querySelector<HTMLElement>('.fe-composer__person.is-active');
+    if (!o) return false;
+    const r = o.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+    const hit = document.elementFromPoint(x, y);
+    return !!hit && o.contains(hit);
+  });
+
+const PEOPLE = [
+  { id: 'u2', name: 'Иван', email: 'ivan@example.com' },
+  { id: 'u3', name: 'Ивона', email: 'ivona@example.com' },
+  { id: 'u4', name: 'Иветта', email: 'iveta@example.com' },
+];
+
+/** Набрать `@Ив` в поле, пройти стрелками все пункты (каждый виден), вернуться к первому и выбрать Enter. */
+async function mentionAll(page: Page, field: ReturnType<Page['getByRole']>): Promise<void> {
+  await field.click();
+  await page.keyboard.type('для @Ив');
+  const list = page.getByRole('listbox', { name: 'Упомянуть' });
+  await expect(list.getByRole('option')).toHaveCount(PEOPLE.length);
+  for (let i = 0; i < PEOPLE.length; i++) {
+    await expect(list.getByRole('option').nth(i)).toHaveAttribute('aria-selected', 'true');
+    await expect.poll(() => activePersonVisible(page), `пункт ${i}`).toBe(true);
+    await page.keyboard.press('ArrowDown');
+  }
+  await expect(list.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Enter');
+  await expect(list).toHaveCount(0);
+  await expect(field).toHaveValue('для @Иван ');
+}
+
+test('список упоминаний нового комментария виден целиком, и у нижнего края холста', async ({ page }) => {
+  await mount(page);
+  await answer(page, 'mentions', { ok: true, value: PEOPLE });
+  for (const [sx, sy] of [
+    [300, 200],
+    [300, 590],
+  ]) {
+    await core(page, place(sx, sy));
+    const dialog = page.getByRole('dialog', { name: 'Новый комментарий' });
+    await mentionAll(page, dialog.getByRole('textbox', { name: 'Комментарий' }));
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+  }
+});
+
+test('список упоминаний ответа внизу длинного обсуждения виден; Esc сначала закрывает список', async ({ page }) => {
+  await mount(page);
+  await answer(page, 'mentions', { ok: true, value: PEOPLE });
+  const comments = Array.from({ length: 20 }, (_, i) => comment('t1', `c${i}`, author(ME, 'Я'), `комментарий ${i}`));
+  await openThread(page, thread('t1', { replies: 19 }), comments, { sx: 300, sy: 500 });
+  const dialog = page.getByRole('dialog', { name: 'Обсуждение' });
+  const field = dialog.getByRole('textbox', { name: 'Ответ' });
+  await mentionAll(page, field);
+  await page.keyboard.type('и @Ив');
+  await expect(page.getByRole('listbox', { name: 'Упомянуть' })).toBeVisible();
+  await expect.poll(() => activePersonVisible(page)).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('listbox', { name: 'Упомянуть' })).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+});

@@ -100,13 +100,10 @@
   color: var(--danger);
 }
 
+/* Список — в потоке окна под полем, а не поверх: окно прокручивается (`overflow: auto`) и обрезало бы его; окно растёт
+ * и держится в пределах холста, активный пункт прокручивается в видимую часть (`Composer`). */
 .fe-composer__people {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 1;
-  margin: var(--space-1) 0 0;
+  margin: 0;
   padding: var(--space-1);
   list-style: none;
   background: var(--surface-raised);
