@@ -43,3 +43,42 @@ test("отказ worker'а несёт код: сохранитель отлич�
   expect(e.message).toBe('Файл изменён');
   expect(e.code).toBe('CONFLICT');
 });
+
+test("T9-M5: запрос комментариев не зависает — сбой worker'а и вызов после остановки отвечают `NETWORK`", async () => {
+  const workers: { onerror: ((e: { preventDefault(): void }) => void) | null; sent: { t: string }[] }[] = [];
+  g.Worker = class {
+    onmessage = null;
+    onerror: ((e: { preventDefault(): void }) => void) | null = null;
+    sent: { t: string }[] = [];
+    constructor() {
+      workers.push(this);
+    }
+    postMessage(m: { t: string }) {
+      this.sent.push(m);
+    }
+    terminate() {}
+  };
+  g.window = { addEventListener() {}, removeEventListener() {} };
+  g.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+  g.BroadcastChannel = class {
+    postMessage() {}
+    close() {}
+  };
+  const store = new ServerFileStore('user');
+  const core = { connectSync() {}, disconnectSync() {} };
+  const events = { status() {}, reload() {}, participants() {} };
+  const hang = Symbol('нет ответа');
+  // Ответ уже должен быть: обещание, решённое раньше, выигрывает гонку у решённого следом.
+  const now = <T>(p: Promise<T>) => Promise.race([p, Promise.resolve(hang)]);
+
+  const a = store.sync('f', core, events);
+  const asked = a.comments!({ k: 'mentions', q: '' });
+  workers.at(-1)!.onerror!({ preventDefault() {} });
+  expect(await now(asked)).toEqual({ ok: false, failure: 'NETWORK' });
+
+  const b = store.sync('f', core, events);
+  b.stop();
+  const sent = workers.at(-1)!.sent.length;
+  expect(await now(b.comments!({ k: 'mentions', q: '' }))).toEqual({ ok: false, failure: 'NETWORK' });
+  expect(workers.at(-1)!.sent).toHaveLength(sent);
+});

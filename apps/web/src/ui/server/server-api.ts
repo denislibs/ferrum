@@ -12,6 +12,8 @@ import {
   isTeam,
   isTeamList,
   isTeamMembers,
+  parsePrefs,
+  type PrefsDto,
   type ApiErrorCode,
   type ProjectDto,
   type ShareDto,
@@ -102,3 +104,8 @@ export const createProject = (id: string, name: string): Promise<ApiResult<Proje
   send('POST', `${team(id)}/projects`, isProjectDto, { name });
 export const renameProject = (id: string, name: string) => send('PATCH', project(id), isProjectDto, { name });
 export const deleteProject = (id: string) => send('DELETE', project(id), isOk);
+
+const isPrefs = (v: unknown): v is PrefsDto => parsePrefs(v) !== null;
+/** Настройка «Письма о комментариях» (спека подсистемы 4, раздел 10.4): на сервере, письма отправляет он. */
+export const getPrefs = (): Promise<ApiResult<PrefsDto>> => call('/api/me/prefs', isPrefs);
+export const setPrefs = (prefs: PrefsDto) => send('PUT', '/api/me/prefs', (v): v is unknown => isPrefs(v) || isOk(v), prefs);

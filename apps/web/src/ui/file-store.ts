@@ -6,6 +6,7 @@
 
 import type { FileMeta, FromIo, IoOp, IoResults, JournalMark, Section, ToIo } from '../core/file-list';
 import type { AccessState } from '../core/server-files';
+import type { CommentRequest, CommentResult, CommentsToMain } from '../core/comments-store';
 import type { Participant, SyncStatus } from '../core/sync-client';
 import { nameFromFile } from '../core/file-list';
 import { mb } from '../core/limits';
@@ -22,6 +23,14 @@ export interface SyncEvents {
   reload(): void;
   /** Участники файла для шапки (спека подсистемы 4, раздел 9). */
   participants(list: Participant[]): void;
+  /** Комментарии файла (спека подсистемы 4, раздел 10): только у файлов на сервере. */
+  comments?(m: CommentsToMain): void;
+}
+
+/** Соединение файла: остановить; запросы комментариев — где они есть. */
+export interface SyncHandle {
+  stop(): void;
+  comments?(req: CommentRequest): Promise<CommentResult>;
 }
 
 /** Ядро для соединения файла: прямой порт к `sync.worker` и его конец. */
@@ -82,7 +91,7 @@ export interface FileStore {
   /** Кто вошёл (файлы на сервере): себя в полосе участников нет. */
   readonly user?: string;
   /** Соединение файла (спека подсистемы 4, раздел 7): правки идут журналом сервера, файл целиком пишется только первый раз. */
-  sync?(id: string, core: SyncCore, events: SyncEvents): { stop(): void };
+  sync?(id: string, core: SyncCore, events: SyncEvents): SyncHandle;
   /** Сервер подтвердил правки: снять пачки журнала браузера. */
   cutJournal?(id: string, mark: JournalMark): Promise<void>;
   /** Превью при правках журналом. `null` — убрать. */

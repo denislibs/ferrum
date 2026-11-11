@@ -130,11 +130,12 @@ export async function apiStand(over: Partial<AppDeps> = {}, keep = false) {
   // сжатия прошлого теста дождётся его, а не сцепится с ним.
   const reset = () =>
     pool.query(
-      'TRUNCATE file, doc_state, doc_update, doc_peer, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project CASCADE',
+      'TRUNCATE file, doc_state, doc_update, doc_peer, file_access, file_invite, share_link, file_link_user, file_recent, file_image, image, blob_trash, blob_pending, team, team_member, team_invite, project, comment_file, comment_thread, comment, comment_mention, comment_read, mail_outbox, user_pref CASCADE',
     );
 
   const stop = async () => {
     server.compactor?.stop();
+    await server.commentMail?.stop();
     await server.hub.stop();
     server.stop(true);
     valkey.close();

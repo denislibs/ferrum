@@ -30,6 +30,8 @@ const deps = {
   blobs: new FsBlobStore(web),
   mailer: { send: async () => {} },
   secret: TEST_SECRET,
+  // Письма о комментариях здесь не проверяются: их рассыльщик пережил бы пул файла и писал бы в журнал.
+  commentMail: false as const,
 };
 const server = startServer({ ...deps, pool }, 0);
 const url = (p: string) => `http://127.0.0.1:${server.port}${p}`;

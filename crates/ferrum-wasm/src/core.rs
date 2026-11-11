@@ -9,6 +9,7 @@
 //! (`FrameStats::needs_another_frame`: растры фреймов не догнали, картинки ещё
 //! декодируются).
 
+mod comments;
 mod fonts;
 mod panels;
 pub mod presence;
@@ -146,6 +147,7 @@ fn tool_kind(t: Tool) -> ToolKind {
         Tool::Pen => ToolKind::Pen,
         Tool::Arrow => ToolKind::Arrow,
         Tool::Scale => ToolKind::Scale,
+        Tool::Comment => ToolKind::Comment,
     }
 }
 
@@ -162,6 +164,7 @@ fn tool(k: ToolKind) -> Tool {
         ToolKind::Pen => Tool::Pen,
         ToolKind::Arrow => Tool::Arrow,
         ToolKind::Scale => Tool::Scale,
+        ToolKind::Comment => Tool::Comment,
     }
 }
 
@@ -212,6 +215,14 @@ fn waits_behind_fonts(cmd: &Command) -> bool {
             | Command::Thumbnail
             | Command::Presence { .. }
             | Command::PresenceReset
+            // Метки и состояние комментариев документ не правят; переход к обсуждению
+            // (`CommentFocus`) меняет страницу — он ждёт, как другие команды.
+            | Command::CommentsAvailable { .. }
+            | Command::CommentPins { .. }
+            | Command::CommentPinsRemove { .. }
+            | Command::CommentOpen { .. }
+            | Command::CommentDraft { .. }
+            | Command::CommentShowResolved { .. }
             | Command::Demo { .. }
             | Command::DemoText { .. }
             | Command::FlushJournal
@@ -825,6 +836,7 @@ impl Core {
                 self.flush_journal(true);
                 self.sync_note();
             }
+            cmd if comments::is_comment_command(&cmd) => self.comment_command(cmd),
             // Правка текста; ждущая шрифтов — в очередь.
             cmd if text::is_text_command(&cmd) => self.text_command(cmd),
             Command::Execute { command } => match CommandId::from_key(&command) {
@@ -1030,6 +1042,18 @@ impl Core {
                 EditorEvent::Error(message) => self.events.push(CoreEvent::Error { message }),
                 EditorEvent::Following(participant) => {
                     self.events.push(CoreEvent::Following { participant })
+                }
+                // Точка открытой метки меняется с каждым кадром камеры: в пачке важна последняя.
+                e @ EditorEvent::CommentAnchor { .. } => {
+                    self.events
+                        .retain(|e| !matches!(e, CoreEvent::CommentAnchor { .. }));
+                    self.events.extend(comments::comment_event(&e));
+                }
+                e @ (EditorEvent::CommentPlace { .. }
+                | EditorEvent::CommentOpened { .. }
+                | EditorEvent::CommentMoved { .. }
+                | EditorEvent::CommentsState { .. }) => {
+                    self.events.extend(comments::comment_event(&e))
                 }
             }
         }

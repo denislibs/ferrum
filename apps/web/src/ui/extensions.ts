@@ -3,7 +3,9 @@
 
 import type { Component, JSX } from 'solid-js';
 import type { FileMeta, Section } from '../core/file-list';
+import type { CommentRequest, CommentResult, CommentsToMain } from '../core/comments-store';
 import type { Participant } from '../core/sync-client';
+import type { Editor } from './context';
 import type { IconName } from './icons';
 import type { MenuItem } from './menu';
 import type { Route } from './router';
@@ -15,6 +17,22 @@ export interface PresenceBarProps {
   following: () => number | null;
   currentPage: () => string;
   follow: (participant: number | null) => void;
+}
+
+/** Комментарии открытого файла (спека подсистемы 4, раздел 10): окно у метки и панель справа в режиме комментариев. */
+export interface CommentsProps {
+  editor: Editor;
+  canvas: HTMLCanvasElement;
+  /** Запрос в `sync.worker`; соединения ещё нет — `NETWORK`. */
+  request(req: CommentRequest): Promise<CommentResult>;
+  subscribe(listener: (m: CommentsToMain) => void): () => void;
+  /** Где панель: правая колонка в режиме комментариев. */
+  panelHost: () => HTMLElement | undefined;
+  mode: () => boolean;
+  page: () => string;
+  /** Обсуждение из ссылки (`?comment=`). */
+  link?: string;
+  toast(text: string): void;
 }
 
 /** Строка панели разделов: раздел или подпись группы. */
@@ -46,6 +64,8 @@ export const extensions: {
   shareButton?: Component<{ file: FileMeta; role: () => FileMeta['role']; canShare: () => boolean; children?: JSX.Element }>;
   /** Аватары участников открытого файла (спека подсистемы 4, раздел 9). */
   presenceBar?: Component<PresenceBarProps>;
+  /** Комментарии: только у файлов на сервере (в автономной сборке их нет, как в Figma без сети). */
+  comments?: Component<CommentsProps>;
 } = {};
 
 /** Связь корня приложения с кодом входа: ставит `Root` (в обеих сборках, это просто два поля),

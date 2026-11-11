@@ -55,6 +55,8 @@ function stand(over: Partial<AuthDeps> = {}, trustedProxies: string[] = []) {
       blobs: new FsBlobStore('/nonexistent'),
       mailer: deps.mailer,
       secret: TEST_SECRET,
+      // Письма о комментариях здесь не проверяются: их рассыльщик пережил бы пул файла и писал бы в журнал.
+      commentMail: false,
     },
     port,
   );
@@ -203,6 +205,7 @@ test('зависший Valkey: 503 в формате ошибок входа п�
       blobs: new FsBlobStore('/nonexistent'),
       mailer: { send: async () => {} },
       secret: TEST_SECRET,
+      commentMail: false,
     },
     0,
   );

@@ -43,6 +43,9 @@ interface World {
   team: string;
   project: string;
   member: string;
+  /** Обсуждение владельца и его первый комментарий. */
+  thread: string;
+  comment: string;
 }
 
 async function world(): Promise<World> {
@@ -67,7 +70,20 @@ async function world(): Promise<World> {
   ]);
   const member = await s.pool.query<{ id: string }>('SELECT id FROM team_member WHERE team_id = $1 AND user_id = $2', [t, editor.id]);
   const project = await s.pool.query<{ id: string }>(`INSERT INTO project (team_id, name) VALUES ($1, 'Проект') RETURNING id`, [t]);
-  return { file: f.id, entry: entry.rows[0].id, team: t, project: project.rows[0].id, member: member.rows[0].id };
+  const c = await s.pool.query<{ r: { thread: { id: string; first: { id: string } } } }>(
+    `SELECT comment_create($1, $2, '1@1', NULL, 0, 0, 0, 0, 'Первый', 'Первый', false, '{}', '{}', 1000, 10000, 1000) AS r`,
+    [f.id, owner.id],
+  );
+  const thread = c.rows[0].r.thread;
+  return {
+    file: f.id,
+    entry: entry.rows[0].id,
+    team: t,
+    project: project.rows[0].id,
+    member: member.rows[0].id,
+    thread: thread.id,
+    comment: thread.first.id,
+  };
 }
 
 /** Запрос маршрута: метод и адрес — из таблицы маршрутов, здесь — чем его наполнить. */
@@ -87,6 +103,8 @@ const write = () => ({ 'if-match': '"0"', 'x-ferrum-write': crypto.randomUUID() 
 const file = (w: World) => ({ id: w.file });
 const team = (w: World) => ({ teamId: w.team });
 const project = (w: World) => ({ projectId: w.project });
+const thread = (w: World) => ({ id: w.file, threadId: w.thread });
+const comment = (w: World) => ({ id: w.file, threadId: w.thread, commentId: w.comment });
 
 const SAMPLES: Record<string, Sample> = {
   'GET /api/files': {},
@@ -147,6 +165,29 @@ const SAMPLES: Record<string, Sample> = {
   // Прав на файл здесь ещё нет: чужой файл, неверный токен и выключенная ссылка неотличимы.
   'POST /api/files/:id/redeem': { params: file, body: { token: 'x'.repeat(43) }, allowed: stranger, status: 404 },
   'POST /api/files/:id/request-access': { params: file, allowed: stranger },
+  // Комментарии: каждый с доступом, и читатель тоже; правка — только своё, удаление — своё или владелец, закрытие — автор
+  // или редактор (`comments.test.ts` — права каждого действия подробно).
+  'GET /api/files/:id/comments': { params: file, allowed: viewer },
+  'POST /api/files/:id/comments': {
+    params: file,
+    body: { pin: { page: '1@1', node: null, x: 0, y: 0, wx: 0, wy: 0 }, body: 'Новый' },
+    allowed: viewer,
+    status: 201,
+  },
+  'GET /api/files/:id/comments/:threadId': { params: thread, allowed: viewer },
+  'PATCH /api/files/:id/comments/:threadId': { params: thread, body: { resolved: true }, allowed: editor, denied: [viewer] },
+  'POST /api/files/:id/comments/:threadId/comments': { params: thread, body: { body: 'Ответ' }, allowed: viewer, status: 201 },
+  'PATCH /api/files/:id/comments/:threadId/comments/:commentId': {
+    params: comment,
+    body: { body: 'Правка' },
+    allowed: owner,
+    denied: [viewer, editor, linked],
+  },
+  'DELETE /api/files/:id/comments/:threadId/comments/:commentId': { params: comment, allowed: owner, denied: [viewer, editor, linked] },
+  'POST /api/files/:id/comments/:threadId/read': { params: thread, allowed: viewer },
+  'GET /api/files/:id/mentions': { params: file, allowed: viewer },
+  'GET /api/me/prefs': {},
+  'PUT /api/me/prefs': { body: { commentMail: false } },
 };
 
 const key = (r: { method: string; path: string }) => `${r.method} ${r.path}`;
@@ -183,11 +224,14 @@ for (const route of ROUTES) {
     test(`${key(route)}: чужой Origin — 403 и ничего не меняется`, async () => {
       const w = await world();
       const path = pathOf(route.path, sample.params?.(w) ?? {});
-      const before = await s.pool.query('SELECT name, version, trashed_at FROM file ORDER BY id');
+      // Файлы и комментарии: номер файла комментариев растёт с каждым их изменением.
+      const state =
+        'SELECT name, version, trashed_at, (SELECT seq FROM comment_file c WHERE c.file_id = f.id) AS comments FROM file f ORDER BY id';
+      const before = await s.pool.query(state);
       const res = await s.call(owner, route.method, path, sample.body, { ...headersOf(route, sample), origin: 'https://evil.example' });
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: 'BAD_ORIGIN' });
-      expect((await s.pool.query('SELECT name, version, trashed_at FROM file ORDER BY id')).rows).toEqual(before.rows);
+      expect((await s.pool.query(state)).rows).toEqual(before.rows);
       const none = await s.call(owner, route.method, path, sample.body, { ...headersOf(route, sample), origin: '' });
       expect(none.status).toBe(403);
     });

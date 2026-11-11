@@ -81,6 +81,7 @@ fn toggles_are_exactly_the_checkable_commands() {
             C::PixelGrid,
             C::ViewRulers,
             C::ViewGuides,
+            C::ViewComments,
             C::UiPixelSnap,
             C::UiThemeDark,
             C::UiThemeLight,

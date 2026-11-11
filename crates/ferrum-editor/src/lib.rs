@@ -9,6 +9,7 @@ mod boolean;
 pub mod clipboard;
 pub mod command_state;
 pub mod commands;
+pub mod comments;
 pub mod context_menu;
 mod editor;
 pub mod find;
@@ -43,6 +44,7 @@ mod vector_select;
 pub use actions::{PasteMode, FIT_PADDING_PX, MAX_SIMILAR_SAMPLES, PASTE_STEP, PRESET_GAP};
 pub use command_state::CommandState;
 pub use commands::{Command, CommandGroup, CommandId, COMMANDS};
+pub use comments::{CommentPin, PinAnchor, COMMENT_PINS_MAX, PIN_CLUSTER_DISTANCE};
 pub use context_menu::{ContextTarget, MAX_SELECT_LAYER_ITEMS};
 pub use editor::{Editor, EditorEvent, Settings, ThemeChoice, WHEEL_ZOOM_SPEED};
 pub use find::{

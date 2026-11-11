@@ -62,6 +62,8 @@ pub enum Tool {
     Arrow,
     /// Масштаб (K, подсистема 3, этап 5).
     Scale,
+    /// Комментарий (C, подсистема 4, этап 5): только при `CommentsAvailable { on: true }`.
+    Comment,
 }
 
 /// Формат экспорта, как в разделе «Export» Figma (подсистема 3, этап 5).
@@ -459,6 +461,108 @@ pub const PRESENCE_PEERS_MAX: usize = 1024;
 /// Узлов в одной части выделения: 2 КБ кадра — не больше байта на узел и заголовка.
 pub const PRESENCE_PART_IDS_MAX: usize = 2048;
 
+/// Комментарии (спека подсистемы 4, раздел 10): меток и идентификаторов в одной команде не
+/// больше — у длиннее списка разбираются первые `COMMENT_PINS_MAX`, хвост не разбирается
+/// (`command_list_limit`, `bounded_list`): в файле больше 10 000 обсуждений видны первые 10 000,
+/// а не ни одного; у ядра всего меток не больше — лишние не принимаются; идентификатор
+/// обсуждения — не длиннее; инициалы — не больше графем.
+pub const COMMENT_PINS_MAX: usize = ferrum_editor::COMMENT_PINS_MAX;
+
+/// Список команды с пределом длины: по `type` команды — поле и предел. Мост (`web::parse_command`)
+/// режет массив JS до предела до разбора: хвост не обходится вовсе; разбор сам берёт не больше
+/// предела и хвост пропускает, не разбирая элементов (`bounded_list`).
+pub fn command_list_limit(kind: &str) -> Option<(&'static str, usize)> {
+    match kind {
+        "commentPins" => Some(("pins", COMMENT_PINS_MAX)),
+        "commentPinsRemove" => Some(("ids", COMMENT_PINS_MAX)),
+        _ => None,
+    }
+}
+
+/// Первые `max` элементов списка **(поведение)**: хвост пропускается (`IgnoredAny`) — не
+/// разбирается в значения и не ошибка, как `take(COMMENT_PINS_MAX)` у ядра.
+fn bounded_list<'de, D, T>(d: D, max: usize) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    use serde::de::{IgnoredAny, SeqAccess, Visitor};
+    use std::marker::PhantomData;
+
+    struct Bounded<T>(usize, PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "список (берутся первые {})", self.0)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.0));
+            while out.len() < self.0 {
+                match seq.next_element()? {
+                    Some(x) => out.push(x),
+                    None => return Ok(out),
+                }
+            }
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(out)
+        }
+    }
+
+    d.deserialize_seq(Bounded(max, PhantomData))
+}
+
+fn comment_pins_list<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<CommentPinDto>, D::Error> {
+    bounded_list(d, COMMENT_PINS_MAX)
+}
+
+fn comment_ids_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    bounded_list(d, COMMENT_PINS_MAX)
+}
+pub const COMMENT_ID_MAX_BYTES: usize = 64;
+pub const COMMENT_INITIALS_MAX: usize = 3;
+
+/// Метка обсуждения от интерфейса: страница и узел (`counter@peer`, без узла — мир), точка в
+/// координатах узла (`x`, `y`) и последняя мировая (`wx`, `wy`), инициалы и цвет автора
+/// `0xRRGGBB`, ответов, не прочитано, закрыто, можно ли тащить.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentPinDto {
+    pub id: String,
+    pub page: String,
+    #[serde(default)]
+    #[tsify(optional)]
+    pub node: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub wx: f64,
+    pub wy: f64,
+    pub initials: String,
+    pub color: u32,
+    pub replies: u32,
+    pub unread: bool,
+    pub resolved: bool,
+    pub movable: bool,
+}
+
+/// Метка нового комментария, пока его пишут: где она (как у `CommentPinDto`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentDraftDto {
+    pub page: String,
+    #[serde(default)]
+    #[tsify(optional)]
+    pub node: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub wx: f64,
+    pub wy: f64,
+}
+
 /// Выделение участника: версия, сколько узлов, частей и общая рамка.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Tsify)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -722,6 +826,42 @@ pub enum Command {
         #[serde(default)]
         #[tsify(type = "number | undefined")]
         participant: Option<u32>,
+    },
+    /// Комментарии есть (файл на сервере, роль пришла) или нет: без них режима «Комментарий»,
+    /// Shift+C и меток нет. Отдельная сборка его не шлёт.
+    CommentsAvailable {
+        on: bool,
+    },
+    /// Метки обсуждений: `replace` — весь набор, иначе добавить и заменить по `id`.
+    CommentPins {
+        #[serde(deserialize_with = "comment_pins_list")]
+        pins: Vec<CommentPinDto>,
+        replace: bool,
+    },
+    CommentPinsRemove {
+        #[serde(deserialize_with = "comment_ids_list")]
+        ids: Vec<String>,
+    },
+    /// Открытое обсуждение (его метка выделена, `CommentAnchor` следует за ней); без `id` — нет.
+    CommentOpen {
+        #[serde(default)]
+        #[tsify(optional)]
+        id: Option<String>,
+    },
+    /// Метка нового комментария, пока его пишут; без `draft` — нет.
+    CommentDraft {
+        #[serde(default)]
+        #[tsify(optional)]
+        draft: Option<CommentDraftDto>,
+    },
+    /// Перейти к обсуждению: страница метки, камера по центру метки, затем `CommentOpened`.
+    /// Метки или страницы ещё нет — переход, когда они придут.
+    CommentFocus {
+        id: String,
+    },
+    /// Показывать закрытые обсуждения.
+    CommentShowResolved {
+        on: bool,
     },
     /// Отдать журналу правки с прошлой пачки: ответ — `Journal` (и без правок).
     FlushJournal,
@@ -1345,6 +1485,49 @@ pub enum CoreEvent {
         #[tsify(type = "number | undefined")]
         participant: Option<u32>,
     },
+    /// Щелчок по холсту в режиме «Комментарий»: место нового (страница, узел или мир, точка в
+    /// его координатах и мировая) и экранная точка щелчка `sx`, `sy` (CSS-пиксели холста).
+    CommentPlace {
+        page: String,
+        #[tsify(type = "string | undefined")]
+        node: Option<String>,
+        x: f64,
+        y: f64,
+        wx: f64,
+        wy: f64,
+        sx: f64,
+        sy: f64,
+    },
+    /// Обсуждение открыто щелчком по метке или `CommentFocus`: окно — у экранной точки метки.
+    CommentOpened {
+        id: String,
+        sx: f64,
+        sy: f64,
+    },
+    /// Метку перетащили (только `movable`): новое место — на сервер.
+    CommentMoved {
+        id: String,
+        page: String,
+        #[tsify(type = "string | undefined")]
+        node: Option<String>,
+        x: f64,
+        y: f64,
+        wx: f64,
+        wy: f64,
+    },
+    /// Экранная точка открытой метки (или черновика) сменилась; `visible` — на этой странице и
+    /// в пределах холста. Только при изменении.
+    CommentAnchor {
+        sx: f64,
+        sy: f64,
+        visible: bool,
+    },
+    /// Режим «Комментарий», видны ли метки (Shift+C), есть ли комментарии: при изменении.
+    CommentsState {
+        mode: bool,
+        visible: bool,
+        available: bool,
+    },
     /// Перед `Opened`: поверх файла применены пачки журнала — правки, которые не
     /// успели попасть в файл (документ изменён).
     Recovered {
@@ -1519,4 +1702,19 @@ pub enum CoreEvent {
     PageFonts {
         families: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+
+    /// Поток JSON длины не объявляет: берутся первые `max`, хвост пропускается не разбираясь
+    /// (элемент неверной формы в нём — не ошибка).
+    #[test]
+    fn bounded_list_keeps_first_max_and_skips_the_tail() {
+        let mut d = serde_json::Deserializer::from_str(r#"["a", "b", {"не": "строка"}, 5]"#);
+        assert_eq!(bounded_list::<_, String>(&mut d, 2).unwrap(), ["a", "b"]);
+        let mut d = serde_json::Deserializer::from_str(r#"["a", "b"]"#);
+        assert_eq!(bounded_list::<_, String>(&mut d, 2).unwrap(), ["a", "b"]);
+    }
 }

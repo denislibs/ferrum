@@ -134,6 +134,10 @@ pub fn main_menu() -> Vec<MenuNode> {
                 I(C::ViewRulers),
                 I(C::ViewGuides),
                 S,
+                // Спека подсистемы 4, раздел 10.3: режим комментариев — и в меню «Вид».
+                I(C::ToolComment),
+                I(C::ViewComments),
+                S,
                 I(C::ToggleUi),
                 S,
                 I(C::ZoomIn),

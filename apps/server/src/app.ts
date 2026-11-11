@@ -3,11 +3,13 @@
 
 import { isUuid, MAX_CONTENT_BYTES } from '@ferrum/protocol';
 import type { Pool } from 'pg';
-import { apiHandler, type ApiDeps, type Ctx, type Limits, type Route } from './api';
+import { apiHandler, type ApiDeps, type Ctx, type Limits, type Route, type UserSlots } from './api';
 import { authRoutes } from './auth-routes';
 import type { Auth } from './auth';
 import type { BlobStore, UploadPace } from './blob-store';
 import { clientIp, proxyMatcher } from './client-ip';
+import { CommentMailWorker, type CommentMailOptions } from './comment-mail';
+import { commentRoutes } from './comment-routes';
 import { fileRoutes, uploadGate } from './file-routes';
 import { imageRoutes } from './image-routes';
 import { shareRoutes } from './share-routes';
@@ -34,6 +36,16 @@ export interface AppDeps {
   secret: string;
   /** Тесты сокращают пределы и сроки API. */
   limits?: Partial<Limits>;
+  /** Места запросов людей в работе: тесты дают свои. */
+  slots?: UserSlots;
+  /** Места тяжёлых чтений на процесс: тесты дают свои. */
+  heavySlots?: UserSlots;
+  /** Места тяжёлых чтений на человека: тесты дают свои. */
+  heavyUserSlots?: UserSlots;
+  /** Группировка писем о комментариях: тесты сокращают. */
+  commentMailDelayMs?: number;
+  /** Отправка писем о комментариях; `false` — без неё (тесты гоняют свою с поддельной почтой). */
+  commentMail?: Partial<CommentMailOptions> | false;
   apiDeadlineMs?: number;
   uploadIdleMs?: number;
   uploadPace?: UploadPace;
@@ -51,6 +63,7 @@ const NO_ACCESS_CHANGE = /\/(content|thumb|touch|images\/[^/]+)$/;
  * к файлам она не меняет. Маршрут, назвавший затронутые файлы, сверяет только их; без `:id` и без названных — все файлы,
  * запуски сливаются. */
 function accessChanged(hub: SyncHub, route: Route, ctx: Ctx): void {
+  if (route.keepsAccess) return;
   if (NO_ACCESS_CHANGE.test(route.path) || route.path === '/api/files' || (route.method === 'POST' && route.path === '/api/teams')) return;
   const files = ctx.touched ?? (ctx.params.id ? [ctx.params.id] : null);
   if (files) for (const id of files) void hub.recheckFile(id).catch((e: unknown) => console.error('Проверка ролей:', e));
@@ -66,7 +79,7 @@ const apiDeps = (deps: AppDeps): ApiDeps => ({ ...deps, allowedEmails: deps.allo
 export function apiRoutes(deps: AppDeps | ApiDeps): Route[] {
   const api = apiDeps(deps as AppDeps);
   const gate = uploadGate();
-  return [...fileRoutes(api, gate), ...imageRoutes(api, gate), ...teamRoutes(api), ...shareRoutes(api)];
+  return [...fileRoutes(api, gate), ...imageRoutes(api, gate), ...teamRoutes(api), ...shareRoutes(api), ...commentRoutes(api)];
 }
 
 /** Проверка не должна висеть дольше проверки контейнера. */
@@ -85,7 +98,7 @@ async function health(deps: AppDeps): Promise<Response> {
 }
 
 /** Сервер и его WebSocket: остановка контейнера и тесты обращаются к обоим. */
-export type Running = Bun.Server<ConnData> & { hub: SyncHub; compactor: Compactor | null };
+export type Running = Bun.Server<ConnData> & { hub: SyncHub; compactor: Compactor | null; commentMail: CommentMailWorker | null };
 
 export function startServer(deps: AppDeps, port: number): Running {
   const hub = new SyncHub(deps.pool, deps.blobs, deps.auth, deps.publicUrl, deps.syncLimits);
@@ -96,6 +109,11 @@ export function startServer(deps: AppDeps, port: number): Running {
     compactor.active = (file) => hub.isOpen(file);
   }
   const handleAuth = authRoutes({ ...deps, hub });
+  const commentMail =
+    deps.commentMail === false
+      ? null
+      : new CommentMailWorker(deps.pool, deps.mailer, deps.publicUrl, (file) => hub.openUsers(file), deps.allowedEmails, deps.commentMail);
+  void commentMail?.start().catch((e: unknown) => console.error('Письма о комментариях:', e instanceof Error ? e.message : e));
   const trusted = proxyMatcher(deps.trustedProxies);
   const withHeaders = responseHeaders(deps.publicUrl);
   const api: ApiDeps = {
@@ -103,6 +121,7 @@ export function startServer(deps: AppDeps, port: number): Running {
     afterWrite: (route, ctx) => accessChanged(hub, route, ctx),
     contentReplaced: (file) => hub.forgetFile(file),
     compactNow: (file, user) => (compactor ? compactor.manual(file, user) : Promise.resolve({ ok: true as const })),
+    comments: { event: (file, ev) => hub.commentEvent(file, ev), openUsers: (file) => hub.openUsers(file) },
   };
   const handleApi = apiHandler(apiRoutes(api), api);
   const server = Bun.serve({
@@ -128,5 +147,5 @@ export function startServer(deps: AppDeps, port: number): Running {
     },
     websocket: hub.websocket,
   });
-  return Object.assign(server, { hub, compactor });
+  return Object.assign(server, { hub, compactor, commentMail });
 }

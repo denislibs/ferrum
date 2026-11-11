@@ -3,7 +3,8 @@
 //! меню, тулбар и палитру по таблице `ключ → состояние`. Интерфейс получает
 //! только изменившиеся команды и только после шага, который мог их изменить:
 //! выделение, сцена, история, «только чтение», режим правки, настройки.
-//! Инструмент и вид в ключ не входят — ни одно состояние от них пока не зависит.
+//! Из инструмента в ключ входит только режим комментариев (в нём правки узлов
+//! недоступны); вид в ключ не входит. От комментариев зависят — есть ли они и видны ли метки.
 //! Недоступная команда при вызове ничего не делает: ни шага, ни сообщения.
 
 use ferrum_doc::{BooleanOp, NodeKind};
@@ -11,6 +12,7 @@ use ferrum_doc::{BooleanOp, NodeKind};
 use crate::commands::{CommandId, COMMANDS};
 use crate::editor::{Editor, ThemeChoice};
 use crate::selection::locked;
+use crate::tools::ToolKind;
 
 /// Состояние команды: доступна ли и (у переключателя) отмечена ли.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,10 @@ pub(crate) struct StatesKey {
     text_edit: bool,
     vector_edit: bool,
     settings: crate::editor::Settings,
+    /// Комментарии есть и метки видны.
+    comments: (bool, bool),
+    /// Режим «Комментарий»: правки узлов и выделение всего недоступны.
+    comment_mode: bool,
 }
 
 /// Что о выделении нужно состояниям — за один проход.
@@ -68,6 +74,8 @@ impl Editor {
             text_edit: self.text_edit.is_some(),
             vector_edit: self.vector_edit.is_some(),
             settings: self.settings.clone(),
+            comments: (self.comments_available(), self.comments_visible()),
+            comment_mode: self.tool.kind() == ToolKind::Comment,
         }
     }
 
@@ -127,7 +135,10 @@ impl Editor {
     fn state_with(&self, id: CommandId, f: &Facts) -> CommandState {
         use CommandId as C;
         let ro = self.doc.is_read_only();
-        let edit = !ro;
+        // В режиме «Комментарий» правки узлов (клавиши, меню, палитра, вставка) не работают,
+        // камера работает (раздел 10.3) **(поведение, как в Figma)**.
+        let comment_mode = self.tool.kind() == ToolKind::Comment;
+        let edit = !ro && !comment_mode;
         let sel = f.count > 0;
         let text = self.text_edit.is_some();
         let vector = self.vector_edit.is_some();
@@ -145,7 +156,6 @@ impl Editor {
             | C::ToolScale
             | C::HandHold
             | C::ToolImage
-            | C::SelectAll
             | C::Escape
             | C::ZoomToFit
             | C::Zoom100
@@ -153,6 +163,8 @@ impl Editor {
             | C::ZoomOut
             | C::Save => (true, None),
             // Путь пера отменяется по точке, даже если истории ещё нет.
+            // Выделение снято при входе в режим и в нём не возвращается.
+            C::SelectAll => (!comment_mode, None),
             C::Undo => (self.doc.can_undo() || vector, None),
             C::Redo => (self.doc.can_redo(), None),
             C::Copy => (sel || text, None),
@@ -208,6 +220,10 @@ impl Editor {
             C::ViewRulers => (true, checked(self.settings.rulers)),
             // Как в Figma, без линеек направляющих не видно — пункт серый.
             C::ViewGuides => (self.settings.rulers, checked(self.settings.guides)),
+            // Без комментариев (локальный файл, роль ещё не пришла) — серые, клавиши молчат.
+            // Читателю можно: комментировать могут все с доступом (раздел 10.3).
+            C::ToolComment => (self.comments_available(), None),
+            C::ViewComments => (self.comments_available(), checked(self.comments_visible())),
             C::EditObject => (edit && !text && !vector && f.editable, None),
             C::TextBold
             | C::TextItalic

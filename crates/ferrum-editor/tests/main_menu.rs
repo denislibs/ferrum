@@ -148,7 +148,9 @@ fn every_menu_command_is_in_the_table_and_groups_are_covered() {
             );
         assert_eq!(
             all.contains(&c.id),
-            !only_keys || c.id == CommandId::ToolPen,
+            // «Перо» — и в меню «Вектор», «Комментарий» — и в меню «Вид» (спека подсистемы 4,
+            // раздел 10.3).
+            !only_keys || matches!(c.id, CommandId::ToolPen | CommandId::ToolComment),
             "{}",
             c.key
         );

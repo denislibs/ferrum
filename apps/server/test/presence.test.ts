@@ -13,6 +13,7 @@ import {
   PRESENCE_FRAME_HOSTILE,
   splitSelection,
   SYNC_CLOSE,
+  SYNC_PROTOCOL,
   syncPath,
   type PresenceItem,
   type PresenceState,
@@ -437,7 +438,7 @@ test('медленный читатель: сервер не копит для �
   );
   const mask = (p: Uint8Array): Buffer => Buffer.concat([Buffer.from([0x82, 0x80 | p.length]), Buffer.from([0, 0, 0, 0]), p]);
   await Bun.sleep(200);
-  raw.write(mask(encodeClientFrame({ t: 'hello', protocol: 2, schema: 1 })));
+  raw.write(mask(encodeClientFrame({ t: 'hello', protocol: SYNC_PROTOCOL, schema: 1 })));
   await Bun.sleep(300);
   raw.pause();
   // Много участников с большим выделением (16 частей по 2 КБ) шлют без остановки: в сумме десятки мегабайт.

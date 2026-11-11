@@ -53,6 +53,9 @@ const server = startServer(
     allowedEmails: config.allowedEmails,
     secret: config.authSecret,
     compact: { init: { databaseUrl: config.databaseUrl, dataDir: config.dataDir } },
+    commentMailDelayMs: config.commentMailDelayMs,
+    // Очередь смотрится не реже окна группировки: короткое окно стенда не ждёт 15 с прохода.
+    commentMail: { pollMs: Math.min(15_000, config.commentMailDelayMs) },
   },
   config.port,
 );
@@ -63,10 +66,11 @@ console.log(`Ferrum слушает порт ${server.port}`);
 stop = () => {
   stopGc();
   server.compactor?.stop();
+  // Письмо, взятое на отправку, дописывается: строка не останется «неизвестной» без нужды.
+  const mails = server.commentMail?.stop() ?? Promise.resolve();
   // Принятое дописывается, соединения закрываются (клиенты подключатся заново): `server.stop()` без `true`
   // ждал бы их, и контейнер дождался бы SIGKILL.
-  void server.hub
-    .stop()
+  void Promise.all([server.hub.stop(), mails])
     .then(() => server.stop(true))
     .then(() => pool.end())
     .finally(() => process.exit(0));

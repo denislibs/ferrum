@@ -3,10 +3,11 @@
 // пресетами, фигуры со стрелкой (последняя выбранная на кнопке), перо, текст,
 // булевы операции со стрелкой (как в Figma: операция выделенной булевой группы
 // или последняя выбранная на кнопке, в списке — ещё «Сплющить» и «Контур
-// обводки») и отключённые комментарии — с подсказкой, когда они появятся. Рука (H, удержание
+// обводки») и «Комментарий» (C, спека подсистемы 4, раздел 10.3): в файлах на сервере — инструмент, в автономной сборке —
+// отключённая кнопка с объяснением (как в Figma без сети комментариев нет). Рука (H, удержание
 // Space) работает с клавиатуры и в тулбар не выносится.
 
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import type { BooleanOpDto, Tool } from '../wasm/ferrum_wasm';
 import { useEditor } from './context';
 import { Caret, Icon, type IconName } from './icons';
@@ -34,10 +35,6 @@ const BOOLEANS: { op: BooleanOpDto; name: string; command: string }[] = [
   { op: 'subtract', name: 'Вычитание', command: 'object.boolean_subtract' },
   { op: 'intersect', name: 'Пересечение', command: 'object.boolean_intersect' },
   { op: 'exclude', name: 'Исключение', command: 'object.boolean_exclude' },
-];
-
-const LATER: { name: string; key: string; when: string; icon: IconName }[] = [
-  { name: 'Комментарии', key: 'C', when: 'подсистема 4', icon: 'comment' },
 ];
 
 export function Toolbar() {
@@ -250,19 +247,32 @@ export function Toolbar() {
         </button>
       </div>
       <span class="fe-toolbar__sep" role="separator" />
-      <For each={LATER}>
-        {(t) => (
+      <Show
+        when={enabled('tool.comment')}
+        fallback={
           <button
             class="fe-tool"
             aria-disabled="true"
-            aria-label={`${t.name} — ${t.when}`}
-            data-tip={`${t.name}  ${t.key} — ${t.when}`}
+            aria-label="Комментарий — только в файлах на сервере"
+            data-tip="Комментарий  C — только в файлах на сервере"
             data-tip-side="top"
           >
-            <Icon name={t.icon} />
+            <Icon name="comment" />
           </button>
-        )}
-      </For>
+        }
+      >
+        <button
+          class="fe-tool"
+          aria-pressed={tool() === 'comment'}
+          aria-label="Комментарий"
+          data-tip="Комментарий"
+          data-command="tool.comment"
+          data-tip-side="top"
+          onClick={() => setTool('comment')}
+        >
+          <Icon name="comment" />
+        </button>
+      </Show>
       <Show when={menu()}>
         {(m) => <Menu label={menuLabel(m().kind)} items={menuItems(m().kind)} anchor={m().anchor} above onClose={() => setMenu(null)} />}
       </Show>

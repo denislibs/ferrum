@@ -141,3 +141,10 @@
   border: 2px solid var(--select);
   pointer-events: none;
 }
+
+/* Настройка «Письма о комментариях» во вкладке «Аккаунт». */
+.fe-account__pref {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}

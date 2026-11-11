@@ -366,7 +366,8 @@ impl Editor {
     }
 
     /// Можно ли взяться за направляющую в этой точке, а не отдать её инструменту:
-    /// только «Перемещение» без модификаторов, без правок, не над ручками рамки.
+    /// только «Перемещение» без модификаторов, без правок, не над ручками рамки и не под меткой
+    /// комментария.
     fn grabbable_guide(&self, e: &PointerEvent) -> Option<PlacedGuide> {
         let m = e.modifiers;
         if self.tool.kind() != ToolKind::Move
@@ -383,6 +384,10 @@ impl Editor {
                 Cursor::Resize { .. } | Cursor::Rotate { .. }
             )
         {
+            return None;
+        }
+        // Метка над направляющей: нажатие, наведение и курсор — её.
+        if self.pin_catches(e.point) {
             return None;
         }
         let g = self.guide_at(e.point)?;
@@ -444,7 +449,7 @@ impl Editor {
         match self.guide_hover? {
             GuideHover::Ruler(_) | GuideHover::Corner if !self.rulers_visible() => None,
             GuideHover::Ruler(axis) => {
-                let usable = !editing && !self.doc.is_read_only() && self.guides_visible();
+                let usable = self.ruler_pulls_guides(editing);
                 Some(if usable {
                     resize(axis)
                 } else {
@@ -457,6 +462,16 @@ impl Editor {
                     .then(|| resize(g.guide.axis))
             }
         }
+    }
+
+    /// Тянется ли из линейки новая направляющая: не в правке текста и вектора, не у читателя, при
+    /// видимых направляющих и не в режиме «Комментарий» — в нём остальные инструменты не
+    /// работают, как в Figma **(поведение)**; нажатие на линейку всё равно ей.
+    fn ruler_pulls_guides(&self, editing: bool) -> bool {
+        !editing
+            && !self.doc.is_read_only()
+            && self.guides_visible()
+            && self.tool.kind() != ToolKind::Comment
     }
 
     /// Нажатие левой кнопкой: `true` — его забрала линейка или направляющая. Нажатие
@@ -473,7 +488,7 @@ impl Editor {
                 self.cancel_gesture();
             }
             if let GuideHover::Ruler(axis) = over {
-                if !editing && !self.doc.is_read_only() && self.guides_visible() {
+                if self.ruler_pulls_guides(editing) {
                     self.guide_drag = Some(GuideDrag {
                         axis,
                         source: None,

@@ -69,3 +69,10 @@ test('новый файл в проекте и токен ссылки — из 
   // Токен в запись истории не попадает: адрес файла — без него.
   expect(routeHash({ kind: 'file', id: 'abc', link: 'x' })).toBe('#/file/abc');
 });
+
+test('ссылка на обсуждение: `?comment=` — только UUID', () => {
+  const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
+  expect(parseRoute(`#/file/abc?comment=${id}`)).toEqual({ kind: 'file', id: 'abc', comment: id });
+  expect(parseRoute('#/file/abc?comment=../x')).toEqual({ kind: 'file', id: 'abc' });
+  expect(parseRoute('#/file/abc?comment=0F8FAD5B-D9CB-469F-A165-70867728950E')).toEqual({ kind: 'file', id: 'abc' });
+});

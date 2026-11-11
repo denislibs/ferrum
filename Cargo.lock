@@ -875,6 +875,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "tsify",
+ "unicode-segmentation",
  "vello_common",
  "vello_gpu",
  "wasm-bindgen",

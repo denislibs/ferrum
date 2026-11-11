@@ -1,6 +1,7 @@
 // Кадры WebSocket файла (спека подсистемы 4, раздел 7.2): двоичные, разбор не доверяет данным, неверное — `null`.
 // Первый байт — вид кадра, числа — LE, строка — длина u8 и UTF-8. Документ — `root` или `TreeID` страницы.
 
+import { decodeCommentEvent, encodeCommentEvent, type CommentEvent } from './comments';
 import type { FileRole } from './files';
 import {
   parsePartBody,
@@ -15,8 +16,8 @@ import {
 } from './presence';
 
 /** Растёт при несовместимой смене кадров: старый клиент получает `please-reload`. 2 — присутствие (этап 4): кадров
- * `presence` прежний клиент не знает и счёл бы соединение испорченным. */
-export const SYNC_PROTOCOL = 2;
+ * `presence` прежний клиент не знает и счёл бы соединение испорченным. 3 — комментарии (этап 5): кадр `comment`. */
+export const SYNC_PROTOCOL = 3;
 /** Предел кадра по спеке, раздел 7.3. Вся полезная нагрузка — байты Loro, заголовок сверху не считается. */
 export const MAX_SYNC_UPDATE_BYTES = 16 * 1024 * 1024;
 /** Сервер закрывает кадр больше этого, не читая его. */
@@ -103,7 +104,9 @@ export type ServerFrame =
   | { t: 'please-reload' }
   | { t: 'pong' }
   /** Пачка присутствия других участников файла (`encodePresenceBatch`). */
-  | { t: 'presence'; items: PresenceItem[] };
+  | { t: 'presence'; items: PresenceItem[] }
+  /** Событие комментариев файла (спека, раздел 10.4): JSON не больше `COMMENT_EVENT_MAX_BYTES`, разбор строгий. */
+  | { t: 'comment'; event: CommentEvent };
 
 const KIND = {
   hello: 1,
@@ -123,6 +126,7 @@ const KIND = {
   'please-reload': 24,
   pong: 25,
   'presence-batch': 26,
+  comment: 27,
 } as const;
 
 const ROLES: readonly FileRole[] = ['viewer', 'editor', 'owner'];
@@ -312,6 +316,8 @@ export function encodeServerFrame(f: ServerFrame): Uint8Array<ArrayBuffer> {
       return w.done();
     case 'presence':
       throw new RangeError('пачку присутствия собирает encodePresenceBatch');
+    case 'comment':
+      return w.bytes(encodeCommentEvent(f.event)).done();
   }
 }
 
@@ -421,6 +427,10 @@ export function parseServerFrame(b: Uint8Array): ServerFrame | null {
     case KIND['presence-batch']: {
       const items = parsePresenceBatch(b, 1);
       return items ? { t: 'presence', items } : null;
+    }
+    case KIND.comment: {
+      const event = decodeCommentEvent(r.rest());
+      return event ? { t: 'comment', event } : null;
     }
     default:
       return null;

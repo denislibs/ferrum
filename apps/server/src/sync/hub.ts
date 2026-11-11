@@ -13,6 +13,7 @@ import {
   SYNC_CLOSE,
   SYNC_PROTOCOL,
   versionIncludes,
+  type CommentEvent,
   type FileRole,
   type RevokeReason,
   type ServerFrame,
@@ -51,6 +52,11 @@ export interface ConnData {
   lagSince: number;
   /** Имя человека для присутствия: из базы при `hello`, не из кадров клиента. */
   name: string;
+  /** Роль подтверждена запросом `hello`: соединение получает события комментариев и считается «файл открыт» для писем. */
+  confirmed: boolean;
+  /** Пропущены события комментариев до этого номера (сокет не успевал, очередь переполнилась, роли не узнать): при
+   * освобождении или со следующим событием — `gap`, клиент догонит по REST. 0 — пропуска нет. */
+  commentGap: number;
 }
 
 interface DocSub {
@@ -109,6 +115,8 @@ export interface SyncLimits {
   pumpRows: number;
   log: Partial<LogLimits>;
   presence: Partial<PresenceLimits>;
+  /** Буфер сокета, выше которого событие комментариев пропускается (потом — `gap`): очереди на соединение нет. */
+  commentHighWaterBytes: number;
 }
 
 /** Схема документа этой сборки: `SCHEMA_VERSION` ядра (`crates/ferrum-doc/src/document.rs`), сервер и клиент выходят
@@ -147,8 +155,14 @@ export const SYNC_LIMITS: SyncLimits = {
   pumpRows: 512,
   log: {},
   presence: {},
+  commentHighWaterBytes: 64 * 1024,
 };
 
+/** Сколько событие комментариев ждёт соседа с меньшим номером, и сколько таких ждёт разом на файл. */
+const COMMENT_REORDER_MS = 50;
+const COMMENT_EARLY_MAX = 256;
+/** Событий в очереди рассылки файла, пока идёт проход: дальше — `gap` всем. */
+const COMMENT_QUEUE_MAX = 1024;
 /** Столько байт записей журнала за один запрос догоняния. */
 const PUMP_BYTES = 8 * 1024 * 1024;
 /** Буфер сокета, сверх которого Bun кадр выбрасывает. Кадр шлётся, только пока буфер не выше `highWaterBytes`, поэтому
@@ -233,6 +247,17 @@ export class SyncHub {
   /** Идущая сверка ролей всех файлов и нужна ли ещё одна после неё. */
   private rechecking: Promise<void> | null = null;
   private recheckAgain = false;
+  /** Комментарии (раздел 10.4): очередь рассылки каждого файла (рассылает один проход за раз, всё накопленное — одним
+   * запросом ролей) и последний разосланный номер файла (событие с номером не больше уже не нужно: клиент, получивший
+   * больший, догоняет по REST). */
+  private readonly commentRooms = new Map<string, { queue: CommentEvent[]; busy: boolean; overflow: boolean }>();
+  private readonly commentHeads = new Map<string, number>();
+  /** Перестановка: последний поставленный в цепочку номер файла и пришедшие раньше своей очереди. Ответы REST о соседних
+   * изменениях приходят сюда не по порядку фиксации; подождать соседа дешевле, чем каждому клиенту догонять по REST. */
+  private readonly commentQueued = new Map<string, number>();
+  private readonly commentEarly = new Map<string, { evs: CommentEvent[]; timer: Timer }>();
+  /** Пропущено событий комментариев медленным соединениям: тесты и проба. */
+  commentSkipped = 0;
   /** Замер §13.1: от прихода кадра до конца его рассылки, мс. */
   onTiming: ((ms: number) => void) | null = null;
   /** Вызывается после фиксации: сжатие считает записи журнала; при уходе последнего — тоже. */
@@ -318,6 +343,8 @@ export class SyncHub {
       helloTimer: null,
       lagSince: 0,
       name: '',
+      confirmed: false,
+      commentGap: 0,
     };
     if (!server.upgrade(req, { data })) return new Response(null, { status: 400 });
     return undefined;
@@ -387,6 +414,7 @@ export class SyncHub {
       guard(() => {
         ws.data.lagSince = 0;
         for (const w of ws.data.drained.splice(0)) w();
+        this.commentDrained(ws.data);
       });
     },
     close: (ws) => {
@@ -423,6 +451,11 @@ export class SyncHub {
     set?.delete(d);
     if (set?.size === 0) {
       this.conns.delete(d.file);
+      this.commentHeads.delete(d.file);
+      this.commentQueued.delete(d.file);
+      const early = this.commentEarly.get(d.file);
+      if (early) clearTimeout(early.timer);
+      this.commentEarly.delete(d.file);
       this.onLastLeft(d.file);
     }
   }
@@ -566,7 +599,8 @@ export class SyncHub {
           d.role = role;
           d.name = rows[0].name ?? '';
           this.send(d, { t: 'role', role, canShare: rows[0].member >= ROLE_RANK.editor, version: Number(rows[0].version) });
-          // Присутствие файла — только после роли, подтверждённой этим запросом: снятый доступ его не увидит.
+          // Присутствие и комментарии файла — только после роли, подтверждённой этим запросом: снятый доступ их не увидит.
+          d.confirmed = true;
           this.presence.admit(d);
         })
         .catch((e: unknown) => {
@@ -1001,6 +1035,170 @@ export class SyncHub {
     for (const d of this.conns.get(file) ?? []) d.ws?.close(SYNC_CLOSE.GOING_AWAY, 'replaced');
   }
 
+  /** Событие комментариев файла (раздел 10.4): после фиксации изменения, из маршрута. Уходит соединениям с подтверждённой
+   * ролью, у кого доступ есть сейчас: запрос ролей на проход рассылки — снятый доступ не получает события и до сверки
+   * ролей. События файла рассылаются по возрастанию номера; пока идёт проход, следующие копятся и уходят следующим проходом
+   * с одним запросом ролей на всех: медленная база не выстраивает очередь из запросов. Опоздавшее (номер не больше
+   * разосланного) не шлётся — клиент, получивший больший номер с пропуском, догоняет по REST. Медленному сокету событие не
+   * копится: пропуск и потом `gap`. */
+  commentEvent(file: string, ev: CommentEvent): void {
+    // Файл никто не держит открытым — слать некому, и порядок помнить незачем.
+    if (this.stopped || !this.conns.has(file)) return;
+    const queued = this.commentQueued.get(file);
+    if (queued !== undefined && ev.seq > queued + 1) {
+      // Раньше соседа: ждать его не дольше `COMMENT_REORDER_MS`, потом — как есть (клиент догонит по REST).
+      let early = this.commentEarly.get(file);
+      if (!early) {
+        const timer = setTimeout(() => this.flushEarly(file, true), COMMENT_REORDER_MS);
+        timer.unref?.();
+        this.commentEarly.set(file, (early = { evs: [], timer }));
+      }
+      early.evs.push(ev);
+      early.evs.sort((a, b) => a.seq - b.seq);
+      if (early.evs.length >= COMMENT_EARLY_MAX) this.flushEarly(file, true);
+      return;
+    }
+    this.queueComment(file, ev);
+    this.flushEarly(file, false);
+  }
+
+  /** Ждущие своей очереди: подряд идущие — сейчас; `all` — все (срок вышел или их слишком много). */
+  private flushEarly(file: string, all: boolean): void {
+    const early = this.commentEarly.get(file);
+    if (!early) return;
+    while (early.evs.length > 0 && (all || early.evs[0].seq <= (this.commentQueued.get(file) ?? 0) + 1))
+      this.queueComment(file, early.evs.shift()!);
+    if (early.evs.length === 0) {
+      clearTimeout(early.timer);
+      this.commentEarly.delete(file);
+    }
+  }
+
+  private queueComment(file: string, ev: CommentEvent): void {
+    // Последний ушёл, пока событие ждало соседа: слать некому, номер файла помнить незачем.
+    if (!this.conns.has(file)) return;
+    this.commentQueued.set(file, Math.max(ev.seq, this.commentQueued.get(file) ?? 0));
+    let room = this.commentRooms.get(file);
+    if (!room) this.commentRooms.set(file, (room = { queue: [], busy: false, overflow: false }));
+    // Предел очереди файла (база зависла, событий поток): дальше — только последний номер, всем — `gap`.
+    if (room.queue.length >= COMMENT_QUEUE_MAX) {
+      room.overflow = true;
+      room.queue = [];
+    }
+    room.queue.push(ev);
+    if (room.busy) return;
+    room.busy = true;
+    const work = this.pumpComments(file, room);
+    this.track(work);
+  }
+
+  private async pumpComments(file: string, room: { queue: CommentEvent[]; busy: boolean; overflow: boolean }): Promise<void> {
+    try {
+      while (room.queue.length > 0 && !this.stopped) {
+        const batch = room.queue.splice(0);
+        const overflow = room.overflow;
+        room.overflow = false;
+        await this.fanOutComments(file, batch, overflow).catch(report);
+      }
+    } finally {
+      room.busy = false;
+      if (room.queue.length === 0 && this.commentRooms.get(file) === room) this.commentRooms.delete(file);
+    }
+  }
+
+  /** Кадр события комментария. Тесты подменяют его, чтобы проверить сбой кодирования. */
+  encodeComment: (ev: CommentEvent) => Uint8Array = (ev) => encodeServerFrame({ t: 'comment', event: ev });
+
+  private async fanOutComments(file: string, batch: CommentEvent[], overflow: boolean): Promise<void> {
+    const head = this.commentHeads.get(file) ?? 0;
+    const evs = batch.filter((e) => e.seq > head).sort((a, b) => a.seq - b.seq);
+    if (evs.length === 0) return;
+    const targets = [...(this.conns.get(file) ?? [])].filter((d) => d.confirmed && !d.closed);
+    if (targets.length === 0) return;
+    const last = evs[evs.length - 1].seq;
+    // Кодирование — до запроса ролей и сдвига головы: событие, которое не кодируется (больше кадра — ошибка сервера), не
+    // теряет проход молча. Всем целям — `gap` (как при сбое запроса ролей: клиент догонит по REST, где роль сверяется
+    // заново), голова — за проходом: его номера разосланы пропуском.
+    let frames: Uint8Array[];
+    try {
+      frames = evs.map((ev) => this.encodeComment(ev));
+    } catch (e) {
+      report(e);
+      if (this.conns.has(file)) this.commentHeads.set(file, last);
+      for (const d of targets) this.commentGapTo(d, last);
+      return;
+    }
+    const users = [...new Set(targets.map((d) => d.user))];
+    let rows: { u: string; rank: number | null }[];
+    try {
+      ({ rows } = await this.pool.query<{ u: string; rank: number | null }>(
+        'SELECT u, file_role_rank($1, u) AS rank FROM unnest($2::text[]) AS u',
+        [file, users],
+      ));
+    } catch (e) {
+      // Роли не узнать — события прохода не уходят, но и не теряются молча: соединениям, чью роль концентратор ещё
+      // считает действующей, — `gap`, клиент догонит по REST (там роль сверяется заново). Голова файла не сдвигается.
+      report(e);
+      for (const d of targets) this.commentGapTo(d, last);
+      return;
+    }
+    // Голова — после запроса и только у открытого файла: ушёл последний — `closed` её уже убрал.
+    if (this.conns.has(file)) this.commentHeads.set(file, last);
+    const allowed = new Set(rows.filter((r) => (r.rank ?? 0) > 0).map((r) => r.u));
+    for (const d of targets) {
+      if (d.closed) continue;
+      if (!allowed.has(d.user)) {
+        // Доступ снят: и прежний пропуск ему не сообщается — догонять нечего.
+        d.commentGap = 0;
+        continue;
+      }
+      // Очередь переполнялась — пропущено у всех: догнать по REST.
+      if (overflow) d.commentGap = Math.max(d.commentGap, last);
+      for (const [i, frame] of frames.entries()) {
+        if (this.commentSlow(d)) {
+          d.commentGap = Math.max(d.commentGap, last);
+          this.commentSkipped += frames.length - i;
+          break;
+        }
+        if (d.commentGap > 0) {
+          // Пропуск был: это событие и следующие клиент получит вместе с пропущенными, догоняя по REST.
+          this.commentGapTo(d, last);
+          break;
+        }
+        this.sendBytes(d, frame);
+      }
+    }
+  }
+
+  private commentSlow(d: ConnData): boolean {
+    return !!d.ws && d.ws.getBufferedAmount() > this.limits.commentHighWaterBytes;
+  }
+
+  /** Пропуск до `seq`: `gap` сейчас, а медленному сокету — когда освободится (`commentDrained`). Единственное место, откуда
+   * уходит `gap`. */
+  private commentGapTo(d: ConnData, seq: number): void {
+    if (d.closed) return;
+    d.commentGap = Math.max(d.commentGap, seq);
+    if (this.commentSlow(d)) return;
+    const gap = d.commentGap;
+    d.commentGap = 0;
+    this.send(d, { t: 'comment', event: { kind: 'gap', seq: gap } });
+  }
+
+  /** Сокет освободился: пропустившему события — `gap`. Только соединению, чья роль подтверждена и не снята (снятый доступ
+   * закрывает соединение или сбрасывает пропуск в проходе рассылки). */
+  private commentDrained(d: ConnData): void {
+    if (d.commentGap === 0 || !d.confirmed) return;
+    this.commentGapTo(d, d.commentGap);
+  }
+
+  /** Кто держит файл открытым: соединения с подтверждённой ролью. Им письма о комментариях не нужны. */
+  openUsers(file: string): string[] {
+    const out = new Set<string>();
+    for (const d of this.conns.get(file) ?? []) if (d.confirmed && !d.closed) out.add(d.user);
+    return [...out];
+  }
+
   /** Открыт ли файл у кого-нибудь. */
   isOpen(file: string): boolean {
     return (this.conns.get(file)?.size ?? 0) > 0;
@@ -1010,6 +1208,13 @@ export class SyncHub {
   bufferedBytes(): number {
     let n = 0;
     for (const set of this.conns.values()) for (const d of set) n += d.ws?.getBufferedAmount() ?? 0;
+    return n;
+  }
+
+  /** Самый большой буфер одного сокета: проба медленного читателя (сумма по всем смешала бы его с обычной рассылкой). */
+  bufferedMax(): number {
+    let n = 0;
+    for (const set of this.conns.values()) for (const d of set) n = Math.max(n, d.ws?.getBufferedAmount() ?? 0);
     return n;
   }
 
@@ -1028,6 +1233,8 @@ export class SyncHub {
   /** Остановка контейнера: принятое дописывается, соединения закрываются, клиенты переподключатся. */
   async stop(): Promise<void> {
     this.stopped = true;
+    for (const early of this.commentEarly.values()) clearTimeout(early.timer);
+    this.commentEarly.clear();
     for (const t of this.timers) clearInterval(t);
     this.presence.stop();
     await this.log.stop();

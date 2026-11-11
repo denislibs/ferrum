@@ -138,6 +138,8 @@ impl Editor {
         if self.presence.follow.is_some() {
             self.follow_peer();
         }
+        // Переход к обсуждению на странице, которой ещё не было, — тоже.
+        self.retry_comment_focus();
         self.emit();
         Ok(RemoteEffects {
             failed: outcome.failed,

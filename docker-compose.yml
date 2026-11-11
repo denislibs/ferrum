@@ -17,6 +17,7 @@ services:
       MAIL_FROM: ${MAIL_FROM:-Ferrum <ferrum@localhost>}
       ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      COMMENT_MAIL_DELAY_MS: ${COMMENT_MAIL_DELAY_MS:-300000}
     volumes:
       - ferrum-data:/data
     depends_on:

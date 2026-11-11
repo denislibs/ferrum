@@ -886,3 +886,44 @@ fn foreign_edit_under_peer_preview_rebases_the_layer() {
         "сдвиг участника — от нового документа"
     );
 }
+
+/// Ссылка на обсуждение пришла раньше страницы его метки (её создал другой): переход — когда
+/// чужая правка принесёт страницу (спека подсистемы 4, раздел 10.3).
+#[test]
+fn comment_focus_waits_for_page_from_remote_edit() {
+    let (mut a, mut b) = pair();
+    let added = a.ed.add_page("Вторая").unwrap();
+    b.ed.set_comments_available(true);
+    b.ed.set_comment_pins(
+        vec![CommentPin {
+            id: Arc::from("t1"),
+            anchor: PinAnchor {
+                page: added,
+                node: None,
+                local: Point::new(700.0, 500.0),
+                world: Point::new(700.0, 500.0),
+            },
+            initials: Arc::from("АБ"),
+            color: ferrum_render::Rgba::from_rgba8(0x0d, 0x74, 0xce, 255),
+            replies: 0,
+            unread: false,
+            resolved: false,
+            movable: false,
+        }],
+        true,
+    );
+    let first = b.ed.page();
+    b.ed.comment_focus("t1");
+    assert_eq!(b.ed.page(), first, "страницы ещё нет");
+    assert_eq!(b.ed.comment_open(), None);
+    b.ed.take_events();
+    deliver(&mut a, &mut b);
+    assert_eq!(b.ed.page(), added);
+    assert_eq!(b.ed.comment_open(), Some("t1"));
+    assert!((b.ed.camera().center() - Point::new(700.0, 500.0)).hypot() < 1e-6);
+    assert!(b
+        .ed
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, EditorEvent::CommentOpened { id, .. } if &**id == "t1")));
+}

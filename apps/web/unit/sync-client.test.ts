@@ -111,6 +111,7 @@ function stand(over: Partial<SyncEnv['files']> = {}) {
   const statuses: { status: string; detail?: string }[] = [];
   const access: AccessState[] = [];
   const participants: Participant[][] = [];
+  const comments: unknown[] = [];
   let reloads = 0;
   const env: SyncEnv = {
     file: 'f',
@@ -140,6 +141,7 @@ function stand(over: Partial<SyncEnv['files']> = {}) {
     access: (s) => access.push(s),
     reload: () => reloads++,
     participants: (list) => participants.push(list),
+    comments: { connected: (role) => comments.push({ role }), event: (ev) => comments.push(ev) },
   };
   const client = new SyncClient(env);
   return {
@@ -148,6 +150,7 @@ function stand(over: Partial<SyncEnv['files']> = {}) {
     sockets,
     commands,
     participants,
+    comments,
     flushes,
     statuses,
     access,
@@ -1219,4 +1222,19 @@ test('присутствие: соединение закрыто со снят�
   ws.dropped(SYNC_CLOSE.REVOKED);
   expect(s.participants.at(-1)).toEqual([]);
   expect(s.clock.timers.size).toBe(0);
+});
+
+test('комментарии: роль соединения — догнать пропущенное, кадр `comment` — событие хранилищу', () => {
+  const s = stand();
+  const ws = s.live();
+  expect(s.comments).toEqual([]);
+  ws.receive({ t: 'role', role: 'viewer', canShare: false, version: 1 });
+  ws.receive({ t: 'comment', event: { kind: 'gap', seq: 7 } });
+  expect(s.comments).toEqual([{ role: 'viewer' }, { kind: 'gap', seq: 7 }]);
+  // Переподключение: снова роль — снова догоняние.
+  ws.dropped();
+  const next = nextSocket(s);
+  next.open();
+  next.receive({ t: 'role', role: 'viewer', canShare: false, version: 1 });
+  expect(s.comments.at(-1)).toEqual({ role: 'viewer' });
 });

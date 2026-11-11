@@ -1,6 +1,7 @@
 // Человек в интерфейсе: кружок с инициалами, вкладка настроек и строка на экране файлов.
 
-import { createSignal, Show } from 'solid-js';
+import { createSignal, onMount, Show } from 'solid-js';
+import { apiFailureText, getPrefs, setPrefs } from '../server/server-api';
 import { avatarHue, initials } from './auth-logic';
 import { currentUser, leave } from './session';
 import type { SessionUser } from '@ferrum/protocol';
@@ -17,6 +18,25 @@ export function Avatar(props: { user: SessionUser }) {
 export function AccountTab() {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // «Письма о комментариях»: по умолчанию включены; пока ответа сервера нет — выключатель недоступен. Сервер не ответил —
+  // сообщение и «Повторить», а не молча отключённый выключатель.
+  const [mail, setMail] = createSignal<boolean | null>(null);
+  const [prefsError, setPrefsError] = createSignal<string | null>(null);
+  const loadPrefs = async () => {
+    setPrefsError(null);
+    const r = await getPrefs();
+    if (r.ok) setMail(r.value.commentMail);
+    else setPrefsError(apiFailureText(r.failure));
+  };
+  onMount(() => void loadPrefs());
+  const toggleMail = async (on: boolean) => {
+    setMail(on);
+    const r = await setPrefs({ commentMail: on });
+    if (!r.ok) {
+      setMail(!on);
+      setError(apiFailureText(r.failure));
+    }
+  };
   const out = async (everywhere: boolean) => {
     setBusy(true);
     setError(await leave(everywhere));
@@ -33,6 +53,25 @@ export function AccountTab() {
               <span class="t-muted">{u().email}</span>
             </span>
           </div>
+        )}
+      </Show>
+      <label class="fe-account__pref">
+        <input
+          type="checkbox"
+          checked={mail() ?? true}
+          disabled={mail() === null}
+          onChange={(e) => void toggleMail(e.currentTarget.checked)}
+        />
+        Письма о комментариях: упоминания и ответы, пока файл не открыт
+      </label>
+      <Show when={prefsError()}>
+        {(text) => (
+          <p class="fe-auth__error" role="alert">
+            Настройка писем не загрузилась: {text()}{' '}
+            <button class="fe-btn fe-btn--secondary" onClick={() => void loadPrefs()}>
+              Повторить
+            </button>
+          </p>
         )}
       </Show>
       <div class="fe-account__actions">

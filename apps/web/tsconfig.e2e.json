@@ -8,11 +8,15 @@
   "include": [
     "e2e/**/*.ts",
     "e2e-server/**/*.ts",
+    "e2e-ui/**/*.ts",
+    "e2e-ui/**/*.tsx",
     "unit/**/*.ts",
     "src/window.d.ts",
+    "src/vite-env.d.ts",
     "playwright.config.ts",
     "playwright.unit.config.ts",
     "playwright.server.config.ts",
+    "playwright.ui.config.ts",
     "vite.config.ts",
     "scripts/**/*.mjs"
   ],

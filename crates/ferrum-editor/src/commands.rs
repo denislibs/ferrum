@@ -24,6 +24,9 @@ pub enum CommandId {
     ToolArrow,
     /// «Масштаб» (K, подсистема 3, этап 5).
     ToolScale,
+    /// «Комментарий» (C, подсистема 4, этап 5): режим комментариев. Недоступна, пока хозяин не
+    /// сказал, что комментарии есть (`Editor::set_comments_available`).
+    ToolComment,
     /// «Сплющить»: выделение — в один вектор.
     Flatten,
     /// Булевы операции над выделением (подсистема 3, этап 4); у выделенных
@@ -98,6 +101,8 @@ pub enum CommandId {
     ViewRulers,
     /// Направляющие (Shift+G, спека подсистемы 2, раздел 9): видны при линейках.
     ViewGuides,
+    /// Показать и скрыть метки комментариев (Shift+C, как в Figma).
+    ViewComments,
     /// Войти в правку выделенного: текст — правка текста, вектор и фигура — правка
     /// вектора (как Enter).
     EditObject,
@@ -356,6 +361,15 @@ pub const COMMANDS: &[Command] = &[
         "Масштабирование",
         &["пропорционально", "размер", "scale", "resize"],
         &["KeyK"],
+    ),
+    // Как в Figma: «Comment» — C.
+    cmd(
+        C::ToolComment,
+        "tool.comment",
+        G::Tool,
+        "Комментарий",
+        &["обсуждение", "заметка", "отзыв", "comment", "feedback"],
+        &["KeyC"],
     ),
     cmd(
         C::ToolArrow,
@@ -814,6 +828,22 @@ pub const COMMANDS: &[Command] = &[
         "Направляющие",
         &["гайды", "линии", "guides", "guide"],
         &["Shift+KeyG"],
+    )
+    .toggle(),
+    // Как в Figma: «Show comments» — Shift+C.
+    cmd(
+        C::ViewComments,
+        "view.comments",
+        G::View,
+        "Комментарии",
+        &[
+            "метки",
+            "обсуждения",
+            "показать комментарии",
+            "comments",
+            "show comments",
+        ],
+        &["Shift+KeyC"],
     )
     .toggle(),
     // Enter — физическая клавиша правки (как Esc у жеста); в таблице — для меню

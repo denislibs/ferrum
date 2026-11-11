@@ -44,8 +44,20 @@ test('кадры сервера туда и обратно', () => {
     { t: 'access-revoked', reason: 'session' },
     { t: 'please-reload' },
     { t: 'pong' },
+    { t: 'comment', event: { kind: 'gap', seq: 12 } },
+    { t: 'comment', event: { kind: 'removed', seq: 13, by: 'u1', thread: '0b5c1d3e-7f40-4a8b-9c2d-1e2f3a4b5c6d' } },
   ];
   for (const f of frames) expect(parseServerFrame(encodeServerFrame(f))).toEqual(f);
+});
+
+test('кадр комментария: JSON строго, иначе — как обрыв', () => {
+  const frame = (json: string) => new Uint8Array([27, ...new TextEncoder().encode(json)]);
+  expect(parseServerFrame(frame('{"kind":"gap","seq":1}'))).toEqual({ t: 'comment', event: { kind: 'gap', seq: 1 } });
+  for (const bad of ['', '{', '{"kind":"gap","seq":1,"x":1}', '{"kind":"gap","seq":"1"}', 'null', '[1]'])
+    expect(parseServerFrame(frame(bad)), bad).toBeNull();
+  // Кодирование не пишет того, что не прочтётся: событие больше предела — ошибка отправителя.
+  const huge = { kind: 'removed' as const, seq: 1, by: 'x'.repeat(70_000), thread: '0b5c1d3e-7f40-4a8b-9c2d-1e2f3a4b5c6d' };
+  expect(() => encodeServerFrame({ t: 'comment', event: huge })).toThrow(RangeError);
 });
 
 test('вектор версий: пир u64 без потери, мусор — null', () => {
